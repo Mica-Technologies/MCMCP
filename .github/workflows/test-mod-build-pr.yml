@@ -1,10 +1,22 @@
-name: Test Mod Build (Pull Request)
+name: Test Mod Build
 
-on: pull_request
+on:
+  pull_request:
+  # Also on direct pushes to main. Early in a project's life not everything arrives through a PR,
+  # and a workflow that only fires on pull_request means the server smoke test — the only check
+  # that proves the mod can load on a dedicated server and that the MCP endpoint actually serves a
+  # handshake — silently never runs. The release workflow builds and publishes regardless, so
+  # without this a broken server-side jar would ship with a green tick next to it.
+  push:
+    branches: [ main ]
+  # Manual re-run, for reproducing a flaky startup without pushing a commit.
+  workflow_dispatch:
 
-# Superseded runs on the same PR are pointless — the server smoke test is slow.
+# Superseded runs on the same ref are pointless — the server smoke test is slow. On a push the
+# pull_request context is empty, so the group falls back to the workflow name, which is the
+# behaviour we want there anyway: a newer commit on main supersedes the older one's test.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
