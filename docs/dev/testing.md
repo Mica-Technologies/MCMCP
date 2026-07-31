@@ -105,30 +105,56 @@ Environment:
 | `SMOKE_LOG` | `server-smoke.log` | |
 | `MCP_PORT` | `25588` | The server endpoint under `runServer` — see [Building](building.md#dev-launch-ports). |
 
-## Manual client testing
+## Client endpoint testing
 
-The client endpoint has no automated equivalent. A dev client needs a display, and its most valuable
-tools — screenshots, synthetic input, GUI state — are precisely the ones a headless runner cannot
-exercise.
+The client endpoint has no CI equivalent — a dev client needs a display, and its most valuable tools
+are precisely the ones a headless runner cannot exercise. It is still fully drivable without touching
+the window, which is the point of the mod:
 
 ```bash
-./gradlew runClient
+# terminal 1
+./gradlew runServer
+
+# terminal 2 — auto-joins, no clicking through the menu
+DEV_USERNAME=McmcpDev ./gradlew runClient -PmcJoin=127.0.0.1:25565
 ```
 
-Then, against `http://127.0.0.1:25585/mcp`:
+See [Getting a dev client into a world](building.md#getting-a-dev-client-into-a-world-without-touching-the-gui)
+for why `-PmcJoin` exists. From there everything runs over HTTP against `:25585`:
 
 1. `mcmcp_endpoint_info` — confirm `side: client` and the permission set.
-2. `client_gui_state` at the main menu — confirms it works with no world loaded.
-3. Open a world. `client_player_state` — confirm position and surroundings.
-4. `client_screenshot` — confirm the file appears at the returned path.
-5. `client_look` with `lookAtX/Y/Z`, then `client_looking_at` — confirm the crosshair moved onto the
-   intended target.
-6. `client_move` forward 20 ticks — confirm `distanceMoved` is non-zero.
-7. `client_send_chat` with `/time query daytime`, then `client_read_chat` — confirm the reply arrived.
-8. Subscribe to `minecraft://client/chat/recent` over an SSE stream, type in chat, confirm a
-   `notifications/resources/updated` arrives.
+2. `tools/list` — 19 tools, no `server_*` among them.
+3. `client_gui_state` — `worldLoaded: true`, `screenName: none`.
+4. `client_connection_info` — `singleplayer: false`, the server address, the player list.
+5. `client_player_state` — position, biome, `standingOn`. **Check that `blockPosition` and
+   `standingOn.position` agree on X and Z**; see the `EntityPlayerSP` note below.
+6. `client_screenshot` — confirm the file appears at the returned path, then actually open it.
+7. `client_look` with `lookAtX/Y/Z`, and check `lookingAt` in the *same* response names the intended
+   block.
+8. `client_move` forward 20 ticks — `distanceMoved` should be ≈4.
+9. `client_send_chat` with a command, then `client_read_chat`.
+10. `resources/subscribe` to `minecraft://client/chat/recent`, open an SSE stream, send a chat line,
+    confirm a `notifications/resources/updated` frame arrives.
 
-The [API explorer](../api-explorer.md) makes this sequence considerably less tedious than curl.
+### Two bugs this found
+
+Both were invisible to the unit tests and the smoke test, and both are the kind that only surface
+against a running client.
+
+**`EntityPlayerSP.getPosition()` rounds instead of flooring.** It is overridden as
+`new BlockPos(posX + 0.5, posY + 0.5, posZ + 0.5)`, so at a block centre — where a player stands after
+almost any spawn or teleport — it names the block one over on both horizontal axes.
+`client_player_state` reported the player at (35, 64, 13) while its own `standingOn` described
+(36, 63, 14). `EntityPlayerMP` has no such override, so the client and server endpoints also disagreed
+about the same player. Everything now goes through `GameJson.blockPosOf`, which floors explicitly.
+
+**`mc.objectMouseOver` is a frame stale inside a scheduled task.** It is recomputed by
+`EntityRenderer.getMouseOver` during rendering, so a tool that turns the camera and then reads it in
+the same task gets the pre-turn target. `client_look` would aim correctly and report `miss` — which
+reads as a failed aim and invites a model to correct a rotation that was already right. Post-action
+reports now use `ClientStateTools.freshLookTarget`, which ray-traces from the current rotation.
+`client_looking_at` still reports `objectMouseOver`, because that is what the game will actually act
+on and it is never stale when read standalone.
 
 ## Adding tests
 

@@ -246,7 +246,7 @@ public final class ClientInputTools {
                         JsonObject json = new JsonObject();
                         json.addProperty("yaw", Math.round(yaw * 100.0D) / 100.0D);
                         json.addProperty("pitch", Math.round(pitch * 100.0D) / 100.0D);
-                        json.add("lookingAt", GameJson.rayTrace(mc.world, mc.objectMouseOver));
+                        json.add("lookingAt", ClientStateTools.freshLookTarget(mc));
                         return json;
                     }
                 });
@@ -340,7 +340,7 @@ public final class ClientInputTools {
                         json.addProperty("distanceMoved",
                             Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz) * 100.0D) / 100.0D);
                         json.addProperty("onGround", mc.player.onGround);
-                        json.add("lookingAt", GameJson.rayTrace(mc.world, mc.objectMouseOver));
+                        json.add("lookingAt", ClientStateTools.freshLookTarget(mc));
                         return json;
                     }
                 });
@@ -445,7 +445,7 @@ public final class ClientInputTools {
                         json.addProperty("action", action);
                         json.addProperty("ticks", ticks);
                         json.add("targetBefore", targetBefore);
-                        json.add("targetAfter", GameJson.rayTrace(mc.world, mc.objectMouseOver));
+                        json.add("targetAfter", ClientStateTools.freshLookTarget(mc));
                         json.add("mainHand", GameJson.itemStack(mc.player.getHeldItemMainhand()));
                         return json;
                     }

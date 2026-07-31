@@ -116,12 +116,12 @@ public final class ServerPlayerTools {
                         JsonObject json = GameJson.player(player);
                         WorldServer world = (WorldServer) player.world;
                         json.add("world", GameJson.world(world));
-                        String biome = GameJson.biomeName(world, player.getPosition());
+                        String biome = GameJson.biomeName(world, GameJson.blockPosOf(player));
                         if (biome != null) {
                             json.addProperty("biome", biome);
                         }
                         json.add("standingOn",
-                            GameJson.block(world, player.getPosition().down()));
+                            GameJson.block(world, GameJson.blockPosOf(player).down()));
                         return json;
                     }
                 });

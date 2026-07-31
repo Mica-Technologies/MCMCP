@@ -15,6 +15,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.RayTraceResult;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.EnumSkyBlock;
@@ -70,6 +71,27 @@ public final class GameJson {
 
     public static JsonObject vec(Vec3d vector) {
         return vec(vector.x, vector.y, vector.z);
+    }
+
+    /**
+     * The block an entity actually occupies.
+     *
+     * <p>Use this in preference to {@link Entity#getPosition()}, which cannot be trusted for the
+     * local player. {@code EntityPlayerSP} overrides it as
+     * {@code new BlockPos(posX + 0.5, posY + 0.5, posZ + 0.5)} — a <em>round</em>, not a floor — so
+     * at a block centre, which is where a player stands after almost any teleport or spawn, it names
+     * the block one over on both horizontal axes. {@code EntityPlayerMP} has no such override, so
+     * using {@code getPosition()} also made the client and server endpoints disagree about where the
+     * same player was standing.
+     *
+     * <p>Found by driving a live client: {@code client_player_state} reported the player at block
+     * (35, 64, 13) while its own {@code standingOn} field described (36, 63, 14).
+     */
+    public static BlockPos blockPosOf(Entity entity) {
+        return new BlockPos(
+            MathHelper.floor(entity.posX),
+            MathHelper.floor(entity.posY),
+            MathHelper.floor(entity.posZ));
     }
 
     /**
@@ -152,7 +174,7 @@ public final class GameJson {
         }
 
         json.add("position", vec(entity.posX, entity.posY, entity.posZ));
-        json.add("blockPosition", blockPos(new BlockPos(entity.posX, entity.posY, entity.posZ)));
+        json.add("blockPosition", blockPos(blockPosOf(entity)));
         json.addProperty("yaw", round(entity.rotationYaw));
         json.addProperty("pitch", round(entity.rotationPitch));
         json.add("velocity", vec(entity.motionX, entity.motionY, entity.motionZ));

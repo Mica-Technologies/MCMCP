@@ -91,6 +91,32 @@ default would collide.
 Both properties are read as *defaults only*. A value in the generated `config/mcmcp.cfg` always wins,
 so editing the config is never a fight with the build script.
 
+### Getting a dev client into a world without touching the GUI
+
+Testing the client endpoint requires the client to be *in* a world, and reaching one normally means
+clicking through the main menu — which cannot be automated. 1.12.2's menu buttons are mouse-only, and
+MCMCP deliberately has no tool for driving them: its input allow-list covers gameplay keybindings,
+not GUI widgets.
+
+Vanilla's `--server`/`--port` arguments sidestep it entirely. `Minecraft.init()` checks for them and
+opens `GuiConnecting` instead of `GuiMainMenu`, so the client lands in a world with no interaction at
+all:
+
+```bash
+# terminal 1
+./gradlew runServer
+
+# terminal 2 — joins it, no clicking
+DEV_USERNAME=McmcpDev ./gradlew runClient -PmcJoin=127.0.0.1:25565
+```
+
+`addon.gradle` translates `-PmcJoin` into those arguments. The port defaults to 25565 when the value
+has no colon. RFG's dev server already writes `online-mode=false` into `run/server/server.properties`,
+so the dev username is accepted.
+
+With that, the entire client surface — screenshots, input, GUI state, chat — becomes drivable over
+HTTP against `:25585`, with no display interaction at any point.
+
 `separateRunDirectories = true`, so `runClient` uses `run/client/` and `runServer` uses `run/server/`.
 Without it the two launches would fight over config, screenshots and logs — which matters more here
 than in most mods, because running both at once is the normal development case.
@@ -135,7 +161,7 @@ refresh is ever wanted.
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `test-mod-build-pr.yml` | Pull request | `./gradlew build`, then boots a dedicated server and drives a real MCP handshake |
+| `test-mod-build-pr.yml` | Pull request, push to `main`, manual | `./gradlew build`, then boots a dedicated server and drives a real MCP handshake |
 | `build-mod-release-pre-release-main.yml` | Push to `main` | Tags, builds, publishes a GitHub pre-release (or a release via `workflow_dispatch`) |
 | `cleanup-mod-pre-releases.yml` | After a release build | Prunes old pre-releases |
 | `deploy-wiki-pages-main.yml` | `docs/**` or `mkdocs.yml` on `main` | Builds this site with `mkdocs build --strict` and deploys to Pages |

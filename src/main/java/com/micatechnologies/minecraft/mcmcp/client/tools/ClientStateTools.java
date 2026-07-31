@@ -59,6 +59,27 @@ public final class ClientStateTools {
         return mc;
     }
 
+    /**
+     * A ray trace computed from the player's rotation <em>right now</em>.
+     *
+     * <p>Necessary because {@code mc.objectMouseOver} is only recomputed by
+     * {@code EntityRenderer.getMouseOver} during rendering. A tool that turns the camera inside a
+     * scheduled task and then reads {@code objectMouseOver} in the same task gets the target from
+     * before the turn — so {@code client_look} would aim correctly at a block and report "miss",
+     * which reads as a failed aim and invites a model to correct a rotation that was already right.
+     * Observed exactly that against a live client.
+     *
+     * <p>Blocks only: {@link net.minecraft.entity.Entity#rayTrace} does not consider entities. That is
+     * the right trade for the post-action reports this feeds, where the question is "did the camera
+     * end up where I asked". {@code client_looking_at} deliberately still reports
+     * {@code objectMouseOver}, because that is the target the game will actually act on and it is
+     * never stale when read from a standalone call.
+     */
+    static JsonObject freshLookTarget(Minecraft mc) {
+        double reach = mc.playerController == null ? 4.5D : mc.playerController.getBlockReachDistance();
+        return GameJson.rayTrace(mc.world, mc.player.rayTrace(reach, 1.0F));
+    }
+
     private static void registerPlayerState() {
         McpRegistry.registerTool(McpTool.named("client_player_state")
             .title("Player state")
@@ -77,11 +98,11 @@ public final class ClientStateTools {
 
                         JsonObject json = GameJson.player(mc.player);
                         json.add("world", GameJson.world(world));
-                        String biome = GameJson.biomeName(world, mc.player.getPosition());
+                        String biome = GameJson.biomeName(world, GameJson.blockPosOf(mc.player));
                         if (biome != null) {
                             json.addProperty("biome", biome);
                         }
-                        json.add("standingOn", GameJson.block(world, mc.player.getPosition().down()));
+                        json.add("standingOn", GameJson.block(world, GameJson.blockPosOf(mc.player).down()));
                         json.add("lookingAt", GameJson.rayTrace(world, mc.objectMouseOver));
                         json.addProperty("renderDistanceChunks", mc.gameSettings.renderDistanceChunks);
                         return json;
@@ -150,7 +171,7 @@ public final class ClientStateTools {
                     @Override
                     public JsonObject call() {
                         Minecraft mc = requireInWorld();
-                        BlockPos origin = relative ? mc.player.getPosition() : BlockPos.ORIGIN;
+                        BlockPos origin = relative ? GameJson.blockPosOf(mc.player) : BlockPos.ORIGIN;
                         BlockPos pos = new BlockPos(origin.getX() + x, origin.getY() + y,
                             origin.getZ() + z);
                         JsonObject json = GameJson.block(mc.world, pos);

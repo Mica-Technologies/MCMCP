@@ -112,6 +112,14 @@ frequently model-generated and arrive with the wrong primitive type.
 
 - `Minecraft.running` is package-private with no accessor. `ClientThreadBridge` uses
   `getFramebuffer() != null` as the liveness signal — non-null means `Minecraft.init()` completed.
+- **`EntityPlayerSP.getPosition()` rounds, it does not floor.** It is overridden as
+  `new BlockPos(posX + 0.5, posY + 0.5, posZ + 0.5)`, so at a block centre it names the block one over
+  on X and Z. `EntityPlayerMP` has no such override, so using it made the two endpoints disagree about
+  where the same player stood. Always use `GameJson.blockPosOf(entity)`.
+- **`mc.objectMouseOver` is a frame stale inside a scheduled task.** It is recomputed by
+  `EntityRenderer.getMouseOver` during rendering, so a tool that turns the camera and reads it in the
+  same task sees the pre-turn target. Post-action reports use `ClientStateTools.freshLookTarget`;
+  `client_looking_at` keeps `objectMouseOver` because that is what interaction actually acts on.
 - `ScreenShotHelper.saveScreenshot` must run on the client thread; it reads the framebuffer, which
   needs a live GL context.
 - Setting `mc.player.inventory.currentItem` is enough to change hotbar slot;
@@ -136,6 +144,17 @@ wipe the `addon.gradle` customisations.
 25585/25586 and `runServer` gets 25587/25588. Override with `-PmcpBasePort=26000`.
 
 Both dev properties are defaults only — a value in `config/mcmcp.cfg` always wins.
+
+To test the client endpoint, get a dev client into a world without touching the GUI:
+
+```bash
+./gradlew runServer                                              # terminal 1
+DEV_USERNAME=McmcpDev ./gradlew runClient -PmcJoin=127.0.0.1:25565   # terminal 2
+```
+
+`-PmcJoin` becomes vanilla's `--server`/`--port`, so `Minecraft.init()` opens `GuiConnecting` instead
+of `GuiMainMenu`. 1.12.2's menu buttons are mouse-only and MCMCP has no tool for driving GUI widgets,
+so this is the only way to reach a world unattended.
 
 ### Version
 

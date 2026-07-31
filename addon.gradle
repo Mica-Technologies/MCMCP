@@ -98,3 +98,26 @@ tasks.matching { it.name ==~ /^runServer(17|21)?$/ }.configureEach {
     it.getExtraJvmArgs().add("-Dmcmcp.dev.port=${devServerBasePort}".toString())
     it.getExtraJvmArgs().add('-Dmcmcp.dev.autostart=true')
 }
+
+// ---------------------------------------------------------------------------
+// Auto-join a server on client launch:  ./gradlew runClient -PmcJoin=127.0.0.1:25565
+//
+// Testing MCMCP's client endpoint needs the client to be IN a world, and getting there normally
+// means clicking through the main menu — which is precisely the thing that cannot be automated,
+// because 1.12.2's menu buttons are mouse-only and MCMCP has no tool for driving them (by design:
+// its input allow-list covers gameplay bindings, not GUI widgets).
+//
+// Vanilla's --server/--port arguments sidestep it entirely. Minecraft.init() checks for them and
+// opens GuiConnecting instead of GuiMainMenu, so the client lands in a world with no interaction at
+// all. Pair it with `./gradlew runServer` (set online-mode=false in run/server/server.properties so
+// the dev username is accepted) and the whole client surface becomes testable over HTTP.
+//
+// The port defaults to 25565 when the value has no colon.
+if (project.hasProperty('mcJoin')) {
+    def joinTarget = project.property('mcJoin').toString().trim()
+    def joinHost = joinTarget.contains(':') ? joinTarget.substring(0, joinTarget.lastIndexOf(':')) : joinTarget
+    def joinPort = joinTarget.contains(':') ? joinTarget.substring(joinTarget.lastIndexOf(':') + 1) : '25565'
+    tasks.matching { it.name ==~ /^runClient(17|21)?$/ }.configureEach {
+        it.getExtraArgs().addAll(['--server', joinHost, '--port', joinPort])
+    }
+}
