@@ -1,0 +1,13 @@
+// Add any additional repositories for your dependencies here.
+//
+// MCMCP has no third-party runtime dependencies (see dependencies.gradle for why), so the
+// buildscript's own defaults — Maven Central, the GTNH Nexus, and the "well-known 1.12.2"
+// set enabled by includeWellKnownRepositories in buildscript.properties — are all it needs.
+//
+// If a soft integration with another Mica mod is added later, follow the pattern in
+// uia-server-utility-mod/repositories.gradle: an Ivy repo pointed at that project's GitHub
+// Releases with a version pinned in gradle.properties, scoped via `content { includeGroup ... }`
+// so unrelated coordinates never get resolved against GitHub.
+
+repositories {
+}

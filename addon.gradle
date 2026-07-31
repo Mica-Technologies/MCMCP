@@ -1,0 +1,100 @@
+// Add any additional Gradle commands or configuration here
+
+// TOOLS FOR GITHUB ACTIONS
+task printModVersion {
+    doLast {
+        println project.version
+    }
+}
+
+task printArchivesBaseName {
+    doLast {
+        println project.findProperty('archivesBaseName')
+    }
+}
+
+task printModName {
+    doLast {
+        println project.findProperty('modName')
+    }
+}
+
+task printMinecraftVersion {
+    doLast {
+        println project.findProperty('minecraftVersion')
+    }
+}
+
+// ARM macOS (Apple Silicon) support for runClient17/runClient21:
+// MC 1.12.2 bundles JNA 4.4.0 and java-objc-bridge 1.0.0, both x86_64-only. Override with
+// arm64-compatible versions via java17PatchDependencies (loaded before MC's bundled libs).
+if (project.hasProperty('enableJava17RunTasks') && enableJava17RunTasks.toBoolean()) {
+    dependencies {
+        java17PatchDependencies('net.java.dev.jna:jna:5.13.0') { transitive = false }
+        java17PatchDependencies('net.java.dev.jna:jna-platform:5.13.0') { transitive = false }
+        java17PatchDependencies('ca.weblite:java-objc-bridge:1.1') { transitive = false }
+    }
+}
+
+// Apple-Silicon fallback: run the LWJGL2 client under x86_64 (Rosetta 2).
+//
+// runClient17 (lwjgl3ify/arm64-native) launches but its window is broken on macOS — lwjgl3ify 1.0.1
+// (RFB 1.0.6) skips the relauncher re-exec in the gradle dev launch, so GLFW never gets macOS's
+// required first-thread handling and Apple's OpenGL-over-Metal driver crashes on a zero-area window.
+// The reliable dev client on Apple Silicon is the vanilla LWJGL2 path under Rosetta.
+//
+// Usage:  ./gradlew runClient -Prosetta
+// Requires Rosetta 2 (`softwareupdate --install-rosetta --agree-to-license`) and an x86_64 Java 8 JDK
+// in a Gradle-auto-detected location (e.g. ~/Library/Java/JavaVirtualMachines/). Running an x86_64
+// java makes macOS run the whole client under Rosetta, so it uses MC's bundled x86_64 LWJGL2/JNA.
+//
+// We select it via a toolchain spec rather than `executable`: RFG sets `javaLauncher` on the run
+// tasks, and setting `executable` too makes Gradle reject the mismatched pair. Java 8 + Adoptium
+// uniquely identifies the x86_64 Temurin here (the arm64 Java 8 is Azul).
+if (project.hasProperty('rosetta')) {
+    def rosettaLauncher = javaToolchains.launcherFor {
+        languageVersion.set(JavaLanguageVersion.of(8))
+        vendor.set(JvmVendorSpec.ADOPTIUM)
+    }
+    // RFG extracts LWJGL2 natives matching the *gradle* JVM's arch (arm64 here), but the Rosetta client
+    // JVM is x86_64 and can't dlopen arm64 .dylibs. Point LWJGL2 at a dir of x86_64 2.9.4 natives via
+    // org.lwjgl.librarypath (LWJGL2 checks it before java.library.path). Populate it with:
+    //   curl -sSL -o /tmp/n.jar https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-osx.jar
+    //   unzip -o -j /tmp/n.jar '*.dylib' -d .rosetta-natives/lwjgl2
+    def rosettaNatives = file("${project.rootDir}/.rosetta-natives/lwjgl2")
+    tasks.matching { it.name == 'runClient' }.configureEach {
+        it.javaLauncher.set(rosettaLauncher)
+        it.getExtraJvmArgs().add("-Dorg.lwjgl.librarypath=${rosettaNatives.absolutePath}".toString())
+    }
+    tasks.matching { it.name == 'runServer' }.configureEach {
+        it.javaLauncher.set(rosettaLauncher)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dev-launch defaults for the MCP endpoints.
+//
+// A dev runClient and a dev runServer are usually up at the same time (that is what
+// separateRunDirectories is for), and each JVM wants to bind up to TWO ports: MCMCP exposes a
+// client endpoint and a server endpoint, and a runClient that opens a singleplayer world is
+// running both at once. Left to one shared default they would collide and the second bind would
+// fail.
+//
+// So `mcmcp.dev.port` is a BASE: McmcpConfig defaults clientPort to it and serverPort to base + 1.
+// runClient gets 25585/25586, runServer gets 25587/25588, and the four never overlap.
+//
+// Both properties are read by McmcpConfig as *defaults only* — anything explicitly set in the
+// generated config/mcmcp.cfg still wins, so editing the config is never a fight with the build
+// script. Override the base with e.g. `./gradlew runClient -PmcpBasePort=26000`.
+def devClientBasePort = project.findProperty('mcpBasePort') ?: '25585'
+def devServerBasePort = project.findProperty('mcpServerBasePort') ?: '25587'
+tasks.matching { it.name ==~ /^runClient(17|21)?$/ }.configureEach {
+    it.getExtraJvmArgs().add("-Dmcmcp.dev.port=${devClientBasePort}".toString())
+    // Turns on the server endpoint too, so opening a singleplayer world in a dev client exposes
+    // both sides without editing config first. Off by default in a shipped install.
+    it.getExtraJvmArgs().add('-Dmcmcp.dev.autostart=true')
+}
+tasks.matching { it.name ==~ /^runServer(17|21)?$/ }.configureEach {
+    it.getExtraJvmArgs().add("-Dmcmcp.dev.port=${devServerBasePort}".toString())
+    it.getExtraJvmArgs().add('-Dmcmcp.dev.autostart=true')
+}

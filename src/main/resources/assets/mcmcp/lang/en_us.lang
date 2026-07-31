@@ -1,0 +1,11 @@
+# MCMCP language file.
+#
+# MCMCP registers no blocks, items or entities, so there is nothing here to translate yet. The file
+# exists because Forge expects an assets/<modid>/lang directory to be present when the mod ships any
+# assets at all, and adding it now avoids a resource-pack warning the first time one is added.
+#
+# Command output is deliberately NOT localised. Every string an MCP client sees — tool descriptions,
+# error messages, schema text — is read by a model, and the models these are written for work best
+# in English. Translating them would make the mod worse in exactly the place it matters most.
+
+mcmcp.command.usage=/mcmcp <status|tools|sessions|token|reload|restart|stop>

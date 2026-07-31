@@ -1,0 +1,68 @@
+# Gradle
+.gradle/
+build/
+out/
+bin/
+tmp/
+
+# Compiled artifacts
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+
+# JVM crash logs
+hs_err_pid*
+replay_pid*
+
+# IDE
+.idea/
+.idea_modules/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+.metadata
+.factorypath
+local.properties
+*.launch
+
+# Minecraft modding (Forge dev environment)
+run/*
+!run/config/
+run/config/*
+!run/config/lwjgl3ify-early.json
+logs/
+crash-reports/
+
+# Apple Silicon dev-client natives (see addon.gradle for how to repopulate)
+.rosetta-natives/
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+*~
+
+# Logs and temp
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Secrets — the MCP bearer token lives in the Forge config, never in the repo
+*.env
+.env.*
+*credentials*
+*.token
+
+# Local-only Claude Code state
+.claude/settings.local.json
+.claude/worktrees/
+
+# Local reference: cloned/decompiled third-party source for analysis only.
+example-source/

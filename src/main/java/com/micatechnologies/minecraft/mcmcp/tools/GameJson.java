@@ -1,0 +1,308 @@
+package com.micatechnologies.minecraft.mcmcp.tools;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import java.util.Map;
+import javax.annotation.Nullable;
+import net.minecraft.block.state.IBlockState;
+import net.minecraft.block.properties.IProperty;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityList;
+import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.inventory.IInventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.util.EnumFacing;
+import net.minecraft.util.ResourceLocation;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.RayTraceResult;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.EnumSkyBlock;
+import net.minecraft.world.World;
+import net.minecraft.world.biome.Biome;
+
+/**
+ * Turns live game objects into the JSON that MCP tools and resources return.
+ *
+ * <p>Every method here <strong>must be called on the game thread</strong>. They read entity
+ * positions, block states and inventories directly, none of which is safe to touch from an HTTP
+ * worker. The pattern throughout MCMCP is: hop to the game thread, build the JSON there, hand the
+ * finished {@link JsonObject} back across the boundary. The JSON is an immutable snapshot; the game
+ * objects it came from are not, and must never escape.
+ *
+ * <p>Two conventions run through all of it, because models get both wrong otherwise and the fix is
+ * to be explicit in the data rather than in prose:
+ *
+ * <ul>
+ *   <li>Block positions are integers and appear as {@code x}/{@code y}/{@code z}. Entity positions
+ *       are doubles and appear as {@code position}, alongside a separate {@code blockPosition} for
+ *       the block the entity occupies. They are not interchangeable — an entity at y=64.0 is
+ *       standing <em>on</em> the block at y=63.</li>
+ *   <li>Anything with a registry name gets its full namespaced id ({@code minecraft:stone},
+ *       {@code csm:traffic_light}), never a display name. Display names are localised and change
+ *       between languages; ids are what commands and other tools accept.</li>
+ * </ul>
+ */
+public final class GameJson {
+
+    private GameJson() {
+    }
+
+    // ------------------------------------------------------------------
+    // Geometry
+    // ------------------------------------------------------------------
+
+    public static JsonObject blockPos(BlockPos pos) {
+        JsonObject json = new JsonObject();
+        json.addProperty("x", pos.getX());
+        json.addProperty("y", pos.getY());
+        json.addProperty("z", pos.getZ());
+        return json;
+    }
+
+    public static JsonObject vec(double x, double y, double z) {
+        JsonObject json = new JsonObject();
+        json.addProperty("x", round(x));
+        json.addProperty("y", round(y));
+        json.addProperty("z", round(z));
+        return json;
+    }
+
+    public static JsonObject vec(Vec3d vector) {
+        return vec(vector.x, vector.y, vector.z);
+    }
+
+    /**
+     * Rounds to three decimals.
+     *
+     * <p>Raw doubles from the game serialise as {@code 64.00000000000001} and similar. That noise is
+     * pure token cost in every response and invites a model to treat two identical positions as
+     * different. Millimetre precision is far finer than anything a tool here acts on.
+     */
+    private static double round(double value) {
+        return Math.round(value * 1000.0D) / 1000.0D;
+    }
+
+    // ------------------------------------------------------------------
+    // Blocks
+    // ------------------------------------------------------------------
+
+    /**
+     * Describes the block at {@code pos}.
+     *
+     * <p>Reports {@code loaded: false} and nothing else for an unloaded chunk rather than reading
+     * through it. {@link World#getBlockState} on an unloaded position silently returns air, so a
+     * naive read would confidently report empty space where there is a mountain — and, on a server,
+     * asking for it can force a chunk load, turning a read-only query into a world mutation with a
+     * disk hit.
+     */
+    public static JsonObject block(World world, BlockPos pos) {
+        JsonObject json = new JsonObject();
+        json.add("position", blockPos(pos));
+
+        if (!world.isBlockLoaded(pos)) {
+            json.addProperty("loaded", false);
+            return json;
+        }
+        json.addProperty("loaded", true);
+
+        IBlockState state = world.getBlockState(pos);
+        ResourceLocation registryName = state.getBlock().getRegistryName();
+        json.addProperty("block", registryName == null ? "unknown" : registryName.toString());
+        json.addProperty("metadata", state.getBlock().getMetaFromState(state));
+        json.addProperty("displayName", state.getBlock().getLocalizedName());
+        json.addProperty("air", world.isAirBlock(pos));
+
+        JsonObject properties = new JsonObject();
+        for (Map.Entry<IProperty<?>, Comparable<?>> entry : state.getProperties().entrySet()) {
+            properties.addProperty(entry.getKey().getName(), String.valueOf(entry.getValue()));
+        }
+        json.add("state", properties);
+
+        json.addProperty("blockLight", world.getLightFor(EnumSkyBlock.BLOCK, pos));
+        json.addProperty("skyLight", world.getLightFor(EnumSkyBlock.SKY, pos));
+        json.addProperty("hardness", state.getBlockHardness(world, pos));
+        return json;
+    }
+
+    // ------------------------------------------------------------------
+    // Entities
+    // ------------------------------------------------------------------
+
+    /**
+     * Describes an entity.
+     *
+     * <p>{@code type} is the registry id where one exists. Players have no entity-registry entry in
+     * 1.12.2, so they are reported as {@code minecraft:player} explicitly rather than as null —
+     * a model filtering on type should not have to special-case the most important entity in the
+     * world.
+     */
+    public static JsonObject entity(Entity entity) {
+        JsonObject json = new JsonObject();
+        json.addProperty("id", entity.getEntityId());
+        json.addProperty("uuid", entity.getUniqueID().toString());
+        json.addProperty("name", entity.getName());
+
+        if (entity instanceof EntityPlayer) {
+            json.addProperty("type", "minecraft:player");
+        }
+        else {
+            ResourceLocation key = EntityList.getKey(entity);
+            json.addProperty("type", key == null ? "unknown" : key.toString());
+        }
+
+        json.add("position", vec(entity.posX, entity.posY, entity.posZ));
+        json.add("blockPosition", blockPos(new BlockPos(entity.posX, entity.posY, entity.posZ)));
+        json.addProperty("yaw", round(entity.rotationYaw));
+        json.addProperty("pitch", round(entity.rotationPitch));
+        json.add("velocity", vec(entity.motionX, entity.motionY, entity.motionZ));
+        json.addProperty("onGround", entity.onGround);
+        json.addProperty("dimension", entity.dimension);
+
+        if (entity instanceof EntityLivingBase) {
+            EntityLivingBase living = (EntityLivingBase) entity;
+            json.addProperty("health", round(living.getHealth()));
+            json.addProperty("maxHealth", round(living.getMaxHealth()));
+            ItemStack held = living.getHeldItemMainhand();
+            if (!held.isEmpty()) {
+                json.add("heldItem", itemStack(held));
+            }
+        }
+        return json;
+    }
+
+    /** A player, with the survival state a model needs before deciding what is safe to do. */
+    public static JsonObject player(EntityPlayer player) {
+        JsonObject json = entity(player);
+        json.addProperty("health", round(player.getHealth()));
+        json.addProperty("food", player.getFoodStats().getFoodLevel());
+        json.addProperty("saturation", round(player.getFoodStats().getSaturationLevel()));
+        json.addProperty("experienceLevel", player.experienceLevel);
+        json.addProperty("air", player.getAir());
+        json.addProperty("creative", player.capabilities.isCreativeMode);
+        json.addProperty("flying", player.capabilities.isFlying);
+        json.addProperty("sneaking", player.isSneaking());
+        json.addProperty("sprinting", player.isSprinting());
+        json.addProperty("inWater", player.isInWater());
+        json.addProperty("selectedSlot", player.inventory.currentItem);
+        return json;
+    }
+
+    // ------------------------------------------------------------------
+    // Items
+    // ------------------------------------------------------------------
+
+    /**
+     * Describes one stack.
+     *
+     * <p>NBT is included as its {@code toString} form only when present. It is the difference
+     * between "a diamond sword" and "a diamond sword with Sharpness V", which matters for tool
+     * decisions — but a full structured NBT tree would dominate the response for every enchanted
+     * item in an inventory listing.
+     */
+    public static JsonObject itemStack(ItemStack stack) {
+        JsonObject json = new JsonObject();
+        if (stack.isEmpty()) {
+            json.addProperty("empty", true);
+            return json;
+        }
+        ResourceLocation registryName = stack.getItem().getRegistryName();
+        json.addProperty("item", registryName == null ? "unknown" : registryName.toString());
+        json.addProperty("displayName", stack.getDisplayName());
+        json.addProperty("count", stack.getCount());
+        json.addProperty("damage", stack.getItemDamage());
+        json.addProperty("maxDamage", stack.getMaxDamage());
+        if (stack.hasTagCompound()) {
+            json.addProperty("nbt", String.valueOf(stack.getTagCompound()));
+        }
+        return json;
+    }
+
+    /**
+     * Lists an inventory's occupied slots.
+     *
+     * <p>Empty slots are omitted from the array but counted in {@code emptySlots}. Emitting 36
+     * {@code {"empty": true}} entries for a mostly-bare inventory is the single largest avoidable
+     * cost in a typical response, and "which slot indices are free" is answerable from the slot
+     * numbers that are present.
+     */
+    public static JsonObject inventory(IInventory inventory) {
+        JsonObject json = new JsonObject();
+        json.addProperty("size", inventory.getSizeInventory());
+
+        JsonArray slots = new JsonArray();
+        int empty = 0;
+        for (int index = 0; index < inventory.getSizeInventory(); index++) {
+            ItemStack stack = inventory.getStackInSlot(index);
+            if (stack.isEmpty()) {
+                empty++;
+                continue;
+            }
+            JsonObject slot = itemStack(stack);
+            slot.addProperty("slot", index);
+            slots.add(slot);
+        }
+        json.addProperty("emptySlots", empty);
+        json.add("items", slots);
+        return json;
+    }
+
+    // ------------------------------------------------------------------
+    // World
+    // ------------------------------------------------------------------
+
+    public static JsonObject world(World world) {
+        JsonObject json = new JsonObject();
+        json.addProperty("dimension", world.provider.getDimension());
+        json.addProperty("dimensionType", world.provider.getDimensionType().getName());
+        json.addProperty("timeOfDay", world.getWorldTime() % 24000L);
+        json.addProperty("totalTime", world.getTotalWorldTime());
+        json.addProperty("daytime", world.isDaytime());
+        json.addProperty("raining", world.isRaining());
+        json.addProperty("thundering", world.isThundering());
+        json.addProperty("difficulty", world.getDifficulty().name());
+        json.addProperty("remote", world.isRemote);
+        return json;
+    }
+
+    @Nullable
+    public static String biomeName(World world, BlockPos pos) {
+        if (!world.isBlockLoaded(pos)) {
+            return null;
+        }
+        Biome biome = world.getBiome(pos);
+        return biome == null ? null : biome.getBiomeName();
+    }
+
+    // ------------------------------------------------------------------
+    // Ray tracing
+    // ------------------------------------------------------------------
+
+    /**
+     * Describes what a look-vector ray trace hit.
+     *
+     * <p>{@code null} in means "nothing in range", which is reported as {@code {"type":"miss"}}
+     * rather than as an absent field: a model reading "what am I looking at" needs a definite answer
+     * either way, and an omitted key reads as a tool failure.
+     */
+    public static JsonObject rayTrace(World world, @Nullable RayTraceResult result) {
+        JsonObject json = new JsonObject();
+        if (result == null || result.typeOfHit == RayTraceResult.Type.MISS) {
+            json.addProperty("type", "miss");
+            return json;
+        }
+        if (result.typeOfHit == RayTraceResult.Type.BLOCK) {
+            json.addProperty("type", "block");
+            json.add("block", block(world, result.getBlockPos()));
+            EnumFacing face = result.sideHit;
+            json.addProperty("face", face == null ? "unknown" : face.getName());
+            json.add("hitVector", vec(result.hitVec));
+            return json;
+        }
+        json.addProperty("type", "entity");
+        if (result.entityHit != null) {
+            json.add("entity", entity(result.entityHit));
+        }
+        return json;
+    }
+}

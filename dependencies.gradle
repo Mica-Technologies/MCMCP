@@ -1,0 +1,40 @@
+//file:noinspection DependencyNotationArgument
+// TODO remove when fixed in RFG ^
+/*
+ * Add your dependencies here. Supported configurations:
+ *  - api("group:name:version:classifier"): if you use the types from this dependency in the public API of this mod
+ *  - implementation("g:n:v:c"): internal implementation details, not visible via the public API
+ *  - compileOnly("g:n:v:c"): not needed at runtime at all, e.g. for optional mods
+ *  - compileOnlyApi("g:n:v:c"): like compileOnly, but also visible at compiletime for dependents
+ *  - runtimeOnlyNonPublishable("g:n:v:c"): included in runClient/runServer, not published as a dependency
+ *  - devOnlyNonPublishable("g:n:v:c"): compileOnly + runtimeOnlyNonPublishable — useful for RFG-deobfuscated deps
+ *  - runtimeOnly("g:n:v:c"): present at runtime, not needed at compile time
+ *  - annotationProcessor("g:n:v:c"): java compiler plugins
+ *  - testCONFIG("g:n:v:c"): any of the above (except api) for the test source set
+ *  - shadowImplementation("g:n:v:c"): bundled into the jar under a renamed package (needs usesShadowedDependencies)
+ *
+ * To depend on obfuscated jars use `devOnlyNonPublishable(rfg.deobf("dep:spec:1.2.3"))`, or
+ * `devOnlyNonPublishable(rfg.deobf(project.files("libs/my-mod-jar.jar")))` for a local file.
+ *
+ * For more details, see https://docs.gradle.org/8.4/userguide/java_library_plugin.html#sec:java_library_configurations_graph
+ */
+dependencies {
+    // MCMCP intentionally has NO third-party runtime dependencies.
+    //
+    // The two things an MCP server normally needs a library for are already on the Minecraft classpath
+    // or in the JDK, and pulling in real ones would cost far more than it buys:
+    //
+    //   - JSON. Minecraft 1.12.2 bundles com.google.gson:gson:2.8.0 (Forge ships it and mods rely on it),
+    //     so the protocol layer builds on JsonObject/JsonElement directly. Shading Jackson or a newer Gson
+    //     would risk a split-package clash with the one Forge already loaded.
+    //   - HTTP. The transport uses the JDK's own com.sun.net.httpserver.HttpServer, present in Java 8's rt.jar
+    //     and in the jdk.httpserver module (exported by default) on 9+, so it works under both the vanilla
+    //     Java 8 launch and the lwjgl3ify Java 17/21 launches. The alternative — Minecraft's bundled Netty
+    //     4.0.23 — is a decade-old API we'd be pinned to, and sharing the game's event loops with an
+    //     externally reachable socket is exactly the coupling this mod should avoid.
+    //
+    // Keep it that way unless there's a concrete reason not to: every shaded byte here ends up inside a jar
+    // that people drop into modpacks alongside a few hundred others.
+
+    // JUnit 5 is provided by the buildscript when enableJUnit = true; no declaration needed here.
+}

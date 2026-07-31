@@ -1,0 +1,18 @@
+[
+  {
+    "modid": "${modid}",
+    "name": "${modname}",
+    "description": "Embeds a Model Context Protocol server in Minecraft, so AI clients can inspect and play the game. Runs on the game client (works on any server you can join) and optionally on a dedicated server.",
+    "version": "${version}",
+    "mcversion": "${mcversion}",
+    "credits": "Alex H (Mica Technologies)",
+    "logoFile": "",
+    "url": "https://mica-technologies.github.io/MCMCP/",
+    "updateUrl": "",
+    "authorList": ["Mica Technologies"],
+    "dependencies": [],
+    "dependants": [],
+    "requiredMods": [],
+    "useDependencyInformation": "true"
+  }
+]
