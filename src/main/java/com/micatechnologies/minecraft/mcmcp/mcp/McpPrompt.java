@@ -10,7 +10,6 @@ import java.util.EnumSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import javax.annotation.Nullable;
 
 /**
  * One MCP prompt: a named, parameterised conversation starter the user picks from their client's UI.
@@ -178,12 +177,6 @@ public final class McpPrompt {
             this.generator = value;
             return this;
         }
-
-        @Nullable
-        public List<Argument> peekArguments() {
-            return arguments;
-        }
-
         public McpPrompt build() {
             if (generator == null) {
                 throw new IllegalStateException("Prompt '" + name + "' has no generator");

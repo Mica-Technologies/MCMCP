@@ -15,7 +15,6 @@ import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.Collections;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import net.minecraft.client.Minecraft;
@@ -164,10 +163,5 @@ public final class ClientResources {
                     McpContent.binaryResource(uri, "image/png", Files.readAllBytes(file.toPath())));
             })
             .build());
-    }
-
-    /** Kept for readers that need to return several content entries. */
-    static List<JsonObject> single(JsonObject entry) {
-        return Collections.singletonList(entry);
     }
 }

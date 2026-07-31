@@ -11,7 +11,6 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpContent;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpResource;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -178,12 +177,5 @@ public final class CommonResources {
                     McpContent.textResource(uri, "application/json", Json.writePretty(payload)));
             })
             .build());
-    }
-
-    /** Helper for readers that build a single JSON document. */
-    static List<JsonObject> singleJson(String uri, JsonObject payload) {
-        List<JsonObject> contents = new ArrayList<>(1);
-        contents.add(McpContent.textResource(uri, "application/json", Json.writePretty(payload)));
-        return contents;
     }
 }

@@ -15,7 +15,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.GuiChat;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
@@ -491,10 +490,5 @@ public final class ClientInputTools {
                 return ToolResult.structured(result);
             })
             .build());
-    }
-
-    /** Opens the chat GUI with prefilled text; used by the debug tools for visual verification. */
-    static void openChatScreen(String prefill) {
-        Minecraft.getMinecraft().displayGuiScreen(new GuiChat(prefill));
     }
 }

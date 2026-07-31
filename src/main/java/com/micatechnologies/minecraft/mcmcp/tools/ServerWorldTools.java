@@ -7,11 +7,9 @@ import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
-import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.util.List;
 import java.util.concurrent.Callable;
-import javax.annotation.Nullable;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.Entity;
@@ -393,12 +391,5 @@ public final class ServerWorldTools {
                 return ToolResult.structured(result);
             })
             .build());
-    }
-
-    /** Shared helper for tools that accept an optional dimension and default to the overworld. */
-    @Nullable
-    static WorldServer worldOrNull(ToolContext context, int dimension) {
-        MinecraftServer server = ServerThreadBridge.server();
-        return server == null ? null : server.getWorld(dimension);
     }
 }
