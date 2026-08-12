@@ -79,7 +79,11 @@ public final class ClientInputTools {
         map.put("attack", mc.gameSettings.keyBindAttack);
         map.put("use", mc.gameSettings.keyBindUseItem);
         map.put("drop", mc.gameSettings.keyBindDrop);
-        map.put("inventory", mc.gameSettings.keyBindPickBlock);
+        // "inventory" was wired to keyBindPickBlock, which is middle-click, not E. A model asking to
+        // open the inventory got a pick-block on whatever it happened to be looking at instead —
+        // silently wrong rather than an error, and in creative that also rewrites the hotbar slot.
+        map.put("inventory", mc.gameSettings.keyBindInventory);
+        map.put("pickBlock", mc.gameSettings.keyBindPickBlock);
         map.put("swapHands", mc.gameSettings.keyBindSwapHands);
         return map;
     }
@@ -360,7 +364,7 @@ public final class ClientInputTools {
             .schema(JsonSchema.object()
                 .enumeration("key", "Which keybinding to press.",
                     "forward", "back", "left", "right", "jump", "sneak", "sprint",
-                    "attack", "use", "drop", "inventory", "swapHands")
+                    "attack", "use", "drop", "inventory", "pickBlock", "swapHands")
                 .integer("ticks", "How long to hold it, in ticks (20 per second).", 1, 1200)
                 .required("key")
                 .build())
