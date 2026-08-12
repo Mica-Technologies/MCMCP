@@ -1,6 +1,6 @@
 # Tools
 
-43 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+45 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -440,6 +440,40 @@ Requires `permissions.allowPlayerControl` · `text` required · optional `index`
 Type into a text field. Characters go through the field's own `textboxKeyTyped`, so length limits and
 character filters apply exactly as they would to typed input. Check the returned text for what was
 actually accepted.
+
+#### `client_gui_click_at`
+
+Requires `permissions.allowPlayerControl` · `x`, `y` required · optional `space`, `button`
+
+Click a coordinate rather than a named widget.
+
+**This is the fallback that makes modded screens reachable at all.** `client_gui_widgets` only sees
+vanilla widgets, and many mods build their interfaces out of their own classes — SuperMartijn642's
+Core Lib among them — so a screen full of controls can report zero buttons. Clicking a point needs
+none of that: every screen receives clicks through `GuiScreen.mouseClicked`, whatever it is built
+from.
+
+The workflow is screenshot → read the pixel → click it, which is why `pixel` is the default space.
+`gui` is Minecraft's scaled space, matching the positions `client_gui_widgets` reports.
+
+#### `client_gui_key`
+
+Requires `permissions.allowPlayerControl` · optional `text`, `key`, `repeat`
+
+Send characters or a named key to the screen's key handler. The keyboard counterpart to
+`client_gui_click_at`: a mod's own text widget is not a `GuiTextField`, so `client_gui_text` cannot
+find it, but it still receives keys through the screen. Click the field first to focus it.
+
+Dispatch is tried in order — the screen's own `charTyped(char)` / `keyPressed(int)` first, then
+vanilla `keyTyped`. Those two names are vanilla's own from 1.13 onwards and several frameworks
+mirror them, including Core Lib, which overrides `handleKeyboardInput` and never calls `keyTyped` at
+all. The reply reports `dispatchedVia` so you can see which path was taken.
+
+!!! warning "The symptom when this is missed is misleading"
+
+    A screen that reimplements keyboard input still closes on Escape, because that is handled by the
+    inherited `keyTyped` — while every character silently vanishes. It reads as a focus problem and
+    is not one.
 
 #### `client_gui_close`
 

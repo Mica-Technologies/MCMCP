@@ -19,6 +19,7 @@ import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiIngameMenu;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.gui.GuiTextField;
+import net.minecraft.client.gui.ScaledResolution;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -75,9 +76,29 @@ public final class ClientGuiTools {
     public static void register() {
         registerGuiWidgets();
         registerGuiClick();
+        registerGuiClickAt();
+        registerGuiKey();
         registerGuiText();
         registerGuiClose();
         registerView();
+    }
+
+    /**
+     * Converts a point in display pixels — what you measure off a screenshot — into the scaled
+     * coordinate space that {@code mouseClicked} and widget positions use.
+     *
+     * <p>No Y flip. LWJGL's mouse origin is bottom-left and vanilla flips it when reading
+     * {@code Mouse.getY()}, but a screenshot's origin is top-left, which already matches the GUI's.
+     * Flipping here would put every click the same distance from the wrong edge.
+     */
+    private static int toGuiX(Minecraft mc, int pixelX) {
+        ScaledResolution resolution = new ScaledResolution(mc);
+        return pixelX * resolution.getScaledWidth() / Math.max(1, mc.displayWidth);
+    }
+
+    private static int toGuiY(Minecraft mc, int pixelY) {
+        ScaledResolution resolution = new ScaledResolution(mc);
+        return pixelY * resolution.getScaledHeight() / Math.max(1, mc.displayHeight);
     }
 
     // ------------------------------------------------------------------
@@ -134,6 +155,29 @@ public final class ClientGuiTools {
         }
         throw new IllegalStateException("Could not locate GuiScreen.buttonList on this Minecraft "
             + "build; GUI inspection is unavailable.");
+    }
+
+    /**
+     * Finds a method declared anywhere on a screen's own class hierarchy.
+     *
+     * <p>Unlike {@link #findMethod}, which looks on {@link GuiScreen} itself, this walks the concrete
+     * screen's classes. It is how the modern-style {@code charTyped}/{@code keyPressed} handlers get
+     * found on screens that declare them, without assuming any particular framework is present.
+     */
+    @Nullable
+    private static Method screenMethod(GuiScreen screen, String name, Class<?>... parameterTypes) {
+        Class<?> type = screen.getClass();
+        while (type != null && type != Object.class) {
+            try {
+                Method method = type.getDeclaredMethod(name, parameterTypes);
+                method.setAccessible(true);
+                return method;
+            }
+            catch (NoSuchMethodException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        return null;
     }
 
     @Nullable
@@ -215,7 +259,13 @@ public final class ClientGuiTools {
                 + "label or index, and this is where both come from. Works at the main menu and on "
                 + "any mod's screen, not only in a world.\n\n"
                 + "Buttons are listed in the screen's own order. Text fields are found by type, so "
-                + "they are listed even when a mod gives them names this tool cannot know.")
+                + "they are listed even when a mod gives them names this tool cannot know.\n\n"
+                + "An empty list does NOT mean an empty screen. Only vanilla widgets are visible "
+                + "here, and many mods build their interfaces out of their own classes — a screen "
+                + "full of controls can report zero buttons. When that happens, screenshot the frame "
+                + "and drive it with client_gui_click_at and client_gui_key, which work on any "
+                + "screen. The reply includes both coordinate spaces for converting between a "
+                + "screenshot's pixels and the scaled positions reported here.")
             .schema(JsonSchema.noArguments())
             .clientOnly()
             .readOnly()
@@ -223,8 +273,20 @@ public final class ClientGuiTools {
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
                     public JsonObject call() {
+                        Minecraft mc = Minecraft.getMinecraft();
                         GuiScreen screen = currentScreen();
                         JsonObject json = describeScreen(screen);
+
+                        // Both coordinate spaces, so a caller can convert between a screenshot's
+                        // pixels and the scaled space widget positions are reported in without
+                        // having to know Minecraft's scaling rules.
+                        ScaledResolution resolution = new ScaledResolution(mc);
+                        json.addProperty("scaledWidth", resolution.getScaledWidth());
+                        json.addProperty("scaledHeight", resolution.getScaledHeight());
+                        json.addProperty("scaleFactor", resolution.getScaleFactor());
+                        json.addProperty("displayWidth", mc.displayWidth);
+                        json.addProperty("displayHeight", mc.displayHeight);
+
                         if (screen == null) {
                             json.add("buttons", new JsonArray());
                             json.add("textFields", new JsonArray());
@@ -405,6 +467,264 @@ public final class ClientGuiTools {
         }
         throw new IllegalArgumentException("'" + label + "' matches more than one button ('"
             + options + "'). Use a longer label or an index.");
+    }
+
+    // ------------------------------------------------------------------
+    // Coordinate clicking, for screens with no vanilla widgets
+    // ------------------------------------------------------------------
+
+    /**
+     * Click a point rather than a widget.
+     *
+     * <p>{@code client_gui_click} can only find {@link GuiButton}s, and a great many mod screens do
+     * not use them. SuperMartijn642's Core Lib is the case that forced this: its {@code WidgetScreen}
+     * draws a complete interface — text fields, toggles, sliders, spinners — out of its own widget
+     * classes, so {@code buttonList} is empty and label lookup has nothing to match. That is not an
+     * exotic setup; any framework that reimplements widgets looks the same from outside.
+     *
+     * <p>Clicking a coordinate needs none of it. Every screen, whatever it is built from, receives
+     * clicks through {@code GuiScreen.mouseClicked}, because that is the only way the game delivers
+     * them. Pair it with a screenshot: look at the frame, read off the pixel, click it.
+     */
+    private static void registerGuiClickAt() {
+        McpRegistry.registerTool(McpTool.named("client_gui_click_at")
+            .title("Click a point on the screen")
+            .description("Click at a coordinate on the currently open screen, rather than on a named "
+                + "button.\n\n"
+                + "Use this when client_gui_widgets comes back with no buttons. Many mods build their "
+                + "screens out of their own widget classes instead of vanilla ones — SuperMartijn642's "
+                + "Core Lib is one — and those are invisible to label lookup but still receive clicks "
+                + "normally, because every screen gets them through the same handler.\n\n"
+                + "The workflow is: take a screenshot with inline=true, read the pixel coordinate of "
+                + "the thing you want off the image, and click it. Pixel space is the default for "
+                + "exactly that reason.")
+            .schema(JsonSchema.object()
+                .integer("x", "Horizontal coordinate.")
+                .integer("y", "Vertical coordinate, measured from the top.")
+                .enumeration("space", "Coordinate space. 'pixel' (the default) matches a screenshot's "
+                    + "own pixels. 'gui' is Minecraft's scaled space, which is what "
+                    + "client_gui_widgets reports button positions in.", "pixel", "gui")
+                .integer("button", "Mouse button: 0 left, 1 right, 2 middle. Defaults to 0.", 0, 2)
+                .required("x", "y")
+                .build())
+            .clientOnly()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("GUI control is disabled by permissions.allowPlayerControl "
+                        + "in the MCMCP config.");
+                }
+
+                final int x = context.requireInt("x");
+                final int y = context.requireInt("y");
+                final String space = context.getString("space", "pixel");
+                final int mouseButton = context.getBoundedInt("button", 0, 0, 2);
+
+                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() throws Exception {
+                        Minecraft mc = Minecraft.getMinecraft();
+                        GuiScreen screen = mc.currentScreen;
+                        if (screen == null) {
+                            throw new IllegalStateException("No screen is open, so there is nothing to "
+                                + "click.");
+                        }
+
+                        int guiX = "gui".equals(space) ? x : toGuiX(mc, x);
+                        int guiY = "gui".equals(space) ? y : toGuiY(mc, y);
+
+                        Method mouseClicked = mouseClickedMethod();
+                        if (mouseClicked == null) {
+                            throw new IllegalStateException("Could not locate GuiScreen.mouseClicked on "
+                                + "this Minecraft build; GUI clicking is unavailable.");
+                        }
+
+                        String screenBefore = screen.getClass().getSimpleName();
+                        mouseClicked.invoke(screen, guiX, guiY, mouseButton);
+
+                        ScaledResolution resolution = new ScaledResolution(mc);
+                        JsonObject json = describeScreen(mc.currentScreen);
+                        json.addProperty("clickedGuiX", guiX);
+                        json.addProperty("clickedGuiY", guiY);
+                        json.addProperty("space", space);
+                        json.addProperty("button", mouseButton);
+                        json.addProperty("scaledWidth", resolution.getScaledWidth());
+                        json.addProperty("scaledHeight", resolution.getScaledHeight());
+                        json.addProperty("screenBefore", screenBefore);
+                        json.addProperty("screenChanged",
+                            mc.currentScreen == null || !screenBefore.equals(
+                                mc.currentScreen.getClass().getSimpleName()));
+                        return json;
+                    }
+                });
+
+                return ToolResult.text("Clicked at gui(" + result.get("clickedGuiX").getAsInt() + ", "
+                    + result.get("clickedGuiY").getAsInt() + "). Screen is now "
+                    + result.get("screenName").getAsString() + ".")
+                    .withStructured(result);
+            })
+            .build());
+    }
+
+    // ------------------------------------------------------------------
+    // Raw key input, for screens with no vanilla text fields
+    // ------------------------------------------------------------------
+
+    /**
+     * Send keystrokes to the screen itself rather than to a {@link GuiTextField}.
+     *
+     * <p>The keyboard counterpart to {@code client_gui_click_at}, and needed for the same reason: a
+     * mod's own text field is not a {@code GuiTextField}, so {@code client_gui_text} cannot find it.
+     * Whatever it is, it receives characters through the screen's {@code keyTyped}, because that is
+     * where the game delivers them. Click the field first to focus it, then type.
+     */
+    private static void registerGuiKey() {
+        McpRegistry.registerTool(McpTool.named("client_gui_key")
+            .title("Send keystrokes to a screen")
+            .description("Send characters or a special key straight to the open screen's key handler.\n\n"
+                + "Use this when client_gui_text finds no text fields — a mod's own text widget is not "
+                + "a vanilla one, but it still receives keys through the screen. Click the field first "
+                + "to give it focus, then type into it.\n\n"
+                + "Either send 'text' to type a run of characters, or 'key' for a single named key "
+                + "such as backspace or enter.")
+            .schema(JsonSchema.object()
+                .string("text", "Characters to type, one keyTyped call each.")
+                .enumeration("key", "A single named key to press instead of text.",
+                    "enter", "backspace", "delete", "tab", "escape", "up", "down", "left", "right",
+                    "home", "end")
+                .integer("repeat", "How many times to press a named key. Defaults to 1.", 1, 100)
+                .build())
+            .clientOnly()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("GUI control is disabled by permissions.allowPlayerControl "
+                        + "in the MCMCP config.");
+                }
+
+                final String text = context.getString("text", null);
+                final String key = context.getString("key", null);
+                final int repeat = context.getBoundedInt("repeat", 1, 1, 100);
+                if (text == null && key == null) {
+                    return ToolResult.error("Pass either 'text' to type characters or 'key' for a "
+                        + "named key.");
+                }
+
+                final int keyCode = key == null ? -1 : namedKeyCode(key);
+                if (key != null && keyCode < 0) {
+                    return ToolResult.error("Unknown key '" + key + "'.");
+                }
+
+                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() throws Exception {
+                        Minecraft mc = Minecraft.getMinecraft();
+                        GuiScreen screen = mc.currentScreen;
+                        if (screen == null) {
+                            throw new IllegalStateException("No screen is open, so there is nothing to "
+                                + "type into.");
+                        }
+                        Method keyTyped = keyTypedMethod();
+
+                        // Screens that reimplement input often override handleKeyboardInput to read
+                        // LWJGL directly and dispatch to their own charTyped/keyPressed, never
+                        // calling keyTyped at all. SuperMartijn642's Core Lib does exactly this, and
+                        // the names it uses are vanilla's own from 1.13 onwards, so honouring them
+                        // is following a convention rather than special-casing one mod.
+                        //
+                        // The symptom when this is missed is precise and misleading: Escape still
+                        // works, because that is handled by the inherited keyTyped, while every
+                        // character silently vanishes. It looks like a focus problem and is not.
+                        Method charTyped = screenMethod(screen, "charTyped", char.class);
+                        Method keyPressed = screenMethod(screen, "keyPressed", int.class);
+
+                        if (keyTyped == null && charTyped == null && keyPressed == null) {
+                            throw new IllegalStateException("This screen exposes no key handler this "
+                                + "tool knows how to call.");
+                        }
+
+                        String screenBefore = screen.getClass().getSimpleName();
+                        String dispatch = "keyTyped";
+                        int sent = 0;
+
+                        if (text != null) {
+                            for (char character : text.toCharArray()) {
+                                if (charTyped != null) {
+                                    charTyped.invoke(screen, character);
+                                    dispatch = "charTyped";
+                                }
+                                else if (keyTyped != null) {
+                                    keyTyped.invoke(screen, character, 0);
+                                }
+                                sent++;
+                            }
+                        }
+                        if (keyCode >= 0) {
+                            for (int i = 0; i < repeat; i++) {
+                                if (keyPressed != null) {
+                                    keyPressed.invoke(screen, keyCode);
+                                    dispatch = "keyPressed";
+                                }
+                                else if (keyTyped != null) {
+                                    // Character 0 for a non-printing key: vanilla text fields switch
+                                    // on the key code for these and ignore the character, and passing
+                                    // a printable one would have some widgets insert it as well as
+                                    // acting on the key.
+                                    keyTyped.invoke(screen, '\0', keyCode);
+                                }
+                                sent++;
+                            }
+                        }
+
+                        JsonObject json = describeScreen(mc.currentScreen);
+                        json.addProperty("keystrokesSent", sent);
+                        json.addProperty("dispatchedVia", dispatch);
+                        json.addProperty("screenBefore", screenBefore);
+                        return json;
+                    }
+                });
+
+                return ToolResult.text("Sent " + result.get("keystrokesSent").getAsInt()
+                    + " keystroke(s). Screen is now " + result.get("screenName").getAsString() + ".")
+                    .withStructured(result);
+            })
+            .build());
+    }
+
+    /** LWJGL key codes for the named keys, which are the ones worth reaching without raw codes. */
+    private static int namedKeyCode(String name) {
+        if ("enter".equals(name)) {
+            return KEY_RETURN;
+        }
+        if ("backspace".equals(name)) {
+            return 14;
+        }
+        if ("delete".equals(name)) {
+            return 211;
+        }
+        if ("tab".equals(name)) {
+            return 15;
+        }
+        if ("escape".equals(name)) {
+            return KEY_ESCAPE;
+        }
+        if ("up".equals(name)) {
+            return 200;
+        }
+        if ("down".equals(name)) {
+            return 208;
+        }
+        if ("left".equals(name)) {
+            return 203;
+        }
+        if ("right".equals(name)) {
+            return 205;
+        }
+        if ("home".equals(name)) {
+            return 199;
+        }
+        if ("end".equals(name)) {
+            return 207;
+        }
+        return -1;
     }
 
     // ------------------------------------------------------------------
