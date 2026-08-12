@@ -18,9 +18,15 @@ access, and it is off by default.
 
 ## What it exposes
 
-**33 tools.** World queries and bulk region read/write for survey-then-build workflows; player state
+**43 tools.** World queries and bulk region read/write for survey-then-build workflows; player state
 and inventory; command execution with captured output; camera, movement and interaction on the
 client; screenshots, GUI inspection, chat capture and log tailing for debugging.
+
+Also GUI control — reading a screen's buttons and text fields and driving them — so menus, mod config
+screens and anything whose real interface is a screen are reachable, not just blocks and entities.
+Singleplayer worlds can be listed, created and loaded outright, which means a session can start from
+the main menu with nobody at the keyboard. `client_wait` blocks on a condition rather than a guessed
+delay, and the game can be told not to pause when its window is backgrounded.
 
 **7 resources**, including a subscribable chat feed that pushes as messages arrive, and a screenshot
 template so a client can fetch image bytes on demand rather than paying for them in every response.

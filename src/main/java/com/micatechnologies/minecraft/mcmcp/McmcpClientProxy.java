@@ -2,10 +2,13 @@ package com.micatechnologies.minecraft.mcmcp;
 
 import com.micatechnologies.minecraft.mcmcp.client.ClientThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientDebugTools;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientGuiTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientInputTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientPrompts;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientResources;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientStateTools;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientSyncTools;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientWorldTools;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpoint;
 import javax.annotation.Nullable;
@@ -41,6 +44,9 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientStateTools.register();
         ClientDebugTools.register();
         ClientInputTools.register();
+        ClientGuiTools.register();
+        ClientSyncTools.register();
+        ClientWorldTools.register();
         ClientResources.register();
         ClientPrompts.register();
     }

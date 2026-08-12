@@ -1,6 +1,6 @@
 # Tools
 
-33 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+43 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -400,3 +400,133 @@ anything mods print to chat. This is how you see the result of `client_send_chat
 
 Frame rate, heap usage, render distance, graphics settings, and the game and screenshot directories.
 Roughly what F3 shows.
+
+### GUI control
+
+`client_gui_state` says *which* screen is open; these act on it. Between them they reach everything
+before a player exists — the main menu, the world list — and everything whose real interface is a
+screen rather than a block face.
+
+Clicks go through the screen's own `mouseClicked` at the button's centre, not through
+`actionPerformed`. Screens routinely override `mouseClicked` to do their own hit testing or to
+refuse clicks while loading; calling `actionPerformed` would bypass all of it and fire actions the
+real UI would have declined.
+
+#### `client_gui_widgets`
+
+:material-eye: Read-only · no arguments
+
+Buttons on the current screen with label, index, id, enabled/visible state and geometry, plus every
+text field with its contents and focus.
+
+Call this first: the other two address widgets by label or index, and this is where both come from.
+Text fields are found by *type*, so they are listed even on a mod's own screen where no field name
+could have been known in advance.
+
+#### `client_gui_click`
+
+Requires `permissions.allowPlayerControl` · optional `label`, `index`
+
+Click a button. `label` matches case-insensitively — exact first, then a unique substring, so
+"Game Mode" finds "Game Mode: Survival". An ambiguous substring is an error rather than a
+first-match guess.
+
+Reports the screen before and after, and whether it changed.
+
+#### `client_gui_text`
+
+Requires `permissions.allowPlayerControl` · `text` required · optional `index`, `clear`, `submit`
+
+Type into a text field. Characters go through the field's own `textboxKeyTyped`, so length limits and
+character filters apply exactly as they would to typed input. Check the returned text for what was
+actually accepted.
+
+#### `client_gui_close`
+
+Requires `permissions.allowPlayerControl` · no arguments
+
+Escape. Small, and the difference between a recoverable session and a stuck one — Minecraft opens the
+pause menu whenever its window loses focus, and it stays until something closes it.
+
+Escape goes to the screen's own key handler, so a screen that declines to close stays open and the
+reply says so.
+
+#### `client_view`
+
+Requires `permissions.allowScreenshots` · optional `hideHud`, `perspective`, `pauseOnLostFocus`
+
+F1, F5, and the setting that makes unattended work possible.
+
+Hiding the HUD removes the hotbar, crosshair, hand and chat from the frame, which is the difference
+between a usable capture and a debug one. Both persist until changed.
+
+`pauseOnLostFocus: false` stops Minecraft pausing when its window is backgrounded. Without it an
+unattended session is unusable: the pause menu reopens faster than `client_gui_close` can dismiss it,
+and it renders over every screenshot. The call also closes the menu if one is already open. It is a
+runtime override and is deliberately not saved to `options.txt` — it disables a safety behaviour on
+somebody's real client, so it resets on restart.
+
+### Timing
+
+#### `client_wait`
+
+:material-eye: Read-only · optional `ticks`, `waitFor`, `screenName`, `chatContains`
+
+Let game time pass, for a fixed duration or until the game reaches a state:
+`worldLoaded`, `worldUnloaded`, `screenOpen`, `screenClosed`, `chat`.
+
+Prefer a condition over a fixed delay. A fixed sleep is a guess that fails intermittently when too
+short and wastes every run when too long; a condition returns the moment it holds and reports
+honestly when it timed out.
+
+`worldLoaded` means world *and* player *and* terrain — the client spends several seconds on
+`GuiDownloadTerrain` after the world exists, and during that window screenshots capture the loading
+screen and block reads report `loaded=false` for terrain that is merely late.
+
+`chat` only matches lines that arrive after the wait starts, so it cannot return instantly on
+something from minutes ago.
+
+### Worlds
+
+Singleplayer world management, by calling `launchIntegratedServer` directly rather than clicking
+through eight screens. One call with named arguments, indifferent to the client's language, and it
+cannot half-succeed and strand the client on an intermediate screen.
+
+#### `client_world_list`
+
+:material-eye: Read-only · no arguments
+
+Saved worlds, newest first, with game mode, cheats and last-played. `folderName` is what
+`client_world_load` takes — not the display name, which is not unique.
+
+#### `client_world_create`
+
+:material-alert: Destructive · Requires `permissions.allowPlayerControl` · `name` required · optional
+`worldType`, `gameMode`, `seed`, `generateStructures`, `allowCheats`, `hardcore`
+
+Create a world and load it. Marked destructive because it writes a save directory that leaving the
+world does not undo. An existing save is never overwritten — the folder gets a suffix, and the reply
+says which was used.
+
+There is deliberately **no tool to delete a world**. The failure mode of getting that wrong is
+somebody's survival save, and the recovery is nothing.
+
+#### `client_world_load`
+
+Requires `permissions.allowPlayerControl` · `folderName` required
+
+Load an existing world, leaving any current one first.
+
+#### `client_world_leave`
+
+Requires `permissions.allowPlayerControl` · no arguments
+
+Back to the main menu, saving on the way out.
+
+!!! warning "Loading returns before the world is ready"
+
+    `client_world_create` and `client_world_load` return as soon as loading has *started*. Generating
+    spawn chunks blocks the client thread for far longer than a scheduled task is allowed, so waiting
+    on the call itself reports a timeout for a world that is loading perfectly well.
+
+    Follow both with `client_wait` and `waitFor: "worldLoaded"`.
