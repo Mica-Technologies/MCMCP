@@ -10,8 +10,10 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
@@ -192,28 +194,134 @@ public final class ClientGuiTools {
             "keyTyped", "func_73869_a");
     }
 
+    /** How deep the widget walk goes before giving up. Deeper than any real screen nests. */
+    private static final int MAX_WALK_DEPTH = 8;
+
+    /** Objects the walk may visit, as a backstop against a graph that turns out to be enormous. */
+    private static final int MAX_WALK_VISITS = 4000;
+
     /**
-     * Collects every {@link GuiTextField} reachable from a screen instance.
+     * A text-entry widget found on a screen, together with the methods to read and write it.
      *
-     * <p>Found by walking the class hierarchy and matching on field <em>type</em>, never on field
-     * name. Names are obfuscated in a released jar and are arbitrary in a mod's own screen; the type
-     * is stable in both. Order is declaration order, outermost class last, which is stable enough to
-     * index against between two calls on the same screen.
+     * <p>Deliberately not typed as {@link GuiTextField}. See {@link #textWidgets}.
      */
-    private static List<GuiTextField> textFields(GuiScreen screen) {
-        List<GuiTextField> found = new ArrayList<>();
-        Class<?> type = screen.getClass();
+    private static final class TextWidget {
+
+        final Object target;
+        final Method getter;
+        final Method setter;
+        @Nullable
+        final Method focusGetter;
+        final String type;
+
+        TextWidget(Object target, Method getter, Method setter, @Nullable Method focusGetter) {
+            this.target = target;
+            this.getter = getter;
+            this.setter = setter;
+            this.focusGetter = focusGetter;
+            this.type = target.getClass().getSimpleName();
+        }
+
+        String read() throws Exception {
+            Object value = getter.invoke(target);
+            return value == null ? "" : value.toString();
+        }
+
+        void write(String value) throws Exception {
+            setter.invoke(target, value);
+        }
+
+        @Nullable
+        Boolean focused() {
+            if (focusGetter == null) {
+                return null;
+            }
+            try {
+                Object value = focusGetter.invoke(target);
+                return value instanceof Boolean ? (Boolean) value : null;
+            }
+            catch (Exception ignored) {
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Collects every text-entry widget reachable from a screen, by <em>shape</em> rather than type.
+     *
+     * <p>Anything exposing {@code String getText()} and {@code setText(String)} counts. That pair is
+     * the near-universal convention — vanilla's {@link GuiTextField} has it, and so does every mod
+     * widget framework the author has looked at, including the Core Lib one this was written
+     * against. Matching on the convention rather than on {@code GuiTextField} is what makes a mod's
+     * own text box reachable at all, and it needs no knowledge of the framework.
+     *
+     * <p>The walk is necessary because widgets are rarely direct fields of the screen. Core Lib's
+     * {@code WidgetScreen} holds one root widget which holds its children in a list, so a search
+     * limited to declared fields finds nothing on a screen full of text boxes.
+     *
+     * <h2>What it refuses to walk into</h2>
+     *
+     * Recursion skips {@code java.*} and {@code net.minecraft.*} objects. That is not tidiness: the
+     * screen holds a {@code Minecraft} reference, and descending into it reaches the world, every
+     * loaded entity and the whole render stack — a walk that would take far longer than the game
+     * thread can spare and might never terminate. Values are shape-checked <em>before</em> that
+     * filter applies, so a vanilla {@link GuiTextField} held directly by a screen is still found.
+     */
+    private static List<TextWidget> textWidgets(GuiScreen screen) {
+        List<TextWidget> found = new ArrayList<>();
+        Map<Object, Boolean> visited = new IdentityHashMap<>();
+        walk(screen, found, visited, 0, true);
+        return found;
+    }
+
+    private static void walk(@Nullable Object node, List<TextWidget> found,
+        Map<Object, Boolean> visited, int depth, boolean isRoot) {
+
+        if (node == null || depth > MAX_WALK_DEPTH || visited.size() > MAX_WALK_VISITS) {
+            return;
+        }
+        if (visited.put(node, Boolean.TRUE) != null) {
+            return;
+        }
+
+        if (!isRoot) {
+            Method getter = findAccessible(node.getClass(), "getText");
+            Method setter = findAccessible(node.getClass(), "setText", String.class);
+            if (getter != null && setter != null && getter.getReturnType() == String.class) {
+                found.add(new TextWidget(node, getter, setter,
+                    findAccessible(node.getClass(), "isFocused")));
+                // A text widget is a leaf for this purpose; its internals hold nothing else wanted.
+                return;
+            }
+        }
+
+        if (node instanceof Iterable) {
+            for (Object element : (Iterable<?>) node) {
+                walk(element, found, visited, depth + 1, false);
+            }
+            return;
+        }
+        if (node.getClass().isArray() && !node.getClass().getComponentType().isPrimitive()) {
+            int length = java.lang.reflect.Array.getLength(node);
+            for (int i = 0; i < length; i++) {
+                walk(java.lang.reflect.Array.get(node, i), found, visited, depth + 1, false);
+            }
+            return;
+        }
+        if (!isRoot && !mayDescendInto(node.getClass())) {
+            return;
+        }
+
+        Class<?> type = node.getClass();
         while (type != null && type != Object.class) {
             for (Field field : type.getDeclaredFields()) {
-                if (!GuiTextField.class.isAssignableFrom(field.getType())) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                    || field.getType().isPrimitive()) {
                     continue;
                 }
                 try {
                     field.setAccessible(true);
-                    Object value = field.get(screen);
-                    if (value instanceof GuiTextField) {
-                        found.add((GuiTextField) value);
-                    }
+                    walk(field.get(node), found, visited, depth + 1, false);
                 }
                 catch (Exception ignored) {
                     // A field we cannot read is a field we cannot offer; skip it.
@@ -221,7 +329,32 @@ public final class ClientGuiTools {
             }
             type = type.getSuperclass();
         }
-        return found;
+    }
+
+    private static boolean mayDescendInto(Class<?> type) {
+        if (type.isPrimitive() || type.isEnum()) {
+            return false;
+        }
+        String name = type.getName();
+        return !name.startsWith("java.") && !name.startsWith("javax.")
+            && !name.startsWith("sun.") && !name.startsWith("jdk.")
+            && !name.startsWith("net.minecraft.") && !name.startsWith("net.minecraftforge.");
+    }
+
+    @Nullable
+    private static Method findAccessible(Class<?> owner, String name, Class<?>... parameterTypes) {
+        Class<?> type = owner;
+        while (type != null && type != Object.class) {
+            try {
+                Method method = type.getDeclaredMethod(name, parameterTypes);
+                method.setAccessible(true);
+                return method;
+            }
+            catch (NoSuchMethodException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        return null;
     }
 
     /** The screen currently open, or null. Must be called on the client thread. */
@@ -272,7 +405,7 @@ public final class ClientGuiTools {
             .handler(context -> {
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
-                    public JsonObject call() {
+                    public JsonObject call() throws Exception {
                         Minecraft mc = Minecraft.getMinecraft();
                         GuiScreen screen = currentScreen();
                         JsonObject json = describeScreen(screen);
@@ -312,13 +445,17 @@ public final class ClientGuiTools {
                         json.add("buttons", buttons);
 
                         JsonArray fields = new JsonArray();
-                        List<GuiTextField> found = textFields(screen);
+                        List<TextWidget> found = textWidgets(screen);
                         for (int index = 0; index < found.size(); index++) {
-                            GuiTextField field = found.get(index);
+                            TextWidget field = found.get(index);
                             JsonObject entry = new JsonObject();
                             entry.addProperty("index", index);
-                            entry.addProperty("text", field.getText());
-                            entry.addProperty("focused", field.isFocused());
+                            entry.addProperty("text", field.read());
+                            entry.addProperty("widgetType", field.type);
+                            Boolean focused = field.focused();
+                            if (focused != null) {
+                                entry.addProperty("focused", focused);
+                            }
                             fields.add(entry);
                         }
                         json.add("textFields", fields);
@@ -734,12 +871,18 @@ public final class ClientGuiTools {
     private static void registerGuiText() {
         McpRegistry.registerTool(McpTool.named("client_gui_text")
             .title("Type into a GUI text field")
-            .description("Type into a text field on the currently open screen — a world name, a seed, "
-                + "a search box, a rename field.\n\n"
-                + "Characters go through the field's own textboxKeyTyped, so length limits and "
-                + "character filters apply exactly as they would to typed input; text that the field "
-                + "would refuse from a keyboard is refused here too. Check the returned text to see "
-                + "what was actually accepted.")
+            .description("Set the contents of a text field on the currently open screen — a world "
+                + "name, a seed, a search box, a rename field.\n\n"
+                + "Fields are found by shape rather than type: anything exposing getText/setText "
+                + "counts, which covers vanilla text boxes and mod widget frameworks alike. Use "
+                + "client_gui_widgets to see what was found and at which index.\n\n"
+                + "The value is set outright rather than typed character by character. Replaying "
+                + "keystrokes depends on where the caret happens to be, so 'clear and type' quietly "
+                + "becomes 'insert halfway through' on a field a click has already put a caret into. "
+                + "The widget may still refuse part of what you asked for — a length cap or a "
+                + "character filter — so check 'fullyAccepted' and the returned text.\n\n"
+                + "If a screen visibly has a field this cannot find, fall back to "
+                + "client_gui_click_at plus client_gui_key.")
             .schema(JsonSchema.object()
                 .string("text", "The text to type.")
                 .integer("index", "Which text field, by index from client_gui_widgets. Defaults to 0, "
@@ -771,49 +914,56 @@ public final class ClientGuiTools {
                                 + "field to type into.");
                         }
 
-                        List<GuiTextField> fields = textFields(screen);
+                        List<TextWidget> fields = textWidgets(screen);
                         if (fields.isEmpty()) {
                             throw new IllegalStateException("No text fields were found on "
-                                + screen.getClass().getSimpleName() + ".");
+                                + screen.getClass().getSimpleName() + ". If the screen visibly has "
+                                + "one, drive it with client_gui_click_at and client_gui_key instead.");
                         }
                         if (index < 0 || index >= fields.size()) {
                             throw new IllegalArgumentException("Text field index " + index + " is out "
                                 + "of range; this screen has " + fields.size() + " field(s).");
                         }
 
-                        GuiTextField field = fields.get(index);
-
-                        // Focus is exclusive on a real screen: two focused fields would both consume
-                        // the same keystrokes. Clear the others rather than assuming they are unfocused.
-                        for (GuiTextField other : fields) {
-                            other.setFocused(false);
-                        }
-                        field.setFocused(true);
-
-                        if (clear) {
-                            field.setText("");
-                        }
-                        for (char character : text.toCharArray()) {
-                            field.textboxKeyTyped(character, 0);
-                        }
-
-                        String resulting = field.getText();
+                        TextWidget field = fields.get(index);
+                        String before = field.read();
                         String screenBefore = screen.getClass().getSimpleName();
+
+                        // Set the value outright rather than replaying keystrokes. Typing into a
+                        // field depends on where its caret happens to be, which a click positions
+                        // somewhere in the middle of the existing text — so "clear then type"
+                        // silently becomes "insert halfway through", and backspacing a fixed number
+                        // of times either overshoots into the previous value or leaves a tail.
+                        // Setting the string is the operation actually wanted, and it is what the
+                        // widget's own setter is for.
+                        field.write(clear ? text : before + text);
+                        String resulting = field.read();
 
                         if (submit) {
                             Method keyTyped = keyTypedMethod();
-                            if (keyTyped == null) {
-                                throw new IllegalStateException("Could not locate GuiScreen.keyTyped on "
-                                    + "this Minecraft build; 'submit' is unavailable.");
+                            Method keyPressed = screenMethod(screen, "keyPressed", int.class);
+                            if (keyPressed != null) {
+                                keyPressed.invoke(screen, KEY_RETURN);
                             }
-                            keyTyped.invoke(screen, '\r', KEY_RETURN);
+                            else if (keyTyped != null) {
+                                keyTyped.invoke(screen, '\r', KEY_RETURN);
+                            }
+                            else {
+                                throw new IllegalStateException("This screen exposes no key handler, "
+                                    + "so 'submit' is unavailable.");
+                            }
                         }
 
                         JsonObject json = describeScreen(mc.currentScreen);
                         json.addProperty("fieldIndex", index);
+                        json.addProperty("widgetType", field.type);
                         json.addProperty("text", resulting);
+                        json.addProperty("textBefore", before);
                         json.addProperty("requestedText", text);
-                        json.addProperty("fullyAccepted", resulting.endsWith(text));
+                        // The widget may refuse part of what was asked for — a length cap, or a
+                        // character filter. Comparing rather than assuming is the point.
+                        json.addProperty("fullyAccepted",
+                            clear ? resulting.equals(text) : resulting.equals(before + text));
                         json.addProperty("submitted", submit);
                         json.addProperty("screenBefore", screenBefore);
                         return json;

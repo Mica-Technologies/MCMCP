@@ -437,9 +437,26 @@ Reports the screen before and after, and whether it changed.
 
 Requires `permissions.allowPlayerControl` · `text` required · optional `index`, `clear`, `submit`
 
-Type into a text field. Characters go through the field's own `textboxKeyTyped`, so length limits and
-character filters apply exactly as they would to typed input. Check the returned text for what was
-actually accepted.
+Set a text field's contents.
+
+Fields are found by **shape, not type** — anything exposing `String getText()` and `setText(String)`
+qualifies, which is the convention vanilla and every mod widget framework examined so far follow.
+Finding them needs a bounded walk of the screen's object graph, because widgets are often held in a
+container's child list rather than as fields of the screen itself.
+
+The value is **set outright rather than typed**. Replaying keystrokes depends on where the caret
+happens to be, and a click leaves it in the middle of the existing text — so "clear and type" quietly
+becomes "insert halfway through", and backspacing a fixed number of times either overshoots or leaves
+a tail. Setting the string is the operation actually wanted.
+
+The widget can still refuse part of the input to a length cap or character filter, so the reply
+carries `textBefore`, the resulting `text`, and `fullyAccepted`.
+
+!!! note "The graph walk stops at `java.*` and `net.minecraft.*`"
+
+    A screen holds a `Minecraft` reference, and following it reaches the world, every loaded entity
+    and the render stack. Values are shape-checked before that filter applies, so a vanilla text box
+    held directly by a screen is still found.
 
 #### `client_gui_click_at`
 
