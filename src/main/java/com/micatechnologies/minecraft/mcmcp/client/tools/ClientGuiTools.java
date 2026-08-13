@@ -1014,7 +1014,21 @@ public final class ClientGuiTools {
                         if (screen == null) {
                             JsonObject json = describeScreen(null);
                             json.addProperty("closed", false);
-                            json.addProperty("note", "No screen was open.");
+                            // "No screen was open" is not the whole story when the game also has no
+                            // input focus: that is precisely the state an unattended session sits in
+                            // once pauseOnLostFocus is off, and it is the state in which held attack
+                            // silently does nothing. This tool's job is handing input back to the
+                            // game, so do that here too rather than only after dismissing a screen.
+                            boolean grabbed = false;
+                            if (mc.world != null && !mc.inGameHasFocus) {
+                                mc.setIngameFocus();
+                                grabbed = true;
+                            }
+                            json.addProperty("grabbedInputFocus", grabbed);
+                            json.addProperty("inGameFocus", mc.inGameHasFocus);
+                            json.addProperty("note", grabbed
+                                ? "No screen was open; input focus was returned to the game."
+                                : "No screen was open.");
                             return json;
                         }
 
@@ -1079,13 +1093,22 @@ public final class ClientGuiTools {
                 + "work possible at all: Minecraft pauses singleplayer and opens the menu every time "
                 + "its window loses focus, which it has whenever nobody is sitting at the machine. "
                 + "Closing that menu does not help, because it reopens. Set this false and it stops "
-                + "happening.")
+                + "happening.\n\n"
+                + "'grabInputFocus' is its companion, and you need it for mining. Turning the pause "
+                + "off keeps the game running, but the game still considers itself unfocused, and "
+                + "Minecraft gates CONTINUOUS left-click on that flag alone — so held attack applies "
+                + "the input, changes nothing, and reports no error. Set this true to hand input "
+                + "back. Everything else (movement, right-click, looking) works without it, which is "
+                + "exactly why the gap is easy to miss.")
             .schema(JsonSchema.object()
                 .bool("hideHud", "True hides the HUD, false shows it. Omit to leave it unchanged.")
                 .enumeration("perspective", "Camera perspective. Omit to leave it unchanged.",
                     "first", "third_back", "third_front")
                 .bool("pauseOnLostFocus", "Whether losing window focus pauses the game and opens the "
                     + "menu. Set false for unattended sessions. Omit to leave it unchanged.")
+                .bool("grabInputFocus", "True hands input back to the game when it has lost focus, "
+                    + "which is what makes held attack (mining) work in an unattended session. "
+                    + "Omit to leave it unchanged.")
                 .build())
             .clientOnly()
             .handler(context -> {
@@ -1100,6 +1123,7 @@ public final class ClientGuiTools {
                 final boolean hideHud = context.getBoolean("hideHud", false);
                 final boolean changePause = arguments.has("pauseOnLostFocus");
                 final boolean pauseOnLostFocus = context.getBoolean("pauseOnLostFocus", true);
+                final boolean grabInputFocus = context.getBoolean("grabInputFocus", false);
                 final String perspective = context.getString("perspective", null);
 
                 final int perspectiveValue;
@@ -1139,6 +1163,13 @@ public final class ClientGuiTools {
                                 mc.displayGuiScreen(null);
                             }
                         }
+                        // Only with a world and no screen: setIngameFocus grabs the mouse and
+                        // dismisses nothing, so calling it under an open screen would leave that
+                        // screen up with the cursor captured behind it.
+                        if (grabInputFocus && mc.world != null && mc.currentScreen == null
+                            && !mc.inGameHasFocus) {
+                            mc.setIngameFocus();
+                        }
                         // Deliberately not saveOptions(): this is a runtime override for an
                         // automated session, not a change to how the person who owns this client
                         // wants their game to behave. It resets when the game restarts, which is
@@ -1147,6 +1178,7 @@ public final class ClientGuiTools {
                         JsonObject json = new JsonObject();
                         json.addProperty("hudHidden", mc.gameSettings.hideGUI);
                         json.addProperty("pauseOnLostFocus", mc.gameSettings.pauseOnLostFocus);
+                        json.addProperty("inGameFocus", mc.inGameHasFocus);
                         json.addProperty("thirdPersonView", mc.gameSettings.thirdPersonView);
                         json.addProperty("perspective",
                             mc.gameSettings.thirdPersonView == 0 ? "first"

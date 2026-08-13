@@ -391,7 +391,20 @@ public final class ClientInputTools {
                 });
 
                 awaitHold(hold, ticks);
-                return ToolResult.text("Held '" + key + "' for " + ticks + " tick(s).");
+                // Same focus gate client_interact explains: only continuous attack is affected, so
+                // only attack is worth warning about. Everything else applies regardless.
+                boolean unfocusedAttack = "attack".equals(key)
+                    && !context.onGameThread(new Callable<Boolean>() {
+                        @Override
+                        public Boolean call() {
+                            return Minecraft.getMinecraft().inGameHasFocus;
+                        }
+                    });
+                return ToolResult.text("Held '" + key + "' for " + ticks + " tick(s)."
+                    + (unfocusedAttack
+                        ? " The game does not have input focus, so this did nothing beyond the first"
+                            + " click — call client_view with grabInputFocus true first."
+                        : ""));
             })
             .build());
     }
@@ -403,7 +416,11 @@ public final class ClientInputTools {
                 + "at. Check client_looking_at first — this acts on the current target, and the "
                 + "player's reach is about 4.5 blocks in survival.\n\n"
                 + "Breaking a block takes many ticks of held attack and depends on the tool held; hold "
-                + "for longer and re-check rather than expecting one call to finish the job.")
+                + "for longer and re-check rather than expecting one call to finish the job.\n\n"
+                + "Held attack additionally needs the game to have input focus, which an unattended "
+                + "client does not have. Without it the input is applied and nothing happens; the "
+                + "reply flags that rather than leaving you to conclude the block is unbreakable. "
+                + "Fix it with client_view grabInputFocus, or client_gui_close.")
             .schema(JsonSchema.object()
                 .enumeration("action", "'attack' is left click: hit an entity, or mine a block. "
                     + "'use' is right click: place a block, open a container, use an item.",
@@ -451,6 +468,15 @@ public final class ClientInputTools {
                         json.add("targetBefore", targetBefore);
                         json.add("targetAfter", ClientStateTools.freshLookTarget(mc));
                         json.add("mainHand", GameJson.itemStack(mc.player.getHeldItemMainhand()));
+                        // Minecraft routes continuous left-click through a path gated on
+                        // inGameHasFocus, so a held attack without focus is a no-op that reports
+                        // success. Say so, or the only symptom is a block that never breaks.
+                        if ("attack".equals(action) && !mc.inGameHasFocus) {
+                            json.addProperty("inGameFocus", false);
+                            json.addProperty("warning", "The game does not have input focus, so held "
+                                + "attack did nothing beyond the first click. Call client_view with "
+                                + "grabInputFocus true, then attack again.");
+                        }
                         return json;
                     }
                 });
