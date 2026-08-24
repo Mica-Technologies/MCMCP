@@ -94,9 +94,7 @@ impl Hello {
         }
         // 256 bits, hex. A short or absent secret is not a cosmetic problem: the secret is the only
         // thing standing between an approved id and any other process on the machine claiming it.
-        if self.instance_secret.len() != 64
-            || !self.instance_secret.bytes().all(|b| b.is_ascii_hexdigit())
-        {
+        if self.instance_secret.len() != 64 || !self.instance_secret.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(format!(
                 "hello carried a malformed instanceSecret ({} characters)",
                 self.instance_secret.len()
@@ -251,6 +249,9 @@ mod tests {
     #[test]
     fn a_welcome_carries_an_assigned_name_only_when_there_is_one() {
         assert!(welcome("0.1.0", None).get("instanceName").is_none());
-        assert_eq!(welcome("0.1.0", Some("control")).get("instanceName").unwrap(), "control");
+        assert_eq!(
+            welcome("0.1.0", Some("control")).get("instanceName").unwrap(),
+            "control"
+        );
     }
 }

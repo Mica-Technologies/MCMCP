@@ -1,0 +1,133 @@
+name: Test Orchestrator
+
+on:
+  pull_request:
+  # Same reasoning as the mod's test workflow: not everything arrives through a PR early in a
+  # project's life, and the release workflow publishes orchestrator binaries from main regardless.
+  # Without this, a broken binary would ship with a green tick next to it.
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A CI machine has no incremental cache to benefit from, and turning it off makes builds smaller
+  # and a little faster.
+  CARGO_INCREMENTAL: '0'
+  RUSTFLAGS: '-D warnings'
+
+defaults:
+  run:
+    working-directory: orchestrator
+
+jobs:
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: orchestrator
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # Warnings are errors here (see RUSTFLAGS). A lint that is merely reported is a lint that
+      # accumulates until nobody reads the output.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+  test:
+    name: Unit Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the others: the interesting failures here are
+      # platform-specific by nature — path handling, and the state directory rules that differ per
+      # OS by design.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: orchestrator
+          key: ${{ matrix.os }}
+
+      - name: Test
+        run: cargo test --workspace --all-targets
+
+      # `cargo test` skips doc tests when --all-targets is given, and they are cheap.
+      - name: Doc tests
+        run: cargo test --workspace --doc
+
+  end_to_end:
+    name: Real Game Through the Orchestrator
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    # Booting a dedicated server on a cold cache is the slow part; the script has its own budget.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # RFG needs the Gradle JVM on 21+; the mod itself still targets Java 8 via Jabel.
+      - name: Set Up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: orchestrator
+
+      - name: Build the orchestrator
+        run: cargo build
+
+      # The one test where the two implementations of the link protocol meet. Everything else
+      # checks one side against a fixture; a renamed field or a one-sided version bump breaks
+      # nothing that compiles, and produces a handshake that never completes on a user's machine.
+      - name: Drive a real game through the orchestrator
+        working-directory: .
+        run: bash .github/scripts/orchestrator-e2e.sh
+        env:
+          SMOKE_TIMEOUT: '900'
+          LINK_TIMEOUT: '150'
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orchestrator-e2e-server-log
+          path: orchestrator-e2e-server.log
+          retention-days: 7

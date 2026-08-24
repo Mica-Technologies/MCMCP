@@ -87,15 +87,13 @@ impl ApprovalStore {
 
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         let text = serde_json::to_string_pretty(&self.file)?;
         // Write-then-rename, so a crash mid-write cannot leave a truncated store — which `load`
         // would refuse to parse, locking the operator out of every instance they had approved.
         let temporary = self.path.with_extension("json.tmp");
-        std::fs::write(&temporary, text)
-            .with_context(|| format!("writing {}", temporary.display()))?;
+        std::fs::write(&temporary, text).with_context(|| format!("writing {}", temporary.display()))?;
         std::fs::rename(&temporary, &self.path)
             .with_context(|| format!("replacing {}", self.path.display()))?;
         Ok(())
@@ -137,18 +135,13 @@ impl ApprovalStore {
     ///
     /// A custom label survives re-approval. Somebody typed it; a rotated secret is not a reason to
     /// forget it.
-    pub fn approve(
-        &mut self,
-        id: &str,
-        secret: &str,
-        label: &str,
-        game_directory: Option<&str>,
-        now: &str,
-    ) {
+    pub fn approve(&mut self, id: &str, secret: &str, label: &str, game_directory: Option<&str>, now: &str) {
         let existing = self.file.instances.get(id);
         let label_is_custom = existing.is_some_and(|instance| instance.label_is_custom);
         let label = if label_is_custom {
-            existing.map(|instance| instance.label.clone()).unwrap_or_else(|| label.to_string())
+            existing
+                .map(|instance| instance.label.clone())
+                .unwrap_or_else(|| label.to_string())
         } else {
             label.to_string()
         };
@@ -245,7 +238,10 @@ mod tests {
     const OTHER_SECRET: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
     fn store() -> ApprovalStore {
-        ApprovalStore { path: PathBuf::from("unused.json"), file: StoreFile::default() }
+        ApprovalStore {
+            path: PathBuf::from("unused.json"),
+            file: StoreFile::default(),
+        }
     }
 
     #[test]
@@ -278,7 +274,10 @@ mod tests {
         store.approve("modb-dev", SECRET, "modB dev", None, "now");
 
         let stored = serde_json::to_string(&store.file).unwrap();
-        assert!(!stored.contains(SECRET), "the approval store must never contain a raw secret");
+        assert!(
+            !stored.contains(SECRET),
+            "the approval store must never contain a raw secret"
+        );
         assert!(stored.contains(&hash_secret(SECRET)));
     }
 
@@ -334,7 +333,10 @@ mod tests {
         let mut store = store();
         store.approve("modb-dev", SECRET, "modB dev", Some("E:\\old"), "now");
 
-        assert_eq!(store.note_directory("modb-dev", Some("E:\\new")).as_deref(), Some("E:\\old"));
+        assert_eq!(
+            store.note_directory("modb-dev", Some("E:\\new")).as_deref(),
+            Some("E:\\old")
+        );
         assert_eq!(store.note_directory("modb-dev", Some("E:\\new")), None);
     }
 

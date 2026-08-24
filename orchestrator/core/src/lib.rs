@@ -16,11 +16,14 @@
 //! - [`store`] — which instances have been approved, keyed by id and authenticated by secret hash
 //! - [`paths`] — where this orchestrator keeps its state on each platform
 
+pub mod catalogue;
 pub mod instance;
 pub mod jsonrpc;
 pub mod link;
 pub mod paths;
 pub mod registry;
+pub mod router;
+pub mod stdio;
 pub mod store;
 
 /// The orchestrator's version, from Cargo. Deliberately never a git tag — see the workspace

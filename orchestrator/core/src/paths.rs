@@ -50,7 +50,9 @@ fn platform_state_base() -> Result<Option<PathBuf>> {
 }
 
 fn home_directory() -> Option<PathBuf> {
-    non_empty_env("HOME").or_else(|| non_empty_env("USERPROFILE")).map(PathBuf::from)
+    non_empty_env("HOME")
+        .or_else(|| non_empty_env("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// An environment variable that is set *and* not empty.
@@ -80,8 +82,7 @@ pub fn event_log_path() -> Result<PathBuf> {
 
 pub fn ensure_state_directory() -> Result<PathBuf> {
     let directory = state_directory()?;
-    std::fs::create_dir_all(&directory)
-        .with_context(|| format!("creating {}", directory.display()))?;
+    std::fs::create_dir_all(&directory).with_context(|| format!("creating {}", directory.display()))?;
     Ok(directory)
 }
 
@@ -111,12 +112,18 @@ mod tests {
             // A poisoned lock here means another env test panicked. The environment is already
             // suspect at that point, but failing every subsequent test with a poison error hides
             // the original failure, so take the guard anyway.
-            let lock = ENVIRONMENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = ENVIRONMENT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let previous = std::env::var(name).ok();
             // SAFETY: the mutex above is the only thing that writes the environment in this test
             // binary, and it is held for as long as this guard lives.
             unsafe { std::env::set_var(name, value) };
-            Self { name, previous, _lock: lock }
+            Self {
+                name,
+                previous,
+                _lock: lock,
+            }
         }
     }
 
@@ -164,7 +171,11 @@ mod tests {
             catalogue_cache_path().unwrap(),
             event_log_path().unwrap(),
         ] {
-            assert!(path.starts_with(&root), "{} escaped the state directory", path.display());
+            assert!(
+                path.starts_with(&root),
+                "{} escaped the state directory",
+                path.display()
+            );
         }
     }
 }

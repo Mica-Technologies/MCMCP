@@ -51,7 +51,11 @@ impl Registry {
     /// rather than at a timeout.
     pub fn insert(&self, instance: Arc<Instance>) -> Option<Arc<Instance>> {
         let id = instance.id();
-        let displaced = self.instances.write().expect("registry lock").insert(id.clone(), instance);
+        let displaced = self
+            .instances
+            .write()
+            .expect("registry lock")
+            .insert(id.clone(), instance);
         if let Some(old) = &displaced {
             old.mark_closed();
         }
@@ -83,7 +87,13 @@ impl Registry {
         // "unknown instance" until somebody noticed.
         let mut focus = self.focus.write().expect("focus lock");
         if focus.as_deref() == Some(id) {
-            *focus = self.instances.read().expect("registry lock").keys().next().cloned();
+            *focus = self
+                .instances
+                .read()
+                .expect("registry lock")
+                .keys()
+                .next()
+                .cloned();
         }
         true
     }
@@ -93,8 +103,13 @@ impl Registry {
     }
 
     pub fn all(&self) -> Vec<Arc<Instance>> {
-        let mut instances: Vec<_> =
-            self.instances.read().expect("registry lock").values().cloned().collect();
+        let mut instances: Vec<_> = self
+            .instances
+            .read()
+            .expect("registry lock")
+            .values()
+            .cloned()
+            .collect();
         // Sorted so `mcmcp_instances` and the tool schema's `instance` enum are stable between
         // calls. An order that shuffles per call makes for a needlessly noisy tool catalogue.
         instances.sort_by_key(|instance| instance.id());
@@ -102,7 +117,13 @@ impl Registry {
     }
 
     pub fn ids(&self) -> Vec<String> {
-        let mut ids: Vec<_> = self.instances.read().expect("registry lock").keys().cloned().collect();
+        let mut ids: Vec<_> = self
+            .instances
+            .read()
+            .expect("registry lock")
+            .keys()
+            .cloned()
+            .collect();
         ids.sort();
         ids
     }
@@ -220,7 +241,10 @@ mod tests {
         registry.insert(instance("alpha"));
         registry.insert(instance("beta"));
 
-        assert_eq!(registry.resolve(Some("beta")), FocusResolution::Resolved("beta".into()));
+        assert_eq!(
+            registry.resolve(Some("beta")),
+            FocusResolution::Resolved("beta".into())
+        );
     }
 
     #[test]
@@ -230,7 +254,10 @@ mod tests {
         let registry = Registry::new();
         registry.insert(instance("alpha"));
 
-        assert_eq!(registry.resolve(Some("typo")), FocusResolution::Unknown("typo".into()));
+        assert_eq!(
+            registry.resolve(Some("typo")),
+            FocusResolution::Unknown("typo".into())
+        );
     }
 
     #[test]
@@ -247,10 +274,15 @@ mod tests {
         registry.insert(Arc::clone(&first));
         let second = instance("alpha");
 
-        let displaced = registry.insert(Arc::clone(&second)).expect("the old link is displaced");
+        let displaced = registry
+            .insert(Arc::clone(&second))
+            .expect("the old link is displaced");
 
         assert!(Arc::ptr_eq(&displaced, &first));
-        assert!(!first.is_alive(), "the displaced link must be closed, not left waiting");
+        assert!(
+            !first.is_alive(),
+            "the displaced link must be closed, not left waiting"
+        );
         assert_eq!(registry.count(), 1);
     }
 

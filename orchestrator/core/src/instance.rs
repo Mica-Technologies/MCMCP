@@ -98,7 +98,9 @@ pub struct Catalogue {
 
 impl Catalogue {
     pub fn tool_names(&self) -> impl Iterator<Item = &str> {
-        self.tools.iter().filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        self.tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
@@ -191,23 +193,50 @@ impl Instance {
         self.closed.notify_waiters();
     }
 
-    /// Sends a request and waits for its answer.
-    pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
+    /// Reserves the id this instance will see for the next request.
+    ///
+    /// Split out from [`Self::request`] so a caller can record the id *before* the answer arrives.
+    /// That is what makes cancellation forwardable: `notifications/cancelled` from an MCP client
+    /// names the client's own request id, and the instance only recognises the id minted here.
+    /// Without somewhere to hold that mapping, a model abandoning a long `client_wait` would leave
+    /// the game holding a key down until the call timed out on its own.
+    pub fn mint_request_id(&self) -> String {
+        let sequence = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        format!("orch-{sequence}")
+    }
+
+    /// Sends a request under an id from [`Self::mint_request_id`] and hands back its answer channel.
+    pub async fn send(
+        &self,
+        request_id: String,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<oneshot::Receiver<Value>> {
         if !self.is_alive() {
             bail!("instance is no longer connected");
         }
 
-        let sequence = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let request_id = format!("orch-{sequence}");
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().expect("pending lock").insert(request_id.clone(), sender);
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .insert(request_id.clone(), sender);
 
         let message = jsonrpc::request(json!(request_id.clone()), method, params);
         if self.outbound.send(message).await.is_err() {
             self.pending.lock().expect("pending lock").remove(&request_id);
             bail!("instance is no longer connected");
         }
+        Ok(receiver)
+    }
 
+    /// Waits for an answer sent under `request_id`, and unwraps it into a result or an error.
+    pub async fn await_response(
+        &self,
+        request_id: &str,
+        method: &str,
+        receiver: oneshot::Receiver<Value>,
+    ) -> Result<Value> {
         let response = match tokio::time::timeout(REQUEST_TIMEOUT, receiver).await {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
@@ -215,7 +244,7 @@ impl Instance {
                 bail!("the link to this instance closed before it answered {method}");
             }
             Err(_) => {
-                self.pending.lock().expect("pending lock").remove(&request_id);
+                self.pending.lock().expect("pending lock").remove(request_id);
                 bail!("{method} timed out after {}s", REQUEST_TIMEOUT.as_secs());
             }
         };
@@ -230,6 +259,27 @@ impl Instance {
             return Err(anyhow!("{method} failed: {message}"));
         }
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// Sends a request and waits for its answer.
+    pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        let request_id = self.mint_request_id();
+        let receiver = self.send(request_id.clone(), method, params).await?;
+        self.await_response(&request_id, method, receiver).await
+    }
+
+    /// Asks the instance to abandon a request it is still working on.
+    ///
+    /// Cooperative on the far side — MCMCP never interrupts a running handler, because a
+    /// half-applied world mutation is worse than a late cancellation — so this is a request, not a
+    /// guarantee. Sending it still matters: without it a `client_wait` the model gave up on keeps
+    /// running in the game until its own timeout.
+    pub async fn cancel(&self, request_id: &str, reason: &str) {
+        self.notify(
+            "notifications/cancelled",
+            Some(json!({ "requestId": request_id, "reason": reason })),
+        )
+        .await;
     }
 
     /// Sends a notification. Nothing to wait for, so a dead link is not an error worth surfacing.
@@ -311,7 +361,11 @@ impl Instance {
 }
 
 fn array_field(value: &Value, key: &str) -> Vec<Value> {
-    value.get(key).and_then(Value::as_array).cloned().unwrap_or_default()
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -341,7 +395,10 @@ mod tests {
             tokio::spawn(async move { instance.request("tools/list", None).await })
         };
 
-        let sent = outbound.recv().await.expect("the request should reach the writer");
+        let sent = outbound
+            .recv()
+            .await
+            .expect("the request should reach the writer");
         assert_eq!(jsonrpc::method_of(&sent), Some("tools/list"));
         let id = jsonrpc::id_of(&sent).expect("requests carry an id");
         assert!(instance.complete(jsonrpc::result(id, json!({"tools": []}))));
@@ -379,9 +436,16 @@ mod tests {
 
         let sent = outbound.recv().await.unwrap();
         let id = jsonrpc::id_of(&sent).unwrap();
-        instance.complete(jsonrpc::error(Some(id), jsonrpc::METHOD_NOT_FOUND, "no such method"));
+        instance.complete(jsonrpc::error(
+            Some(id),
+            jsonrpc::METHOD_NOT_FOUND,
+            "no such method",
+        ));
 
-        let error = calling.await.unwrap().expect_err("an error response must not read as success");
+        let error = calling
+            .await
+            .unwrap()
+            .expect_err("an error response must not read as success");
         assert!(error.to_string().contains("no such method"));
     }
 
@@ -399,7 +463,10 @@ mod tests {
 
         instance.mark_closed();
 
-        let error = calling.await.unwrap().expect_err("a closed link must fail the call");
+        let error = calling
+            .await
+            .unwrap()
+            .expect_err("a closed link must fail the call");
         assert!(error.to_string().contains("closed"));
         assert!(!instance.is_alive());
     }
@@ -411,6 +478,42 @@ mod tests {
         instance.mark_closed();
 
         assert!(instance.request("ping", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_id_can_be_minted_before_the_request_is_sent() {
+        // This is what makes cancellation forwardable: the caller records the instance-side id
+        // before the answer arrives, so a later notifications/cancelled has something to name.
+        let (sender, mut outbound) = mpsc::channel(4);
+        let instance = Arc::new(Instance::new(info(), sender));
+
+        let request_id = instance.mint_request_id();
+        let receiver = instance
+            .send(request_id.clone(), "tools/call", None)
+            .await
+            .expect("the request should send");
+
+        let sent = outbound.recv().await.unwrap();
+        assert_eq!(jsonrpc::id_of(&sent), Some(json!(request_id.clone())));
+
+        instance.complete(jsonrpc::result(json!(request_id.clone()), json!({"ok": true})));
+        let result = instance
+            .await_response(&request_id, "tools/call", receiver)
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn cancelling_names_the_instance_side_id() {
+        let (sender, mut outbound) = mpsc::channel(4);
+        let instance = Instance::new(info(), sender);
+
+        instance.cancel("orch-7", "the client gave up").await;
+
+        let sent = outbound.recv().await.unwrap();
+        assert_eq!(jsonrpc::method_of(&sent), Some("notifications/cancelled"));
+        assert_eq!(sent["params"]["requestId"], "orch-7");
     }
 
     #[test]
@@ -426,7 +529,10 @@ mod tests {
         let summary = info().to_json(true, false);
 
         let text = serde_json::to_string(&summary).unwrap();
-        assert!(!text.contains("secret"), "the roster summary reaches a model's context");
+        assert!(
+            !text.contains("secret"),
+            "the roster summary reaches a model's context"
+        );
         assert_eq!(summary["instance"], "modb-dev");
         assert_eq!(summary["side"], "client");
         assert_eq!(summary["connected"], true);

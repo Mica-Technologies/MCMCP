@@ -99,7 +99,9 @@ pub struct LinkContext {
 
 /// Listens for instances until the returned future is dropped or the socket fails.
 pub async fn serve(listener: TcpListener, context: LinkContext) -> Result<()> {
-    let address = listener.local_addr().context("reading the link listener address")?;
+    let address = listener
+        .local_addr()
+        .context("reading the link listener address")?;
     info!(%address, "listening for MCMCP instances");
 
     loop {
@@ -163,7 +165,11 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
     // Authorisation
     // ------------------------------------------------------------------
 
-    let verdict = context.store.lock().expect("store lock").evaluate(&hello.instance_id, &hello.instance_secret);
+    let verdict = context
+        .store
+        .lock()
+        .expect("store lock")
+        .evaluate(&hello.instance_id, &hello.instance_secret);
     let strict = context.store.lock().expect("store lock").strict_approval();
 
     let outcome = match verdict {
@@ -214,8 +220,7 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
             hello.game_directory.as_deref(),
             &now_rfc3339(),
         );
-        if let Some(previous) = store.note_directory(&hello.instance_id, hello.game_directory.as_deref())
-        {
+        if let Some(previous) = store.note_directory(&hello.instance_id, hello.game_directory.as_deref()) {
             // A known id from a new path is a moved instance, which is fine and stays approved. It
             // is also what a copied config looks like, so it earns a line rather than silence.
             warn!(
@@ -237,7 +242,10 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
     framing::write_frame(&mut write_half, &protocol::welcome(crate::VERSION, Some(&label))).await?;
 
     let (outbound, mut outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
-    let instance = Arc::new(Instance::new(InstanceInfo::from_hello(&hello, label.clone()), outbound));
+    let instance = Arc::new(Instance::new(
+        InstanceInfo::from_hello(&hello, label.clone()),
+        outbound,
+    ));
 
     // The writer owns the write half from here. Nothing else may touch it, which is what makes
     // interleaved frames impossible rather than merely unlikely.
@@ -278,7 +286,9 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
     instance.mark_closed();
     context.registry.remove(&hello.instance_id, &instance);
     writer.abort();
-    let _ = context.events.send(UpstreamEvent::Disconnected { instance: hello.instance_id.clone() });
+    let _ = context.events.send(UpstreamEvent::Disconnected {
+        instance: hello.instance_id.clone(),
+    });
     info!(instance = %hello.instance_id, "instance unlinked");
 
     result
@@ -286,7 +296,10 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
 
 async fn ask(context: &LinkContext, hello: &Hello) -> ApprovalOutcome {
     let (respond, answer) = oneshot::channel();
-    let request = ApprovalRequest { hello: HelloSummary::from_hello(hello), respond };
+    let request = ApprovalRequest {
+        hello: HelloSummary::from_hello(hello),
+        respond,
+    };
 
     if context.approvals.send(request).await.is_err() {
         // Nobody is listening for approvals. Pending rather than reject: the instance keeps trying,
@@ -317,9 +330,10 @@ where
         }
 
         if jsonrpc::is_notification(&frame) {
-            let _ = context
-                .events
-                .send(UpstreamEvent::Notification { instance: id.clone(), message: frame });
+            let _ = context.events.send(UpstreamEvent::Notification {
+                instance: id.clone(),
+                message: frame,
+            });
             continue;
         }
 
@@ -346,7 +360,10 @@ where
 /// since the epoch rendered as a string would do — but a readable timestamp costs nothing more.
 fn now_rfc3339() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     format!("{seconds}")
 }
 

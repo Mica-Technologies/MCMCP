@@ -16,6 +16,12 @@ jobs:
   assemble_release:
     name: Build Mod and Publish Release/Pre-Release
     runs-on: ubuntu-latest
+    # The orchestrator job attaches its binaries to whatever tag this job created. It cannot
+    # recompute the tag itself — the pre-release form contains a timestamp, so a second computation
+    # would land on a different tag and silently publish to nothing.
+    outputs:
+      tag: ${{ steps.publish_tag.outputs.tag }}
+      mod_version: ${{ env.MOD_VERSION }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -76,6 +82,15 @@ jobs:
         run: |
           git tag "${{ env.PRE_TAG }}" "${{ github.sha }}"
           git push origin "${{ env.PRE_TAG }}"
+
+      - name: Publish Which Tag Was Used
+        id: publish_tag
+        run: |
+          if [ "${{ github.event.inputs.release }}" = "true" ]; then
+            echo "tag=${{ env.REL_TAG }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ env.PRE_TAG }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Assemble Mod with Gradle
         run: ./gradlew build -Dhttp.socketTimeout=60000 -Dhttp.connectionTimeout=60000 -Dorg.gradle.internal.http.socketTimeout=60000 -Dorg.gradle.internal.http.connectionTimeout=60000
@@ -172,3 +187,94 @@ jobs:
           generate_release_notes: true
           files: |
             ${{ env.MOD_ARCHIVE_BASE_NAME }}-${{ env.MOD_VERSION }}.jar
+
+  # ------------------------------------------------------------------------------------------
+  # Orchestrator binaries
+  # ------------------------------------------------------------------------------------------
+  #
+  # Attached to the SAME release as the mod jar, built from the SAME commit. That is a correctness
+  # requirement, not tidiness: the mod and the orchestrator are two implementations of one link
+  # protocol, and a release where they came from different commits is a release where they may not
+  # agree on the wire. Shipping them together means whoever downloads a release gets two halves that
+  # were tested against each other.
+  #
+  # Note what this job does NOT do: create a tag. build.gradle:1555 derives the mod's version with
+  # `git describe --abbrev=0 --tags` and no --match filter, so ANY tag pushed to this repository
+  # becomes the mod's version. A tag like `app-0.1.0` would silently rewrite the jar manifest,
+  # mcmod.info and McmcpConstants.MOD_VERSION. The orchestrator's version lives in
+  # orchestrator/Cargo.toml and is never a tag.
+  orchestrator_binaries:
+    name: Orchestrator (${{ matrix.target }})
+    needs: assemble_release
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      # One platform failing must not stop the other two from publishing. A release with two of
+      # three binaries is worth far more than a release with none.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: orchestrator
+          key: ${{ matrix.target }}
+
+      - name: Build
+        working-directory: orchestrator
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          name="mcmcp-orchestrator-${{ needs.assemble_release.outputs.mod_version }}-${{ matrix.target }}"
+          staging="$(mktemp -d)/$name"
+          mkdir -p "$staging"
+          cp orchestrator/target/${{ matrix.target }}/release/mcmcp-orchestrator "$staging/"
+          cp LICENSE.txt "$staging/" 2>/dev/null || true
+          cp docs/guide/orchestrator.md "$staging/README.md" 2>/dev/null || true
+          tar -czf "$name.tar.gz" -C "$(dirname "$staging")" "$name"
+          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "mcmcp-orchestrator-${{ needs.assemble_release.outputs.mod_version }}-${{ matrix.target }}"
+          $staging = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "orchestrator/target/${{ matrix.target }}/release/mcmcp-orchestrator.exe" $staging
+          if (Test-Path "LICENSE.txt") { Copy-Item "LICENSE.txt" $staging }
+          if (Test-Path "docs/guide/orchestrator.md") { Copy-Item "docs/guide/orchestrator.md" (Join-Path $staging "README.md") }
+          Compress-Archive -Path $staging -DestinationPath "$name.zip" -Force
+          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.assemble_release.outputs.tag }}
+          # The release already exists and already has its notes; this only adds files to it.
+          files: ${{ env.ASSET }}

@@ -92,7 +92,10 @@ where
 {
     let mut bytes = serde_json::to_vec(frame).context("serialising a link frame")?;
     if bytes.len() + 1 > MAX_FRAME_BYTES {
-        bail!("refusing to send a {} byte link frame; the limit is {MAX_FRAME_BYTES}", bytes.len());
+        bail!(
+            "refusing to send a {} byte link frame; the limit is {MAX_FRAME_BYTES}",
+            bytes.len()
+        );
     }
     bytes.push(b'\n');
     writer.write_all(&bytes).await.context("writing to the link")?;
@@ -151,7 +154,9 @@ mod tests {
         let oversized = format!("{{\"a\":\"{}\"", "x".repeat(500));
         let mut reader = BufReader::new(oversized.as_bytes());
 
-        let error = read_line(&mut reader, 64).await.expect_err("an oversized line must be refused");
+        let error = read_line(&mut reader, 64)
+            .await
+            .expect_err("an oversized line must be refused");
         assert!(error.to_string().contains("exceeds"));
     }
 
@@ -185,7 +190,9 @@ mod tests {
         let frame = json!({"type": "hello", "instanceName": "módB — tëst"});
         let mut written: Vec<u8> = Vec::new();
 
-        write_frame(&mut written, &frame).await.expect("frame should write");
+        write_frame(&mut written, &frame)
+            .await
+            .expect("frame should write");
 
         assert_eq!(written.last(), Some(&b'\n'));
         let mut reader = BufReader::new(&written[..]);
