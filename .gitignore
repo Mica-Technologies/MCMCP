@@ -66,3 +66,8 @@ desktop.ini
 
 # Local reference: cloned/decompiled third-party source for analysis only.
 example-source/
+
+# Agent working notes and implementation plans. Local scratch by design — these churn
+# constantly and are written for whoever/whatever is doing the work right now, not for
+# the repo's history. Matches docs/agent-plans/ in the sibling Mica mods.
+docs/agent-plans/
