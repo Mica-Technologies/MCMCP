@@ -54,6 +54,16 @@ DESTINATION="orchestrator/app/binaries/mcmcp-orchestrator-${TRIPLE}${SUFFIX}"
 mkdir -p "$(dirname "$DESTINATION")"
 cp "$SOURCE" "$DESTINATION"
 
+# The app's build script writes a placeholder here when no real binary has been staged, so that a
+# plain `cargo test --workspace` can build the crate at all. That placeholder must never reach an
+# installer — it would produce exactly the failure this staging step exists to prevent, except
+# harder to spot, because the file would be present and simply not be a program.
+if head -c 64 "$DESTINATION" | grep -q 'sidecar placeholder'; then
+  echo "==> FAIL: ${DESTINATION} is the build script's placeholder, not the shim."
+  echo "    The copy above should have replaced it. Check that ${SOURCE} is a real binary."
+  exit 1
+fi
+
 echo "==> Staged the shim for bundling"
 echo "    from ${SOURCE}"
 echo "    to   ${DESTINATION}"
