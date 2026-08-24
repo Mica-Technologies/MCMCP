@@ -76,9 +76,11 @@ Every tool gains an optional `instance` argument. Omit it and the call goes to t
 instance; with only one game connected, that is always the right one.
 
 ```
-mcmcp_instances          # what is connected, what each one is, which is focused
-mcmcp_focus              # read or change where unaimed calls go
-mcmcp_set_label          # rename an instance so it can be told apart
+mcmcp_instances            # what is connected, what each one is, which is focused
+mcmcp_focus                # read or change where unaimed calls go
+mcmcp_set_label            # rename an instance so it can be told apart
+mcmcp_compare_instances    # what differs between the connected games
+mcmcp_read_logs            # every game's log, merged in time order and tagged
 ```
 
 **Every result says which instance produced it**, in three places: a prefix on the text, a
@@ -89,6 +91,38 @@ came from a model would keep acting on its memory of what was focused.
 Read-only tools also accept `instance: "*"`, which runs them on every connected game at once and
 returns the answers together — the fastest way to compare a mod against a control. Tools that change
 anything do not offer it, and are refused if asked.
+
+## Telling several games apart
+
+`mcmcp_compare_instances` reports only what is **different** between the connected games — the mods
+each has that the others lack, and the tools only some of them offer. Reporting what they share
+would bury the answer under a hundred identical lines, and the question you actually have with three
+games open is "which of these is the mod I am working on".
+
+Against a real pair it answers that outright:
+
+```
+run-d0a639 ("run", client)
+  mods only here: albedo, albedocore, com.boydti.fawe, immersiveengineering, worldedit
+  tools only here: none
+
+server-fc5e56 ("server", server)
+  mods only here: jei, theoneprobe
+  tools only here: server_broadcast, server_find_blocks, …
+```
+
+That first instance labelled itself `run`, from its folder name — which is exactly why this exists,
+and a good reason to give it a real name with `mcmcp_set_label`.
+
+`mcmcp_read_logs` merges every game's `latest.log` in time order, each line tagged with the game it
+came from. Reading them one at a time gives you two lists to merge by eye, and the case this is for
+is precisely where the order matters — a crash in one game immediately after an action in the other.
+Stack traces stay attached to the line that opened them.
+
+There is also a **`compare_instances` prompt**, for the A/B workflow: run the same thing in two games
+and report what differs. It arrives already knowing what is connected, and it insists on naming
+instances explicitly rather than leaning on focus — a comparison that silently ran twice in the same
+game is worse than no comparison at all.
 
 ## First connection
 

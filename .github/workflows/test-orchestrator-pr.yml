@@ -103,6 +103,14 @@ jobs:
   end_to_end:
     name: Real Game Through the Orchestrator
     needs: [lint, test]
+    # Linux only, deliberately. What this proves is platform-independent — the link protocol,
+    # aggregation, routing and result stamping are pure logic, and the unit tests above already run
+    # on all three. Booting a dedicated server is the slow part, so running it three times would
+    # roughly triple the cost of the slowest job to re-check a socket the unit tests largely cover.
+    #
+    # The risk accepted is a Windows- or macOS-specific socket or process-spawning bug reaching a
+    # person before CI. Mitigated in practice by `two-instance-check.py`, which is run by hand on
+    # Windows and exercises the same path against two real games.
     runs-on: ubuntu-latest
     # Booting a dedicated server on a cold cache is the slow part; the script has its own budget.
     timeout-minutes: 30
