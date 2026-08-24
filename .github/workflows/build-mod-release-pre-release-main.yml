@@ -267,12 +267,23 @@ jobs:
         working-directory: orchestrator
         run: cargo build --release --target ${{ matrix.target }} -p mcmcp-orchestrator
 
+      # The app cannot serve MCP over stdio, so an MCP client spawns the shim instead — and the
+      # app's own Settings panel hands out a configuration pointing at it *next to the app*.
+      # Bundling the app without the shim produces an install that looks complete and points its
+      # configuration at a file that is not there. The first installer build did exactly that,
+      # because nothing had ever run it.
+      - name: Stage the shim for bundling
+        run: bash .github/scripts/stage-orchestrator-sidecar.sh ${{ matrix.target }} release
+
       # Installers, not just an executable. This is what "cross-platform app" has to mean for
       # somebody who is not going to run cargo.
+      #
+      # No continue-on-error. It was here while this path had never been executed, and all it bought
+      # was a release that published a jar, published binaries, shipped no installers, and stayed
+      # green. fail-fast is off on the matrix, so one platform failing still lets the others publish.
       - name: Build the desktop app installers
         working-directory: orchestrator
         run: cargo tauri build --target ${{ matrix.target }} --config app/tauri.conf.json
-        continue-on-error: true
 
       - name: Collect installers
         id: installers
@@ -291,6 +302,14 @@ jobs:
           echo "count=$count" >> "$GITHUB_OUTPUT"
           echo "Collected $count installer(s):"
           ls -la dist/ || true
+
+          # A bundle step that succeeded but produced nothing is the same outcome as one that
+          # failed, and is harder to notice.
+          if [ "$count" -eq 0 ]; then
+            echo "==> FAIL: the bundler reported success but produced no installers."
+            echo "    Expected something under $bundle"
+            exit 1
+          fi
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'

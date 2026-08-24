@@ -77,3 +77,6 @@ orchestrator/target/
 
 # Tauri writes these from tauri.conf.json and the capability files on every build.
 orchestrator/app/gen/schemas/
+
+# Staged by stage-orchestrator-sidecar.sh before bundling; a copy of a build output.
+orchestrator/app/binaries/
