@@ -160,6 +160,31 @@ impl ApprovalStore {
         );
     }
 
+    /// Re-approves an instance from its stored hash, without needing the raw secret.
+    ///
+    /// What `mcmcp-orchestrator approve` uses. The CLI is a separate process and has no way to know
+    /// an instance's secret — nor should it: the secret lives in the game's config and in the
+    /// handshake, and a command-line tool that handled it would put it in shell history.
+    pub fn approve_known(&mut self, id: &str, secret_hash: &str, label: &str, game_directory: Option<&str>) {
+        let label_is_custom = self
+            .file
+            .instances
+            .get(id)
+            .is_some_and(|known| known.label_is_custom);
+        self.file.instances.insert(
+            id.to_string(),
+            ApprovedInstance {
+                id: id.to_string(),
+                secret_hash: secret_hash.to_string(),
+                label: label.to_string(),
+                game_directory: game_directory.map(str::to_string),
+                revoked: false,
+                approved_at: Some(String::new()),
+                label_is_custom,
+            },
+        );
+    }
+
     /// Marks an instance revoked, keeping the record so its secret hash still authenticates it.
     ///
     /// Deleting it instead would make the next connection look like a brand-new instance and

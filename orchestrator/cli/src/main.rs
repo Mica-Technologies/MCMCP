@@ -11,15 +11,18 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use mcmcp_orchestrator_core::events::{Actor, EventLog, Filter, Level};
 use mcmcp_orchestrator_core::link::listener::{ApprovalOutcome, ApprovalRequest, LinkContext};
+use mcmcp_orchestrator_core::policy::{Class, Rule};
 use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::Router;
 use mcmcp_orchestrator_core::store::ApprovalStore;
-use mcmcp_orchestrator_core::{catalogue, link, paths, stdio};
+use mcmcp_orchestrator_core::{catalogue, control, link, paths, stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -60,6 +63,93 @@ enum Command {
     },
     /// List instances the orchestrator knows about, connected or not.
     Instances,
+
+    /// Approve an instance so it may connect.
+    ///
+    /// Only needed with --strict-approval; the default approves on first use.
+    Approve {
+        /// The instance id, as shown by `instances`.
+        instance: String,
+    },
+
+    /// Revoke an instance. A running orchestrator disconnects it within a couple of seconds.
+    Revoke { instance: String },
+
+    /// Rename an instance, so it can be told apart from the others.
+    Label { instance: String, label: String },
+
+    /// Read or change the gating policy.
+    Policy {
+        /// Which class of tool: read-only, mutating, or destructive.
+        #[arg(long, value_parser = parse_class)]
+        class: Option<Class>,
+
+        /// What to do with it: allow, ask, or deny. `ask` needs the desktop app; headless denies.
+        #[arg(long, value_parser = parse_rule)]
+        rule: Option<Rule>,
+
+        /// Apply to one instance rather than to the default for all of them.
+        #[arg(long)]
+        instance: Option<String>,
+
+        /// Require destructive calls to name their instance rather than following focus.
+        #[arg(long)]
+        require_explicit_instance: Option<bool>,
+    },
+
+    /// Read the event log.
+    Log {
+        /// Only this instance.
+        #[arg(long)]
+        instance: Option<String>,
+
+        /// Only this actor: model, human, or system.
+        #[arg(long, value_parser = parse_actor)]
+        actor: Option<Actor>,
+
+        /// Substring to search the rendered summaries for.
+        #[arg(long)]
+        grep: Option<String>,
+
+        /// How many entries to show.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        /// Print each entry as JSON, for pasting into a conversation or a bug report.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn parse_class(value: &str) -> Result<Class, String> {
+    match value.replace('-', "_").to_lowercase().as_str() {
+        "read_only" | "readonly" | "read" => Ok(Class::ReadOnly),
+        "mutating" | "mutate" | "write" => Ok(Class::Mutating),
+        "destructive" => Ok(Class::Destructive),
+        other => Err(format!(
+            "unknown class '{other}'; expected read-only, mutating or destructive"
+        )),
+    }
+}
+
+fn parse_rule(value: &str) -> Result<Rule, String> {
+    match value.to_lowercase().as_str() {
+        "allow" => Ok(Rule::Allow),
+        "ask" => Ok(Rule::Ask),
+        "deny" => Ok(Rule::Deny),
+        other => Err(format!("unknown rule '{other}'; expected allow, ask or deny")),
+    }
+}
+
+fn parse_actor(value: &str) -> Result<Actor, String> {
+    match value.to_lowercase().as_str() {
+        "model" => Ok(Actor::Model),
+        "human" | "person" => Ok(Actor::Human),
+        "system" => Ok(Actor::System),
+        other => Err(format!(
+            "unknown actor '{other}'; expected model, human or system"
+        )),
+    }
 }
 
 #[tokio::main]
@@ -83,7 +173,179 @@ async fn main() -> Result<()> {
             no_stdio,
         } => serve(cli.link_port, !strict_approval, no_stdio).await,
         Command::Instances => list_instances(),
+        Command::Approve { instance } => approve(&instance),
+        Command::Revoke { instance } => revoke(&instance),
+        Command::Label { instance, label } => set_label(&instance, &label),
+        Command::Policy {
+            class,
+            rule,
+            instance,
+            require_explicit_instance,
+        } => policy_command(class, rule, instance.as_deref(), require_explicit_instance),
+        Command::Log {
+            instance,
+            actor,
+            grep,
+            limit,
+            json,
+        } => show_log(instance, actor, grep, limit, json),
     }
+}
+
+// ----------------------------------------------------------------------------------
+// Human-only operations
+//
+// These are the ones a model must never reach. The authority check lives in the core so
+// there is exactly one of it; running them here is what "the CLI can do everything,
+// because the CLI is you" means.
+// ----------------------------------------------------------------------------------
+
+fn approve(instance: &str) -> Result<()> {
+    let store = open_store()?;
+    let mut store = store.lock().expect("store lock");
+    let Some(known) = store.get(instance).cloned() else {
+        anyhow::bail!(
+            "this orchestrator has never seen an instance called '{instance}'. It has to connect \
+             once before it can be approved — start the game, then run this again."
+        );
+    };
+    // Re-approving through the stored hash: the raw secret is not here and must not be.
+    store.approve_known(
+        &known.id,
+        &known.secret_hash,
+        &known.label,
+        known.game_directory.as_deref(),
+    );
+    store.save()?;
+    println!("Approved {instance}. It will connect on its next attempt, within about 30 seconds.");
+    Ok(())
+}
+
+fn revoke(instance: &str) -> Result<()> {
+    let store = open_store()?;
+    let mut store = store.lock().expect("store lock");
+    if !store.revoke(instance) {
+        anyhow::bail!("this orchestrator has never seen an instance called '{instance}'");
+    }
+    store.save()?;
+    println!(
+        "Revoked {instance}. A running orchestrator disconnects it within a couple of seconds; it \
+         will keep retrying and being refused until you approve it again."
+    );
+    Ok(())
+}
+
+fn set_label(instance: &str, label: &str) -> Result<()> {
+    let store = open_store()?;
+    let mut store = store.lock().expect("store lock");
+    if !store.set_label(instance, label) {
+        anyhow::bail!("this orchestrator has never seen an instance called '{instance}'");
+    }
+    store.save()?;
+    println!("{instance} is now \"{label}\".");
+    Ok(())
+}
+
+fn policy_command(
+    class: Option<Class>,
+    rule: Option<Rule>,
+    instance: Option<&str>,
+    require_explicit_instance: Option<bool>,
+) -> Result<()> {
+    let state = paths::ensure_state_directory()?;
+    let path = control::policy_path(&state);
+    let mut policy = control::load_policy(&path)?;
+
+    let mut changed = false;
+    match (class, rule) {
+        (Some(class), Some(rule)) => {
+            policy.set_rule(instance, class, rule);
+            changed = true;
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("--class and --rule go together; give both or neither");
+        }
+        (None, None) => {}
+    }
+    if let Some(require) = require_explicit_instance {
+        policy.require_explicit_instance_for_destructive = require;
+        changed = true;
+    }
+
+    if changed {
+        control::save_policy(&path, &policy)?;
+        println!(
+            "Saved to {}. A running orchestrator picks this up within a couple of seconds.",
+            path.display()
+        );
+    }
+
+    println!(
+        "default          read-only={:?} mutating={:?} destructive={:?}",
+        policy.defaults.read_only, policy.defaults.mutating, policy.defaults.destructive
+    );
+    for (id, rules) in &policy.per_instance {
+        println!(
+            "{id:<16} read-only={:?} mutating={:?} destructive={:?}",
+            rules.read_only, rules.mutating, rules.destructive
+        );
+    }
+    println!(
+        "destructive calls must name their instance: {}",
+        policy.require_explicit_instance_for_destructive
+    );
+    Ok(())
+}
+
+fn show_log(
+    instance: Option<String>,
+    actor: Option<Actor>,
+    grep: Option<String>,
+    limit: usize,
+    as_json: bool,
+) -> Result<()> {
+    // Read from the file rather than a running process: the most valuable moment for this log is
+    // after something went wrong, which is frequently after the thing that went wrong stopped.
+    let path = paths::event_log_path()?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("No events recorded yet ({}).", path.display());
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let filter = Filter {
+        instance,
+        actor,
+        text: grep,
+        ..Filter::default()
+    };
+    let log = EventLog::in_memory();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // A truncated final line is normal — the file is appended to by a live process.
+        if let Ok(event) = serde_json::from_str(line) {
+            log.record(event);
+        }
+    }
+
+    for event in log.slice(&filter, limit) {
+        if as_json {
+            println!("{}", serde_json::to_string(&event)?);
+        } else {
+            let marker = match event.level {
+                Level::Error => "!!",
+                Level::Warn => " !",
+                _ => "  ",
+            };
+            println!("{marker} {:>14} {:?} {}", event.at, event.actor, event.summary());
+        }
+    }
+    Ok(())
 }
 
 fn open_store() -> Result<Arc<Mutex<ApprovalStore>>> {
@@ -133,11 +395,17 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
 
     spawn_approver(approvals_rx, trust_on_first_use);
 
-    let router = Arc::new(Router::new(
-        Arc::clone(&registry),
-        Arc::clone(&store),
-        downstream_tx,
-    ));
+    // The event log goes to disk as well as memory. The most valuable moment for it is after
+    // something has gone wrong, which is frequently after the process that recorded it stopped.
+    let events = EventLog::with_file(paths::event_log_path()?, EVENT_LOG_LIMIT_BYTES);
+    let policy_path = control::policy_path(&paths::state_directory()?);
+    let policy = Arc::new(Mutex::new(control::load_policy(&policy_path)?));
+
+    let router = Arc::new(
+        Router::new(Arc::clone(&registry), Arc::clone(&store), downstream_tx)
+            .with_events(events.clone())
+            .with_policy(Arc::clone(&policy)),
+    );
 
     // Seed the tool surface from the last session. Without this, a client that connects before any
     // game is up sees only the roster tool and plans around having no others.
@@ -166,6 +434,14 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
             }
         });
     }
+
+    spawn_control_watcher(
+        Arc::clone(&store),
+        Arc::clone(&policy),
+        Arc::clone(&registry),
+        policy_path,
+        events,
+    );
 
     let address = format!("127.0.0.1:{link_port}");
     let listener = TcpListener::bind(&address)
@@ -197,6 +473,79 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
         links.abort();
         result
     }
+}
+
+/// How often the running orchestrator re-reads the files the CLI writes.
+///
+/// Short enough that `revoke` feels immediate; long enough that it is two small file reads a second
+/// rather than anything worth thinking about.
+const CONTROL_POLL: Duration = Duration::from_secs(2);
+
+/// Bytes before the event log rotates. One previous file is kept.
+const EVENT_LOG_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Watches the approval store and the policy file, and acts on what changed.
+///
+/// This is what makes file-based control equivalent to a control socket rather than a poor
+/// substitute for one. Writing a file is how the CLI sends a message; this is what receives it. The
+/// case that would otherwise be wrong is revocation: without this, revoking an instance would leave
+/// it connected until it happened to reconnect, which for a healthy link is never.
+fn spawn_control_watcher(
+    store: Arc<Mutex<ApprovalStore>>,
+    policy: Arc<Mutex<mcmcp_orchestrator_core::policy::Policy>>,
+    registry: Arc<Registry>,
+    policy_path: std::path::PathBuf,
+    events: EventLog,
+) {
+    tokio::spawn(async move {
+        let store_path = match paths::approval_store_path() {
+            Ok(path) => path,
+            Err(error) => {
+                warn!(%error, "control watcher could not resolve the approval store");
+                return;
+            }
+        };
+
+        loop {
+            tokio::time::sleep(CONTROL_POLL).await;
+
+            // Reload the approvals and disconnect anything that was revoked while connected.
+            match ApprovalStore::load(&store_path) {
+                Ok(reloaded) => {
+                    let revoked: Vec<String> = registry
+                        .ids()
+                        .into_iter()
+                        .filter(|id| reloaded.get(id).map(|known| known.revoked).unwrap_or(false))
+                        .collect();
+
+                    // Swap the contents rather than the Arc: the link listener holds the same one.
+                    if let Ok(mut current) = store.lock() {
+                        *current = reloaded;
+                    }
+
+                    for id in revoked {
+                        if let Some(instance) = registry.get(&id) {
+                            events.note(Actor::Human, Some(id.clone()), "revoked; disconnecting");
+                            info!(instance = %id, "revoked; disconnecting");
+                            instance.mark_closed();
+                            registry.remove(&id, &instance);
+                        }
+                    }
+                }
+                // A half-written store is what a concurrent save looks like; the next poll gets it.
+                Err(error) => debug!(%error, "could not reload the approval store"),
+            }
+
+            match control::load_policy(&policy_path) {
+                Ok(reloaded) => {
+                    if let Ok(mut current) = policy.lock() {
+                        *current = reloaded;
+                    }
+                }
+                Err(error) => debug!(%error, "could not reload the gating policy"),
+            }
+        }
+    });
 }
 
 /// Answers approval requests by policy.

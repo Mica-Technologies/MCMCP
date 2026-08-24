@@ -257,6 +257,7 @@ dependencies = [
  "anyhow",
  "clap",
  "mcmcp-orchestrator-core",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

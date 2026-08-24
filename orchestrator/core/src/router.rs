@@ -25,8 +25,10 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
 use crate::catalogue::{self, Aggregate, Contribution, INSTANCE_ARGUMENT};
+use crate::events::{Actor, Event, EventKind, EventLog, Level};
 use crate::instance::{Instance, UpstreamEvent};
 use crate::jsonrpc;
+use crate::policy::{Decision, Policy};
 use crate::registry::{FocusResolution, Registry};
 use crate::store::ApprovalStore;
 
@@ -56,6 +58,25 @@ pub struct Router {
     inflight: Mutex<HashMap<String, (Arc<Instance>, String)>>,
     protocol_version: Mutex<String>,
     initialized: AtomicBool,
+    events: EventLog,
+    policy: Arc<Mutex<Policy>>,
+    /// Where an `Ask` decision goes to be answered.
+    ///
+    /// `None` in a headless process, and `Ask` then denies. There is nothing on screen to ask, and
+    /// allowing what somebody explicitly asked to be prompted about fails in the direction that
+    /// loses work. This is the same channel-shaped seam the approval flow uses, for the same
+    /// reason: the GUI answers it without being a special case inside this code.
+    gate: Mutex<Option<tokio::sync::mpsc::Sender<GateRequest>>>,
+}
+
+/// A call waiting on a human.
+#[derive(Debug)]
+pub struct GateRequest {
+    pub instance: String,
+    pub tool: String,
+    pub arguments: Value,
+    pub reason: String,
+    pub respond: tokio::sync::oneshot::Sender<bool>,
 }
 
 impl Router {
@@ -72,7 +93,34 @@ impl Router {
             inflight: Mutex::new(HashMap::new()),
             protocol_version: Mutex::new(LATEST_PROTOCOL_VERSION.to_string()),
             initialized: AtomicBool::new(false),
+            events: EventLog::in_memory(),
+            policy: Arc::new(Mutex::new(Policy::default())),
+            gate: Mutex::new(None),
         }
+    }
+
+    /// Records to this log instead of the throwaway in-memory one.
+    pub fn with_events(mut self, events: EventLog) -> Self {
+        self.events = events;
+        self
+    }
+
+    pub fn with_policy(mut self, policy: Arc<Mutex<Policy>>) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Routes `Ask` decisions to whoever can put them on a screen.
+    pub fn set_gate(&self, gate: tokio::sync::mpsc::Sender<GateRequest>) {
+        *self.gate.lock().expect("gate lock") = Some(gate);
+    }
+
+    pub fn events(&self) -> &EventLog {
+        &self.events
+    }
+
+    pub fn policy(&self) -> Arc<Mutex<Policy>> {
+        Arc::clone(&self.policy)
     }
 
     /// Seeds the cached catalogue from disk, so a client connecting before any game is up still
@@ -393,6 +441,27 @@ impl Router {
             )));
         }
 
+        // Gate the call before it reaches a game. Refusals are tool errors so the model reads them
+        // and can say what happened, rather than retrying into a wall.
+        let definition = instance
+            .catalogue()
+            .tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+            .cloned()
+            .unwrap_or_else(|| json!({ "name": name }));
+        let decision = {
+            let policy = self.policy.lock().expect("policy lock");
+            policy.evaluate(&instance.id(), &definition, requested_instance.is_some())
+        };
+        if let Some(refusal) = self.apply_gate(decision, &instance.id(), name, &arguments).await {
+            return Ok(refusal);
+        }
+
+        // Kept for the log before the map is moved into the forwarded params. Rust will not let
+        // both happen to one value, and the clone is the honest cost of recording what was sent.
+        let logged_arguments = Value::Object(arguments.clone());
+
         // Forward params minus the instance argument. `_meta` goes along untouched, which is what
         // carries the client's progress token through to the game.
         let mut forwarded = Map::new();
@@ -402,6 +471,7 @@ impl Router {
             forwarded.insert("_meta".into(), meta.clone());
         }
 
+        let started = std::time::Instant::now();
         let instance_request_id = instance.mint_request_id();
         let tracking_key = id_key(client_request_id);
         let receiver = match instance
@@ -426,9 +496,22 @@ impl Router {
             .await;
         self.inflight.lock().expect("inflight lock").remove(&tracking_key);
 
+        let duration_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(mut result) => {
                 let info = instance.info();
+                let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                self.events.record(Event::new(
+                    Actor::Model,
+                    if is_error { Level::Warn } else { Level::Info },
+                    Some(info.id.clone()),
+                    EventKind::ToolCall {
+                        tool: name.to_string(),
+                        arguments: logged_arguments.clone(),
+                        is_error,
+                        duration_ms,
+                    },
+                ));
                 let declares_output_schema = instance
                     .catalogue()
                     .tools
@@ -438,11 +521,93 @@ impl Router {
                 annotate_result(&mut result, &info.id, &info.label, declares_output_schema);
                 Ok(result)
             }
-            Err(error) => Ok(tool_error(&format!(
-                "instance '{}' did not complete that call: {error}",
-                instance.id()
-            ))),
+            Err(error) => {
+                self.events.record(Event::new(
+                    Actor::Model,
+                    Level::Error,
+                    Some(instance.id()),
+                    EventKind::ToolCall {
+                        tool: name.to_string(),
+                        arguments: logged_arguments.clone(),
+                        is_error: true,
+                        duration_ms,
+                    },
+                ));
+                Ok(tool_error(&format!(
+                    "instance '{}' did not complete that call: {error}",
+                    instance.id()
+                )))
+            }
         }
+    }
+
+    /// Turns a policy decision into either nothing (proceed) or a tool error.
+    async fn apply_gate(
+        &self,
+        decision: Decision,
+        instance: &str,
+        tool: &str,
+        arguments: &Map<String, Value>,
+    ) -> Option<Value> {
+        let (reason, rule) = match decision {
+            Decision::Allow => return None,
+            Decision::Deny { reason } => (reason, "deny"),
+            Decision::Ask { reason } => {
+                let gate = self.gate.lock().expect("gate lock").clone();
+                let Some(gate) = gate else {
+                    // Headless. Denying is the safe direction; saying so is what stops it looking
+                    // like a bug in the tool.
+                    let message = format!(
+                        "{reason}, and nothing is running that can ask. Run the orchestrator's \
+                         desktop app to approve calls interactively, or change this rule with \
+                         'mcmcp-orchestrator policy'."
+                    );
+                    self.events.record(Event::new(
+                        Actor::System,
+                        Level::Warn,
+                        Some(instance.to_string()),
+                        EventKind::ToolBlocked {
+                            tool: tool.to_string(),
+                            rule: "ask".into(),
+                        },
+                    ));
+                    return Some(tool_error(&message));
+                };
+
+                let (respond, answer) = tokio::sync::oneshot::channel();
+                let request = GateRequest {
+                    instance: instance.to_string(),
+                    tool: tool.to_string(),
+                    arguments: Value::Object(arguments.clone()),
+                    reason: reason.clone(),
+                    respond,
+                };
+                if gate.send(request).await.is_err() || !answer.await.unwrap_or(false) {
+                    self.events.record(Event::new(
+                        Actor::Human,
+                        Level::Warn,
+                        Some(instance.to_string()),
+                        EventKind::ToolBlocked {
+                            tool: tool.to_string(),
+                            rule: "ask".into(),
+                        },
+                    ));
+                    return Some(tool_error(&format!("{reason}, and it was not approved.")));
+                }
+                return None;
+            }
+        };
+
+        self.events.record(Event::new(
+            Actor::System,
+            Level::Warn,
+            Some(instance.to_string()),
+            EventKind::ToolBlocked {
+                tool: tool.to_string(),
+                rule: rule.into(),
+            },
+        ));
+        Some(tool_error(&reason))
     }
 
     fn call_orchestrator_tool(&self, name: &str, arguments: &Map<String, Value>) -> Value {
@@ -493,7 +658,17 @@ impl Router {
                         "connected": self.registry.ids(),
                     }));
                 };
+                let previous = self.registry.focus();
                 if self.registry.set_focus(requested) {
+                    self.events.record(Event::new(
+                        Actor::Model,
+                        Level::Info,
+                        Some(requested.to_string()),
+                        EventKind::FocusChanged {
+                            from: previous,
+                            to: requested.to_string(),
+                        },
+                    ));
                     let _ = self.downstream.send(jsonrpc::notification(
                         "notifications/message",
                         Some(json!({
@@ -532,9 +707,23 @@ impl Router {
                         "this orchestrator has never seen an instance called '{target}'"
                     ));
                 }
+                let previous = self
+                    .registry
+                    .get(target)
+                    .map(|instance| instance.info().label)
+                    .unwrap_or_default();
                 if let Some(instance) = self.registry.get(target) {
                     instance.set_label(label.to_string());
                 }
+                self.events.record(Event::new(
+                    Actor::Model,
+                    Level::Info,
+                    Some(target.to_string()),
+                    EventKind::LabelChanged {
+                        from: previous,
+                        to: label.to_string(),
+                    },
+                ));
                 structured_result(json!({ "instance": target, "label": label }))
             }
             other => tool_error(&format!("unknown orchestrator tool: {other}")),
@@ -651,10 +840,29 @@ impl Router {
     pub async fn handle_upstream(&self, event: UpstreamEvent) {
         match event {
             UpstreamEvent::Connected { instance } => {
+                if let Some(handle) = self.registry.get(&instance) {
+                    let info = handle.info();
+                    self.events.record(Event::new(
+                        Actor::System,
+                        Level::Info,
+                        Some(instance.clone()),
+                        EventKind::InstanceLinked {
+                            label: info.label,
+                            side: info.side.as_str().to_string(),
+                            game_directory: info.game_directory,
+                        },
+                    ));
+                }
                 self.rebuild_and_announce(&format!("instance {instance} connected"))
                     .await;
             }
             UpstreamEvent::Disconnected { instance } => {
+                self.events.record(Event::new(
+                    Actor::System,
+                    Level::Info,
+                    Some(instance.clone()),
+                    EventKind::InstanceUnlinked,
+                ));
                 // The catalogue is deliberately NOT cleared. It is what gets served while nothing is
                 // connected, and dropping it would empty the tool surface every time a client is
                 // relaunched — which in a mod-development loop is constantly.

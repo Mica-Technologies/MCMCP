@@ -17,10 +17,13 @@
 //! - [`paths`] — where this orchestrator keeps its state on each platform
 
 pub mod catalogue;
+pub mod control;
+pub mod events;
 pub mod instance;
 pub mod jsonrpc;
 pub mod link;
 pub mod paths;
+pub mod policy;
 pub mod registry;
 pub mod router;
 pub mod stdio;
