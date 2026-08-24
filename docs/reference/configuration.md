@@ -178,6 +178,101 @@ diagnostics.
 
 Sending chat messages.
 
+## `identity`
+
+Who this game instance is. Generated on first launch; see
+[Running several instances](../guide/orchestrator.md).
+
+### `instanceId`
+
+`string` · generated
+
+Stable id for this instance, in the form `<folder-slug>-<random>`. An orchestrator stores its
+approval of this instance against this id.
+
+Deliberately not derived from the game directory at read time: an instance you move or rename is the
+same instance, and being asked to approve it again because a path changed would teach you to click
+through the one prompt that is meant to mean something. The random suffix exists because copying an
+instance folder is how people make a test variant of a pack, and two instances both calling
+themselves `atm9` would collide in an approval store — where the consequence is one instance
+inheriting another's access.
+
+Clearing it generates a new one, and costs you the approval.
+
+### `instanceSecret`
+
+`string` · generated
+
+64 hex characters — 256 bits — proving this instance is the one an orchestrator approved.
+
+Treat it like a password. Without it, any process on this machine could open a link, claim an
+approved id, and be believed; trust-on-first-use with no secret is not trust. It is never logged,
+never printed by `/mcmcp`, and never included in a tool result.
+
+Rotate it by clearing the value and restarting. You will be asked to approve the instance again, and
+until you do the link reports `the orchestrator knows this instance id but not this secret` and stops
+retrying.
+
+### `instanceName`
+
+`string` · defaults to the instance folder's name
+
+The human-readable label, and the only field in this section meant to be edited.
+
+It is how you and a model tell several running games apart, so name it after what you are doing in
+it — `mymod dev`, `vanilla control`. A label typed into the orchestrator's roster wins over this one
+for display there, because somebody chose it on purpose.
+
+## `orchestrator`
+
+The outbound link that lets several instances be driven through one MCP endpoint. See
+[Running several instances](../guide/orchestrator.md).
+
+### `enableOrchestratorLink`
+
+`boolean` · default `true`
+
+Connect out to an orchestrator.
+
+On by default and harmless without one: the link logs a single line saying nothing is listening, then
+retries quietly in the background. It does not replace the HTTP endpoint — both run, and either works
+alone.
+
+### `orchestratorHost`
+
+`string` · default `127.0.0.1`
+
+Where the orchestrator is listening.
+
+**Loopback only.** The link is not encrypted and carries the instance secret followed by full control
+of this game. Forward the port over SSH rather than pointing this across a network; MCMCP logs a
+warning if you set anything else.
+
+### `orchestratorPort`
+
+`integer` 1024–65535 · default `25580`
+
+The orchestrator's port. Unlike `clientPort`, nothing here binds it — several instances dial the same
+port with no conflict, which is the point.
+
+### `reconnectBackoffMillis`
+
+`integer` 100–60000 · default `1000`
+
+Delay before the first reconnect attempt. Doubles after each failure, up to
+`reconnectBackoffMaxMillis`, and resets on every successful handshake.
+
+### `reconnectBackoffMaxMillis`
+
+`integer` 1000–600000 · default `30000`
+
+Longest gap between attempts.
+
+The resting state of most installs is a game with no orchestrator running, so the gap grows rather
+than dialling a closed port every second forever. It stops growing because the thing being waited for
+is a person starting an app, and half a minute is about as long as anyone should sit wondering why
+their game has not appeared in the roster.
+
 ## `limits`
 
 ### `maxSessions`
@@ -197,7 +292,10 @@ that would otherwise silently stop working.
 Drop a session after this long without traffic. Clients crash without saying goodbye; without this,
 their sessions and queued notifications accumulate until the game restarts.
 
-Swept from the server tick, not a timer thread.
+Swept every 30 seconds from a daemon thread. It used to be swept from the server tick, which never
+fires on a client sitting at the main menu — harmless while the only way in was an HTTP port nobody
+connects to before a world is loaded, and not harmless once an orchestrator link is up from the
+moment the game finishes loading.
 
 ### `workerThreads`
 
@@ -279,6 +377,20 @@ permissions {
         ban-ip
         whitelist
      >
+}
+
+identity {
+    S:instanceId=modb-dev-3f2a1c
+    S:instanceName=modB dev
+    S:instanceSecret=<64 hex characters>
+}
+
+orchestrator {
+    B:enableOrchestratorLink=true
+    S:orchestratorHost=127.0.0.1
+    I:orchestratorPort=25580
+    I:reconnectBackoffMaxMillis=30000
+    I:reconnectBackoffMillis=1000
 }
 
 limits {

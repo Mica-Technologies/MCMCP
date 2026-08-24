@@ -491,6 +491,7 @@ public class McmcpConfig {
             .port(orchestratorPort)
             .backoffInitialMillis(orchestratorBackoffInitialMillis)
             .backoffMaxMillis(orchestratorBackoffMaxMillis)
+            .workerThreads(workerThreads)
             .build();
     }
 

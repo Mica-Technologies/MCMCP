@@ -2,9 +2,12 @@ package com.micatechnologies.minecraft.mcmcp.command;
 
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
+import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpSession;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpoint;
+import com.micatechnologies.minecraft.mcmcp.transport.McpTransport;
+import com.micatechnologies.minecraft.mcmcp.transport.ReverseTransport;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -34,7 +37,7 @@ import net.minecraft.util.text.event.HoverEvent;
 public class CommandMcmcp extends CommandBase {
 
     private static final List<String> SUBCOMMANDS =
-        Arrays.asList("status", "tools", "sessions", "token", "reload", "restart", "stop");
+        Arrays.asList("status", "link", "tools", "sessions", "token", "reload", "restart", "stop");
 
     @Override
     public String getName() {
@@ -43,7 +46,7 @@ public class CommandMcmcp extends CommandBase {
 
     @Override
     public String getUsage(ICommandSender sender) {
-        return "/mcmcp <status|tools|sessions|token|reload|restart|stop>";
+        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop>";
     }
 
     /**
@@ -76,6 +79,9 @@ public class CommandMcmcp extends CommandBase {
             case "status":
                 handleStatus(sender);
                 break;
+            case "link":
+                handleLink(sender);
+                break;
             case "tools":
                 handleTools(sender);
                 break;
@@ -106,6 +112,13 @@ public class CommandMcmcp extends CommandBase {
     }
 
     private void handleStatus(ICommandSender sender) {
+        // Identity first, and shown even when nothing is running. With several games open at once it
+        // is the only thing that says which one is answering, and "which instance am I looking at"
+        // has to be answerable before any of the rest means anything.
+        McmcpIdentity identity = McmcpConfig.identity();
+        reply(sender, TextFormatting.AQUA, "MCMCP instance: " + identity.getInstanceName()
+            + " (" + identity.getInstanceId() + ")");
+
         List<McpEndpoint> endpoints = Mcmcp.allEndpoints();
         if (endpoints.isEmpty()) {
             reply(sender, TextFormatting.RED, "No MCMCP endpoint is running.");
@@ -115,17 +128,74 @@ public class CommandMcmcp extends CommandBase {
             return;
         }
 
-        reply(sender, TextFormatting.AQUA, "MCMCP endpoints:");
         for (McpEndpoint endpoint : endpoints) {
-            reply(sender, TextFormatting.WHITE, "  " + endpoint.getSide().id() + ": "
-                + endpoint.getSettings().describeUrl()
-                + " — " + endpoint.getSessions().count() + " session(s), "
-                + McpRegistry.tools(endpoint.getSide()).size() + " tool(s)"
-                + (endpoint.getSettings().isRequireAuth() ? "" : ", AUTH DISABLED"));
+            reply(sender, TextFormatting.WHITE, "  " + endpoint.getSide().id() + " — "
+                + endpoint.getSessions().count() + " session(s), "
+                + McpRegistry.tools(endpoint.getSide()).size() + " tool(s)");
+
+            // Per transport, because "the endpoint is up" is no longer one fact. An instance whose
+            // port was taken but whose orchestrator link is fine is a working instance; one whose
+            // port is fine but whose link is down is a different problem entirely.
+            for (McpTransport transport : endpoint.transports()) {
+                boolean up = transport.isRunning();
+                String detail = transport instanceof ReverseTransport
+                    ? ((ReverseTransport) transport).describeState()
+                    : (up ? "listening" : "not running");
+                reply(sender, up ? TextFormatting.GREEN : TextFormatting.GRAY,
+                    "    " + transport.describeKind() + " " + transport.describeTarget()
+                        + " — " + detail);
+            }
+
+            if (!endpoint.getSettings().isRequireAuth()) {
+                reply(sender, TextFormatting.RED, "    HTTP authentication is DISABLED.");
+            }
             if (endpoint.getSettings().isExposedBeyondLoopback()) {
                 reply(sender, TextFormatting.RED, "    Bound beyond loopback and reachable from the "
                     + "network.");
             }
+        }
+    }
+
+    /**
+     * Reports the orchestrator link in detail.
+     *
+     * <p>Separate from {@code status} because the answers point in different directions and someone
+     * chasing one is not chasing the other. "Nothing is listening" wants the app started; "waiting
+     * to be approved" wants a dialog clicked; "the secret does not match" will never fix itself and
+     * wants the instance approved again.
+     */
+    private void handleLink(ICommandSender sender) {
+        McmcpIdentity identity = McmcpConfig.identity();
+        reply(sender, TextFormatting.AQUA, "MCMCP orchestrator link for " + identity.getInstanceName()
+            + " (" + identity.getInstanceId() + "):");
+
+        if (!McmcpConfig.isOrchestratorLinkEnabled()) {
+            reply(sender, TextFormatting.GRAY, "  Disabled. Set "
+                + "orchestrator.enableOrchestratorLink=true in config/mcmcp.cfg, then '/mcmcp restart'.");
+            return;
+        }
+
+        boolean found = false;
+        for (McpEndpoint endpoint : Mcmcp.allEndpoints()) {
+            for (McpTransport transport : endpoint.transports()) {
+                if (!(transport instanceof ReverseTransport)) {
+                    continue;
+                }
+                found = true;
+                ReverseTransport link = (ReverseTransport) transport;
+                reply(sender, link.getState().isConnected() ? TextFormatting.GREEN : TextFormatting.YELLOW,
+                    "  " + endpoint.getSide().id() + " -> " + link.describeTarget()
+                        + ": " + link.describeState());
+                String assigned = link.getAssignedName();
+                if (assigned != null) {
+                    reply(sender, TextFormatting.GRAY, "    Named as " + assigned
+                        + " in the orchestrator.");
+                }
+            }
+        }
+        if (!found) {
+            reply(sender, TextFormatting.RED, "  Enabled in the config, but no link is running. "
+                + "Try '/mcmcp restart', and check the game log.");
         }
     }
 

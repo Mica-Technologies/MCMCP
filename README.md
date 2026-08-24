@@ -75,6 +75,40 @@ The [API explorer](https://mica-technologies.github.io/MCMCP/api-explorer/) will
 handshake and list your instance's actual tool surface from a browser, if you would rather see it
 before wiring anything up.
 
+## Running several instances at once
+
+The quick start above is all you need for one game. It is also the whole story if you only ever run
+one at a time — that path is unchanged and is not going away.
+
+Two games are a different matter. `clientPort` defaults to `25585` in every install, so a second
+instance on a default config cannot bind, and MCMCP logs the failure and runs that instance with **no
+MCP endpoint at all**. You can give each instance its own port and add a separate entry per instance
+to your MCP client, and it works — at the cost of a config edit for every instance, and one full tool
+catalogue per instance in every request your model makes.
+
+So MCMCP has a second way in, alongside the HTTP endpoint rather than instead of it: an **outbound
+link** to an orchestrator. The game dials out, so nothing listens, nothing collides, and one MCP
+entry addresses every running instance.
+
+```
+identity {
+    S:instanceName=modB dev          # name it after what you are doing in it
+}
+orchestrator {
+    B:enableOrchestratorLink=true    # on by default; harmless with no orchestrator running
+}
+```
+
+```
+/mcmcp link      # connected, retrying, or waiting to be approved — and what to do about it
+```
+
+**The orchestrator app is a separate download, and it is only needed for this.** Every tool, resource
+and prompt, the HTTP endpoint, `/mcmcp` and the API explorer all work with the jar alone. CI proves
+both paths on every commit.
+
+Guide: [Running several instances](https://mica-technologies.github.io/MCMCP/guide/orchestrator/).
+
 ## Security posture
 
 MCMCP opens a port that can move your character, run commands and read your screen. The defaults are

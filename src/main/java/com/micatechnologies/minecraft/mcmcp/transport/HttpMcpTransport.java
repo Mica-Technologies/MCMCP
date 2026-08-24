@@ -67,7 +67,7 @@ import javax.annotation.Nullable;
  * subsequent requests hang — with no error, which makes it a genuinely nasty thing to diagnose.
  * Reserving one thread per permitted session removes the interaction entirely.
  */
-public class HttpMcpTransport {
+public class HttpMcpTransport implements McpTransport {
 
     /**
      * Largest POST body accepted, in bytes.
@@ -107,8 +107,19 @@ public class HttpMcpTransport {
         this.sessions = sessions;
     }
 
+    @Override
     public boolean isRunning() {
         return server != null;
+    }
+
+    @Override
+    public String describeKind() {
+        return "http";
+    }
+
+    @Override
+    public String describeTarget() {
+        return settings.describeUrl();
     }
 
     /**
@@ -117,6 +128,7 @@ public class HttpMcpTransport {
      * @throws IOException if the port is already in use — the common cause being a second dev launch
      *                     or a previous game instance that has not fully exited
      */
+    @Override
     public synchronized void start() throws IOException {
         if (server != null) {
             return;
@@ -163,6 +175,7 @@ public class HttpMcpTransport {
     }
 
     /** Stops serving and releases the port. Safe to call when not running. */
+    @Override
     public synchronized void stop() {
         HttpServer running = this.server;
         if (running == null) {

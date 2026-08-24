@@ -24,6 +24,7 @@ public final class LinkSettings {
     private final long connectTimeoutMillis;
     private final long backoffInitialMillis;
     private final long backoffMaxMillis;
+    private final int workerThreads;
 
     private LinkSettings(Builder builder) {
         this.enabled = builder.enabled;
@@ -32,6 +33,7 @@ public final class LinkSettings {
         this.connectTimeoutMillis = builder.connectTimeoutMillis;
         this.backoffInitialMillis = builder.backoffInitialMillis;
         this.backoffMaxMillis = builder.backoffMaxMillis;
+        this.workerThreads = builder.workerThreads;
     }
 
     public static Builder builder() {
@@ -60,6 +62,19 @@ public final class LinkSettings {
 
     public long getBackoffMaxMillis() {
         return backoffMaxMillis;
+    }
+
+    /**
+     * Threads that run tool calls arriving over the link.
+     *
+     * <p>Bounded rather than a cached pool. The link's peer is authenticated, so this is not a flood
+     * defence — it is backpressure. Tools like {@code client_wait} block for as long as their
+     * condition takes, and an unbounded pool would answer a burst of those by making a thread each,
+     * inside the game process. A queue behind a fixed pool is the honest version of the same
+     * behaviour.
+     */
+    public int getWorkerThreads() {
+        return workerThreads;
     }
 
     /**
@@ -94,6 +109,7 @@ public final class LinkSettings {
         private long connectTimeoutMillis = 3000L;
         private long backoffInitialMillis = 1000L;
         private long backoffMaxMillis = 30000L;
+        private int workerThreads = 4;
 
         public Builder enabled(boolean value) {
             this.enabled = value;
@@ -122,6 +138,11 @@ public final class LinkSettings {
 
         public Builder backoffMaxMillis(long value) {
             this.backoffMaxMillis = Math.max(100L, value);
+            return this;
+        }
+
+        public Builder workerThreads(int value) {
+            this.workerThreads = Math.max(1, value);
             return this;
         }
 

@@ -17,6 +17,13 @@
 #      protocol version and lists tools. This drives the same sequence a real client does:
 #      initialize -> notifications/initialized -> tools/list.
 #
+#   3. That the ORCHESTRATOR LINK dials out and serves the same dispatcher. A stub orchestrator
+#      listens before the server starts, accepts the instance's outbound link, and drives the same
+#      MCP sequence over it. LinkFraming and LinkHandshake are unit-tested against byte arrays,
+#      which proves nothing about whether a socket is ever opened or whether what arrives on it
+#      reaches the dispatcher. It also cross-checks the instance id from the handshake against the
+#      one mcmcp_endpoint_info reports, because two sources for one fact is how they drift.
+#
 # `runServer` never returns on success, so it runs in the background while the log is tailed for a
 # verdict, then gets shut down.
 #
@@ -24,6 +31,7 @@
 #   SMOKE_TIMEOUT   seconds to wait for startup (default 900)
 #   SMOKE_LOG       log file path (default server-smoke.log)
 #   MCP_PORT        server-endpoint port (default 25588; see addon.gradle for how it is derived)
+#   LINK_PORT       stub orchestrator port (default 25580, matching the mod's config default)
 
 set -uo pipefail
 
@@ -33,6 +41,13 @@ LOG="${SMOKE_LOG:-server-smoke.log}"
 # addon.gradle passes -Dmcmcp.dev.port=25587 to runServer, and McmcpConfig treats that as a BASE:
 # clientPort = base, serverPort = base + 1. The server endpoint is therefore 25588.
 MCP_PORT="${MCP_PORT:-25588}"
+
+# The mod's orchestrator.orchestratorPort default. The stub has to be listening BEFORE the server
+# starts: the link dials during FMLServerStartingEvent, and while it would retry with backoff, a
+# stub started afterwards would turn a wiring bug into a timing-dependent pass.
+LINK_PORT="${LINK_PORT:-25580}"
+LINK_RESULT="$(mktemp)"
+STUB_SCRIPT="$(dirname "$0")/stub-orchestrator.py"
 
 # buildscript.properties sets separateRunDirectories = true, so runServer's working directory is
 # run/server rather than run.
@@ -49,6 +64,16 @@ FAILURE_RE='Encountered an unexpected exception|MissingModsException|for invalid
 mkdir -p run "${RUN_DIR}"
 printf 'eula=true\n' > run/eula.txt
 printf 'eula=true\n' > "${RUN_DIR}/eula.txt"
+
+PYTHON_BIN="$(command -v python3 || command -v python || true)"
+if [ -z "$PYTHON_BIN" ]; then
+  echo "==> FAIL: no python3 on PATH; the stub orchestrator needs it"
+  exit 1
+fi
+
+echo "==> Starting stub orchestrator on 127.0.0.1:${LINK_PORT}"
+"$PYTHON_BIN" "$STUB_SCRIPT" "$LINK_PORT" "$LINK_RESULT" "$TIMEOUT" &
+STUB_PID=$!
 
 echo "==> Starting dedicated server (timeout ${TIMEOUT}s)"
 ./gradlew runServer \
@@ -80,6 +105,7 @@ done
 
 shutdown_server() {
   echo "==> Stopping server"
+  kill "$STUB_PID" 2>/dev/null
   kill "$GRADLE_PID" 2>/dev/null
   # The Gradle wrapper spawns the server in a child JVM; kill that too so the runner does not
   # hang waiting on an orphan.
@@ -245,6 +271,54 @@ case "$CALL_BODY" in
   *) mcp_failure "endpoint_info did not report the server side: ${CALL_BODY}" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Orchestrator link
+# ---------------------------------------------------------------------------
+
+echo "==> Checking the instance identity in ${CONFIG_FILE}"
+INSTANCE_ID="$(grep -E '^\s*S:instanceId=' "$CONFIG_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+INSTANCE_SECRET="$(grep -E '^\s*S:instanceSecret=' "$CONFIG_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+if [ -z "$INSTANCE_ID" ]; then
+  mcp_failure "no instanceId in ${CONFIG_FILE} — identity generation did not run"
+fi
+if [ "${#INSTANCE_SECRET}" != "64" ]; then
+  mcp_failure "instanceSecret is ${#INSTANCE_SECRET} characters, expected 64"
+fi
+echo "    instance ${INSTANCE_ID}"
+
+# The stub writes its verdict when it finishes, which is some way after "Done (" — the link dials
+# during server startup but the MCP sequence over it takes a moment. Poll rather than assuming.
+echo "==> Waiting for the stub orchestrator's verdict"
+link_waited=0
+while [ "$link_waited" -lt 120 ]; do
+  if [ -s "$LINK_RESULT" ]; then
+    break
+  fi
+  if ! kill -0 "$STUB_PID" 2>/dev/null && [ ! -s "$LINK_RESULT" ]; then
+    mcp_failure "the stub orchestrator exited without writing a verdict"
+  fi
+  sleep 2
+  link_waited=$((link_waited + 2))
+done
+
+if [ ! -s "$LINK_RESULT" ]; then
+  echo "----- MCMCP link log lines -----"
+  grep -n 'orchestrator' "$LOG" | tail -20
+  mcp_failure "the stub orchestrator never reported (waited ${link_waited}s); the link never connected"
+fi
+
+LINK_VERDICT="$(head -1 "$LINK_RESULT")"
+echo "    ${LINK_VERDICT}"
+sed -n '2,$p' "$LINK_RESULT" | sed 's/^/    /'
+case "$LINK_VERDICT" in
+  PASS) ;;
+  *)
+    echo "----- MCMCP link log lines -----"
+    grep -n 'orchestrator' "$LOG" | tail -20
+    mcp_failure "orchestrator link check failed: ${LINK_VERDICT}"
+    ;;
+esac
+
 echo "==> DELETE session"
 curl -fsS --max-time 5 -X DELETE "http://127.0.0.1:${MCP_PORT}/mcp" \
   -H "Authorization: Bearer ${TOKEN}" \
@@ -252,5 +326,6 @@ curl -fsS --max-time 5 -X DELETE "http://127.0.0.1:${MCP_PORT}/mcp" \
   || echo "    (session delete failed; not fatal)"
 
 shutdown_server
-echo "==> PASS: dedicated server started and served a full MCP handshake"
+rm -f "$LINK_RESULT"
+echo "==> PASS: dedicated server started, served a full MCP handshake over HTTP, and linked to an orchestrator"
 exit 0

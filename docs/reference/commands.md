@@ -20,10 +20,21 @@ token, or restarts the service. In singleplayer you have level 4 automatically.
 The first thing to run when something is not connecting.
 
 ```
-MCMCP endpoints:
-  client: http://127.0.0.1:25585/mcp — 1 session(s), 19 tool(s)
-  server: http://127.0.0.1:25586/mcp — 0 session(s), 17 tool(s)
+MCMCP instance: modB dev (modb-dev-3f2a1c)
+  client — 1 session(s), 19 tool(s)
+    http http://127.0.0.1:25585/mcp — listening
+    orchestrator link 127.0.0.1:25580 — connected
+  server — 0 session(s), 17 tool(s)
+    http http://127.0.0.1:25586/mcp — listening
+    orchestrator link 127.0.0.1:25580 — retrying
 ```
+
+The instance name and id come first, and are shown even when nothing is running. With several games
+open at once it is the only thing that says which one is answering.
+
+Each transport is reported separately, because "the endpoint is up" stopped being one fact. An
+instance whose HTTP port was taken but whose orchestrator link is connected is a perfectly working
+instance; one whose port is fine but whose link is down is a different problem entirely.
 
 With nothing running it reports the configured intent, so you can tell "disabled" from "failed to
 bind":
@@ -33,13 +44,36 @@ No MCMCP endpoint is running.
 Client endpoint enabled: true, server endpoint enabled: false. Check the game log for bind errors.
 ```
 
-An endpoint bound beyond loopback is called out:
+An endpoint bound beyond loopback is called out, as is authentication being off:
 
 ```
+    HTTP authentication is DISABLED.
     Bound beyond loopback and reachable from the network.
 ```
 
-as is authentication being off (`, AUTH DISABLED` on the endpoint line).
+## `/mcmcp link`
+
+The orchestrator link in detail. Separate from `status` because the answers point in different
+directions and someone chasing one is not chasing the other.
+
+```
+MCMCP orchestrator link for modB dev (modb-dev-3f2a1c):
+  client -> 127.0.0.1:25580: connected — connected to MCMCP Orchestrator 0.1.0
+    Named as mod B (dev) in the orchestrator.
+```
+
+| State | What to do |
+| --- | --- |
+| `disabled in the config` | Set `orchestrator.enableOrchestratorLink=true`, then `/mcmcp restart` |
+| `connecting` | Nothing; it is mid-handshake |
+| `retrying` | Start the orchestrator app |
+| `waiting to be approved in the orchestrator` | Approve this instance in the app — it has heard you |
+| `connected` | Nothing |
+| `stopped` | Something only you can clear; the message says which. The link will not retry |
+
+`stopped` covers a mismatched instance secret, a revoked approval, and an unsupported link protocol
+version. Everything else retries forever, including reasons this build has never heard of — a newer
+orchestrator inventing one is likelier than a genuinely fatal condition.
 
 ## `/mcmcp tools`
 

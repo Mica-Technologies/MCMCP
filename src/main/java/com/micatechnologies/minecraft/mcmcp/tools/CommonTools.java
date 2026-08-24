@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
+import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -49,10 +50,12 @@ public final class CommonTools {
     private static void registerEndpointInfo() {
         McpRegistry.registerTool(McpTool.named("mcmcp_endpoint_info")
             .title("Endpoint info")
-            .description("Describe this MCMCP endpoint: which side of the game it runs on, which MCP "
-                + "protocol versions it speaks, and which capability groups the server operator has "
-                + "enabled or disabled. Call this first — several tool families can be turned off in "
-                + "configuration, and this reports which.")
+            .description("Describe this MCMCP endpoint: which game instance it belongs to, which side "
+                + "of the game it runs on, which MCP protocol versions it speaks, and which capability "
+                + "groups the operator has enabled or disabled. Call this first — several tool "
+                + "families can be turned off in configuration, and this reports which. The instance "
+                + "id and name identify which running game you are attached to, which matters when "
+                + "more than one is open at a time.")
             .schema(JsonSchema.noArguments())
             .readOnly()
             .closedWorld()
@@ -64,6 +67,16 @@ public final class CommonTools {
                 info.addProperty("minecraftVersion", "1.12.2");
                 info.addProperty("side", context.getSide().id());
                 info.addProperty("gameAvailable", context.getGameThread().isAvailable());
+
+                // Which game this is. Reported even on a direct HTTP connection, where the caller
+                // already knows, because the alternative is a model that can only tell instances
+                // apart when it happens to have come through an orchestrator. The secret is not
+                // here and must never be: this result goes into a model's context.
+                McmcpIdentity identity = McmcpConfig.identity();
+                JsonObject instance = new JsonObject();
+                instance.addProperty("id", identity.getInstanceId());
+                instance.addProperty("name", identity.getInstanceName());
+                info.add("instance", instance);
 
                 JsonArray protocols = new JsonArray();
                 for (String version : McpProtocol.supportedVersions()) {

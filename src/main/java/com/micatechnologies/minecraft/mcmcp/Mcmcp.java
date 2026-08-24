@@ -9,6 +9,10 @@ import com.micatechnologies.minecraft.mcmcp.tools.CommonTools;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpoint;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.Mod.EventHandler;
@@ -18,9 +22,6 @@ import net.minecraftforge.fml.common.event.FMLPostInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLServerStartingEvent;
 import net.minecraftforge.fml.common.event.FMLServerStoppingEvent;
-import net.minecraftforge.fml.common.gameevent.TickEvent;
-import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
-import net.minecraftforge.common.MinecraftForge;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -72,10 +73,24 @@ public class Mcmcp {
     @Nullable
     private static volatile McpEndpoint serverEndpoint;
 
-    /** Ticks between session sweeps; 600 ticks is 30 seconds at a healthy tick rate. */
-    private static final int SWEEP_INTERVAL_TICKS = 600;
+    /** Seconds between session sweeps. */
+    private static final long SWEEP_INTERVAL_SECONDS = 30L;
 
-    private int ticksSinceSweep;
+    /**
+     * Housekeeping that must run whether or not a world is open.
+     *
+     * <p>Session expiry used to hang off {@code TickEvent.ServerTickEvent}, which does not fire on a
+     * client sitting at the main menu — there is no integrated server there to tick. That was
+     * invisible while the only way in was an HTTP port, because nobody connects to a game that has
+     * not loaded a world. It stops being invisible with an orchestrator link, which is up from the
+     * moment the game finishes loading and can hold a session across the whole main-menu-to-world
+     * journey.
+     *
+     * <p>A scheduler rather than a client tick handler because the work is neither client-specific
+     * nor game-thread work: it walks a concurrent map and drops entries.
+     */
+    @Nullable
+    private static volatile ScheduledExecutorService housekeeping;
 
     @EventHandler
     public void preInit(FMLPreInitializationEvent event) {
@@ -84,7 +99,6 @@ public class Mcmcp {
         CommonResources.register();
         CommonPrompts.register();
         proxy.preInit(event);
-        MinecraftForge.EVENT_BUS.register(this);
         LOGGER.info(McmcpConstants.MOD_NAME + " " + McmcpConstants.MOD_VERSION + " loaded.");
     }
 
@@ -105,6 +119,7 @@ public class Mcmcp {
     @EventHandler
     public void postInit(FMLPostInitializationEvent event) {
         proxy.startClientEndpoint();
+        startHousekeeping();
         // Endpoints run on daemon threads, so they cannot keep the JVM alive; this hook exists to
         // release the ports and close sessions cleanly on a normal quit. The client has no Forge
         // shutdown event to hang this on.
@@ -123,10 +138,7 @@ public class Mcmcp {
         if (!McmcpConfig.isServerEndpointEnabled()) {
             return;
         }
-        serverEndpoint = McpEndpoint.startOrLog(
-            McmcpSide.SERVER,
-            McmcpConfig.settingsFor(McmcpSide.SERVER),
-            new ServerThreadBridge());
+        serverEndpoint = McmcpEndpoints.start(McmcpSide.SERVER, new ServerThreadBridge());
     }
 
     /**
@@ -147,23 +159,47 @@ public class Mcmcp {
     }
 
     /**
-     * Drives session expiry off the server tick.
+     * Starts the housekeeping scheduler. Idempotent.
      *
-     * <p>A dedicated timer thread would work too, but the tick is already running and sweeping is
-     * cheap — and tying it to the tick means a paused or stalled server does not silently expire
-     * sessions that are perfectly healthy.
+     * <p>One daemon thread, so a sweep in progress can never delay the game exiting, and every
+     * failure is swallowed — an exception escaping a scheduled task cancels all future runs of it
+     * silently, and losing session expiry for the rest of the session because one sweep hit an edge
+     * case is not a trade worth making.
      */
-    @SubscribeEvent
-    public void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
+    private static synchronized void startHousekeeping() {
+        if (housekeeping != null) {
             return;
         }
-        if (++ticksSinceSweep < SWEEP_INTERVAL_TICKS) {
-            return;
-        }
-        ticksSinceSweep = 0;
-        for (McpEndpoint endpoint : allEndpoints()) {
-            endpoint.tick();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
+            new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable runnable) {
+                    Thread thread = new Thread(runnable, "MCMCP-housekeeping");
+                    thread.setDaemon(true);
+                    return thread;
+                }
+            });
+        scheduler.scheduleWithFixedDelay(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    for (McpEndpoint endpoint : allEndpoints()) {
+                        endpoint.tick();
+                    }
+                }
+                catch (Throwable t) {
+                    LOGGER.error("MCMCP session sweep failed", t);
+                }
+            }
+        }, SWEEP_INTERVAL_SECONDS, SWEEP_INTERVAL_SECONDS, TimeUnit.SECONDS);
+        housekeeping = scheduler;
+    }
+
+    private static synchronized void stopHousekeeping() {
+        ScheduledExecutorService scheduler = housekeeping;
+        housekeeping = null;
+        if (scheduler != null) {
+            scheduler.shutdownNow();
         }
     }
 
@@ -197,6 +233,7 @@ public class Mcmcp {
 
     /** Stops every endpoint. Backs {@code /mcmcp stop} and the JVM shutdown hook. */
     public static void shutdownEndpoints() {
+        stopHousekeeping();
         McpEndpoint server = serverEndpoint;
         if (server != null) {
             server.stop();
@@ -217,14 +254,12 @@ public class Mcmcp {
     public static void restartEndpoints() {
         shutdownEndpoints();
         McmcpConfig.reload();
+        startHousekeeping();
         if (proxy != null) {
             proxy.startClientEndpoint();
         }
         if (McmcpConfig.isServerEndpointEnabled() && ServerThreadBridge.server() != null) {
-            serverEndpoint = McpEndpoint.startOrLog(
-                McmcpSide.SERVER,
-                McmcpConfig.settingsFor(McmcpSide.SERVER),
-                new ServerThreadBridge());
+            serverEndpoint = McmcpEndpoints.start(McmcpSide.SERVER, new ServerThreadBridge());
         }
     }
 }

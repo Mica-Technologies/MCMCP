@@ -60,10 +60,7 @@ public class McmcpClientProxy implements McmcpProxy {
             Mcmcp.LOGGER.info("MCMCP client endpoint is disabled in the config; not starting it.");
             return;
         }
-        clientEndpoint = McpEndpoint.startOrLog(
-            McmcpSide.CLIENT,
-            McmcpConfig.settingsFor(McmcpSide.CLIENT),
-            new ClientThreadBridge());
+        clientEndpoint = McmcpEndpoints.start(McmcpSide.CLIENT, new ClientThreadBridge());
     }
 
     @Override

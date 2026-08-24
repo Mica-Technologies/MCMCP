@@ -14,6 +14,7 @@ copyright: >-
 # up and quietly publishing them on the next deploy.
 exclude_docs: |
   AGENT-PLANS/
+  agent-plans/
 
 theme:
   name: material
@@ -88,6 +89,7 @@ nav:
       - Installation: guide/installation.md
       - Connecting a client: guide/connecting.md
       - Client vs server endpoint: guide/endpoints.md
+      - Running several instances: guide/orchestrator.md
       - Security model: guide/security.md
       - Debugging workflows: guide/debugging.md
   - Reference:
