@@ -112,6 +112,13 @@ jobs:
           modVersion=$(${{github.workspace}}/gradlew -q printModVersion | tail -n 1 | xargs)
           echo "MOD_VERSION=$modVersion" >> $GITHUB_ENV
 
+      # The mod version comes from the most recent git tag of ANY name (build.gradle:1555 uses
+      # `git describe` with no --match). This repository also holds the orchestrator, whose releases
+      # would very reasonably be tagged `app-0.1.0` by anybody who had not read the comment saying
+      # not to — and the resulting jar would ship claiming that version, silently.
+      - name: Check the mod version looks like a mod version
+        run: bash .github/scripts/check-mod-version.sh "${{ env.MOD_VERSION }}"
+
       - name: Save Mod Archive Base Name to GITHUB_ENV
         run: |
           modArchiveBaseName=$(${{github.workspace}}/gradlew -q printArchivesBaseName | tail -n 1 | xargs)
