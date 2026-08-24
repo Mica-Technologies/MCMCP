@@ -22,6 +22,7 @@ pub mod events;
 pub mod instance;
 pub mod jsonrpc;
 pub mod link;
+pub mod mcp_socket;
 pub mod paths;
 pub mod policy;
 pub mod registry;

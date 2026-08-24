@@ -35,7 +35,7 @@ use mcmcp_orchestrator_core::policy::{Class, Policy, Rule};
 use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::{GateRequest, Router};
 use mcmcp_orchestrator_core::store::ApprovalStore;
-use mcmcp_orchestrator_core::{catalogue, link, paths};
+use mcmcp_orchestrator_core::{catalogue, link, mcp_socket, paths};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -633,6 +633,43 @@ fn set_require_explicit_instance(
     Ok(())
 }
 
+/// The MCP client entry that points at this orchestrator.
+///
+/// Returned for copying rather than written into anybody's configuration file. Editing an MCP
+/// client's config behind its back is a destructive action on a file the user owns and may have
+/// hand-tuned, and getting it wrong breaks every other server listed in it. A snippet on the
+/// clipboard costs one paste and cannot corrupt anything.
+///
+/// Note what is absent: no port, no token, no URL. That is the point of the shim — the app can move,
+/// restart, or change ports without this entry ever changing.
+#[tauri::command]
+fn mcp_client_config() -> Result<String, String> {
+    let shim = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|directory| directory.join(shim_name())))
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "mcmcp-orchestrator".to_string());
+
+    let snippet = json!({
+        "mcpServers": {
+            "minecraft": {
+                "command": shim,
+                "args": ["shim"],
+            }
+        }
+    });
+    serde_json::to_string_pretty(&snippet).map_err(|error| error.to_string())
+}
+
+fn shim_name() -> &'static str {
+    if cfg!(windows) {
+        "mcmcp-orchestrator.exe"
+    } else {
+        "mcmcp-orchestrator"
+    }
+}
+
 /// Everything the log holds for one instance, as a file the user can hand to somebody.
 #[tauri::command]
 fn export_events(state: State<'_, AppState>, instance: Option<String>) -> Result<String, String> {
@@ -685,9 +722,8 @@ fn main() -> anyhow::Result<()> {
     let events = EventLog::with_file(paths::event_log_path()?, EVENT_LOG_LIMIT_BYTES);
     let registry = Arc::new(Registry::new());
 
-    let (downstream_tx, _downstream_rx) = mpsc::unbounded_channel();
     let router = Arc::new(
-        Router::new(Arc::clone(&registry), Arc::clone(&store), downstream_tx)
+        Router::new(Arc::clone(&registry), Arc::clone(&store))
             .with_events(events.clone())
             .with_policy(Arc::clone(&policy)),
     );
@@ -727,6 +763,7 @@ fn main() -> anyhow::Result<()> {
             set_policy_rule,
             set_require_explicit_instance,
             export_events,
+            mcp_client_config,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -821,6 +858,45 @@ fn spawn_background(
                                 let _ = catalogue::save_cache(&path, &aggregate);
                             }
                             let _ = app.emit(CHANGED, ());
+                        }
+                    });
+                }
+
+                // The MCP side, which a shim attaches to on an MCP client's behalf.
+                {
+                    let router = Arc::clone(&router);
+                    let events = events.clone();
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        let Ok(state) = paths::state_directory() else {
+                            return;
+                        };
+                        let token = match mcp_socket::ensure_token(&state) {
+                            Ok(token) => token,
+                            Err(error) => {
+                                warn!(%error, "could not prepare the MCP token");
+                                return;
+                            }
+                        };
+                        let address = format!("127.0.0.1:{}", mcp_socket::DEFAULT_MCP_PORT);
+                        match tokio::net::TcpListener::bind(&address).await {
+                            Ok(listener) => {
+                                if let Err(error) = mcp_socket::serve(listener, router, token).await {
+                                    warn!(%error, "the MCP listener stopped");
+                                }
+                            }
+                            Err(error) => {
+                                warn!(%error, %address, "could not listen for MCP clients");
+                                events.note(
+                                    Actor::System,
+                                    None,
+                                    format!(
+                                        "Could not listen for MCP clients on {address}: {error}. \
+                                         Another orchestrator is probably already running."
+                                    ),
+                                );
+                                let _ = app.emit(CHANGED, ());
+                            }
                         }
                     });
                 }

@@ -241,9 +241,49 @@ jobs:
           workspaces: orchestrator
           key: ${{ matrix.target }}
 
-      - name: Build
+      # Tauri renders through the system webview. Windows has WebView2 and macOS has WKWebView; on
+      # Linux the webkit2gtk development headers have to be installed or the app will not link.
+      - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install the Tauri CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      # The headless binary and the shim are the same executable, and the shim is what an MCP client
+      # spawns — so it ships beside the app rather than instead of it.
+      - name: Build the headless orchestrator
         working-directory: orchestrator
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} -p mcmcp-orchestrator
+
+      # Installers, not just an executable. This is what "cross-platform app" has to mean for
+      # somebody who is not going to run cargo.
+      - name: Build the desktop app installers
+        working-directory: orchestrator
+        run: cargo tauri build --target ${{ matrix.target }} --config app/tauri.conf.json
+        continue-on-error: true
+
+      - name: Collect installers
+        id: installers
+        shell: bash
+        run: |
+          # Where tauri-bundler puts things varies by platform, so gather rather than guess. Missing
+          # is not fatal: a release with the headless binary and no installer is still a release.
+          mkdir -p dist
+          bundle="orchestrator/target/${{ matrix.target }}/release/bundle"
+          if [ -d "$bundle" ]; then
+            find "$bundle" -type f \
+              \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) \
+              -exec cp {} dist/ \;
+          fi
+          count=$(find dist -type f | wc -l)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Collected $count installer(s):"
+          ls -la dist/ || true
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
@@ -277,4 +317,11 @@ jobs:
         with:
           tag_name: ${{ needs.assemble_release.outputs.tag }}
           # The release already exists and already has its notes; this only adds files to it.
-          files: ${{ env.ASSET }}
+          #
+          # Installers are UNSIGNED. That is a deliberate deferral — this is a personal tool and a
+          # certificate costs money annually — and it means Windows SmartScreen and macOS Gatekeeper
+          # will both complain. Nothing here precludes signing later: tauri-bundler takes signing
+          # configuration, so it becomes a config addition and a secret rather than a rewrite.
+          files: |
+            ${{ env.ASSET }}
+            dist/*

@@ -104,6 +104,14 @@
           <tbody id="gating"></tbody>
         </table>
 
+        <h2>Connecting an MCP client</h2>
+        <p class="muted">
+          Paste this into your MCP client's configuration. It contains no port and no token — the
+          shim finds the app, and starts it if it is not running, so this entry never has to change.
+        </p>
+        <pre id="mcp-config" class="snippet">…</pre>
+        <button id="copy-config">Copy</button>
+
         <h2>Where things live</h2>
         <p class="muted">
           State directory: <code id="state-dir">…</code><br />

@@ -31,7 +31,8 @@ use crate::jsonrpc;
 use crate::router::Router;
 
 /// Serves MCP over stdin/stdout until the client closes stdin.
-pub async fn serve(router: Arc<Router>, mut downstream: mpsc::UnboundedReceiver<Value>) -> Result<()> {
+pub async fn serve(router: Arc<Router>) -> Result<()> {
+    let mut downstream = router.subscribe_downstream();
     // One task owns stdout. Responses come from many request tasks and notifications come from the
     // instances, and two writers interleaving mid-frame would corrupt both.
     let (outgoing, mut outgoing_rx) = mpsc::unbounded_channel::<Value>();
@@ -56,9 +57,20 @@ pub async fn serve(router: Arc<Router>, mut downstream: mpsc::UnboundedReceiver<
     {
         let outgoing = outgoing.clone();
         tokio::spawn(async move {
-            while let Some(message) = downstream.recv().await {
-                if outgoing.send(message).is_err() {
-                    break;
+            loop {
+                match downstream.recv().await {
+                    Ok(message) => {
+                        if outgoing.send(message).is_err() {
+                            break;
+                        }
+                    }
+                    // Lagged: this client fell behind and the oldest notifications were dropped for
+                    // it. Keep going — a missed list_changed costs a stale tool list until the next
+                    // one, and stopping would cost every notification after it.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        warn!(missed, "an MCP client fell behind on notifications");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -107,11 +119,9 @@ mod tests {
     use std::sync::Mutex;
 
     fn router() -> Arc<Router> {
-        let (downstream, _rx) = mpsc::unbounded_channel();
         Arc::new(Router::new(
             Arc::new(Registry::new()),
             Arc::new(Mutex::new(ApprovalStore::load("unused-in-tests.json").unwrap())),
-            downstream,
         ))
     }
 

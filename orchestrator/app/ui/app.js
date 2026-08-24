@@ -307,7 +307,11 @@ function gatingRow(label, instance, rules) {
 }
 
 async function renderSettings() {
-  const settings = await invoke("get_settings");
+  const [settings, config] = await Promise.all([
+    invoke("get_settings"),
+    invoke("mcp_client_config"),
+  ]);
+  $("mcp-config").textContent = config;
 
   $("strict-approval").checked = settings.strict_approval;
   $("require-explicit").checked = settings.require_explicit_instance_for_destructive;
@@ -367,6 +371,11 @@ for (const [id, key] of [["log-instance", "instance"], ["log-actor", "actor"], [
 $("log-export").addEventListener("click", async () => {
   const path = await call("export_events", { instance: filters.instance || null });
   toast(`Written to ${path}`);
+});
+
+$("copy-config").addEventListener("click", async () => {
+  await navigator.clipboard.writeText($("mcp-config").textContent);
+  toast("Configuration copied");
 });
 
 $("strict-approval").addEventListener("change", (event) =>

@@ -61,6 +61,21 @@ enum Command {
         #[arg(long)]
         no_stdio: bool,
     },
+    /// Bridge an MCP client's stdio to a running orchestrator app.
+    ///
+    /// This is what goes in an MCP client's configuration when the desktop app is what serves it:
+    /// the app cannot use stdio itself, because its own stdin and stdout belong to whatever
+    /// launched it, and an MCP client expects to spawn what it talks to.
+    Shim {
+        /// Port the app is listening on.
+        #[arg(long, default_value_t = mcmcp_orchestrator_core::mcp_socket::DEFAULT_MCP_PORT)]
+        mcp_port: u16,
+
+        /// Do not try to start the app if nothing is listening.
+        #[arg(long)]
+        no_launch: bool,
+    },
+
     /// List instances the orchestrator knows about, connected or not.
     Instances,
 
@@ -172,6 +187,7 @@ async fn main() -> Result<()> {
             strict_approval,
             no_stdio,
         } => serve(cli.link_port, !strict_approval, no_stdio).await,
+        Command::Shim { mcp_port, no_launch } => shim(mcp_port, !no_launch).await,
         Command::Instances => list_instances(),
         Command::Approve { instance } => approve(&instance),
         Command::Revoke { instance } => revoke(&instance),
@@ -190,6 +206,137 @@ async fn main() -> Result<()> {
             json,
         } => show_log(instance, actor, grep, limit, json),
     }
+}
+
+/// Pumps an MCP client's stdio to and from the app.
+///
+/// Deliberately a pump and not a translator: what arrives on stdin is JSON-RPC, one object per line,
+/// and what the app's socket wants is JSON-RPC, one object per line. Parsing in the middle would add
+/// a place for the two to disagree and buy nothing.
+///
+/// Reads the token from the state directory rather than taking one as an argument. An MCP client
+/// configuration containing a secret is a secret in a file people paste into issues.
+async fn shim(mcp_port: u16, may_launch: bool) -> Result<()> {
+    use mcmcp_orchestrator_core::mcp_socket;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let state = paths::state_directory()?;
+
+    let stream = match connect(mcp_port).await {
+        Ok(stream) => stream,
+        Err(_) if may_launch => {
+            // Nothing listening. Starting the app is the entire point of the shim being a separate
+            // process: an MCP client connecting is what brings the orchestrator up, so there is no
+            // "did I remember to start it?" step.
+            launch_app()?;
+            wait_for_app(mcp_port).await?
+        }
+        Err(error) => {
+            anyhow::bail!(
+                "nothing is listening on 127.0.0.1:{mcp_port} ({error}). Start the MCMCP \
+                 Orchestrator app, or drop --no-launch and this will start it."
+            );
+        }
+    };
+
+    let token = mcp_socket::read_token(&state).context(
+        "reading the orchestrator's token. It is written when the app first runs; if it has never \
+         run on this machine, start it once.",
+    )?;
+
+    // into_split rather than split: the stdin pump runs in its own task, which needs an owned half.
+    // A borrowing split would tie both halves to this stack frame.
+    let (read_half, mut write_half) = stream.into_split();
+    let mut from_app = BufReader::new(read_half);
+
+    // Attach before anything else. Until the app answers, this connection may not carry MCP.
+    mcmcp_orchestrator_core::link::framing::write_frame(
+        &mut write_half,
+        &serde_json::json!({ "type": "attach", "token": token }),
+    )
+    .await?;
+
+    match mcmcp_orchestrator_core::link::framing::read_frame(&mut from_app).await? {
+        Some(frame) if frame.get("type").and_then(|t| t.as_str()) == Some("attached") => {}
+        Some(frame) => anyhow::bail!(
+            "the orchestrator refused this connection: {}",
+            frame
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("no reason given")
+        ),
+        None => anyhow::bail!("the orchestrator closed the connection without answering"),
+    }
+
+    // Two pumps, in opposite directions, each ending when its source does.
+    let to_app = tokio::spawn(async move {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if write_half.write_all(line.as_bytes()).await.is_err()
+                || write_half.write_all(b"\n").await.is_err()
+                || write_half.flush().await.is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let mut stdout = tokio::io::stdout();
+    let mut lines = from_app.lines();
+    while let Some(line) = lines.next_line().await? {
+        stdout.write_all(line.as_bytes()).await?;
+        stdout.write_all(b"\n").await?;
+        stdout.flush().await?;
+    }
+
+    to_app.abort();
+    Ok(())
+}
+
+async fn connect(port: u16) -> Result<tokio::net::TcpStream> {
+    Ok(tokio::net::TcpStream::connect(("127.0.0.1", port)).await?)
+}
+
+/// Starts the desktop app beside this process and leaves it running.
+///
+/// Looked for next to this binary first, which is where an installer puts them both.
+fn launch_app() -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let directory = executable.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let candidate = directory.join(if cfg!(windows) {
+        "mcmcp-orchestrator-app.exe"
+    } else {
+        "mcmcp-orchestrator-app"
+    });
+
+    let program = if candidate.exists() {
+        candidate
+    } else {
+        "mcmcp-orchestrator-app".into()
+    };
+    info!(app = %program.display(), "starting the orchestrator app");
+    std::process::Command::new(&program).spawn().with_context(|| {
+        format!(
+            "could not start {}. Install the MCMCP Orchestrator app, or start it yourself and run \
+             this again.",
+            program.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Waits for the app to come up, rather than racing it.
+async fn wait_for_app(port: u16) -> Result<tokio::net::TcpStream> {
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if let Ok(stream) = connect(port).await {
+            return Ok(stream);
+        }
+    }
+    anyhow::bail!("the orchestrator app did not start listening on 127.0.0.1:{port} within 15s")
 }
 
 // ----------------------------------------------------------------------------------
@@ -391,7 +538,6 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
     let registry = Arc::new(Registry::new());
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
     let (approvals_tx, approvals_rx) = mpsc::channel::<ApprovalRequest>(8);
-    let (downstream_tx, downstream_rx) = mpsc::unbounded_channel();
 
     spawn_approver(approvals_rx, trust_on_first_use);
 
@@ -402,7 +548,7 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
     let policy = Arc::new(Mutex::new(control::load_policy(&policy_path)?));
 
     let router = Arc::new(
-        Router::new(Arc::clone(&registry), Arc::clone(&store), downstream_tx)
+        Router::new(Arc::clone(&registry), Arc::clone(&store))
             .with_events(events.clone())
             .with_policy(Arc::clone(&policy)),
     );
@@ -469,7 +615,7 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
     } else {
         // stdio owns the lifetime from here: when the client closes stdin it is gone, and there is
         // nothing left to orchestrate for.
-        let result = stdio::serve(router, downstream_rx).await;
+        let result = stdio::serve(router).await;
         links.abort();
         result
     }

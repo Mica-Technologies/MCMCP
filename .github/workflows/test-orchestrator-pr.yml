@@ -45,6 +45,15 @@ jobs:
         with:
           workspaces: orchestrator
 
+      # Tauri renders through the system webview, and the app crate is part of the workspace — so
+      # `cargo test --workspace` links against it. Windows has WebView2 and macOS has WKWebView
+      # already; Linux needs the webkit2gtk headers or nothing in the workspace builds at all.
+      - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -74,6 +83,15 @@ jobs:
         with:
           workspaces: orchestrator
           key: ${{ matrix.os }}
+
+      # Tauri renders through the system webview, and the app crate is part of the workspace — so
+      # `cargo test --workspace` links against it. Windows has WebView2 and macOS has WKWebView
+      # already; Linux needs the webkit2gtk headers or nothing in the workspace builds at all.
+      - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Test
         run: cargo test --workspace --all-targets
@@ -110,6 +128,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: orchestrator
+
+      # Tauri renders through the system webview, and the app crate is part of the workspace — so
+      # `cargo test --workspace` links against it. Windows has WebView2 and macOS has WKWebView
+      # already; Linux needs the webkit2gtk headers or nothing in the workspace builds at all.
+      - name: Install Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Build the orchestrator
         run: cargo build

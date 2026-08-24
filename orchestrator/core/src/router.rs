@@ -44,10 +44,24 @@ pub const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
 /// thing an approval prompt exists to prevent.
 pub const ORCHESTRATOR_TOOLS: &[&str] = &["mcmcp_instances", "mcmcp_focus", "mcmcp_set_label"];
 
+/// How many notifications may queue for a client that has stopped reading.
+///
+/// Bounded on purpose. An MCP client that subscribes to a fast-changing resource and then stops
+/// reading would otherwise grow a queue inside this process without limit. Dropping the oldest
+/// keeps the newest world state, which is what a client catching up actually wants.
+const DOWNSTREAM_CAPACITY: usize = 512;
+
 pub struct Router {
     registry: Arc<Registry>,
     store: Arc<Mutex<ApprovalStore>>,
-    downstream: tokio::sync::mpsc::UnboundedSender<Value>,
+    /// Notifications on their way to whichever MCP clients are attached.
+    ///
+    /// A broadcast rather than a single channel because there can legitimately be more than one:
+    /// the desktop app serves a socket that any number of shims can attach to, and a resource
+    /// update belongs to all of them. A lagging receiver drops the oldest messages rather than
+    /// stalling the sender, which is the right trade — a client too slow to keep up with
+    /// notifications must not be able to wedge a tool call.
+    downstream: tokio::sync::broadcast::Sender<Value>,
     /// The last aggregate built while something was connected.
     ///
     /// Served when nothing is. Without it, relaunching a game client would empty and refill the
@@ -80,11 +94,8 @@ pub struct GateRequest {
 }
 
 impl Router {
-    pub fn new(
-        registry: Arc<Registry>,
-        store: Arc<Mutex<ApprovalStore>>,
-        downstream: tokio::sync::mpsc::UnboundedSender<Value>,
-    ) -> Self {
+    pub fn new(registry: Arc<Registry>, store: Arc<Mutex<ApprovalStore>>) -> Self {
+        let (downstream, _) = tokio::sync::broadcast::channel(DOWNSTREAM_CAPACITY);
         Self {
             registry,
             store,
@@ -127,6 +138,21 @@ impl Router {
     /// sees a real tool surface.
     pub fn restore_cache(&self, aggregate: Aggregate) {
         *self.cached.lock().expect("cache lock") = Some(aggregate);
+    }
+
+    /// A receiver for notifications bound for MCP clients.
+    ///
+    /// Each attached client gets its own. Dropping it simply stops delivery to that one.
+    pub fn subscribe_downstream(&self) -> tokio::sync::broadcast::Receiver<Value> {
+        self.downstream.subscribe()
+    }
+
+    /// Sends a notification to every attached client.
+    ///
+    /// A send with nobody attached is not an error: the orchestrator runs perfectly well with no
+    /// MCP client connected, quietly accumulating instances until one arrives.
+    fn notify_downstream(&self, message: Value) {
+        let _ = self.downstream.send(message);
     }
 
     pub fn cached_aggregate(&self) -> Option<Aggregate> {
@@ -669,7 +695,7 @@ impl Router {
                             to: requested.to_string(),
                         },
                     ));
-                    let _ = self.downstream.send(jsonrpc::notification(
+                    self.notify_downstream(jsonrpc::notification(
                         "notifications/message",
                         Some(json!({
                             "level": "info",
@@ -882,9 +908,9 @@ impl Router {
             "notifications/resources/list_changed",
             "notifications/prompts/list_changed",
         ] {
-            let _ = self.downstream.send(jsonrpc::notification(method, None));
+            self.notify_downstream(jsonrpc::notification(method, None));
         }
-        let _ = self.downstream.send(jsonrpc::notification(
+        self.notify_downstream(jsonrpc::notification(
             "notifications/message",
             Some(json!({
                 "level": "info",
@@ -910,7 +936,7 @@ impl Router {
                     warn!(instance = %instance_id, %error, "could not re-read a catalogue");
                 }
                 self.build_aggregate().await;
-                let _ = self.downstream.send(jsonrpc::notification(&method, None));
+                self.notify_downstream(jsonrpc::notification(&method, None));
             }
 
             "notifications/resources/updated" => {
@@ -922,7 +948,7 @@ impl Router {
                     && let Some(qualified) = catalogue::qualify_uri(instance_id, uri)
                 {
                     forwarded["params"]["uri"] = json!(qualified);
-                    let _ = self.downstream.send(forwarded);
+                    self.notify_downstream(forwarded);
                 }
                 // A resource update whose URI could not be qualified is dropped rather than sent
                 // unqualified: a subscriber would get an update for a URI it never subscribed to.
@@ -941,13 +967,13 @@ impl Router {
                         .to_string();
                     params.insert("logger".into(), json!(format!("{instance_id}/{logger}")));
                 }
-                let _ = self.downstream.send(forwarded);
+                self.notify_downstream(forwarded);
             }
 
             // Progress tokens are the client's own — they ride through in `_meta` on the way down
             // and come back unchanged, so there is nothing to translate.
             "notifications/progress" => {
-                let _ = self.downstream.send(message);
+                self.notify_downstream(message);
             }
 
             other => debug!(instance = %instance_id, method = %other, "dropped an instance notification"),

@@ -158,6 +158,12 @@ button:disabled { opacity: .45; cursor: default; }
   border: 1px solid var(--line); background: var(--bg-sunken); color: var(--text);
 }
 
+.snippet {
+  font-family: var(--mono); font-size: 12px; background: var(--bg-sunken);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px;
+  max-width: 68ch; overflow-x: auto; margin: 8px 0;
+}
+
 /* The in-place rename field replaces its button, so it has to be about the same size. */
 input.rename {
   font: inherit; font-size: 12.5px; padding: 4px 9px; border-radius: 7px;
