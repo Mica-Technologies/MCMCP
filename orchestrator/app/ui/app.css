@@ -1,0 +1,171 @@
+/*
+ * Dark by default and only dark, which is a deliberate exception to how most things here are built.
+ *
+ * This window sits next to two or three Minecraft clients for hours. It is a monitor, not a
+ * document: a bright panel in the corner of a dark screen is the thing you end up minimising, and an
+ * app you have minimised cannot show you an approval prompt.
+ */
+
+:root {
+  --bg: #16171f;
+  --bg-raised: #1e2029;
+  --bg-sunken: #121319;
+  --line: #2b2e3b;
+  --text: #e6e8f0;
+  --text-dim: #9aa0b4;
+  --accent: #63b3ed;
+  --ok: #48bb9c;
+  --warn: #e6b455;
+  --danger: #e57373;
+  --radius: 10px;
+  --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--sans);
+  /* The window is a fixed frame with scrolling panels, not a scrolling page — a log that moves the
+     roster off screen as it grows would be unusable. */
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+h1 { font-size: 15px; margin: 0; font-weight: 600; }
+h2 { font-size: 13px; margin: 22px 0 8px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim); }
+p { margin: 6px 0; }
+code { font-family: var(--mono); font-size: .92em; color: var(--accent); }
+.muted { color: var(--text-dim); font-size: 13px; }
+
+/* ---- header ---- */
+.bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--bg-raised);
+  flex: 0 0 auto;
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand p { margin: 0; font-size: 12px; }
+.dot {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--text-dim);
+  box-shadow: 0 0 0 4px rgba(154, 160, 180, .12);
+}
+.dot.is-live { background: var(--ok); box-shadow: 0 0 0 4px rgba(72, 187, 156, .18); }
+
+.tabs { display: flex; gap: 4px; }
+.tab {
+  background: none; border: 0; color: var(--text-dim); font: inherit; font-size: 13px;
+  padding: 6px 12px; border-radius: 999px; cursor: pointer;
+}
+.tab:hover { color: var(--text); background: rgba(255, 255, 255, .04); }
+.tab.is-active { color: var(--text); background: rgba(99, 179, 237, .16); }
+
+/* ---- prompts ---- */
+.prompts { flex: 0 0 auto; padding: 12px 18px 0; display: flex; flex-direction: column; gap: 10px; }
+.prompt {
+  border: 1px solid var(--accent); border-left-width: 3px; border-radius: var(--radius);
+  background: rgba(99, 179, 237, .08); padding: 12px 14px;
+}
+.prompt.is-gate { border-color: var(--warn); background: rgba(230, 180, 85, .08); }
+.prompt h3 { margin: 0 0 4px; font-size: 14px; }
+.prompt dl { margin: 8px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 12.5px; }
+.prompt dt { color: var(--text-dim); }
+.prompt dd { margin: 0; font-family: var(--mono); word-break: break-all; }
+.prompt .actions { margin-top: 12px; display: flex; gap: 8px; }
+
+/* ---- panels ---- */
+main { flex: 1 1 auto; overflow: hidden; display: flex; }
+.panel { flex: 1 1 auto; overflow-y: auto; padding: 16px 18px 24px; }
+
+.empty {
+  color: var(--text-dim); text-align: center; margin: 48px auto; max-width: 46ch; line-height: 1.7;
+}
+
+/* ---- instance cards ---- */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.card {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised);
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+}
+.card.is-focused { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.card.is-offline { opacity: .6; }
+.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.card-name { font-weight: 600; font-size: 15px; }
+.card-id { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+.badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
+  color: var(--text-dim); white-space: nowrap;
+}
+.badge.is-live { color: var(--ok); border-color: rgba(72, 187, 156, .4); }
+.badge.is-focused { color: var(--accent); border-color: rgba(99, 179, 237, .5); }
+.badge.is-revoked { color: var(--danger); border-color: rgba(229, 115, 115, .5); }
+.card dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 12.5px; }
+.card dt { color: var(--text-dim); }
+.card dd { margin: 0; font-family: var(--mono); word-break: break-all; }
+.card .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---- buttons ---- */
+button {
+  font: inherit; font-size: 12.5px; padding: 5px 11px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg-sunken); color: var(--text);
+}
+button:hover { border-color: var(--text-dim); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #10131a; font-weight: 600; }
+button.danger { color: var(--danger); border-color: rgba(229, 115, 115, .4); }
+button.ghost { background: none; color: var(--text-dim); }
+button:disabled { opacity: .45; cursor: default; }
+
+/* ---- log ---- */
+.filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.filters input, .filters select {
+  font: inherit; font-size: 12.5px; padding: 5px 9px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--bg-sunken); color: var(--text);
+}
+.filters input { flex: 1 1 200px; }
+
+.log { font-family: var(--mono); font-size: 12.5px; }
+.row {
+  display: grid; grid-template-columns: 68px 62px 1fr auto; gap: 10px; align-items: baseline;
+  padding: 4px 8px; border-radius: 6px;
+}
+.row:hover { background: rgba(255, 255, 255, .035); }
+.row:hover .copy { opacity: 1; }
+.row .time { color: var(--text-dim); }
+.row .who { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.row.actor-model .who { color: var(--accent); }
+.row.actor-human .who { color: var(--ok); }
+.row.level-warn .summary { color: var(--warn); }
+.row.level-error .summary { color: var(--danger); }
+.row .summary { word-break: break-word; }
+/* Revealed on hover: it is the feature people reach for when something misbehaves, and a button on
+   every row all the time would drown the text it sits beside. */
+.copy { opacity: 0; transition: opacity .1s; font-size: 11px; padding: 2px 7px; }
+
+/* ---- settings ---- */
+.setting { margin-bottom: 20px; max-width: 68ch; }
+.switch { display: flex; align-items: center; gap: 9px; cursor: pointer; font-weight: 500; }
+.switch input { width: 16px; height: 16px; accent-color: var(--accent); }
+.gating { border-collapse: collapse; width: 100%; max-width: 68ch; font-size: 13px; }
+.gating th, .gating td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+.gating th { color: var(--text-dim); font-weight: 500; font-size: 12px; }
+.gating select {
+  font: inherit; font-size: 12.5px; padding: 3px 7px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--bg-sunken); color: var(--text);
+}
+
+/* The in-place rename field replaces its button, so it has to be about the same size. */
+input.rename {
+  font: inherit; font-size: 12.5px; padding: 4px 9px; border-radius: 7px;
+  border: 1px solid var(--accent); background: var(--bg-sunken); color: var(--text); width: 14ch;
+}
+
+.toast {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+  background: var(--bg-raised); border: 1px solid var(--line); border-radius: 999px;
+  padding: 8px 18px; font-size: 12.5px; box-shadow: 0 6px 24px rgba(0, 0, 0, .4);
+}

@@ -120,6 +120,12 @@ impl ApprovalStore {
         let Some(known) = self.file.instances.get(id) else {
             return Verdict::Unknown;
         };
+        if known.revoked && known.secret_hash.is_empty() {
+            // Refused before it was ever approved — "never" on an approval prompt. There is no
+            // secret on file to compare, so checking one first would report a mismatch and tell the
+            // instance the wrong thing about why it was turned away.
+            return Verdict::Revoked;
+        }
         if !constant_time_eq(&known.secret_hash, &hash_secret(secret)) {
             // Checked before `revoked` on purpose: something presenting the wrong secret should be
             // told its secret is wrong, not handed the information that this id was revoked.
@@ -183,6 +189,45 @@ impl ApprovalStore {
                 label_is_custom,
             },
         );
+    }
+
+    /// Records an instance as refused, for one that was never approved in the first place.
+    ///
+    /// Needed because "never" on an approval prompt has nothing to mark: the instance is unknown by
+    /// definition, so there is no record to revoke. Without a record it would be asked about again
+    /// on the next launch, which is the opposite of what "never" means.
+    ///
+    /// The secret hash is deliberately empty. Nothing should ever authenticate against this record —
+    /// it exists to be found and refused, and `evaluate` reports a mismatch before it reports a
+    /// revocation, so an empty hash would answer the wrong question. `is_denied` is what the link
+    /// checks.
+    pub fn deny_forever(&mut self, id: &str, label: &str, game_directory: Option<&str>) {
+        let existing = self.file.instances.get(id);
+        let label_is_custom = existing.is_some_and(|known| known.label_is_custom);
+        let secret_hash = existing
+            .map(|known| known.secret_hash.clone())
+            .unwrap_or_default();
+        self.file.instances.insert(
+            id.to_string(),
+            ApprovedInstance {
+                id: id.to_string(),
+                secret_hash,
+                label: label.to_string(),
+                game_directory: game_directory.map(str::to_string),
+                revoked: true,
+                approved_at: None,
+                label_is_custom,
+            },
+        );
+    }
+
+    /// Whether this id has been refused, whatever secret it presents.
+    pub fn is_denied(&self, id: &str) -> bool {
+        self.file
+            .instances
+            .get(id)
+            .map(|known| known.revoked)
+            .unwrap_or(false)
     }
 
     /// Marks an instance revoked, keeping the record so its secret hash still authenticates it.
@@ -316,6 +361,18 @@ mod tests {
 
         assert_eq!(store.evaluate("modb-dev", SECRET), Verdict::Revoked);
         assert_eq!(store.evaluate("modb-dev", OTHER_SECRET), Verdict::SecretMismatch);
+    }
+
+    #[test]
+    fn an_instance_refused_before_approval_reports_revoked_not_a_mismatch() {
+        // "Never" on an approval prompt has no secret on file to compare against. Reporting a
+        // mismatch would tell the instance its secret was wrong, which is both untrue and
+        // unactionable.
+        let mut store = store();
+        store.deny_forever("modb-dev", "modB dev", None);
+
+        assert_eq!(store.evaluate("modb-dev", SECRET), Verdict::Revoked);
+        assert!(store.is_denied("modb-dev"));
     }
 
     #[test]

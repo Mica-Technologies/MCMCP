@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MCMCP Orchestrator</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <!--
+      Deliberately one page with no framework and no build step.
+
+      The whole UI is a roster, a log and two kinds of prompt. A framework would add a bundler, a
+      node_modules, and a second toolchain to the release pipeline, in exchange for state management
+      this does not have enough state to need. `withGlobalTauri` puts the invoke/listen API on
+      `window.__TAURI__`, so there is not even a package to install.
+    -->
+    <header class="bar">
+      <div class="brand">
+        <span class="dot"></span>
+        <div>
+          <h1>MCMCP Orchestrator</h1>
+          <p id="subtitle" class="muted">starting…</p>
+        </div>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-panel="instances" role="tab">Instances</button>
+        <button class="tab" data-panel="log" role="tab">Log</button>
+        <button class="tab" data-panel="settings" role="tab">Settings</button>
+      </nav>
+    </header>
+
+    <!--
+      Prompts sit above the tabs rather than inside one. A model waiting on an approval is blocked
+      right now, and burying that behind a tab somebody is not looking at would make the app the
+      reason their game stopped responding.
+    -->
+    <section id="prompts" class="prompts" hidden></section>
+
+    <main>
+      <section id="panel-instances" class="panel">
+        <div id="instances" class="cards"></div>
+        <p id="instances-empty" class="empty" hidden>
+          No game has connected yet. Start Minecraft with MCMCP installed — the link is on by
+          default and dials <code id="empty-port">127.0.0.1:25580</code>. Run
+          <code>/mcmcp link</code> in-game to see what it thinks is happening.
+        </p>
+      </section>
+
+      <section id="panel-log" class="panel" hidden>
+        <div class="filters">
+          <input id="log-search" type="search" placeholder="Search…" />
+          <select id="log-instance"><option value="">All instances</option></select>
+          <select id="log-actor">
+            <option value="">Anyone</option>
+            <option value="model">Model</option>
+            <option value="human">Me</option>
+            <option value="system">System</option>
+          </select>
+          <select id="log-level">
+            <option value="">All levels</option>
+            <option value="warn">Warnings and errors</option>
+            <option value="error">Errors only</option>
+          </select>
+          <button id="log-export" class="ghost">Export…</button>
+        </div>
+        <div id="log" class="log"></div>
+        <p id="log-empty" class="empty" hidden>Nothing recorded yet.</p>
+      </section>
+
+      <section id="panel-settings" class="panel" hidden>
+        <div class="setting">
+          <label class="switch">
+            <input type="checkbox" id="strict-approval" />
+            <span>Ask before every connection</span>
+          </label>
+          <p class="muted">
+            Off, an instance is approved the first time it connects and remembered — trust on first
+            use. On, every connection needs a click, including from instances already approved.
+          </p>
+        </div>
+
+        <div class="setting">
+          <label class="switch">
+            <input type="checkbox" id="require-explicit" />
+            <span>Destructive calls must name their instance</span>
+          </label>
+          <p class="muted">
+            Closes the gap focus leaves open: if you move focus and the model does not notice, its
+            next world-changing call would land somewhere it did not intend. With this on, those
+            calls have to say which game they mean.
+          </p>
+        </div>
+
+        <h2>Gating</h2>
+        <p class="muted">
+          What to do with each kind of tool. <strong>Ask</strong> puts it to you here; it only works
+          while this app is running, and the headless orchestrator denies instead.
+        </p>
+        <table class="gating">
+          <thead>
+            <tr><th>Instance</th><th>Read-only</th><th>Changes things</th><th>Destructive</th></tr>
+          </thead>
+          <tbody id="gating"></tbody>
+        </table>
+
+        <h2>Where things live</h2>
+        <p class="muted">
+          State directory: <code id="state-dir">…</code><br />
+          Instances dial: <code id="link-port">…</code>
+        </p>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
