@@ -27,6 +27,27 @@ pub const NAMES: &[&str] = &[
 /// The prompt the orchestrator offers, for the workflow it exists to support.
 pub const COMPARE_PROMPT: &str = "compare_instances";
 
+/// Marks a tool as answered here rather than routed to a game.
+///
+/// Published in each tool's `_meta`, which MCP reserves for exactly this: information about a tool
+/// that is not part of its contract. It exists because guessing has failed twice. A hardcoded list
+/// went stale the moment a tool was added; the obvious replacement — "a tool with no `instance`
+/// argument must be ours" — is wrong too, because `mcmcp_read_logs` takes an optional `instance` to
+/// narrow to one game. The only reliable answer is the one the orchestrator gives directly.
+pub const ANSWERED_BY_META: &str = "mcmcp/answeredBy";
+pub const ANSWERED_BY_ORCHESTRATOR: &str = "orchestrator";
+
+/// Stamps a definition as the orchestrator's own.
+fn own(mut tool: Value) -> Value {
+    if let Some(object) = tool.as_object_mut() {
+        object.insert(
+            "_meta".to_string(),
+            json!({ ANSWERED_BY_META: ANSWERED_BY_ORCHESTRATOR }),
+        );
+    }
+    tool
+}
+
 /// A `string` property naming an instance, with the known ones as an enum where there are any.
 fn instance_property(addressable: &[String], description: &str) -> Value {
     let mut property = json!({ "type": "string", "description": description });
@@ -41,7 +62,7 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
     let target = instance_property(addressable, "The instance id, as reported by mcmcp_instances.");
 
     vec![
-        json!({
+        own(json!({
             "name": "mcmcp_instances",
             "title": "List Minecraft instances",
             "description": "List every Minecraft game connected to this orchestrator, with its id, \
@@ -52,8 +73,8 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                 running right now.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true },
-        }),
-        json!({
+        })),
+        own(json!({
             "name": "mcmcp_focus",
             "title": "Get or set the focused instance",
             "description": "Read or change which instance tool calls go to when they do not name one. \
@@ -65,8 +86,8 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                 "properties": { "target": target.clone() },
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true },
-        }),
-        json!({
+        })),
+        own(json!({
             "name": "mcmcp_set_label",
             "title": "Rename an instance",
             "description": "Give an instance a human-readable label, so it can be told apart from the \
@@ -81,8 +102,8 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                 "required": ["target", "label"],
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true },
-        }),
-        json!({
+        })),
+        own(json!({
             "name": "mcmcp_compare_instances",
             "title": "Compare what the connected games are running",
             "description": "Report what is DIFFERENT between the connected instances: which mods each \
@@ -95,8 +116,8 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                 change.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true },
-        }),
-        json!({
+        })),
+        own(json!({
             "name": "mcmcp_read_logs",
             "title": "Read several games' logs together",
             "description": "Read the tail of latest.log from every connected instance and interleave \
@@ -128,7 +149,7 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                 },
             },
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true },
-        }),
+        })),
     ]
 }
 
@@ -264,6 +285,20 @@ mod tests {
             .collect();
 
         assert_eq!(defined, NAMES);
+    }
+
+    #[test]
+    fn every_definition_says_the_orchestrator_answers_it() {
+        // Guessing has failed twice: a hardcoded list went stale, and "no instance argument means
+        // ours" is wrong because mcmcp_read_logs takes an optional one. This is the authoritative
+        // answer, and every tool has to carry it or the guessing comes back.
+        for tool in definitions(&[]) {
+            assert_eq!(
+                tool["_meta"][ANSWERED_BY_META], ANSWERED_BY_ORCHESTRATOR,
+                "{} does not say who answers it",
+                tool["name"]
+            );
+        }
     }
 
     #[test]

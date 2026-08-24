@@ -214,9 +214,46 @@ orchestrator {
 On by default and harmless when no orchestrator is running: one log line saying nothing is listening,
 then quiet retries backing off to 30 seconds. Your HTTP endpoint is unaffected either way.
 
-Only loopback is supported. The link is not encrypted and carries your instance secret followed by
-full control of the game, so `orchestratorHost` should stay `127.0.0.1`. Forward the port over SSH if
-you need an orchestrator on another machine.
+Only loopback is supported, and `orchestratorHost` should stay `127.0.0.1`. The link is not
+encrypted and carries your instance secret followed by full control of the game.
+
+That is not the same as "one machine only" — see below.
+
+## A game on another machine
+
+A dedicated server elsewhere can reach your orchestrator over an **SSH tunnel**, with no
+configuration change on either side. The game still dials `127.0.0.1:25580`; SSH is what carries it.
+
+This is the case with the most to gain, because the game server never needs an inbound port opened
+for it — which is normally the hard part of reaching a box you do not fully control.
+
+Whichever direction you can already SSH in, the result is the same: a listener on the game server's
+own loopback, forwarded to your orchestrator.
+
+```bash
+# If the game server can reach your workstation — run this ON THE GAME SERVER:
+ssh -N -L 25580:127.0.0.1:25580 you@workstation
+
+# If your workstation can reach the game server — run this ON YOUR WORKSTATION:
+ssh -N -R 25580:127.0.0.1:25580 you@gameserver
+```
+
+Leave `orchestratorHost=127.0.0.1` in the server's `mcmcp.cfg`. It is telling the truth: from the
+game's point of view the orchestrator *is* on loopback. Nothing crosses the network unencrypted, and
+the mod's non-loopback warning correctly stays quiet.
+
+Add `ServerAliveInterval 30` to your SSH config if the tunnel is long-lived. If it does drop, the
+link notices and reconnects with backoff exactly as it would for any other broken socket.
+
+!!! note "What has been tested"
+
+    The link has been verified through a proxied hop with 40 ms of added latency each way — a full
+    handshake, catalogue fetch, tool call and resource read, over 12 connections. That covers
+    everything a tunnel does to the link itself. SSH's own authentication and keepalive behaviour is
+    SSH's business and has not been exercised here.
+
+Native TLS is deliberately **not** offered. It would be more code and weaker security than an SSH
+tunnel you already know how to operate and audit.
 
 Network settings are read when the link starts, so changing them needs `/mcmcp restart`, not just
 `/mcmcp reload`.

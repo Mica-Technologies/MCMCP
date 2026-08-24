@@ -25,8 +25,24 @@ import subprocess
 import sys
 import time
 
-# The orchestrator's own tools, which exist whether or not a game is connected.
-ORCHESTRATOR_TOOLS = {"mcmcp_instances", "mcmcp_focus", "mcmcp_set_label"}
+# Which tools the orchestrator answers itself is READ from the catalogue, never listed here and
+# never inferred. See split_tools.
+def split_tools(tools):
+    """Returns (orchestrator's own, routed to a game).
+
+    Read from each tool's `_meta`, which the orchestrator stamps, rather than inferred. Two guesses
+    have already been wrong: a hardcoded list went stale the moment a tool was added, and "a tool
+    with no instance argument must be the orchestrator's" is wrong because mcmcp_read_logs takes an
+    optional instance to narrow to one game.
+    """
+    own, routed = set(), []
+    for tool in tools:
+        answered_by = (tool.get("_meta") or {}).get("mcmcp/answeredBy")
+        if answered_by == "orchestrator":
+            own.add(tool.get("name"))
+        else:
+            routed.append(tool)
+    return own, routed
 
 
 class Failure(Exception):
@@ -161,20 +177,22 @@ def check(orchestrator, link_timeout):
     # ---- the aggregated tool surface ----
     tools = orchestrator.request("tools/list").get("tools", [])
     names = {tool.get("name") for tool in tools}
-    if not ORCHESTRATOR_TOOLS.issubset(names):
-        raise Failure(f"the orchestrator's own tools are missing: {sorted(ORCHESTRATOR_TOOLS - names)}")
+    own, routed = split_tools(tools)
+
+    if "mcmcp_instances" not in own:
+        raise Failure(f"the orchestrator's roster tool is missing or was routed: {sorted(own)}")
     if "mcmcp_endpoint_info" not in names:
         raise Failure("the game's tools did not reach the aggregated catalogue")
 
-    # The instance argument is the whole addressing model. A tool without it cannot be aimed.
-    game_tools = [tool for tool in tools if tool.get("name") not in ORCHESTRATOR_TOOLS]
-    for tool in game_tools:
-        properties = (tool.get("inputSchema") or {}).get("properties") or {}
-        if "instance" not in properties:
-            raise Failure(f"tool {tool['name']} has no instance argument")
-        if "enum" not in properties["instance"]:
+    # The instance argument is the whole addressing model, and an enum is what makes a model pick
+    # from it reliably. Every routed tool must offer both.
+    for tool in routed:
+        if "enum" not in tool["inputSchema"]["properties"]["instance"]:
             raise Failure(f"tool {tool['name']} has no instance enum to choose from")
-    checked.append(f"{len(tools)} tools aggregated, every game tool addressable")
+    checked.append(
+        f"{len(tools)} tools aggregated: {len(routed)} routed and addressable, "
+        f"{len(own)} answered by the orchestrator"
+    )
 
     # ---- a real call, routed ----
     result = orchestrator.request(

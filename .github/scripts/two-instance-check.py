@@ -197,20 +197,16 @@ def main():
         names = {t["name"] for t in tools}
         per_instance = {i["instance"]: i["tools"] for i in connected}
         naive = sum(per_instance.values())
-        # The orchestrator's own tools are not from either game, so they are not part of the
-        # saving. Asserted rather than subtracted blindly: this list went stale once already when
-        # two tools were added, and the symptom was a tool count that looked like a real anomaly in
-        # the aggregation. Missing one now fails here instead of quietly inflating the number.
+        # Which tools the orchestrator answers itself is read from each tool's `_meta`, which it
+        # stamps, rather than listed here or inferred. Two guesses were already wrong: a hardcoded
+        # list went stale when a tool was added, and "no instance argument means ours" is wrong
+        # because mcmcp_read_logs takes an optional instance.
         orchestrator_own = {
-            "mcmcp_instances",
-            "mcmcp_focus",
-            "mcmcp_set_label",
-            "mcmcp_compare_instances",
-            "mcmcp_read_logs",
+            t["name"] for t in tools
+            if (t.get("_meta") or {}).get("mcmcp/answeredBy") == "orchestrator"
         }
-        missing = orchestrator_own - names
-        if missing:
-            raise RuntimeError(f"the orchestrator's own tools are missing: {sorted(missing)}")
+        if "mcmcp_instances" not in orchestrator_own:
+            raise RuntimeError("the orchestrator did not mark its own tools in _meta")
         game_tools = len(names - orchestrator_own)
         checks.append(
             f"{game_tools} game tools aggregated from {naive} across both "
