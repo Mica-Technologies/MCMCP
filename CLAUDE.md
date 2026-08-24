@@ -38,6 +38,11 @@ export JAVA_HOME="/Users/<user>/Library/Java/JavaVirtualMachines/azul-21.0.x/Con
 
 bash .github/scripts/server-smoke-test.sh     # boot a server + drive a real MCP handshake
 bash .github/scripts/orchestrator-e2e.sh     # boot a server + drive a real MCP client through the orchestrator
+
+# Two instances at once — the configuration the orchestrator exists for, and the only place
+# aggregation, focus and fan-out are reachable. Local only: it needs a dev CLIENT, which needs a
+# display, so CI cannot run it. Start runServer and runClient, then:
+python .github/scripts/two-instance-check.py
 ```
 
 The orchestrator is a separate Cargo workspace. **Rust is not on the default PATH here**:
