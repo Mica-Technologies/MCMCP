@@ -19,3 +19,4 @@ tauri = { version = "2", features = ["tray-icon"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tauri-plugin-autostart = "2.5.1"

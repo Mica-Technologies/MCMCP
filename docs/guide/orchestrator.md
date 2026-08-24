@@ -179,6 +179,19 @@ it optimistically that these capabilities exist. If the client that eventually a
 them, the tool gets a clear error naming the missing capability. That is a better failure than
 telling the game the capability was absent and having it never try.
 
+## Starting with your computer
+
+Off by default, and you do not need it — your MCP client starts the app on demand through the shim.
+
+Tick **Start when I log in** in Settings if you would rather the app were already there when you
+launch your games. The difference is *when you get asked to approve them*: with the app already
+running, a game's approval prompt appears while you are launching it, instead of arriving a few
+turns into a conversation once your MCP client has brought the app up.
+
+It writes a normal login item — a Run key entry on Windows, a LaunchAgent on macOS, a `.desktop`
+entry on Linux — and the checkbox reads back from the system rather than from a setting of its own,
+so removing the entry by hand is reflected honestly.
+
 ## Gating
 
 Off by default, because the orchestrator is not a security boundary — your MCP client is already

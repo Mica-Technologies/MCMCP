@@ -314,6 +314,7 @@ async function renderSettings() {
   $("mcp-config").textContent = config;
 
   $("strict-approval").checked = settings.strict_approval;
+  $("autostart").checked = settings.autostart;
   $("require-explicit").checked = settings.require_explicit_instance_for_destructive;
   $("state-dir").textContent = settings.state_directory;
   $("link-port").textContent = `127.0.0.1:${settings.link_port}`;
@@ -384,6 +385,16 @@ $("strict-approval").addEventListener("change", (event) =>
 $("require-explicit").addEventListener("change", (event) =>
   call("set_require_explicit_instance", { require: event.target.checked }),
 );
+$("autostart").addEventListener("change", async (event) => {
+  try {
+    await invoke("set_autostart", { enabled: event.target.checked });
+  } catch (error) {
+    // Put the box back to what the system actually says, rather than leaving it showing a state
+    // that was never applied.
+    toast(String(error));
+    event.target.checked = await invoke("get_autostart");
+  }
+});
 
 listen("mcmcp://changed", refresh);
 

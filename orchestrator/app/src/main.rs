@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -502,6 +503,7 @@ fn approve_known(state: State<'_, AppState>, app: AppHandle, instance: String) -
 #[derive(Serialize)]
 struct Settings {
     strict_approval: bool,
+    autostart: bool,
     require_explicit_instance_for_destructive: bool,
     defaults: PolicyView,
     per_instance: HashMap<String, PolicyView>,
@@ -526,7 +528,7 @@ fn rule_name(rule: Rule) -> String {
 }
 
 #[tauri::command]
-fn get_settings(state: State<'_, AppState>) -> Settings {
+fn get_settings(app: AppHandle, state: State<'_, AppState>) -> Settings {
     let policy = state.policy.lock().expect("policy lock");
     let view = |rules: &mcmcp_orchestrator_core::policy::ClassRules| PolicyView {
         read_only: rule_name(rules.read_only),
@@ -539,6 +541,8 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
             .lock()
             .map(|store| store.strict_approval())
             .unwrap_or(false),
+        // Asked of the platform, not remembered here — see get_autostart.
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
         require_explicit_instance_for_destructive: policy.require_explicit_instance_for_destructive,
         defaults: view(&policy.defaults),
         per_instance: policy
@@ -631,6 +635,46 @@ fn set_require_explicit_instance(
     control::save_policy(&state.policy_path, &policy).map_err(|error| error.to_string())?;
     drop(policy);
 
+    let _ = app.emit(CHANGED, ());
+    Ok(())
+}
+
+/// Whether the app is set to start when the user logs in.
+///
+/// Read from the platform rather than from a setting of our own — the registry Run key, a
+/// LaunchAgent, or a `.desktop` entry, depending. Keeping our own copy would let the two disagree
+/// the moment somebody removed the entry by hand, and the honest answer to "will this start with my
+/// computer" is whatever the operating system thinks.
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> bool {
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// Turns start-at-login on or off.
+///
+/// **Off unless somebody ticks it.** A tool that adds itself to startup without being asked is a
+/// tool people uninstall, and the shim already starts the app on demand — so this is a preference
+/// for the case where you would rather the games connect and be approved while you are launching
+/// them, instead of a few turns into a conversation.
+#[tauri::command]
+fn set_autostart(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    let outcome = if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    outcome.map_err(|error| format!("could not change the login item: {error}"))?;
+
+    state.events.note(
+        Actor::Human,
+        None,
+        if enabled {
+            "will start at login"
+        } else {
+            "will no longer start at login"
+        },
+    );
     let _ = app.emit(CHANGED, ());
     Ok(())
 }
@@ -748,6 +792,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     tauri::Builder::default()
+        // No arguments passed to the launched copy: started at login it should behave exactly as it
+        // does when started by hand, and a flag here would be a second code path nobody exercises.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             list_instances,
@@ -766,6 +816,8 @@ fn main() -> anyhow::Result<()> {
             set_require_explicit_instance,
             export_events,
             mcp_client_config,
+            get_autostart,
+            set_autostart,
         ])
         .setup(move |app| {
             install_tray(app.handle())?;
