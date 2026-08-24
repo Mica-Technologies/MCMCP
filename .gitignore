@@ -74,3 +74,6 @@ docs/agent-plans/
 
 # Rust build output for the orchestrator workspace. Same reasoning as build/ above.
 orchestrator/target/
+
+# Tauri writes these from tauri.conf.json and the capability files on every build.
+orchestrator/app/gen/schemas/
