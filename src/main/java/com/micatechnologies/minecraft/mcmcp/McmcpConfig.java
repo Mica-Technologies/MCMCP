@@ -1,6 +1,7 @@
 package com.micatechnologies.minecraft.mcmcp;
 
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
+import com.micatechnologies.minecraft.mcmcp.link.LinkSettings;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpointSettings;
 import java.io.File;
 import java.security.SecureRandom;
@@ -9,6 +10,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import javax.annotation.Nullable;
 import net.minecraftforge.common.config.Configuration;
 
 /**
@@ -43,6 +45,8 @@ public class McmcpConfig {
     private static final String CATEGORY_ENDPOINTS = "endpoints";
     private static final String CATEGORY_PERMISSIONS = "permissions";
     private static final String CATEGORY_LIMITS = "limits";
+    private static final String CATEGORY_IDENTITY = "identity";
+    private static final String CATEGORY_ORCHESTRATOR = "orchestrator";
 
     /**
      * Dev-launch overrides injected by {@code addon.gradle}.
@@ -57,6 +61,17 @@ public class McmcpConfig {
     private static final String DEV_AUTOSTART_PROPERTY = "mcmcp.dev.autostart";
 
     private static Configuration configuration;
+
+    /**
+     * The game installation root, remembered from the config file's location.
+     *
+     * <p>{@code McmcpPaths.gameDirectory()} goes through {@code Loader}, which is fine everywhere
+     * else but would tie this class to Forge's load order during {@code preInit}. The config file
+     * Forge suggests is always {@code <gameDir>/config/mcmcp.cfg}, so two parent hops get there
+     * with no dependency at all — and it is needed here only to name a default.
+     */
+    @Nullable
+    private static File gameDirectory;
 
     // Endpoints
     private static boolean clientEndpointEnabled = true;
@@ -80,6 +95,18 @@ public class McmcpConfig {
     private static boolean allowChat = true;
     private static Set<String> blockedCommands = Collections.emptySet();
 
+    // Identity
+    private static String instanceId = "";
+    private static String instanceSecret = "";
+    private static String instanceName = "";
+
+    // Orchestrator link
+    private static boolean orchestratorEnabled = true;
+    private static String orchestratorHost = "127.0.0.1";
+    private static int orchestratorPort = 25580;
+    private static int orchestratorBackoffInitialMillis = 1000;
+    private static int orchestratorBackoffMaxMillis = 30000;
+
     // Limits
     private static int maxSessions = 8;
     private static int sessionIdleTimeoutSeconds = 1800;
@@ -101,6 +128,10 @@ public class McmcpConfig {
      * read before they go looking for it.
      */
     public static void init(File configFile) {
+        // <gameDir>/config/mcmcp.cfg -> <gameDir>. Only ever used to name a default instance label.
+        File configDir = configFile == null ? null : configFile.getParentFile();
+        gameDirectory = configDir == null ? null : configDir.getParentFile();
+
         configuration = new Configuration(configFile);
         configuration.load();
         read();
@@ -173,6 +204,57 @@ public class McmcpConfig {
                 + "This is the DNS-rebinding defence: without it, a web page you visit could have your "
                 + "browser POST to this endpoint and drive your game. Requests with no Origin header — "
                 + "which is every non-browser MCP client — are unaffected. '*' disables the check."));
+
+        // Identity
+        instanceId = configuration.getString("instanceId", CATEGORY_IDENTITY, "",
+            "Stable id for this game instance, generated on first launch if left empty.\n"
+                + "An orchestrator stores its approval of this instance against this id, so changing "
+                + "it means being asked to approve the instance again. It survives moving or renaming "
+                + "the instance folder; that is the point of it.");
+
+        instanceSecret = configuration.getString("instanceSecret", CATEGORY_IDENTITY, "",
+            "Secret this instance proves its identity with when connecting to an orchestrator. "
+                + "Generated automatically on first launch.\n"
+                + "Treat this like a password. Without it, any process on this machine could claim to "
+                + "be this instance and inherit whatever access you have granted it. Rotate it by "
+                + "clearing this value and restarting — you will be asked to approve the instance "
+                + "again.");
+
+        instanceName = configuration.getString("instanceName", CATEGORY_IDENTITY, "",
+            "Human-readable name for this instance, shown in an orchestrator's roster and in tool "
+                + "results. Defaults to this instance folder's name.\n"
+                + "This is the one field here meant to be edited. Name it after what you are doing in "
+                + "it — 'mymod dev', 'vanilla control' — because it is how you and a model will tell "
+                + "several running games apart.");
+
+        // Orchestrator link
+        orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR, true,
+            "Connect out to an MCMCP orchestrator, so several running game instances can be driven "
+                + "through one MCP endpoint.\n"
+                + "Harmless when no orchestrator is running: the link retries quietly in the "
+                + "background and the game is unaffected. This does not replace the HTTP endpoint "
+                + "above — both run, and either can be used on its own.");
+
+        orchestratorHost = configuration.getString("orchestratorHost", CATEGORY_ORCHESTRATOR, "127.0.0.1",
+            "Host the orchestrator is listening on.\n"
+                + "Only loopback is supported today. The link carries this instance's secret and then "
+                + "full control of this game, and it is not encrypted yet — do not point it across a "
+                + "network.");
+
+        orchestratorPort = configuration.getInt("orchestratorPort", CATEGORY_ORCHESTRATOR, 25580, 1024, 65535,
+            "TCP port the orchestrator is listening on.");
+
+        orchestratorBackoffInitialMillis = configuration.getInt("reconnectBackoffMillis",
+            CATEGORY_ORCHESTRATOR, 1000, 100, 60000,
+            "How long to wait before the first reconnect attempt, in milliseconds. The delay doubles "
+                + "after each failure up to reconnectBackoffMaxMillis.");
+
+        orchestratorBackoffMaxMillis = configuration.getInt("reconnectBackoffMaxMillis",
+            CATEGORY_ORCHESTRATOR, 30000, 1000, 600000,
+            "Longest gap between reconnect attempts, in milliseconds.\n"
+                + "The common case is no orchestrator installed at all, so this wants to be long "
+                + "enough that retrying costs nothing and short enough that starting the app is "
+                + "noticed within a few seconds of it being ready.");
 
         // Permissions
         allowCommands = configuration.getBoolean("allowCommands", CATEGORY_PERMISSIONS, true,
@@ -249,6 +331,45 @@ public class McmcpConfig {
             "Most log lines returnable in one call.");
 
         ensureAuthToken();
+        ensureIdentity();
+    }
+
+    /**
+     * Generates and persists the instance id, secret and default label when they are missing.
+     *
+     * <p>Runs on every load, not just the first: clearing any one of the three in the file is the
+     * documented way to rotate it, and each is regenerated independently so clearing the secret does
+     * not silently change the id and cost the user their orchestrator approval as well.
+     *
+     * <p>Unlike {@link #ensureAuthToken()} this is unconditional — it does not check whether the
+     * orchestrator link is enabled. The identity is also what {@code /mcmcp status} and
+     * {@code mcmcp_endpoint_info} report, and an instance that can be told apart from its neighbours
+     * is useful whether or not it is currently linked to anything.
+     */
+    private static void ensureIdentity() {
+        String directoryName = gameDirectory == null ? null : gameDirectory.getName();
+        boolean changed = false;
+
+        if (instanceId.trim().isEmpty()) {
+            instanceId = McmcpIdentity.generateInstanceId(directoryName);
+            configuration.get(CATEGORY_IDENTITY, "instanceId", "").set(instanceId);
+            changed = true;
+        }
+        if (instanceSecret.trim().isEmpty()) {
+            instanceSecret = McmcpIdentity.generateSecret();
+            configuration.get(CATEGORY_IDENTITY, "instanceSecret", "").set(instanceSecret);
+            changed = true;
+        }
+        if (instanceName.trim().isEmpty()) {
+            instanceName = directoryName == null || directoryName.isEmpty() ? instanceId : directoryName;
+            configuration.get(CATEGORY_IDENTITY, "instanceName", "").set(instanceName);
+            changed = true;
+        }
+
+        if (changed) {
+            configuration.save();
+            Mcmcp.LOGGER.info("MCMCP instance identity: " + instanceId + " (\"" + instanceName + "\")");
+        }
     }
 
     /**
@@ -351,6 +472,26 @@ public class McmcpConfig {
 
     public static int getMaxLogLines() {
         return maxLogLines;
+    }
+
+    public static boolean isOrchestratorLinkEnabled() {
+        return orchestratorEnabled;
+    }
+
+    /** This instance's identity. Never put {@code getInstanceSecret()} anywhere a human can read it. */
+    public static McmcpIdentity identity() {
+        return new McmcpIdentity(instanceId, instanceSecret, instanceName);
+    }
+
+    /** Builds the immutable settings snapshot the orchestrator link runs with. */
+    public static LinkSettings linkSettings() {
+        return LinkSettings.builder()
+            .enabled(orchestratorEnabled)
+            .host(orchestratorHost)
+            .port(orchestratorPort)
+            .backoffInitialMillis(orchestratorBackoffInitialMillis)
+            .backoffMaxMillis(orchestratorBackoffMaxMillis)
+            .build();
     }
 
     /** Builds the immutable settings snapshot one endpoint runs with. */
