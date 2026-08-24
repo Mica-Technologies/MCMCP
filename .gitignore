@@ -71,3 +71,6 @@ example-source/
 # constantly and are written for whoever/whatever is doing the work right now, not for
 # the repo's history. Matches docs/agent-plans/ in the sibling Mica mods.
 docs/agent-plans/
+
+# Rust build output for the orchestrator workspace. Same reasoning as build/ above.
+orchestrator/target/

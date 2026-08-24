@@ -1,0 +1,20 @@
+[package]
+name = "mcmcp-orchestrator"
+description = "Headless MCMCP orchestrator: one MCP endpoint for every linked Minecraft instance."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mcmcp-orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+mcmcp-orchestrator-core = { path = "../core" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
