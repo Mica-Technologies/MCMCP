@@ -256,16 +256,56 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      # `cargo install` rather than a prebuilt-binary action. It costs a couple of minutes per
+      # platform, in parallel so wall clock barely moves, and it cannot fail because a third-party
+      # action's supported-tool list changed. A release job should be boring.
       - name: Install the Tauri CLI
-        uses: taiki-e/install-action@v2
-        with:
-          tool: tauri-cli
+        run: cargo install tauri-cli --locked --version "^2"
 
       # The headless binary and the shim are the same executable, and the shim is what an MCP client
       # spawns — so it ships beside the app rather than instead of it.
       - name: Build the headless orchestrator
         working-directory: orchestrator
         run: cargo build --release --target ${{ matrix.target }} -p mcmcp-orchestrator
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          name="mcmcp-orchestrator-${{ needs.assemble_release.outputs.mod_version }}-${{ matrix.target }}"
+          staging="$(mktemp -d)/$name"
+          mkdir -p "$staging"
+          cp orchestrator/target/${{ matrix.target }}/release/mcmcp-orchestrator "$staging/"
+          cp LICENSE.txt "$staging/" 2>/dev/null || true
+          cp docs/guide/orchestrator.md "$staging/README.md" 2>/dev/null || true
+          tar -czf "$name.tar.gz" -C "$(dirname "$staging")" "$name"
+          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "mcmcp-orchestrator-${{ needs.assemble_release.outputs.mod_version }}-${{ matrix.target }}"
+          $staging = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "orchestrator/target/${{ matrix.target }}/release/mcmcp-orchestrator.exe" $staging
+          if (Test-Path "LICENSE.txt") { Copy-Item "LICENSE.txt" $staging }
+          if (Test-Path "docs/guide/orchestrator.md") { Copy-Item "docs/guide/orchestrator.md" (Join-Path $staging "README.md") }
+          Compress-Archive -Path $staging -DestinationPath "$name.zip" -Force
+          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Attached BEFORE the installers are built, on purpose.
+      #
+      # Bundling is the step most likely to fail on a platform nobody has exercised, and with
+      # continue-on-error gone a failure there ends the job. Publishing the binary first means such
+      # a failure costs only that platform's installers, not its binary as well — while the job
+      # still goes red so somebody notices.
+      - name: Attach the headless binary to the release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.assemble_release.outputs.tag }}
+          files: ${{ env.ASSET }}
 
       # The app cannot serve MCP over stdio, so an MCP client spawns the shim instead — and the
       # app's own Settings panel hands out a configuration pointing at it *next to the app*.
@@ -311,43 +351,14 @@ jobs:
             exit 1
           fi
 
-      - name: Package (tar.gz)
-        if: matrix.archive == 'tar.gz'
-        run: |
-          name="mcmcp-orchestrator-${{ needs.assemble_release.outputs.mod_version }}-${{ matrix.target }}"
-          staging="$(mktemp -d)/$name"
-          mkdir -p "$staging"
-          cp orchestrator/target/${{ matrix.target }}/release/mcmcp-orchestrator "$staging/"
-          cp LICENSE.txt "$staging/" 2>/dev/null || true
-          cp docs/guide/orchestrator.md "$staging/README.md" 2>/dev/null || true
-          tar -czf "$name.tar.gz" -C "$(dirname "$staging")" "$name"
-          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
-
-      - name: Package (zip)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $name = "mcmcp-orchestrator-${{ needs.assemble_release.outputs.mod_version }}-${{ matrix.target }}"
-          $staging = Join-Path $env:RUNNER_TEMP $name
-          New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          Copy-Item "orchestrator/target/${{ matrix.target }}/release/mcmcp-orchestrator.exe" $staging
-          if (Test-Path "LICENSE.txt") { Copy-Item "LICENSE.txt" $staging }
-          if (Test-Path "docs/guide/orchestrator.md") { Copy-Item "docs/guide/orchestrator.md" (Join-Path $staging "README.md") }
-          Compress-Archive -Path $staging -DestinationPath "$name.zip" -Force
-          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Attach to the release
+      - name: Attach the installers to the release
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ needs.assemble_release.outputs.tag }}
-          # The release already exists and already has its notes; this only adds files to it.
-          #
-          # Installers are UNSIGNED. That is a deliberate deferral — this is a personal tool and a
-          # certificate costs money annually — and it means Windows SmartScreen and macOS Gatekeeper
-          # will both complain. Nothing here precludes signing later: tauri-bundler takes signing
+          # Installers are UNSIGNED. A deliberate deferral for a personal tool — a certificate costs
+          # money annually — which means Windows SmartScreen and macOS Gatekeeper will both
+          # complain. Nothing here precludes signing later: tauri-bundler takes signing
           # configuration, so it becomes a config addition and a secret rather than a rewrite.
-          files: |
-            ${{ env.ASSET }}
-            dist/*
+          files: dist/*
