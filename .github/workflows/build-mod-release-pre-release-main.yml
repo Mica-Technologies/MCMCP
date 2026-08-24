@@ -228,7 +228,13 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: macos-13
+          # Cross-compiled from the ARM runner rather than built on macos-13.
+          #
+          # macos-13 is GitHub's Intel image, and it is being retired — a job requesting it sat
+          # queued for 45 minutes on the first release with no runner ever picking it up. Apple
+          # Silicon runners are plentiful and can target x86_64 directly, so this is both faster and
+          # not dependent on hardware that is going away.
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive: tar.gz
           - os: windows-latest
