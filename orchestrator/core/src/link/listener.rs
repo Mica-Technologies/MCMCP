@@ -337,18 +337,18 @@ where
             continue;
         }
 
-        // A *request* from the instance — sampling or elicitation. Nothing here answers those yet,
-        // and leaving a request unanswered would hang whatever tool is waiting on it inside the
-        // game, so refuse explicitly.
-        if let Some(request_id) = jsonrpc::id_of(&frame) {
+        // A *request* from the instance — sampling, elicitation, roots. Handed to the router, which
+        // forwards it to the MCP client and routes the answer back under the id used here.
+        //
+        // Never dropped. A request left unanswered hangs whatever tool is waiting on it inside the
+        // game until its own timeout, and the game has no way to tell that from a slow answer.
+        if jsonrpc::id_of(&frame).is_some() {
             let method = jsonrpc::method_of(&frame).unwrap_or("(unknown)").to_string();
-            let refusal = jsonrpc::error(
-                Some(request_id),
-                jsonrpc::METHOD_NOT_FOUND,
-                "this orchestrator does not forward server-to-client requests yet",
-            );
-            let _ = instance.notify_raw(refusal).await;
-            debug!(instance = %id, %method, "refused a server-to-client request");
+            debug!(instance = %id, %method, "forwarding a server-to-client request");
+            let _ = context.events.send(UpstreamEvent::Request {
+                instance: id.clone(),
+                message: frame,
+            });
         }
     }
     Ok(())

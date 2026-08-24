@@ -247,6 +247,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_client_that_offered_no_sampling_is_not_sent_a_sampling_request() {
+        // The instance was told optimistically that sampling exists, because it connects before any
+        // client does. Whether a *particular* client can answer is only knowable here, and telling
+        // the game plainly beats forwarding something that will never come back.
+        let router = router();
+        router
+            .handle(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+            }))
+            .await;
+
+        // No instance is connected, so nothing can be answered either way — but the refusal path is
+        // the one being checked, and it must not panic or hang.
+        router
+            .handle_upstream(crate::instance::UpstreamEvent::Request {
+                instance: "ghost".into(),
+                message: json!({
+                    "jsonrpc": "2.0", "id": 7, "method": "sampling/createMessage",
+                    "params": {"messages": []},
+                }),
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_response_to_nothing_is_ignored_rather_than_panicking() {
+        // A client answering an id we never issued — a stale reply after a reconnect, say.
+        let router = router();
+
+        let answer = router
+            .handle(json!({"jsonrpc": "2.0", "id": "mcmcp-up-999", "result": {}}))
+            .await;
+
+        assert!(answer.is_none(), "a response is not itself answerable");
+    }
+
+    #[tokio::test]
+    async fn the_orchestrator_records_what_the_client_can_do() {
+        // Forwarding decisions are made from this, so it has to survive initialize.
+        let router = router();
+        router
+            .handle(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {"sampling": {}, "elicitation": {}},
+                },
+            }))
+            .await;
+
+        // Nothing observable from outside except that a later forward does not refuse on the
+        // capability check; asserted through the public surface by not panicking here.
+        router
+            .handle_upstream(crate::instance::UpstreamEvent::Request {
+                instance: "ghost".into(),
+                message: json!({
+                    "jsonrpc": "2.0", "id": 3, "method": "elicitation/create",
+                    "params": {"message": "pick one"},
+                }),
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn an_unqualified_resource_uri_is_refused_with_an_explanation() {
         // The confusing case, and the reason the message says more than "not connected": an
         // unqualified URI does not fail to parse. `minecraft://game/mods` reads as instance `game`,

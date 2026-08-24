@@ -164,6 +164,21 @@ doing in it — `mymod dev`, `vanilla control`. Renaming it in the app wins over
 be an instance you have already approved. Never logged, never printed by a command, never in a tool
 result. Rotate it by clearing the value and restarting; you will be asked to approve again.
 
+## Tools that ask you something
+
+A tool can ask a question back — MCP calls these **sampling** (ask the model) and **elicitation**
+(ask the human). Nothing MCMCP ships uses them; they are there so a mod registering its own tools
+can.
+
+The orchestrator routes them in both directions, rewriting ids on each hop, and answers rather than
+drops a request it cannot forward — an unanswered request leaves a tool blocked inside the game
+until its own timeout, with no way to tell a slow answer from one that is never coming.
+
+One wrinkle worth knowing: a game connects long before any MCP client does, so the orchestrator tells
+it optimistically that these capabilities exist. If the client that eventually attaches did not offer
+them, the tool gets a clear error naming the missing capability. That is a better failure than
+telling the game the capability was absent and having it never try.
+
 ## Gating
 
 Off by default, because the orchestrator is not a security boundary — your MCP client is already

@@ -20,7 +20,7 @@
 
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
@@ -70,6 +70,18 @@ pub struct Router {
     cached: Mutex<Option<Aggregate>>,
     /// Client request id to the instance and instance-side id handling it, for cancellation.
     inflight: Mutex<HashMap<String, (Arc<Instance>, String)>>,
+    /// The other direction: an id this orchestrator gave the client, to the instance waiting on it
+    /// and the id that instance used.
+    ///
+    /// Two hops, two namespaces. The instance numbered its request without knowing anything about
+    /// the client, and the client must not be handed an id another instance is also using.
+    awaiting_client: Mutex<HashMap<String, (String, Value)>>,
+    next_client_request: AtomicU64,
+    /// What the attached client said it could do at `initialize`.
+    ///
+    /// Consulted before forwarding a sampling or elicitation request, so a client that never
+    /// declared the capability is told plainly rather than sent something it will not answer.
+    client_capabilities: Mutex<Value>,
     protocol_version: Mutex<String>,
     initialized: AtomicBool,
     events: EventLog,
@@ -102,6 +114,9 @@ impl Router {
             downstream,
             cached: Mutex::new(None),
             inflight: Mutex::new(HashMap::new()),
+            awaiting_client: Mutex::new(HashMap::new()),
+            next_client_request: AtomicU64::new(1),
+            client_capabilities: Mutex::new(json!({})),
             protocol_version: Mutex::new(LATEST_PROTOCOL_VERSION.to_string()),
             initialized: AtomicBool::new(false),
             events: EventLog::in_memory(),
@@ -167,7 +182,8 @@ impl Router {
     pub async fn handle(&self, message: Value) -> Option<Value> {
         let id = jsonrpc::id_of(&message);
         let Some(method) = jsonrpc::method_of(&message).map(str::to_string) else {
-            // A response to something we asked. Nothing here asks the client anything yet.
+            // A response to something an *instance* asked, travelling back the other way.
+            self.route_client_response(message).await;
             return None;
         };
         let params = message.get("params").cloned();
@@ -273,6 +289,11 @@ impl Router {
             LATEST_PROTOCOL_VERSION.to_string()
         };
         *self.protocol_version.lock().expect("protocol lock") = negotiated.clone();
+        *self.client_capabilities.lock().expect("capabilities lock") = params
+            .as_ref()
+            .and_then(|params| params.get("capabilities"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         json!({
             "protocolVersion": negotiated,
@@ -1273,6 +1294,9 @@ impl Router {
             UpstreamEvent::Notification { instance, message } => {
                 self.forward_notification(&instance, message).await;
             }
+            UpstreamEvent::Request { instance, message } => {
+                self.forward_client_request(&instance, message).await;
+            }
         }
     }
 
@@ -1293,6 +1317,92 @@ impl Router {
                 "data": reason,
             })),
         ));
+    }
+
+    /// Sends an instance's request on to the MCP client, under an id of our own.
+    ///
+    /// Refused here rather than forwarded when no client can answer it — a request that vanishes
+    /// leaves a tool blocked inside the game until its own timeout, with no way to tell a slow
+    /// answer from one that is never coming.
+    async fn forward_client_request(&self, instance_id: &str, message: Value) {
+        let Some(instance_request_id) = jsonrpc::id_of(&message) else {
+            return;
+        };
+        let method = jsonrpc::method_of(&message).unwrap_or("").to_string();
+
+        let capability = match method.as_str() {
+            "sampling/createMessage" => Some("sampling"),
+            "elicitation/create" => Some("elicitation"),
+            "roots/list" => Some("roots"),
+            _ => None,
+        };
+
+        let refusal = match capability {
+            None => Some(format!(
+                "this orchestrator does not forward '{method}' to an MCP client"
+            )),
+            Some(capability)
+                if self
+                    .client_capabilities
+                    .lock()
+                    .expect("capabilities lock")
+                    .get(capability)
+                    .is_none() =>
+            {
+                Some(format!(
+                    "the MCP client attached to this orchestrator did not offer the '{capability}' \
+                     capability, so '{method}' cannot be answered"
+                ))
+            }
+            Some(_) => None,
+        };
+
+        if let Some(reason) = refusal {
+            debug!(instance = %instance_id, %method, "refusing a server-to-client request");
+            self.answer_instance(
+                instance_id,
+                jsonrpc::error(Some(instance_request_id), jsonrpc::METHOD_NOT_FOUND, &reason),
+            )
+            .await;
+            return;
+        }
+
+        let sequence = self.next_client_request.fetch_add(1, Ordering::Relaxed);
+        let client_request_id = format!("mcmcp-up-{sequence}");
+        self.awaiting_client.lock().expect("awaiting lock").insert(
+            client_request_id.clone(),
+            (instance_id.to_string(), instance_request_id),
+        );
+
+        let mut forwarded = message;
+        forwarded["id"] = json!(client_request_id);
+        self.notify_downstream(forwarded);
+    }
+
+    /// Routes the client's answer back to the instance that asked.
+    async fn route_client_response(&self, message: Value) {
+        let Some(id) = jsonrpc::id_of(&message) else {
+            return;
+        };
+        let key = id_key(&id);
+        let waiting = self.awaiting_client.lock().expect("awaiting lock").remove(&key);
+        let Some((instance_id, instance_request_id)) = waiting else {
+            debug!(%key, "a client response arrived for a request nobody is waiting on");
+            return;
+        };
+
+        // Rewritten to the id the instance used. It has never seen ours.
+        let mut answer = message;
+        answer["id"] = instance_request_id;
+        self.answer_instance(&instance_id, answer).await;
+    }
+
+    async fn answer_instance(&self, instance_id: &str, frame: Value) {
+        match self.registry.get(instance_id) {
+            Some(instance) => instance.notify_raw(frame).await,
+            // The game went away while its own question was in flight. Nothing to answer.
+            None => debug!(instance = %instance_id, "cannot answer; the instance disconnected"),
+        }
     }
 
     async fn forward_notification(&self, instance_id: &str, message: Value) {
@@ -1476,6 +1586,178 @@ fn leading_timestamp(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::instance::{Instance, InstanceInfo, UpstreamEvent};
+    use crate::link::protocol::Side;
+    use crate::registry::Registry;
+    use crate::store::ApprovalStore;
+    use std::sync::Arc;
+
+    fn router_with(instance_id: &str) -> (Arc<Router>, Arc<Instance>, tokio::sync::mpsc::Receiver<Value>) {
+        let (sender, outbound) = tokio::sync::mpsc::channel(8);
+        let instance = Arc::new(Instance::new(
+            InstanceInfo {
+                id: instance_id.into(),
+                label: instance_id.into(),
+                side: Side::Client,
+                game_directory: None,
+                mod_version: "test".into(),
+                minecraft_version: "1.12.2".into(),
+                endpoint_url: None,
+            },
+            sender,
+        ));
+        let registry = Arc::new(Registry::new());
+        registry.insert(Arc::clone(&instance));
+        let router = Arc::new(Router::new(
+            registry,
+            Arc::new(Mutex::new(ApprovalStore::load("unused-in-tests.json").unwrap())),
+        ));
+        (router, instance, outbound)
+    }
+
+    async fn declare_client_capabilities(router: &Router, capabilities: Value) {
+        router
+            .handle(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": "2025-06-18", "capabilities": capabilities },
+            }))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_request_from_a_game_reaches_the_client_under_a_different_id() {
+        // Two hops, two id namespaces. The game numbered its request knowing nothing about the
+        // client, and two games would happily both use 7 — so the client must never see the raw one.
+        let (router, _instance, _outbound) = router_with("alpha");
+        declare_client_capabilities(&router, json!({"sampling": {}})).await;
+        let mut downstream = router.subscribe_downstream();
+
+        router
+            .handle_upstream(UpstreamEvent::Request {
+                instance: "alpha".into(),
+                message: json!({
+                    "jsonrpc": "2.0", "id": 7, "method": "sampling/createMessage",
+                    "params": {"messages": []},
+                }),
+            })
+            .await;
+
+        let forwarded = downstream
+            .recv()
+            .await
+            .expect("the request should reach the client");
+        assert_eq!(jsonrpc::method_of(&forwarded), Some("sampling/createMessage"));
+        assert_ne!(
+            jsonrpc::id_of(&forwarded),
+            Some(json!(7)),
+            "the game's id must not leak through"
+        );
+        // The params travel untouched; only the envelope is rewritten.
+        assert_eq!(forwarded["params"]["messages"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn the_clients_answer_comes_back_under_the_id_the_game_used() {
+        // The half that actually matters: the game is waiting on id 7 and will ignore anything else,
+        // so an answer under our id would hang the tool until its own timeout.
+        let (router, _instance, mut outbound) = router_with("alpha");
+        declare_client_capabilities(&router, json!({"sampling": {}})).await;
+        let mut downstream = router.subscribe_downstream();
+
+        router
+            .handle_upstream(UpstreamEvent::Request {
+                instance: "alpha".into(),
+                message: json!({
+                    "jsonrpc": "2.0", "id": 7, "method": "sampling/createMessage",
+                    "params": {"messages": []},
+                }),
+            })
+            .await;
+        let forwarded = downstream.recv().await.unwrap();
+        let client_id = jsonrpc::id_of(&forwarded).unwrap();
+
+        router
+            .handle(json!({
+                "jsonrpc": "2.0", "id": client_id, "result": {"content": {"text": "hello"}},
+            }))
+            .await;
+
+        let answer = outbound
+            .recv()
+            .await
+            .expect("the answer should reach the instance");
+        assert_eq!(jsonrpc::id_of(&answer), Some(json!(7)));
+        assert_eq!(answer["result"]["content"]["text"], "hello");
+    }
+
+    #[tokio::test]
+    async fn an_error_from_the_client_reaches_the_game_as_an_error() {
+        // A refusal has to arrive as a refusal. Losing the error and delivering nothing would leave
+        // the tool blocked, which is the one outcome worse than being told no.
+        let (router, _instance, mut outbound) = router_with("alpha");
+        declare_client_capabilities(&router, json!({"elicitation": {}})).await;
+        let mut downstream = router.subscribe_downstream();
+
+        router
+            .handle_upstream(UpstreamEvent::Request {
+                instance: "alpha".into(),
+                message: json!({"jsonrpc": "2.0", "id": 2, "method": "elicitation/create"}),
+            })
+            .await;
+        let client_id = jsonrpc::id_of(&downstream.recv().await.unwrap()).unwrap();
+
+        router
+            .handle(json!({
+                "jsonrpc": "2.0", "id": client_id,
+                "error": {"code": -32001, "message": "the user declined"},
+            }))
+            .await;
+
+        let answer = outbound.recv().await.unwrap();
+        assert_eq!(jsonrpc::id_of(&answer), Some(json!(2)));
+        assert_eq!(answer["error"]["message"], "the user declined");
+    }
+
+    #[tokio::test]
+    async fn a_capability_the_client_never_offered_is_refused_to_the_game_immediately() {
+        // The instance was told optimistically that sampling exists, because it connects before any
+        // client does. A request that simply vanished would block a tool until its own timeout with
+        // no way to tell a slow answer from one that is never coming.
+        let (router, _instance, mut outbound) = router_with("alpha");
+        declare_client_capabilities(&router, json!({})).await;
+
+        router
+            .handle_upstream(UpstreamEvent::Request {
+                instance: "alpha".into(),
+                message: json!({"jsonrpc": "2.0", "id": 9, "method": "sampling/createMessage"}),
+            })
+            .await;
+
+        let answer = outbound.recv().await.expect("a refusal must still be an answer");
+        assert_eq!(jsonrpc::id_of(&answer), Some(json!(9)));
+        let message = answer["error"]["message"].as_str().unwrap();
+        assert!(message.contains("sampling"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn a_method_the_orchestrator_does_not_forward_is_refused_rather_than_dropped() {
+        let (router, _instance, mut outbound) = router_with("alpha");
+        declare_client_capabilities(&router, json!({"sampling": {}})).await;
+
+        router
+            .handle_upstream(UpstreamEvent::Request {
+                instance: "alpha".into(),
+                message: json!({"jsonrpc": "2.0", "id": 4, "method": "something/invented"}),
+            })
+            .await;
+
+        let answer = outbound
+            .recv()
+            .await
+            .expect("even an unknown method gets an answer");
+        assert_eq!(jsonrpc::id_of(&answer), Some(json!(4)));
+    }
 
     #[test]
     fn a_tool_error_is_a_successful_response_the_model_can_read() {

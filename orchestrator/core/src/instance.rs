@@ -117,6 +117,12 @@ pub enum UpstreamEvent {
     Connected { instance: String },
     /// The link dropped.
     Disconnected { instance: String },
+    /// The instance asked the *client* something — sampling, elicitation, roots.
+    ///
+    /// The inverted direction, and the reason it needs an event of its own: everything else here is
+    /// something to pass on, while this is something that must be answered, and the answer has to
+    /// find its way back to the instance under the id the instance used.
+    Request { instance: String, message: Value },
 }
 
 /// A handle to one connected instance.
@@ -321,7 +327,12 @@ impl Instance {
                 "initialize",
                 Some(json!({
                     "protocolVersion": INSTANCE_PROTOCOL_VERSION,
-                    "capabilities": {},
+                    // Declared optimistically, because an instance is initialised when it connects
+                    // and that is routinely *before* any MCP client has attached — so what the real
+                    // client can do is not knowable yet. A tool that asks when nobody is listening
+                    // gets a clear error saying so, which is a better failure than a capability the
+                    // game was told it did not have and therefore never tried to use.
+                    "capabilities": { "sampling": {}, "elicitation": {} },
                     "clientInfo": { "name": "mcmcp-orchestrator", "version": crate::VERSION },
                 })),
             )
