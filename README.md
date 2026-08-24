@@ -103,9 +103,14 @@ orchestrator {
 /mcmcp link      # connected, retrying, or waiting to be approved — and what to do about it
 ```
 
-**The orchestrator app is a separate download, and it is only needed for this.** Every tool, resource
-and prompt, the HTTP endpoint, `/mcmcp` and the API explorer all work with the jar alone. CI proves
-both paths on every commit.
+The orchestrator comes in two forms: a **desktop app** — roster, approval prompts, a live traffic log
+filtered by instance, and per-instance gating — and the **same thing headless** for CI or a server.
+Your MCP client's entry contains a command and nothing else: no port, no token, no URL.
+
+**Both are a separate download, and only the link needs them.** Every tool, resource and prompt, the
+HTTP endpoint, `/mcmcp` and the API explorer all work with the jar alone. CI proves both paths on
+every commit, one of them by driving a real MCP client through the orchestrator against a real
+dedicated server.
 
 Guide: [Running several instances](https://mica-technologies.github.io/MCMCP/guide/orchestrator/).
 

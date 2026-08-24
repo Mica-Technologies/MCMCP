@@ -7,6 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 MCMCP is a Minecraft 1.12.2 Forge mod (mod id `mcmcp`) that embeds a Model Context Protocol server in
 a running game. It produces a single mod jar with no third-party runtime dependencies.
 
+It also contains the **orchestrator** (`orchestrator/`, Rust): a separate program that lets several
+running game instances be driven through one MCP endpoint. See "The orchestrator" below.
+
 Two independent MCP endpoints:
 
 - **Client** (`:25585`, on by default) — runs in a player's game client, controls that player through
@@ -33,7 +36,20 @@ export JAVA_HOME="/Users/<user>/Library/Java/JavaVirtualMachines/azul-21.0.x/Con
 ./gradlew runClient -Prosetta           # Apple Silicon: LWJGL2 under Rosetta 2
 ./gradlew clean
 
-bash .github/scripts/server-smoke-test.sh   # boot a server + drive a real MCP handshake
+bash .github/scripts/server-smoke-test.sh     # boot a server + drive a real MCP handshake
+bash .github/scripts/orchestrator-e2e.sh     # boot a server + drive a real MCP client through the orchestrator
+```
+
+The orchestrator is a separate Cargo workspace. **Rust is not on the default PATH here**:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cd orchestrator
+cargo test --workspace              # unit tests
+cargo fmt --all --check             # CI enforces this
+cargo clippy --workspace --all-targets   # CI runs with -D warnings
+cargo build -p mcmcp-orchestrator   # headless binary and shim
+cargo build -p mcmcp-orchestrator-app    # the desktop app
 
 python -m pip install -r docs/requirements.txt && mkdocs serve   # wiki preview
 ```
@@ -93,6 +109,42 @@ Names are unique registry-wide and collisions throw, so behaviour never depends 
 `McpEndpointSettings` is immutable and built once at endpoint start; the transport never reads
 `McmcpConfig`. Network settings therefore need `/mcmcp restart`, not just `/mcmcp reload`. Permission
 and limit checks *are* read live, per call.
+
+### The orchestrator
+
+`orchestrator/` is a Cargo workspace: `core` (the library), `cli` (headless binary **and** the stdio
+shim), `app` (Tauri desktop). It exists because `clientPort` defaults to 25585 everywhere, so a
+second game cannot bind — and because three MCP entries means three copies of a 45-tool catalogue in
+every request a model makes.
+
+**The link is inverted.** The game dials out (`transport/ReverseTransport`), so nothing in the game
+listens and nothing can collide. Presence is the socket: no registry file, no heartbeat. The wire
+format is newline-delimited JSON-RPC over plain TCP, and `link/LinkProtocol.java` and
+`orchestrator/core/src/link/protocol.rs` are **one protocol with two implementations**. Nothing but
+discipline keeps them in step, which is why `orchestrator-e2e.sh` exists — it is the only place the
+two halves meet, and a mismatch fails at runtime rather than at compile time.
+
+**The router is a proxy, not a tool server.** It works on `serde_json::Value` throughout and never
+deserialises MCP messages into typed structs: it forwards messages it did not author between two
+peers that may both be newer than it is, and a typed layer would silently drop fields this build has
+not been taught about.
+
+**Errors follow the mod's rule.** Addressing failures — nothing connected, ambiguous focus, a tool
+that instance lacks — are `isError: true` results, never JSON-RPC errors.
+
+**Every routed result is stamped with its instance**, three ways. Focus is sticky and a human can
+change it at any time; without the stamp a model would keep acting on its memory of what was focused.
+
+**The GUI has no privileged path into the core.** Approvals and gate prompts are channels the CLI
+answers by policy and the app answers with a dialog. Approving, revoking and changing gating are
+`Authority::Human` only and are deliberately not tools — a model that can approve an instance can
+widen its own reach.
+
+**Never create a git tag for the orchestrator.** `build.gradle:1555` resolves the mod's version with
+`git describe --abbrev=0 --tags` and no `--match`, so *any* tag in this repository becomes the mod's
+version. A tag like `app-0.1.0` would silently land in the jar manifest, `mcmod.info` and
+`McmcpConstants.MOD_VERSION`. The orchestrator's version lives in `orchestrator/Cargo.toml`, and its
+binaries attach to the mod's release.
 
 ## Conventions & gotchas
 

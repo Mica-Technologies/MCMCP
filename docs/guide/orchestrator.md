@@ -8,7 +8,7 @@ on its own.
 | Direction | Something connects **to** the game | The game connects **out** |
 | Needs a free port | Yes, one per instance | No |
 | Needs a bearer token in your MCP client | Yes | No |
-| Needs anything else installed | No | Yes — the orchestrator app |
+| Needs anything else installed | No | Yes — the orchestrator |
 | Entries in your MCP client config | One per instance | One, for all instances |
 
 **If you run one game at a time, you do not need any of this.** Drop the jar in `mods/`, point your
@@ -22,26 +22,88 @@ cannot bind: MCMCP logs the failure and that instance runs with **no MCP endpoin
 in-game says so — the only sign is a line in `logs/latest.log`.
 
 You can fix that by hand. Give each instance a different port, add a separate entry per instance to
-your MCP client's config, and keep track of which port is which game. It works, and it costs you a
-config edit for every instance you add, plus one tool catalogue per instance in every request your
-model makes — the same 45 tools, three times over, distinguished only by a prefix.
+your MCP client's config, and keep track of which port is which game. It works, and it costs a config
+edit for every instance you add, plus one tool catalogue per instance in every request your model
+makes — the same 45 tools, three times over, distinguished only by a prefix.
 
-The orchestrator link replaces that with one connection out of each game to one app.
+The orchestrator replaces that with one connection out of each game to one place.
 
-## What changes when the link is on
+## Which piece is which
 
-**Nothing listens.** No port to pick, nothing to collide, no bookkeeping. A second instance on a
-default config now works.
+Three programs, and you will not use all of them.
 
-**Presence is the connection.** The orchestrator knows an instance is alive because the socket is
-open. There is no registry file to go stale and no heartbeat to miss.
+**The mod** dials out. Nothing listens, so nothing can collide, and a second instance on a default
+config now works.
 
-**You approve an instance once.** The first time a game connects, the orchestrator asks whether you
-recognise it — showing the instance's name, its folder, which side it is, and its Minecraft version.
-After that it is remembered.
+**The orchestrator** accepts those links and presents them to your MCP client as one server. It comes
+in two forms sharing the same core:
 
-**Your MCP client config stops changing.** One entry, pointed at the orchestrator. Games come and go
-underneath it.
+- **`MCMCP Orchestrator`** — the desktop app. What you want if you are running games interactively.
+- **`mcmcp-orchestrator`** — the same thing headless, for CI or a server. Also the **shim**, which is
+  what an MCP client actually spawns when the app is what serves it.
+
+## Connecting an MCP client
+
+Start the app once, open **Settings**, and copy the snippet. It looks like this:
+
+```json
+{
+  "mcpServers": {
+    "minecraft": {
+      "command": "C:\\Program Files\\MCMCP Orchestrator\\mcmcp-orchestrator.exe",
+      "args": ["shim"]
+    }
+  }
+}
+```
+
+No port, no token, no URL. The shim finds the app — and starts it if it is not running — so this
+entry never has to change, and games can come and go underneath a connection that never drops.
+
+Prefer no app at all? The headless orchestrator speaks MCP over stdio directly:
+
+```json
+{
+  "mcpServers": {
+    "minecraft": { "command": "mcmcp-orchestrator", "args": ["serve"] }
+  }
+}
+```
+
+## Addressing a game
+
+Every tool gains an optional `instance` argument. Omit it and the call goes to the **focused**
+instance; with only one game connected, that is always the right one.
+
+```
+mcmcp_instances          # what is connected, what each one is, which is focused
+mcmcp_focus              # read or change where unaimed calls go
+mcmcp_set_label          # rename an instance so it can be told apart
+```
+
+**Every result says which instance produced it**, in three places: a prefix on the text, a
+`_meta` entry, and `structuredContent` where the tool's own schema allows it. That is not decoration.
+Focus is sticky, you can change it in the app at any time, and without the result saying where it
+came from a model would keep acting on its memory of what was focused.
+
+Read-only tools also accept `instance: "*"`, which runs them on every connected game at once and
+returns the answers together — the fastest way to compare a mod against a control. Tools that change
+anything do not offer it, and are refused if asked.
+
+## First connection
+
+The first time a game dials in, the app asks whether you recognise it, showing its name, folder, side
+and versions. Three answers:
+
+- **Approve** — remembered; it connects without asking again.
+- **Not now** — refused this time. It keeps retrying and will ask again.
+- **Never** — refused and recorded. Un-revoke it from the roster to undo.
+
+Turn on **Ask before every connection** in Settings if trust-on-first-use is not good enough for you.
+
+The headless orchestrator approves on first use, because nothing is on screen to ask. Pass
+`--strict-approval` to refuse unknown instances instead, then approve them with
+`mcmcp-orchestrator approve <id>`.
 
 ## Instance identity
 
@@ -55,19 +117,53 @@ identity {
 }
 ```
 
-`instanceId` is what an orchestrator stores your approval against. It is generated once and does not
-change, deliberately including when you move or rename the instance folder — an instance you moved
-is the same instance, and being asked to re-approve it every time a path changed would teach you to
-click through the one prompt that is meant to mean something.
+`instanceId` is what an orchestrator stores your approval against. Generated once and unchanged
+thereafter, deliberately including when you move or rename the instance folder — an instance you
+moved is the same instance, and being asked to re-approve it every time a path changed would teach
+you to click through the one prompt that is meant to mean something.
 
-`instanceName` is the only one of the three meant to be edited, and it is worth editing. It defaults
-to the folder's name and it is how you and a model will tell several running games apart. Name it
-after what you are doing in it — `mymod dev`, `vanilla control`.
+`instanceName` is the only one meant to be edited, and it is worth editing. It defaults to the
+folder's name and is how you and a model tell several running games apart. Name it after what you are
+doing in it — `mymod dev`, `vanilla control`. Renaming it in the app wins over this value.
 
-`instanceSecret` is a password. It is what stops any other process on your machine from claiming to
-be an instance you have already approved. It is never logged, never printed by a command, and never
-included in a tool result. Rotate it by clearing the value and restarting; you will be asked to
-approve the instance again.
+`instanceSecret` is a password: it is what stops any other process on your machine from claiming to
+be an instance you have already approved. Never logged, never printed by a command, never in a tool
+result. Rotate it by clearing the value and restarting; you will be asked to approve again.
+
+## Gating
+
+Off by default, because the orchestrator is not a security boundary — your MCP client is already
+trusted to drive the game — and a default that blocked things would teach you to turn it off.
+
+Tools are classified by their own MCP annotations, so the rules cover a tool another mod registered
+five minutes ago:
+
+| | |
+| --- | --- |
+| **Read-only** | Cannot change game state |
+| **Changes things** | Writes something, not destructively |
+| **Destructive** | Can change the world irreversibly |
+
+Each gets `allow`, `ask` or `deny`, per instance or as a default. **`ask` needs the app** — the
+headless orchestrator denies instead, and says so, because allowing what you asked to be prompted
+about fails in the direction that loses work.
+
+**Destructive calls must name their instance** is worth knowing about. It closes the gap focus leaves
+open: if you move focus and the model does not notice, its next world-changing call lands somewhere
+it did not intend. Everything else makes that visible; this makes it impossible.
+
+## The log
+
+Every call the model makes, every approval, every focus change, filtered by instance, by who acted,
+and by level. Hover a row to copy it as JSON — which is what you reach for when a call misbehaves and
+you want to paste it back into the conversation that caused it. **Export** writes a slice to a file.
+
+Also available headless:
+
+```bash
+mcmcp-orchestrator log --instance modb-dev --grep screenshot
+mcmcp-orchestrator log --json --limit 20
+```
 
 ## Configuration
 
@@ -81,13 +177,12 @@ orchestrator {
 }
 ```
 
-The link is **on by default** and harmless when no orchestrator is running: it logs one line saying
-nothing is listening, then retries quietly with a backoff that grows to 30 seconds. Your HTTP
-endpoint is unaffected either way.
+On by default and harmless when no orchestrator is running: one log line saying nothing is listening,
+then quiet retries backing off to 30 seconds. Your HTTP endpoint is unaffected either way.
 
 Only loopback is supported. The link is not encrypted and carries your instance secret followed by
 full control of the game, so `orchestratorHost` should stay `127.0.0.1`. Forward the port over SSH if
-you need to reach an orchestrator on another machine.
+you need an orchestrator on another machine.
 
 Network settings are read when the link starts, so changing them needs `/mcmcp restart`, not just
 `/mcmcp reload`.
@@ -99,22 +194,41 @@ Network settings are read when the link starts, so changing them needs `/mcmcp r
 /mcmcp link      # the orchestrator link in detail
 ```
 
-`/mcmcp status` now reports each transport separately, because "the endpoint is up" stopped being one
-fact. An instance whose HTTP port was taken but whose link is connected is a perfectly working
-instance; one whose port is fine but whose link is down is a different problem.
-
 `/mcmcp link` exists because the answers point in different directions:
 
 | What it says | What to do |
 | --- | --- |
 | `disabled in the config` | Set `enableOrchestratorLink=true`, then `/mcmcp restart` |
-| `retrying` | Start the orchestrator app |
+| `retrying` | Start the orchestrator |
 | `waiting to be approved in the orchestrator` | Approve this instance in the app |
 | `connected` | Nothing |
-| `stopped — the orchestrator knows this instance id but not this secret` | Approve the instance again in the app; it will not retry on its own |
+| `stopped — the orchestrator knows this instance id but not this secret` | Approve it again; it will not retry on its own |
 
-## When the app is required
+## Where state lives
 
-Only for the orchestrator link. Everything else in MCMCP — every tool, every resource, every prompt,
-the HTTP endpoint, `/mcmcp`, the API explorer — works with the jar alone and always will. The link is
-additive, and CI proves both paths on every commit.
+| Platform | Directory |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\mcmcp-orchestrator` |
+| macOS | `~/Library/Application Support/mcmcp-orchestrator` |
+| Linux | `$XDG_STATE_HOME/mcmcp-orchestrator`, or `~/.local/state/mcmcp-orchestrator` |
+
+Holding approvals (`instances.json`), the gating policy (`policy.json`), the event log
+(`events.jsonl`), the cached tool catalogue, and the shim's token. Approvals store a **hash** of each
+instance secret, never the secret — the secrets stay in each game's own config.
+
+`MCMCP_ORCHESTRATOR_HOME` overrides all of it.
+
+## What needs the app, and what does not
+
+Only the orchestrator link needs an orchestrator, and only `ask` gating and the approval prompts need
+the *desktop* one. Everything else in MCMCP — every tool, resource and prompt, the HTTP endpoint,
+`/mcmcp`, the API explorer — works with the jar alone and always will.
+
+CI proves both paths on every commit: one job drives the HTTP endpoint against a real dedicated
+server, another drives a real MCP client through the orchestrator against the same thing.
+
+!!! note "Installers are unsigned"
+
+    Windows SmartScreen and macOS Gatekeeper will both complain about the orchestrator installers.
+    That is a deliberate deferral rather than an oversight — signing certificates cost money annually
+    and this is currently a personal tool. The headless binary and the jar are unaffected.
