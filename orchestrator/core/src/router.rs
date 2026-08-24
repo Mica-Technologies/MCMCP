@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
-use crate::catalogue::{self, Aggregate, Contribution, INSTANCE_ARGUMENT};
+use crate::catalogue::{self, ALL_INSTANCES, Aggregate, Contribution, INSTANCE_ARGUMENT};
 use crate::events::{Actor, Event, EventKind, EventLog, Level};
 use crate::instance::{Instance, UpstreamEvent};
 use crate::jsonrpc;
@@ -413,6 +413,10 @@ impl Router {
             return Ok(self.call_orchestrator_tool(name, &arguments));
         }
 
+        if requested_instance.as_deref() == Some(ALL_INSTANCES) {
+            return Ok(self.fan_out(name, &arguments).await);
+        }
+
         let instance = match self.registry.resolve(requested_instance.as_deref()) {
             FocusResolution::Resolved(id) => match self.registry.get(&id) {
                 Some(instance) => instance,
@@ -565,6 +569,106 @@ impl Router {
                 )))
             }
         }
+    }
+
+    /// Runs one read-only tool on every connected instance and returns all the answers together.
+    ///
+    /// Refused outright for anything that is not read-only, even though the schema does not offer
+    /// the option there: a schema is a suggestion to a model, not a constraint on it, and the one
+    /// call this must never serve is a destructive one aimed at every game at once.
+    ///
+    /// Failures do not abort the rest. The useful shape of "ask all three" is three answers, some of
+    /// which may be "that one is not answering" — collapsing the whole call into one error because
+    /// one instance is wedged would throw away the two that worked.
+    async fn fan_out(&self, name: &str, arguments: &Map<String, Value>) -> Value {
+        let instances = self.registry.all();
+        if instances.is_empty() {
+            return tool_error("No Minecraft instance is connected to this orchestrator right now.");
+        }
+
+        for instance in &instances {
+            let definition = instance
+                .catalogue()
+                .tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .cloned();
+            if let Some(definition) = definition
+                && crate::policy::Class::of(&definition) != crate::policy::Class::ReadOnly
+            {
+                return tool_error(&format!(
+                    "'{name}' can change game state, so it cannot be run on every instance at once. \
+                     Name one instance and call it again."
+                ));
+            }
+        }
+
+        // Concurrently, via spawn rather than a combinator crate: the whole point is not waiting
+        // for three round trips in a row, and each one is a game thread that may be busy. Every
+        // captured value is owned or an Arc, which is what makes the spawn 'static.
+        let mut handles = Vec::with_capacity(instances.len());
+        for instance in &instances {
+            let instance = Arc::clone(instance);
+            let arguments = arguments.clone();
+            let name = name.to_string();
+            handles.push(tokio::spawn(async move {
+                let outcome = instance
+                    .request(
+                        "tools/call",
+                        Some(json!({ "name": name, "arguments": Value::Object(arguments) })),
+                    )
+                    .await;
+                (instance.info(), outcome)
+            }));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok(result) => results.push(result),
+                // A panicked task must not take the other instances' answers with it.
+                Err(error) => warn!(%error, "a fan-out call did not complete"),
+            }
+        }
+
+        let mut content = Vec::new();
+        let mut structured = Map::new();
+        let mut any_error = false;
+
+        for (info, outcome) in results {
+            match outcome {
+                Ok(result) => {
+                    if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+                        any_error = true;
+                    }
+                    if let Some(items) = result.get("content").and_then(Value::as_array) {
+                        content.push(json!({
+                            "type": "text",
+                            "text": format!("[{} · {}]", info.label, info.id),
+                        }));
+                        content.extend(items.iter().cloned());
+                    }
+                    structured.insert(
+                        info.id.clone(),
+                        result.get("structuredContent").cloned().unwrap_or(Value::Null),
+                    );
+                }
+                Err(error) => {
+                    any_error = true;
+                    content.push(json!({
+                        "type": "text",
+                        "text": format!("[{} · {}] did not answer: {error}", info.label, info.id),
+                    }));
+                    structured.insert(info.id.clone(), json!({ "error": error.to_string() }));
+                }
+            }
+        }
+
+        json!({
+            "content": content,
+            "structuredContent": { "byInstance": Value::Object(structured) },
+            "isError": any_error,
+        })
     }
 
     /// Turns a policy decision into either nothing (proceed) or a tool error.

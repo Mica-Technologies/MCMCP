@@ -27,6 +27,15 @@ use crate::instance::Catalogue;
 /// The argument every routed tool gains.
 pub const INSTANCE_ARGUMENT: &str = "instance";
 
+/// Addresses every connected instance at once.
+///
+/// Offered **only on read-only tools**, and that restriction is the entire design. "What does each
+/// game report" is a genuinely useful question and answering it one call at a time is tedious;
+/// "move the player in all three games" is not a thing anybody means, and a fan-out that could do it
+/// would eventually do it by accident. The enum is where the restriction lives, so a model never
+/// sees the option on a tool where it would be wrong.
+pub const ALL_INSTANCES: &str = "*";
+
 /// One instance's contribution to the aggregate.
 pub struct Contribution {
     pub id: String,
@@ -141,6 +150,10 @@ fn annotate_availability(tool: &mut Value, owners: &[String]) {
 /// gets the focused one, which is the whole reason focus exists. Making it required would put a
 /// mandatory argument on all 45 tools to serve the case where more than one game is open.
 pub fn inject_instance_argument(tool: &mut Value, addressable: &[String], focused: Option<&str>) {
+    // Read-only tools may be fanned out; nothing else may. Decided from the tool's own annotations
+    // before the schema is touched, so the option simply does not exist where it would be wrong.
+    let fannable = crate::policy::Class::of(tool) == crate::policy::Class::ReadOnly;
+
     // Value has no entry(); Map does. Reaching the object first is the whole difference.
     let Some(tool) = tool.as_object_mut() else {
         return;
@@ -162,11 +175,11 @@ pub fn inject_instance_argument(tool: &mut Value, addressable: &[String], focuse
     };
     properties.insert(
         INSTANCE_ARGUMENT.to_string(),
-        instance_property(addressable, focused),
+        instance_property(addressable, focused, fannable),
     );
 }
 
-fn instance_property(addressable: &[String], focused: Option<&str>) -> Value {
+fn instance_property(addressable: &[String], focused: Option<&str>, fannable: bool) -> Value {
     let mut description =
         String::from("Which running game instance to act on. Omit it to use the focused instance");
     match focused {
@@ -174,13 +187,22 @@ fn instance_property(addressable: &[String], focused: Option<&str>) -> Value {
         None => description.push('.'),
     }
     description.push_str(" Call mcmcp_instances to see what is connected and what each one is.");
+    if fannable {
+        description.push_str(
+            " This tool only reads, so \"*\" is also accepted and runs it on every connected              instance at once — useful for comparing two games without asking each in turn.",
+        );
+    }
 
     let mut property = json!({ "type": "string", "description": description });
     if !addressable.is_empty() {
         // An enum is worth a great deal here: a model picks from a list far more reliably than it
         // recalls an id from a description. It covers instances seen recently as well as connected
         // ones, so a relaunch does not rewrite every schema.
-        property["enum"] = Value::Array(addressable.iter().map(|id| json!(id)).collect());
+        let mut values: Vec<Value> = addressable.iter().map(|id| json!(id)).collect();
+        if fannable {
+            values.push(json!(ALL_INSTANCES));
+        }
+        property["enum"] = Value::Array(values);
     }
     property
 }
@@ -418,6 +440,48 @@ mod tests {
         );
         // And the tool's own arguments survive.
         assert_eq!(schema["properties"]["x"]["type"], "integer");
+    }
+
+    #[test]
+    fn only_read_only_tools_offer_the_fan_out_option() {
+        // The restriction lives in the enum so a model never sees the option where it would be
+        // wrong. "What does each game report" is useful; "move the player in all three" is not
+        // something anybody means, and an option that could do it would eventually do it.
+        let mut reader = json!({
+            "name": "client_player_state",
+            "annotations": {"readOnlyHint": true},
+            "inputSchema": {"type": "object"},
+        });
+        inject_instance_argument(&mut reader, &["alpha".into()], None);
+        let values = reader["inputSchema"]["properties"]["instance"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(values.iter().any(|value| value == "*"));
+
+        let mut mover = json!({
+            "name": "client_move",
+            "annotations": {"readOnlyHint": false},
+            "inputSchema": {"type": "object"},
+        });
+        inject_instance_argument(&mut mover, &["alpha".into()], None);
+        let values = mover["inputSchema"]["properties"]["instance"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(!values.iter().any(|value| value == "*"));
+    }
+
+    #[test]
+    fn an_unannotated_tool_does_not_offer_fan_out() {
+        // Class::of treats an unannotated tool as mutating, and this inherits that caution: a
+        // third-party tool nobody annotated must not become fannable by omission.
+        let mut tool = json!({"name": "mymod_mystery", "inputSchema": {"type": "object"}});
+
+        inject_instance_argument(&mut tool, &["alpha".into()], None);
+
+        let values = tool["inputSchema"]["properties"]["instance"]["enum"]
+            .as_array()
+            .unwrap();
+        assert_eq!(values.len(), 1);
     }
 
     #[test]
