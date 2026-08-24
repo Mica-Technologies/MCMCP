@@ -590,9 +590,31 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
     );
 
     let address = format!("127.0.0.1:{link_port}");
-    let listener = TcpListener::bind(&address)
-        .await
-        .with_context(|| format!("binding the link listener on {address}"))?;
+    let listener = match TcpListener::bind(&address).await {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            // Almost always a second orchestrator, and the advice is to use that one rather than
+            // this. Worth saying: an MCP client sees only that the command exited, and "address in
+            // use" on its own leaves somebody hunting for which address and whose.
+            anyhow::bail!(
+                concat!(
+                    "Another orchestrator is already listening on {}. ",
+                    "Only one can accept instance links at a time.\n",
+                    "\n",
+                    "If the desktop app is running, point your MCP client at it instead:\n",
+                    "    mcmcp-orchestrator shim\n",
+                    "\n",
+                    "To run a second one anyway — a separate set of games on a separate port — ",
+                    "give it its own with --link-port and its own state with --state-dir, and set ",
+                    "orchestrator.orchestratorPort to match in each game's config."
+                ),
+                address
+            );
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("binding the link listener on {address}"));
+        }
+    };
 
     let context = LinkContext {
         registry: Arc::clone(&registry),

@@ -28,6 +28,7 @@ use crate::catalogue::{self, ALL_INSTANCES, Aggregate, Contribution, INSTANCE_AR
 use crate::events::{Actor, Event, EventKind, EventLog, Level};
 use crate::instance::{Instance, UpstreamEvent};
 use crate::jsonrpc;
+use crate::orchestrator_tools;
 use crate::policy::{Decision, Policy};
 use crate::registry::{FocusResolution, Registry};
 use crate::store::ApprovalStore;
@@ -36,13 +37,12 @@ use crate::store::ApprovalStore;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 pub const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// Tools the orchestrator answers itself.
+/// Tools the orchestrator answers itself, rather than routing to a game.
 ///
-/// The line between these and the human-only operations is an authorisation boundary, not a
-/// convenience one: **approving a pairing, revoking one, and changing gating policy are never
-/// tools.** A model that can approve an instance can widen its own reach, which is precisely the
-/// thing an approval prompt exists to prevent.
-pub const ORCHESTRATOR_TOOLS: &[&str] = &["mcmcp_instances", "mcmcp_focus", "mcmcp_set_label"];
+/// Defined in [`crate::orchestrator_tools`], which also documents what is deliberately *not* here:
+/// approving a pairing, revoking one, and changing gating policy are human-only, because a model
+/// that can approve an instance can widen its own reach.
+pub use crate::orchestrator_tools::NAMES as ORCHESTRATOR_TOOLS;
 
 /// How many notifications may queue for a client that has stopped reading.
 ///
@@ -370,7 +370,7 @@ impl Router {
 
     async fn handle_tools_list(&self) -> Value {
         let mut tools = self.build_aggregate().await.tools;
-        tools.extend(orchestrator_tool_definitions(&self.addressable()));
+        tools.extend(orchestrator_tools::definitions(&self.addressable()));
         json!({ "tools": tools })
     }
 
@@ -383,7 +383,9 @@ impl Router {
     }
 
     async fn handle_prompts_list(&self) -> Value {
-        json!({ "prompts": self.build_aggregate().await.prompts })
+        let mut prompts = self.build_aggregate().await.prompts;
+        prompts.push(orchestrator_tools::prompt_definition(&self.addressable()));
+        json!({ "prompts": prompts })
     }
 
     // ------------------------------------------------------------------
@@ -410,7 +412,7 @@ impl Router {
             .and_then(|value| value.as_str().map(str::to_string));
 
         if ORCHESTRATOR_TOOLS.contains(&name) {
-            return Ok(self.call_orchestrator_tool(name, &arguments));
+            return Ok(self.call_orchestrator_tool(name, &arguments).await);
         }
 
         if requested_instance.as_deref() == Some(ALL_INSTANCES) {
@@ -740,7 +742,7 @@ impl Router {
         Some(tool_error(&reason))
     }
 
-    fn call_orchestrator_tool(&self, name: &str, arguments: &Map<String, Value>) -> Value {
+    async fn call_orchestrator_tool(&self, name: &str, arguments: &Map<String, Value>) -> Value {
         match name {
             "mcmcp_instances" => {
                 let focus = self.registry.focus();
@@ -856,8 +858,259 @@ impl Router {
                 ));
                 structured_result(json!({ "instance": target, "label": label }))
             }
+            "mcmcp_compare_instances" => self.compare_instances().await,
+            "mcmcp_read_logs" => self.read_logs(arguments).await,
             other => tool_error(&format!("unknown orchestrator tool: {other}")),
         }
+    }
+
+    /// Reports what is different between the connected instances.
+    ///
+    /// The mods unique to an instance are the answer to "which one is the mod I am working on",
+    /// which is the question somebody with three games open actually has. Reporting what they share
+    /// as well would bury that under a hundred identical lines, so this reports only the
+    /// differences — and says so when there are none.
+    async fn compare_instances(&self) -> Value {
+        let instances = self.registry.all();
+        if instances.len() < 2 {
+            return tool_error(
+                "Comparing needs at least two connected instances; there \
+                 are fewer than that right now. mcmcp_instances shows what is connected.",
+            );
+        }
+
+        // Mod lists concurrently — each is a round trip to a game thread that may be busy.
+        let mut handles = Vec::with_capacity(instances.len());
+        for instance in &instances {
+            let instance = Arc::clone(instance);
+            handles.push(tokio::spawn(async move {
+                let mods = instance
+                    .request(
+                        "tools/call",
+                        Some(json!({ "name": "game_list_mods", "arguments": {} })),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|result| {
+                        result
+                            .get("structuredContent")
+                            .and_then(|structured| structured.get("mods"))
+                            .and_then(Value::as_array)
+                            .map(|mods| {
+                                mods.iter()
+                                    .filter_map(|entry| {
+                                        entry.get("id").and_then(Value::as_str).map(str::to_string)
+                                    })
+                                    .collect::<std::collections::BTreeSet<String>>()
+                            })
+                    });
+                (instance.info(), instance.catalogue(), mods)
+            }));
+        }
+
+        let mut gathered = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok(result) => gathered.push(result),
+                Err(error) => warn!(%error, "a comparison call did not complete"),
+            }
+        }
+
+        // What every instance has is not what anybody is asking about.
+        let shared_mods: std::collections::BTreeSet<String> = gathered
+            .iter()
+            .filter_map(|(_, _, mods)| mods.clone())
+            .reduce(|left, right| left.intersection(&right).cloned().collect())
+            .unwrap_or_default();
+        let shared_tools: std::collections::BTreeSet<String> = gathered
+            .iter()
+            .map(|(_, catalogue, _)| {
+                catalogue
+                    .tool_names()
+                    .map(str::to_string)
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .reduce(|left, right| left.intersection(&right).cloned().collect())
+            .unwrap_or_default();
+
+        let mut summaries = Vec::new();
+        let mut lines = Vec::new();
+        for (info, catalogue, mods) in &gathered {
+            let unique_mods: Vec<String> = mods
+                .as_ref()
+                .map(|mods| mods.difference(&shared_mods).cloned().collect())
+                .unwrap_or_default();
+            let unique_tools: Vec<String> = catalogue
+                .tool_names()
+                .map(str::to_string)
+                .filter(|name| !shared_tools.contains(name))
+                .collect();
+
+            lines.push(format!(
+                "{} (\"{}\", {})\n  mods only here: {}\n  tools only here: {}",
+                info.id,
+                info.label,
+                info.side.as_str(),
+                if unique_mods.is_empty() {
+                    "none".into()
+                } else {
+                    unique_mods.join(", ")
+                },
+                if unique_tools.is_empty() {
+                    "none".into()
+                } else if unique_tools.len() > 12 {
+                    format!(
+                        "{} and {} more",
+                        unique_tools[..12].join(", "),
+                        unique_tools.len() - 12
+                    )
+                } else {
+                    unique_tools.join(", ")
+                },
+            ));
+
+            summaries.push(json!({
+                "instance": info.id,
+                "label": info.label,
+                "side": info.side.as_str(),
+                "minecraftVersion": info.minecraft_version,
+                "modVersion": info.mod_version,
+                "gameDirectory": info.game_directory,
+                "modsOnlyHere": unique_mods,
+                "toolsOnlyHere": unique_tools,
+                "modsReadable": mods.is_some(),
+            }));
+        }
+
+        let mut text = format!("{} instances connected.\n\n", gathered.len());
+        text.push_str(&lines.join("\n\n"));
+        if gathered.iter().all(|(_, _, mods)| {
+            mods.as_ref()
+                .map(|mods| mods.difference(&shared_mods).count() == 0)
+                .unwrap_or(true)
+        }) {
+            text.push_str(
+                "\n\nNo instance has a mod the others lack. If you are trying to tell them apart, \
+                 the game directory is the surest signal — or rename them with mcmcp_set_label.",
+            );
+        }
+
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": {
+                "instances": summaries,
+                "sharedModCount": shared_mods.len(),
+                "sharedToolCount": shared_tools.len(),
+            },
+            "isError": false,
+        })
+    }
+
+    /// Reads several games' logs and interleaves them in time order.
+    ///
+    /// Reading each separately gives two lists to merge by eye, and the case this is for is exactly
+    /// the one where order matters: a crash in one game right after an action in the other.
+    ///
+    /// Lines that do not start with a Minecraft timestamp keep their place relative to the line
+    /// above rather than being dropped or floated to the top — a stack trace is a run of such lines
+    /// and it belongs with the message that opened it.
+    async fn read_logs(&self, arguments: &Map<String, Value>) -> Value {
+        let requested = arguments.get("instance").and_then(Value::as_str);
+        let instances: Vec<Arc<Instance>> = match requested {
+            Some(id) => match self.registry.get(id) {
+                Some(instance) => vec![instance],
+                None => return tool_error(&format!("there is no connected instance called '{id}'")),
+            },
+            None => self.registry.all(),
+        };
+        if instances.is_empty() {
+            return tool_error("No Minecraft instance is connected to this orchestrator right now.");
+        }
+
+        let lines = arguments
+            .get("lines")
+            .and_then(Value::as_u64)
+            .unwrap_or(60)
+            .clamp(1, 500);
+        let filter = arguments
+            .get("filter")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        let mut handles = Vec::with_capacity(instances.len());
+        for instance in &instances {
+            let instance = Arc::clone(instance);
+            let mut call = json!({ "lines": lines });
+            if let Some(filter) = &filter {
+                call["filter"] = json!(filter);
+            }
+            handles.push(tokio::spawn(async move {
+                let outcome = instance
+                    .request(
+                        "tools/call",
+                        Some(json!({ "name": "game_read_log", "arguments": call })),
+                    )
+                    .await;
+                (instance.info(), outcome)
+            }));
+        }
+
+        let mut tagged: Vec<(String, String, String)> = Vec::new();
+        let mut problems = Vec::new();
+        for handle in handles {
+            let Ok((info, outcome)) = handle.await else {
+                continue;
+            };
+            match outcome {
+                Ok(result) => {
+                    let text = result
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.first())
+                        .and_then(|item| item.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let mut last_stamp = String::new();
+                    for line in text.lines() {
+                        if let Some(stamp) = leading_timestamp(line) {
+                            last_stamp = stamp;
+                        }
+                        tagged.push((last_stamp.clone(), info.label.clone(), line.to_string()));
+                    }
+                }
+                Err(error) => problems.push(format!("{}: {error}", info.id)),
+            }
+        }
+
+        // Stable sort: lines sharing a timestamp — and every continuation line, which inherits the
+        // one above it — keep the order they were read in, so a stack trace stays a stack trace.
+        tagged.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let width = instances
+            .iter()
+            .map(|i| i.info().label.chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut text = String::new();
+        for (_, label, line) in &tagged {
+            text.push_str(&format!("{label:<width$} | {line}\n"));
+        }
+        if text.is_empty() {
+            text.push_str("Nothing matched.\n");
+        }
+        for problem in &problems {
+            text.push_str(&format!("\n(could not read {problem})"));
+        }
+
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": {
+                "lines": tagged.len(),
+                "instances": instances.iter().map(|i| json!(i.id())).collect::<Vec<_>>(),
+                "problems": problems,
+            },
+            "isError": !problems.is_empty(),
+        })
     }
 
     // ------------------------------------------------------------------
@@ -930,6 +1183,24 @@ impl Router {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+
+        if name == orchestrator_tools::COMPARE_PROMPT {
+            let roster: Vec<Value> = self
+                .registry
+                .all()
+                .iter()
+                .map(|instance| instance.info().to_json(true, false))
+                .collect();
+            return Ok(orchestrator_tools::compare_prompt_messages(
+                arguments
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("(not specified)"),
+                arguments.get("first").and_then(Value::as_str),
+                arguments.get("second").and_then(Value::as_str),
+                &roster,
+            ));
+        }
         let requested = arguments
             .remove(INSTANCE_ARGUMENT)
             .and_then(|value| value.as_str().map(str::to_string));
@@ -1180,60 +1451,26 @@ fn id_key(id: &Value) -> String {
     }
 }
 
-/// The orchestrator's own tools.
-pub fn orchestrator_tool_definitions(addressable: &[String]) -> Vec<Value> {
-    let enum_values: Vec<Value> = addressable.iter().map(|id| json!(id)).collect();
-    let mut target = json!({
-        "type": "string",
-        "description": "The instance id, as reported by mcmcp_instances.",
-    });
-    if !enum_values.is_empty() {
-        target["enum"] = Value::Array(enum_values);
+/// The `[HH:MM:SS]` a Minecraft log line opens with, if it has one.
+///
+/// Used only for ordering, so the date is irrelevant: every line being merged came from the same
+/// session within seconds of the others. Returned as a string because that is all the comparison
+/// needs, and parsing it into a time would invite a timezone question nobody asked.
+fn leading_timestamp(line: &str) -> Option<String> {
+    let rest = line.strip_prefix('[')?;
+    let (stamp, _) = rest.split_once(']')?;
+    // "12:34:56" — the shape, not just the length, so an ordinary bracketed word is not mistaken
+    // for a timestamp.
+    let bytes = stamp.as_bytes();
+    if bytes.len() == 8 && bytes[2] == b':' && bytes[5] == b':' {
+        let digits = [0, 1, 3, 4, 6, 7]
+            .iter()
+            .all(|index| bytes[*index].is_ascii_digit());
+        if digits {
+            return Some(stamp.to_string());
+        }
     }
-
-    vec![
-        json!({
-            "name": "mcmcp_instances",
-            "title": "List Minecraft instances",
-            "description": "List every Minecraft game connected to this orchestrator, with its id, \
-                label, which side it is (client or server), what it is running, and which one is \
-                currently focused. Call this before acting when more than one game may be open — the \
-                games are usually different worlds with different mods, and acting on the wrong one \
-                is rarely harmless. Also lists instances this orchestrator knows but that are not \
-                running right now.",
-            "inputSchema": { "type": "object", "properties": {} },
-            "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true },
-        }),
-        json!({
-            "name": "mcmcp_focus",
-            "title": "Get or set the focused instance",
-            "description": "Read or change which instance tool calls go to when they do not name one. \
-                Call with no arguments to read the current focus. Setting focus is a convenience, not \
-                a lock: a human can change it at any time from the orchestrator, so always trust the \
-                instance named in a tool result over your memory of what you focused.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "target": target.clone() },
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true },
-        }),
-        json!({
-            "name": "mcmcp_set_label",
-            "title": "Rename an instance",
-            "description": "Give an instance a human-readable label, so it can be told apart from the \
-                others in later calls and in the orchestrator's own roster. Names the instance for \
-                everyone, not just this session.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target": target,
-                    "label": { "type": "string", "description": "The new label, e.g. 'mymod dev'." },
-                },
-                "required": ["target", "label"],
-            },
-            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true },
-        }),
-    ]
+    None
 }
 
 #[cfg(test)]
@@ -1307,7 +1544,7 @@ mod tests {
     fn the_orchestrator_offers_no_tool_that_approves_an_instance() {
         // The authorisation boundary, asserted rather than assumed. A model that can approve a
         // pairing can widen its own reach, which is exactly what an approval prompt prevents.
-        let names: Vec<String> = orchestrator_tool_definitions(&[])
+        let names: Vec<String> = orchestrator_tools::definitions(&[])
             .iter()
             .map(|tool| tool["name"].as_str().unwrap().to_string())
             .collect();
@@ -1328,13 +1565,52 @@ mod tests {
 
     #[test]
     fn orchestrator_tools_offer_known_instances_as_an_enum() {
-        let tools = orchestrator_tool_definitions(&["alpha".into(), "beta".into()]);
+        let tools = orchestrator_tools::definitions(&["alpha".into(), "beta".into()]);
         let focus = tools.iter().find(|tool| tool["name"] == "mcmcp_focus").unwrap();
 
         assert_eq!(
             focus["inputSchema"]["properties"]["target"]["enum"],
             json!(["alpha", "beta"])
         );
+    }
+
+    #[test]
+    fn recognises_the_timestamp_a_minecraft_log_line_opens_with() {
+        assert_eq!(
+            leading_timestamp("[12:34:56] [Server thread/INFO]: Done"),
+            Some("12:34:56".to_string())
+        );
+    }
+
+    #[test]
+    fn a_continuation_line_has_no_timestamp_of_its_own() {
+        // Stack traces are runs of these. They inherit the stamp of the line above so they keep
+        // their place beside it rather than floating to the top of a merged view.
+        assert_eq!(leading_timestamp("	at net.minecraft.Foo.bar(Foo.java:12)"), None);
+        assert_eq!(
+            leading_timestamp("Caused by: java.lang.NullPointerException"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_ordinary_bracketed_word_is_not_mistaken_for_a_timestamp() {
+        // The shape is checked, not just the brackets — otherwise "[FML]: ..." would sort as if it
+        // carried a time.
+        assert_eq!(leading_timestamp("[FML]: Searching for mods"), None);
+        assert_eq!(leading_timestamp("[ab:cd:ef] not a time"), None);
+        assert_eq!(leading_timestamp("[12:34:5] too short"), None);
+        assert_eq!(leading_timestamp("no brackets at all"), None);
+    }
+
+    #[test]
+    fn timestamps_sort_in_time_order_as_plain_strings() {
+        // Fixed-width zero-padded HH:MM:SS compares correctly as text, which is why this never
+        // parses a time and never has to ask what timezone the game was in.
+        let mut stamps = ["12:34:56", "09:00:01", "12:04:56"];
+        stamps.sort();
+
+        assert_eq!(stamps, ["09:00:01", "12:04:56", "12:34:56"]);
     }
 
     #[test]

@@ -41,7 +41,9 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -766,14 +768,74 @@ fn main() -> anyhow::Result<()> {
             mcp_client_config,
         ])
         .setup(move |app| {
+            install_tray(app.handle())?;
+
             let handle = app.handle().clone();
             spawn_background(
                 handle, registry, store, router, events, approvals, gates, link_port,
             );
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // Closing the window hides it. The orchestrator keeps running because the games are
+            // still connected to it; Quit in the tray menu is what actually stops it.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .run(tauri::generate_context!())?;
     Ok(())
+}
+
+/// Puts the orchestrator in the system tray, and makes closing the window mean "hide".
+///
+/// This is not decoration. The orchestrator has to keep accepting links and answering an MCP client
+/// for as long as the games are running, and the window is only how a person looks at it — so
+/// closing the window must not stop the thing. Without a tray icon that would be a process with no
+/// way back to it and no way to stop it except the task manager, which is worse than either.
+fn install_tray(app: &AppHandle) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show orchestrator", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| tauri::Error::UnknownPath)?;
+
+    TrayIconBuilder::with_id("mcmcp")
+        .icon(icon)
+        .tooltip("MCMCP Orchestrator")
+        .menu(&menu)
+        // Left click shows the window; the menu is for everything else. Quitting from a left click
+        // would be far too easy to do by accident to something several games are talking to.
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => reveal(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                reveal(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+fn reveal(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 /// Starts everything that is not the window.

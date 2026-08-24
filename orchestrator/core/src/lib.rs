@@ -23,6 +23,7 @@ pub mod instance;
 pub mod jsonrpc;
 pub mod link;
 pub mod mcp_socket;
+pub mod orchestrator_tools;
 pub mod paths;
 pub mod policy;
 pub mod registry;
