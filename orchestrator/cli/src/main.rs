@@ -24,6 +24,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[derive(Parser)]
 #[command(
@@ -171,15 +172,25 @@ fn parse_actor(value: &str) -> Result<Actor, String> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_env("MCMCP_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
-        // stderr, always. stdout belongs to MCP.
-        .with_writer(std::io::stderr)
-        .init();
-
+    // The state directory has to exist before the log inside it can be opened. `--state-dir` is
+    // applied first for the same reason: it decides where that directory is.
     if let Some(state_dir) = &cli.state_dir {
         // SAFETY: set once, before any task that reads it is spawned.
         unsafe { std::env::set_var("MCMCP_ORCHESTRATOR_HOME", state_dir) };
+    }
+    let _ = paths::ensure_state_directory();
+
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_env("MCMCP_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_ansi(false);
+    // stderr, always — stdout belongs to MCP — and a file beside it, so a run launched detached
+    // still leaves its warnings somewhere readable.
+    match paths::open_log_file() {
+        Ok(file) => builder.with_writer(std::io::stderr.and(file)).init(),
+        Err(error) => {
+            builder.with_writer(std::io::stderr).init();
+            tracing::warn!(%error, "could not open the diagnostic log; logging to stderr only");
+        }
     }
 
     match cli.command {

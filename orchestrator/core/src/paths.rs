@@ -80,6 +80,37 @@ pub fn event_log_path() -> Result<PathBuf> {
     Ok(state_directory()?.join("events.jsonl"))
 }
 
+/// The diagnostic log, as distinct from [`event_log_path`].
+///
+/// `events.jsonl` is the record of what happened *to instances* — links, tool calls, approvals — and
+/// is a closed set of kinds a UI can filter. This is the program's own `tracing` output, and it
+/// exists because the desktop app has no terminal: everything the orchestrator logged about its own
+/// workings went to a stderr nobody could read, so a link that came up and then failed to initialise
+/// reported the reason into the void.
+pub fn log_file_path() -> Result<PathBuf> {
+    Ok(state_directory()?.join("orchestrator.log"))
+}
+
+/// The most the diagnostic log may reach before the previous run's copy is rotated away.
+///
+/// One generation, not a scheme: the durable record of instance trouble is `events.jsonl`, and this
+/// file is for the surrounding detail while diagnosing something. Unbounded growth in a state
+/// directory a person never looks at is the failure worth avoiding here.
+pub const LOG_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Opens the diagnostic log for appending, rotating it first if it has grown past the cap.
+pub fn open_log_file() -> Result<std::fs::File> {
+    let path = log_file_path()?;
+    if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > LOG_ROTATE_BYTES {
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))
+}
+
 pub fn ensure_state_directory() -> Result<PathBuf> {
     let directory = state_directory()?;
     std::fs::create_dir_all(&directory).with_context(|| format!("creating {}", directory.display()))?;

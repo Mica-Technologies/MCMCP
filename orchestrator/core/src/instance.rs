@@ -156,6 +156,17 @@ pub enum UpstreamEvent {
     Notification { instance: String, message: Value },
     /// The instance finished its handshake and its catalogue is loaded.
     Connected { instance: String },
+    /// Bringing the instance up failed, and will be retried.
+    ///
+    /// Carried as an event rather than only logged because the log a desktop app writes to is
+    /// stderr, which nobody sees. An instance stuck part-way up looks identical to a healthy one in
+    /// the roster, so the durable record is the only way to find out afterwards what went wrong.
+    BootstrapFailed {
+        instance: String,
+        stage: String,
+        attempt: u32,
+        error: String,
+    },
     /// The link dropped.
     Disconnected { instance: String },
     /// The instance asked the *client* something — sampling, elicitation, roots.
@@ -175,6 +186,7 @@ pub struct Instance {
     next_request_id: AtomicU64,
     closed: Notify,
     alive: std::sync::atomic::AtomicBool,
+    ready: std::sync::atomic::AtomicBool,
 }
 
 impl Instance {
@@ -187,6 +199,7 @@ impl Instance {
             next_request_id: AtomicU64::new(1),
             closed: Notify::new(),
             alive: std::sync::atomic::AtomicBool::new(true),
+            ready: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -211,12 +224,32 @@ impl Instance {
         Arc::clone(&self.catalogue.lock().expect("catalogue lock"))
     }
 
+    /// Installs a catalogue, which is also what marks the instance ready.
+    ///
+    /// The two are one operation on purpose: "has been asked what it can do" and "has a catalogue"
+    /// are the same fact, and letting a caller establish one without the other is how an instance
+    /// ends up holding tools that aggregation refuses to look at.
     pub fn set_catalogue(&self, catalogue: Catalogue) {
         *self.catalogue.lock().expect("catalogue lock") = Arc::new(catalogue);
+        self.ready.store(true, Ordering::SeqCst);
     }
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// Whether this instance has ever successfully loaded a catalogue.
+    ///
+    /// Distinct from [`Self::is_alive`], and the distinction is the whole point: an instance is
+    /// registered the moment its link is up, because the reader task needs somewhere to route
+    /// answers to, but that is *before* it has been asked what it can do. A registered instance
+    /// with no catalogue looks connected and offers nothing, which reads to a caller as "this game
+    /// has no tools" when the truth is "nobody has asked it yet, or asking failed".
+    ///
+    /// Aggregation and the roster both consult this rather than counting tools, so an instance
+    /// still being brought up cannot be mistaken for one that genuinely offers nothing.
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
     }
 
     /// Marks the link gone and fails every caller still waiting on it.
@@ -238,6 +271,18 @@ impl Instance {
             ));
         }
         self.closed.notify_waiters();
+    }
+
+    /// Resolves when the link drops.
+    ///
+    /// Checks first rather than waiting straight away: a link that closed before this was called
+    /// has already fired its notification, and `Notify` does not keep one for a waiter that was not
+    /// yet waiting.
+    pub async fn wait_closed(&self) {
+        if !self.is_alive() {
+            return;
+        }
+        self.closed.notified().await;
     }
 
     /// Reserves the id this instance will see for the next request.
@@ -362,7 +407,19 @@ impl Instance {
     }
 
     /// Runs the MCP handshake toward the instance and loads its catalogue.
+    ///
+    /// Kept as one call for the common path. A caller that retries should drive [`Self::handshake`]
+    /// and [`Self::refresh_catalogue`] separately instead: re-sending `initialize` to a session that
+    /// already completed one is not something MCP promises to tolerate, so a retry that failed on
+    /// the catalogue must not replay the handshake to get back to it.
     pub async fn initialize(&self) -> Result<Value> {
+        let result = self.handshake().await?;
+        self.refresh_catalogue().await?;
+        Ok(result)
+    }
+
+    /// The MCP handshake alone: `initialize`, then `notifications/initialized`.
+    pub async fn handshake(&self) -> Result<Value> {
         let result = self
             .request(
                 "initialize",
@@ -381,7 +438,6 @@ impl Instance {
             .context("initialising the instance")?;
 
         self.notify("notifications/initialized", None).await;
-        self.refresh_catalogue().await?;
         Ok(result)
     }
 
@@ -407,6 +463,9 @@ impl Instance {
             catalogue.prompts = array_field(&prompts, "prompts");
         }
 
+        // Marks the instance ready as a side effect, and only on a refresh that actually returned.
+        // A `list_changed` refresh reaching this line is also what promotes an instance whose
+        // bootstrap failed, so a game that registers a tool late recovers on its own.
         self.set_catalogue(catalogue);
         Ok(())
     }
@@ -451,6 +510,27 @@ mod tests {
             "minecraftVersion": "1.12.2",
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn an_instance_is_not_ready_until_it_has_a_catalogue() {
+        // The distinction the roster and aggregation both hang on. An instance is registered the
+        // moment its link is up, because the reader task needs somewhere to route answers to — but
+        // that is before anyone has asked it what it can do. Treating registered as ready is what
+        // let a game that linked and then failed to initialise sit there advertising nothing.
+        let (sender, _outbound) = mpsc::channel(8);
+        let instance = Instance::new(info(), sender);
+        assert!(instance.is_alive());
+        assert!(
+            !instance.is_ready(),
+            "a fresh link has not been asked anything yet"
+        );
+
+        instance.set_catalogue(Catalogue {
+            tools: vec![json!({"name": "client_move"})],
+            ..Catalogue::default()
+        });
+        assert!(instance.is_ready(), "a loaded catalogue is what ready means");
     }
 
     #[test]

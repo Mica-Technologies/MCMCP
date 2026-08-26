@@ -325,8 +325,15 @@ Network settings are read when the link starts, so changing them needs `/mcmcp r
 | Linux | `$XDG_STATE_HOME/mcmcp-orchestrator`, or `~/.local/state/mcmcp-orchestrator` |
 
 Holding approvals (`instances.json`), the gating policy (`policy.json`), the event log
-(`events.jsonl`), the cached tool catalogue, and the shim's token. Approvals store a **hash** of each
-instance secret, never the secret — the secrets stay in each game's own config.
+(`events.jsonl`), the diagnostic log (`orchestrator.log`), the cached tool catalogue, and the shim's
+token. Approvals store a **hash** of each instance secret, never the secret — the secrets stay in
+each game's own config.
+
+The two logs answer different questions. `events.jsonl` is what happened *to instances* — links,
+tool calls, approvals — as a closed set of kinds the app can filter. `orchestrator.log` is the
+program's own `tracing` output, and it exists because the desktop app has no terminal: without it,
+everything the orchestrator said about its own workings went to a stderr nobody could read. It is
+appended to across runs and rotated to `orchestrator.log.1` once it passes 8 MB.
 
 `MCMCP_ORCHESTRATOR_HOME` overrides all of it.
 

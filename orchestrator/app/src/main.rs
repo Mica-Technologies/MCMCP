@@ -47,6 +47,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 /// Emitted whenever anything the UI shows may have changed.
 ///
@@ -832,20 +833,34 @@ fn export_events(state: State<'_, AppState>, instance: Option<String>) -> Result
 // ----------------------------------------------------------------------------------
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
+    // Before the subscriber, because the log now lives in the state directory. Harmless where it
+    // was while the only writer was stderr.
+    paths::ensure_state_directory()?;
+
+    // Tee, not replace. A desktop app has no terminal, so stderr-only logging discarded every
+    // warning the orchestrator produced about its own workings — including the one saying an
+    // instance linked and then failed to initialise. ANSI is off because half of this now goes to a
+    // file a person is expected to open.
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("MCMCP_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .with_writer(std::io::stderr)
-        .init();
+        .with_ansi(false);
+    match paths::open_log_file() {
+        Ok(file) => builder.with_writer(std::io::stderr.and(file)).init(),
+        // A log that cannot be opened is not a reason to refuse to start.
+        Err(error) => {
+            builder.with_writer(std::io::stderr).init();
+            tracing::warn!(%error, "could not open the diagnostic log; logging to stderr only");
+        }
+    }
 
     let link_port: u16 = std::env::var("MCMCP_LINK_PORT")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(25580);
 
-    paths::ensure_state_directory()?;
     let store = Arc::new(Mutex::new(ApprovalStore::load(paths::approval_store_path()?)?));
     let policy_path = control::policy_path(&paths::state_directory()?);
     let policy = Arc::new(Mutex::new(control::load_policy(&policy_path)?));

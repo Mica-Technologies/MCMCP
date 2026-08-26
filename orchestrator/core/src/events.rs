@@ -74,6 +74,16 @@ pub enum EventKind {
         game_directory: Option<String>,
     },
     InstanceUnlinked,
+    /// The link came up but bringing the instance up failed; a retry is scheduled.
+    ///
+    /// Recorded because [`EventKind::InstanceLinked`] is only written once an instance is *ready*,
+    /// so a bootstrap that kept failing used to leave no record whatsoever — the instance simply
+    /// never appeared in the log, and the only way to notice was to spot the absence.
+    InstanceBootstrapFailed {
+        stage: String,
+        attempt: u32,
+        error: String,
+    },
     InstanceApproved {
         label: String,
     },
@@ -183,6 +193,11 @@ impl Event {
             // rename later should not rewrite what happened — but the line does not repeat it.
             EventKind::InstanceLinked { side, .. } => format!("{where_}: linked ({side})"),
             EventKind::InstanceUnlinked => format!("{where_}: unlinked"),
+            EventKind::InstanceBootstrapFailed {
+                stage,
+                attempt,
+                error,
+            } => format!("{where_}: {stage} failed (attempt {attempt}), retrying — {error}"),
             EventKind::InstanceApproved { .. } => format!("{where_}: approved"),
             EventKind::InstanceRejected { reason } => format!("{where_}: refused ({reason})"),
             EventKind::InstanceRevoked => format!("{where_}: revoked"),

@@ -25,6 +25,7 @@
 
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -273,18 +274,7 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
         let events = context.events.clone();
         let id = instance_id.clone();
         let name = label.clone();
-        tokio::spawn(async move {
-            match instance.initialize().await {
-                Ok(_) => {
-                    let tools = instance.catalogue().tools.len();
-                    info!(instance = %id, label = %name, tools, "instance ready");
-                    let _ = events.send(UpstreamEvent::Connected { instance: id });
-                }
-                Err(error) => {
-                    error!(instance = %id, label = %name, %error, "instance failed to initialise");
-                }
-            }
-        })
+        tokio::spawn(async move { bootstrap(instance, events, id, name).await })
     };
 
     let result = read_loop(&mut reader, &instance, &context).await;
@@ -299,6 +289,93 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
     info!(instance = %instance_id, %label, "instance unlinked");
 
     result
+}
+
+/// How long to wait before each successive bootstrap attempt.
+///
+/// The last entry repeats for as long as the link stays up. Bootstrapping is not something that can
+/// be given up on: the instance is already in the registry — the reader task needs it there — so an
+/// abandoned bootstrap leaves a game that looks connected, offers nothing, and never recovers. The
+/// task is cancelled when the link drops, which is the only bound that belongs here.
+const BOOTSTRAP_BACKOFF: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(60),
+];
+
+/// Brings a freshly linked instance up: MCP handshake, then its catalogue, retrying until it works.
+///
+/// The two stages are separate because they fail for different reasons and only one of them is safe
+/// to repeat. A handshake that succeeded is not replayed — MCP does not promise a server tolerates a
+/// second `initialize` — so once past it, a retry re-fetches the catalogue and nothing else.
+async fn bootstrap(
+    instance: Arc<Instance>,
+    events: mpsc::UnboundedSender<UpstreamEvent>,
+    id: String,
+    label: String,
+) {
+    let mut handshaken = false;
+    let mut attempt: u32 = 0;
+
+    loop {
+        if !instance.is_alive() {
+            return;
+        }
+
+        let failure = if !handshaken {
+            match instance.handshake().await {
+                Ok(_) => {
+                    handshaken = true;
+                    None
+                }
+                Err(error) => Some(("handshake", error)),
+            }
+        } else {
+            None
+        };
+
+        let failure = match failure {
+            Some(failure) => Some(failure),
+            None => match instance.refresh_catalogue().await {
+                Ok(()) => {
+                    let tools = instance.catalogue().tools.len();
+                    if attempt > 0 {
+                        info!(instance = %id, label = %label, tools, attempt, "instance ready after retrying");
+                    } else {
+                        info!(instance = %id, label = %label, tools, "instance ready");
+                    }
+                    let _ = events.send(UpstreamEvent::Connected { instance: id });
+                    return;
+                }
+                Err(error) => Some(("catalogue", error)),
+            },
+        };
+
+        let Some((stage, error)) = failure else {
+            return;
+        };
+
+        attempt += 1;
+        let message = format!("{error:#}");
+        error!(instance = %id, label = %label, stage, attempt, error = %message, "instance failed to initialise; will retry");
+        // Durable, not just stderr. The event log recorded only successful links, so a bootstrap
+        // that never succeeded left no trace at all and the failure was invisible to anyone not
+        // watching a terminal the desktop app does not have.
+        let _ = events.send(UpstreamEvent::BootstrapFailed {
+            instance: id.clone(),
+            stage: stage.to_string(),
+            attempt,
+            error: message,
+        });
+
+        let delay = BOOTSTRAP_BACKOFF[usize::min(attempt as usize - 1, BOOTSTRAP_BACKOFF.len() - 1)];
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = instance.wait_closed() => return,
+        }
+    }
 }
 
 async fn ask(context: &LinkContext, hello: &Hello) -> ApprovalOutcome {
@@ -382,6 +459,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Reads outbound frames until a request arrives, answering nothing. Notifications are skipped:
+    /// `notifications/initialized` sits between the handshake and the catalogue fetch.
+    async fn next_request(outbound: &mut mpsc::Receiver<serde_json::Value>) -> serde_json::Value {
+        loop {
+            let frame = outbound.recv().await.expect("bootstrap should keep asking");
+            if frame.get("id").is_some() {
+                return frame;
+            }
+        }
+    }
+
     #[test]
     fn an_approval_summary_never_carries_the_secret() {
         // Whoever answers a prompt has no business handling it, and a GUI would be one screenshot
@@ -406,5 +494,125 @@ mod tests {
         assert_eq!(summary.instance_id, "modb-dev");
         assert_eq!(summary.label, "modB dev");
         assert_eq!(summary.game_directory.as_deref(), Some("E:\\instances\\modB"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_catalogue_fetch_that_fails_is_retried_rather_than_abandoned() {
+        // The bug: bootstrap ran once, and its Err arm only logged. The instance stayed in the
+        // registry with an empty catalogue and no path back — it reported connected, offered
+        // nothing, and every call against it failed with "no connected instance offers it".
+        let (sender, mut outbound) = mpsc::channel(16);
+        let instance = Arc::new(Instance::new(
+            InstanceInfo {
+                id: "alpha.client".into(),
+                approval_id: "alpha".into(),
+                label: "alpha".into(),
+                side: protocol::Side::Client,
+                game_directory: None,
+                mod_version: "test".into(),
+                minecraft_version: "1.12.2".into(),
+                endpoint_url: None,
+            },
+            sender,
+        ));
+        let (events, mut received) = mpsc::unbounded_channel();
+
+        let driver = {
+            let instance = Arc::clone(&instance);
+            tokio::spawn(
+                async move { bootstrap(instance, events, "alpha.client".into(), "alpha".into()).await },
+            )
+        };
+
+        // The handshake succeeds.
+        let handshake = next_request(&mut outbound).await;
+        assert_eq!(handshake["method"], "initialize");
+        instance.complete(jsonrpc::result(handshake["id"].clone(), json!({})));
+
+        // The first catalogue fetch fails, the way a game still finishing its load might.
+        let first = next_request(&mut outbound).await;
+        assert_eq!(first["method"], "tools/list");
+        instance.complete(jsonrpc::error(
+            Some(first["id"].clone()),
+            jsonrpc::INTERNAL_ERROR,
+            "not ready yet",
+        ));
+        assert!(!instance.is_ready(), "a failed fetch must not look ready");
+
+        // The retry asks again -- and this time is answered. `initialize` is NOT replayed.
+        let second = next_request(&mut outbound).await;
+        assert_eq!(
+            second["method"], "tools/list",
+            "a retry re-fetches the catalogue; replaying the handshake is not safe"
+        );
+        instance.complete(jsonrpc::result(
+            second["id"].clone(),
+            json!({"tools": [{"name": "client_move"}]}),
+        ));
+
+        driver.await.expect("bootstrap finishes once it succeeds");
+        assert!(
+            instance.is_ready(),
+            "a successful retry leaves the instance ready"
+        );
+        assert_eq!(instance.catalogue().tools.len(), 1);
+
+        let mut failures = 0;
+        let mut connected = 0;
+        while let Ok(event) = received.try_recv() {
+            match event {
+                UpstreamEvent::BootstrapFailed { attempt, stage, .. } => {
+                    assert_eq!(stage, "catalogue");
+                    assert_eq!(attempt, 1);
+                    failures += 1;
+                }
+                UpstreamEvent::Connected { .. } => connected += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(failures, 1, "the failure is recorded durably, not only on stderr");
+        assert_eq!(connected, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bootstrap_gives_up_when_the_link_dies() {
+        // The retry is bounded by the link, not by an attempt count: a game that closed mid-bootstrap
+        // must not leave a task retrying into a socket that is gone.
+        let (sender, mut outbound) = mpsc::channel(16);
+        let instance = Arc::new(Instance::new(
+            InstanceInfo {
+                id: "alpha.client".into(),
+                approval_id: "alpha".into(),
+                label: "alpha".into(),
+                side: protocol::Side::Client,
+                game_directory: None,
+                mod_version: "test".into(),
+                minecraft_version: "1.12.2".into(),
+                endpoint_url: None,
+            },
+            sender,
+        ));
+        let (events, _received) = mpsc::unbounded_channel();
+
+        let driver = {
+            let instance = Arc::clone(&instance);
+            tokio::spawn(
+                async move { bootstrap(instance, events, "alpha.client".into(), "alpha".into()).await },
+            )
+        };
+
+        let handshake = next_request(&mut outbound).await;
+        instance.complete(jsonrpc::error(
+            Some(handshake["id"].clone()),
+            jsonrpc::INTERNAL_ERROR,
+            "no",
+        ));
+        instance.mark_closed();
+
+        tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("a dead link must end the retry loop")
+            .expect("the task should not panic");
+        assert!(!instance.is_ready());
     }
 }

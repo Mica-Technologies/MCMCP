@@ -401,10 +401,21 @@ impl Router {
     }
 
     async fn build_aggregate(&self) -> Aggregate {
-        let instances = self.registry.all();
+        // Only instances that have actually loaded a catalogue. One that is linked but still being
+        // brought up — or whose bootstrap is failing and retrying — contributes nothing, and letting
+        // it into the aggregate does not merely omit its tools: the result is cached below, so an
+        // instance that is up but not ready would overwrite the surface every other instance and
+        // every previous session had. The `is_empty` fallback right underneath exists precisely so
+        // the tool list does not collapse while a game is coming up; it has to cover this case too.
+        let instances: Vec<_> = self
+            .registry
+            .all()
+            .into_iter()
+            .filter(|instance| instance.is_ready())
+            .collect();
         if instances.is_empty() {
-            // Nothing connected: serve what was there last, so the tool surface does not vanish
-            // between a game closing and the next one opening.
+            // Nothing connected and ready: serve what was there last, so the tool surface does not
+            // vanish between a game closing and the next one opening.
             if let Some(cached) = self.cached_aggregate() {
                 return cached;
             }
@@ -824,6 +835,12 @@ impl Router {
                         let focused = focus.as_deref() == Some(info.id.as_str());
                         let mut summary = info.to_json(true, focused);
                         summary["tools"] = json!(instance.catalogue().tools.len());
+                        // `connected` alone was misleading: an instance is registered the moment
+                        // its link is up, which is before anyone has asked it what it can do. One
+                        // still coming up — or stuck retrying — reported `connected: true` and
+                        // `tools: 0`, and calls against it failed with "no connected instance
+                        // offers it", which is exactly backwards.
+                        summary["ready"] = json!(instance.is_ready());
                         summary
                     })
                     .collect();
@@ -1349,6 +1366,23 @@ impl Router {
                 self.rebuild_and_announce(&format!("instance {instance} connected"))
                     .await;
             }
+            UpstreamEvent::BootstrapFailed {
+                instance,
+                stage,
+                attempt,
+                error,
+            } => {
+                self.record_event(Event::new(
+                    Actor::System,
+                    Level::Warn,
+                    Some(instance),
+                    EventKind::InstanceBootstrapFailed {
+                        stage,
+                        attempt,
+                        error,
+                    },
+                ));
+            }
             UpstreamEvent::Disconnected { instance } => {
                 self.record_event(Event::new(
                     Actor::System,
@@ -1662,6 +1696,7 @@ fn leading_timestamp(line: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    use crate::instance::Catalogue;
     use crate::instance::{Instance, InstanceInfo, UpstreamEvent};
     use crate::link::protocol::Side;
     use crate::registry::Registry;
@@ -1699,6 +1734,68 @@ mod tests {
                 "params": { "protocolVersion": "2025-06-18", "capabilities": capabilities },
             }))
             .await;
+    }
+
+    #[tokio::test]
+    async fn an_instance_that_never_loaded_a_catalogue_cannot_empty_the_tool_surface() {
+        // The regression: an instance is registered as soon as its link is up, before it has been
+        // asked what it can do. One whose bootstrap was still retrying contributed an empty
+        // catalogue to the aggregate — and because the aggregate is cached, that emptiness replaced
+        // the surface every previous session had, on disk. A game coming up wiped the tool list
+        // instead of merely not adding to it yet.
+        let (router, alpha, _outbound) = router_with("alpha");
+        alpha.set_catalogue(Catalogue {
+            tools: vec![json!({"name": "client_move", "description": "move"})],
+            ..Catalogue::default()
+        });
+        let listed = router
+            .handle(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .await
+            .expect("tools/list answers");
+        let names = tool_names(&listed);
+        assert!(
+            names.iter().any(|name| name.contains("client_move")),
+            "a ready instance contributes its tools: {names:?}"
+        );
+
+        // alpha goes away and a fresh link arrives that has not been asked anything yet.
+        router.registry.remove("alpha", &alpha);
+        let (sender, _beta_outbound) = tokio::sync::mpsc::channel(8);
+        let beta = Arc::new(Instance::new(
+            InstanceInfo {
+                id: "beta".into(),
+                approval_id: "beta".into(),
+                label: "beta".into(),
+                side: Side::Client,
+                game_directory: None,
+                mod_version: "test".into(),
+                minecraft_version: "1.12.2".into(),
+                endpoint_url: None,
+            },
+            sender,
+        ));
+        assert!(!beta.is_ready());
+        router.registry.insert(beta);
+
+        let listed = router
+            .handle(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+            .await
+            .expect("tools/list answers");
+        let names = tool_names(&listed);
+        assert!(
+            names.iter().any(|name| name.contains("client_move")),
+            "the cached surface must survive a link that is still coming up: {names:?}"
+        );
+    }
+
+    fn tool_names(response: &Value) -> Vec<String> {
+        response["result"]["tools"]
+            .as_array()
+            .expect("tools is an array")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
     }
 
     #[tokio::test]
