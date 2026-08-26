@@ -137,8 +137,22 @@ impl ClassRules {
 }
 
 impl Policy {
-    pub fn rules_for(&self, instance: &str) -> &ClassRules {
-        self.per_instance.get(instance).unwrap_or(&self.defaults)
+    /// The rules for one endpoint, falling back to its game and then to the defaults.
+    ///
+    /// Two levels rather than one, because the two ids mean different things to the person writing
+    /// a rule. `atm9-3f2a1c.client` is "this game's client, which has the camera and the keyboard";
+    /// `atm9-3f2a1c` is "this Minecraft install, whichever half of it a call lands on". Both are
+    /// worth being able to say, and the more specific one wins.
+    ///
+    /// It is also what stops a policy file written before endpoints were addressable from quietly
+    /// ceasing to apply. Those files are keyed by the game id, and a lookup that only tried the
+    /// endpoint id would miss every one of them and fall through to the defaults — silently
+    /// widening what a model may do, which is the one direction this must never fail in.
+    pub fn rules_for(&self, instance: &str, game: &str) -> &ClassRules {
+        self.per_instance
+            .get(instance)
+            .or_else(|| self.per_instance.get(game))
+            .unwrap_or(&self.defaults)
     }
 
     pub fn set_rule(&mut self, instance: Option<&str>, class: Class, rule: Rule) {
@@ -158,7 +172,13 @@ impl Policy {
     /// `instance_was_named` is whether the caller said which instance to act on, rather than letting
     /// focus decide. It only matters for destructive tools, and only when the corresponding setting
     /// is on.
-    pub fn evaluate(&self, instance: &str, tool: &serde_json::Value, instance_was_named: bool) -> Decision {
+    pub fn evaluate(
+        &self,
+        instance: &str,
+        game: &str,
+        tool: &serde_json::Value,
+        instance_was_named: bool,
+    ) -> Decision {
         let name = tool
             .get("name")
             .and_then(serde_json::Value::as_str)
@@ -179,7 +199,7 @@ impl Policy {
             };
         }
 
-        match self.rules_for(instance).rule_for(class) {
+        match self.rules_for(instance, game).rule_for(class) {
             Rule::Allow => Decision::Allow,
             Rule::Ask => Decision::Ask {
                 reason: format!("'{name}' needs approval on instance {instance}"),
@@ -242,6 +262,7 @@ mod tests {
         assert_eq!(
             policy.evaluate(
                 "alpha",
+                "alpha",
                 &tool("server_set_block", json!({"destructiveHint": true})),
                 true
             ),
@@ -257,10 +278,52 @@ mod tests {
         let destructive = tool("server_set_block", json!({"destructiveHint": true}));
 
         assert!(matches!(
-            policy.evaluate("production", &destructive, true),
+            policy.evaluate("production", "production", &destructive, true),
             Decision::Deny { .. }
         ));
-        assert_eq!(policy.evaluate("scratch", &destructive, true), Decision::Allow);
+        assert_eq!(
+            policy.evaluate("scratch", "scratch", &destructive, true),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_rule_on_a_game_covers_both_of_its_endpoints() {
+        // What keeps a policy file written before endpoints were addressable working. Those files
+        // are keyed by the game id, and a lookup that only tried the endpoint id would miss every
+        // one of them and fall through to the defaults — silently widening what a model may do.
+        let mut policy = Policy::default();
+        policy.set_rule(Some("atm9-3f2a1c"), Class::Destructive, Rule::Deny);
+        let destructive = tool("server_set_block", json!({"destructiveHint": true}));
+
+        for endpoint in ["atm9-3f2a1c.client", "atm9-3f2a1c.server"] {
+            assert!(
+                matches!(
+                    policy.evaluate(endpoint, "atm9-3f2a1c", &destructive, true),
+                    Decision::Deny { .. }
+                ),
+                "{endpoint} should inherit its game's rule"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_on_one_endpoint_beats_its_games_rule() {
+        // The two ids mean different things to whoever wrote the rule: one names this game's
+        // client, which has the camera and the keyboard; the other names the whole install.
+        let mut policy = Policy::default();
+        policy.set_rule(Some("atm9-3f2a1c"), Class::Mutating, Rule::Deny);
+        policy.set_rule(Some("atm9-3f2a1c.client"), Class::Mutating, Rule::Allow);
+        let mutating = tool("client_move", json!({}));
+
+        assert_eq!(
+            policy.evaluate("atm9-3f2a1c.client", "atm9-3f2a1c", &mutating, true),
+            Decision::Allow
+        );
+        assert!(matches!(
+            policy.evaluate("atm9-3f2a1c.server", "atm9-3f2a1c", &mutating, true),
+            Decision::Deny { .. }
+        ));
     }
 
     #[test]
@@ -269,11 +332,17 @@ mod tests {
         policy.set_rule(None, Class::Destructive, Rule::Ask);
 
         assert_eq!(
-            policy.evaluate("alpha", &tool("client_look", json!({"readOnlyHint": true})), true),
+            policy.evaluate(
+                "alpha",
+                "alpha",
+                &tool("client_look", json!({"readOnlyHint": true})),
+                true
+            ),
             Decision::Allow
         );
         assert!(matches!(
             policy.evaluate(
+                "alpha",
                 "alpha",
                 &tool("server_set_block", json!({"destructiveHint": true})),
                 true
@@ -288,7 +357,8 @@ mod tests {
         let mut policy = Policy::default();
         policy.set_rule(Some("alpha"), Class::Mutating, Rule::Deny);
 
-        let Decision::Deny { reason } = policy.evaluate("alpha", &tool("client_move", json!({})), true)
+        let Decision::Deny { reason } =
+            policy.evaluate("alpha", "alpha", &tool("client_move", json!({})), true)
         else {
             panic!("expected a denial");
         };
@@ -308,23 +378,27 @@ mod tests {
         assert_eq!(
             policy.evaluate(
                 "alpha",
+                "alpha",
                 &tool("client_look", json!({"readOnlyHint": true})),
                 false
             ),
             Decision::Allow
         );
         assert_eq!(
-            policy.evaluate("alpha", &tool("client_move", json!({})), false),
+            policy.evaluate("alpha", "alpha", &tool("client_move", json!({})), false),
             Decision::Allow
         );
 
         let destructive = tool("server_set_block", json!({"destructiveHint": true}));
         assert!(matches!(
-            policy.evaluate("alpha", &destructive, false),
+            policy.evaluate("alpha", "alpha", &destructive, false),
             Decision::Deny { .. }
         ));
         // Naming the instance satisfies it.
-        assert_eq!(policy.evaluate("alpha", &destructive, true), Decision::Allow);
+        assert_eq!(
+            policy.evaluate("alpha", "alpha", &destructive, true),
+            Decision::Allow
+        );
     }
 
     #[test]
@@ -335,6 +409,7 @@ mod tests {
         };
 
         let Decision::Deny { reason } = policy.evaluate(
+            "alpha",
             "alpha",
             &tool("server_set_block", json!({"destructiveHint": true})),
             false,
@@ -357,9 +432,9 @@ mod tests {
         let text = serde_json::to_string(&policy).unwrap();
         let restored: Policy = serde_json::from_str(&text).unwrap();
 
-        assert_eq!(restored.rules_for("alpha").destructive, Rule::Ask);
+        assert_eq!(restored.rules_for("alpha", "alpha").destructive, Rule::Ask);
         assert!(restored.require_explicit_instance_for_destructive);
-        assert_eq!(restored.rules_for("beta").destructive, Rule::Allow);
+        assert_eq!(restored.rules_for("beta", "beta").destructive, Rule::Allow);
     }
 
     #[test]

@@ -75,6 +75,19 @@ Prefer no app at all? The headless orchestrator speaks MCP over stdio directly:
 Every tool gains an optional `instance` argument. Omit it and the call goes to the **focused**
 instance; with only one game connected, that is always the right one.
 
+What you address is one **endpoint**, not one game. Instance ids read `<game>.client` and
+`<game>.server`:
+
+```
+atm9-3f2a1c.client     the camera, the keyboard, the screenshots
+atm9-3f2a1c.server     authoritative world state, commands, direct block writes
+```
+
+A world open in singleplayer is **both**, from one process — and they are separately addressable
+because their tool surfaces genuinely differ, while `mcmcp_instances` reports the `game` they share
+so you can see they are one running game rather than two. Approving, revoking and renaming all apply
+to the game, so you do those once and both endpoints follow.
+
 ```
 mcmcp_instances            # what is connected, what each one is, which is focused
 mcmcp_focus                # read or change where unaimed calls go

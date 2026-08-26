@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 
 use crate::catalogue::{self, ALL_INSTANCES, Aggregate, Contribution, INSTANCE_ARGUMENT};
 use crate::events::{Actor, Event, EventKind, EventLog, Level};
-use crate::instance::{Instance, UpstreamEvent};
+use crate::instance::{self, Instance, UpstreamEvent};
 use crate::jsonrpc;
 use crate::orchestrator_tools;
 use crate::policy::{Decision, Policy};
@@ -347,14 +347,57 @@ impl Router {
         let mut ids = self.registry.ids();
         if let Ok(store) = self.store.lock() {
             for known in store.all() {
-                if !known.revoked && !ids.contains(&known.id) {
-                    ids.push(known.id.clone());
+                if known.revoked {
+                    continue;
+                }
+                // Endpoint ids, not the bare game id the store is keyed on: a game id is what an
+                // approval is filed under, not something a call can be routed to. Offering one here
+                // would put a target in every tool schema that always fails.
+                for side in &known.endpoints {
+                    let id = format!("{}{}{side}", known.id, instance::ENDPOINT_SEPARATOR);
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
                 }
             }
         }
         ids.sort();
         ids.dedup();
         ids
+    }
+
+    /// Records an event, filling in the instance's label so the log line names it.
+    ///
+    /// One funnel rather than a `.labelled(...)` on nine call sites: the next event added would have
+    /// been the one that forgot, and an audit trail with a gap in it is worse than one with none.
+    fn record_event(&self, event: Event) {
+        let event = match event.instance.clone() {
+            Some(id) => event.labelled(self.label_of(&id)),
+            None => event,
+        };
+        self.events.record(event);
+    }
+
+    /// The label to put beside an instance id in a log line.
+    ///
+    /// Falls back to the id, because a log line that says which instance it is about is worth more
+    /// than one that is missing a field. An id like `run-d0a639` is derived from a directory name
+    /// and a few bytes of entropy; nobody reading an audit trail knows which game that is.
+    fn label_of(&self, id: &str) -> String {
+        self.registry
+            .get(id)
+            .map(|instance| instance.info().label)
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    /// The game id an addressable instance is approved under.
+    ///
+    /// A live instance carries it; one that is only on disk is resolved by the store.
+    fn approval_id_for(&self, addressable: &str) -> Option<String> {
+        if let Some(instance) = self.registry.get(addressable) {
+            return Some(instance.info().approval_id);
+        }
+        self.store.lock().ok()?.game_of(addressable)
     }
 
     async fn build_aggregate(&self) -> Aggregate {
@@ -505,7 +548,12 @@ impl Router {
             .unwrap_or_else(|| json!({ "name": name }));
         let decision = {
             let policy = self.policy.lock().expect("policy lock");
-            policy.evaluate(&instance.id(), &definition, requested_instance.is_some())
+            policy.evaluate(
+                &instance.id(),
+                &instance.info().approval_id,
+                &definition,
+                requested_instance.is_some(),
+            )
         };
         if let Some(refusal) = self.apply_gate(decision, &instance.id(), name, &arguments).await {
             return Ok(refusal);
@@ -554,7 +602,7 @@ impl Router {
             Ok(mut result) => {
                 let info = instance.info();
                 let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
-                self.events.record(Event::new(
+                self.record_event(Event::new(
                     Actor::Model,
                     if is_error { Level::Warn } else { Level::Info },
                     Some(info.id.clone()),
@@ -575,7 +623,7 @@ impl Router {
                 Ok(result)
             }
             Err(error) => {
-                self.events.record(Event::new(
+                self.record_event(Event::new(
                     Actor::Model,
                     Level::Error,
                     Some(instance.id()),
@@ -715,7 +763,7 @@ impl Router {
                          desktop app to approve calls interactively, or change this rule with \
                          'mcmcp-orchestrator policy'."
                     );
-                    self.events.record(Event::new(
+                    self.record_event(Event::new(
                         Actor::System,
                         Level::Warn,
                         Some(instance.to_string()),
@@ -736,7 +784,7 @@ impl Router {
                     respond,
                 };
                 if gate.send(request).await.is_err() || !answer.await.unwrap_or(false) {
-                    self.events.record(Event::new(
+                    self.record_event(Event::new(
                         Actor::Human,
                         Level::Warn,
                         Some(instance.to_string()),
@@ -751,7 +799,7 @@ impl Router {
             }
         };
 
-        self.events.record(Event::new(
+        self.record_event(Event::new(
             Actor::System,
             Level::Warn,
             Some(instance.to_string()),
@@ -782,18 +830,31 @@ impl Router {
 
                 // Known-but-absent instances are listed too. "Where did my other game go" is a real
                 // question, and an empty answer to it is much less useful than "known, not running".
-                let connected_ids = self.registry.ids();
+                let connected_games: Vec<String> = self
+                    .registry
+                    .all()
+                    .iter()
+                    .map(|instance| instance.info().approval_id)
+                    .collect();
                 let mut known = Vec::new();
                 if let Ok(store) = self.store.lock() {
-                    for instance in store.all() {
-                        if instance.revoked || connected_ids.contains(&instance.id) {
+                    for game in store.all() {
+                        if game.revoked || connected_games.contains(&game.id) {
                             continue;
                         }
+                        // One entry per game rather than per endpoint. An endpoint that is not
+                        // running has nothing to say about itself, and listing two of them for one
+                        // absent singleplayer world reads as two missing games.
                         known.push(json!({
-                            "instance": instance.id,
-                            "label": instance.label,
+                            "game": game.id,
+                            "label": game.label,
                             "connected": false,
-                            "gameDirectory": instance.game_directory,
+                            "gameDirectory": game.game_directory,
+                            "endpoints": game
+                                .endpoints
+                                .iter()
+                                .map(|side| format!("{}{}{side}", game.id, instance::ENDPOINT_SEPARATOR))
+                                .collect::<Vec<_>>(),
                         }));
                     }
                 }
@@ -813,7 +874,7 @@ impl Router {
                 };
                 let previous = self.registry.focus();
                 if self.registry.set_focus(requested) {
-                    self.events.record(Event::new(
+                    self.record_event(Event::new(
                         Actor::Model,
                         Level::Info,
                         Some(requested.to_string()),
@@ -845,9 +906,17 @@ impl Router {
                 let Some(label) = arguments.get("label").and_then(Value::as_str) else {
                     return tool_error("mcmcp_set_label needs a label");
                 };
+                // A label belongs to the game, not to one of its endpoints: it is what a person
+                // typed to mean "this Minecraft install", and renaming a singleplayer world through
+                // its client while its server kept the old name would be a bug, not a feature.
+                let Some(game) = self.approval_id_for(target) else {
+                    return tool_error(&format!(
+                        "this orchestrator has never seen an instance called '{target}'"
+                    ));
+                };
                 let renamed = {
                     let mut store = self.store.lock().expect("store lock");
-                    let renamed = store.set_label(target, label);
+                    let renamed = store.set_label(&game, label);
                     if renamed {
                         if let Err(error) = store.save() {
                             warn!(%error, "could not save the approval store after a rename");
@@ -865,10 +934,12 @@ impl Router {
                     .get(target)
                     .map(|instance| instance.info().label)
                     .unwrap_or_default();
-                if let Some(instance) = self.registry.get(target) {
-                    instance.set_label(label.to_string());
+                for instance in self.registry.all() {
+                    if instance.info().approval_id == game {
+                        instance.set_label(label.to_string());
+                    }
                 }
-                self.events.record(Event::new(
+                self.record_event(Event::new(
                     Actor::Model,
                     Level::Info,
                     Some(target.to_string()),
@@ -1264,7 +1335,7 @@ impl Router {
             UpstreamEvent::Connected { instance } => {
                 if let Some(handle) = self.registry.get(&instance) {
                     let info = handle.info();
-                    self.events.record(Event::new(
+                    self.record_event(Event::new(
                         Actor::System,
                         Level::Info,
                         Some(instance.clone()),
@@ -1279,7 +1350,7 @@ impl Router {
                     .await;
             }
             UpstreamEvent::Disconnected { instance } => {
-                self.events.record(Event::new(
+                self.record_event(Event::new(
                     Actor::System,
                     Level::Info,
                     Some(instance.clone()),
@@ -1358,7 +1429,7 @@ impl Router {
         };
 
         if let Some(reason) = refusal {
-            debug!(instance = %instance_id, %method, "refusing a server-to-client request");
+            debug!(instance = %instance_id, label = %self.label_of(instance_id), %method, "refusing a server-to-client request");
             self.answer_instance(
                 instance_id,
                 jsonrpc::error(Some(instance_request_id), jsonrpc::METHOD_NOT_FOUND, &reason),
@@ -1401,7 +1472,9 @@ impl Router {
         match self.registry.get(instance_id) {
             Some(instance) => instance.notify_raw(frame).await,
             // The game went away while its own question was in flight. Nothing to answer.
-            None => debug!(instance = %instance_id, "cannot answer; the instance disconnected"),
+            None => {
+                debug!(instance = %instance_id, label = %self.label_of(instance_id), "cannot answer; the instance disconnected")
+            }
         }
     }
 
@@ -1418,7 +1491,7 @@ impl Router {
                 if let Some(instance) = self.registry.get(instance_id)
                     && let Err(error) = instance.refresh_catalogue().await
                 {
-                    warn!(instance = %instance_id, %error, "could not re-read a catalogue");
+                    warn!(instance = %instance_id, label = %self.label_of(instance_id), %error, "could not re-read a catalogue");
                 }
                 self.build_aggregate().await;
                 self.notify_downstream(jsonrpc::notification(&method, None));
@@ -1461,7 +1534,9 @@ impl Router {
                 self.notify_downstream(message);
             }
 
-            other => debug!(instance = %instance_id, method = %other, "dropped an instance notification"),
+            other => {
+                debug!(instance = %instance_id, label = %self.label_of(instance_id), method = %other, "dropped an instance notification")
+            }
         }
     }
 }
@@ -1598,6 +1673,7 @@ mod tests {
         let instance = Arc::new(Instance::new(
             InstanceInfo {
                 id: instance_id.into(),
+                approval_id: instance_id.into(),
                 label: instance_id.into(),
                 side: Side::Client,
                 game_directory: None,

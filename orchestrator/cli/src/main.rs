@@ -347,10 +347,20 @@ async fn wait_for_app(port: u16) -> Result<tokio::net::TcpStream> {
 // because the CLI is you" means.
 // ----------------------------------------------------------------------------------
 
+/// Turns whatever a person typed into the game id the store is keyed by.
+///
+/// Approval, revocation and labelling are per game; routing is per endpoint. Someone copying an id
+/// out of a tool result or the app's roster has an endpoint id in hand, and refusing it because the
+/// store has never heard of `atm9-3f2a1c.client` would be technically true and useless.
+fn game_of(store: &mcmcp_orchestrator_core::store::ApprovalStore, instance: &str) -> Option<String> {
+    store.game_of(instance)
+}
+
 fn approve(instance: &str) -> Result<()> {
     let store = open_store()?;
     let mut store = store.lock().expect("store lock");
-    let Some(known) = store.get(instance).cloned() else {
+    let known = game_of(&store, instance).and_then(|game| store.get(&game).cloned());
+    let Some(known) = known else {
         anyhow::bail!(
             "this orchestrator has never seen an instance called '{instance}'. It has to connect \
              once before it can be approved — start the game, then run this again."
@@ -371,7 +381,8 @@ fn approve(instance: &str) -> Result<()> {
 fn revoke(instance: &str) -> Result<()> {
     let store = open_store()?;
     let mut store = store.lock().expect("store lock");
-    if !store.revoke(instance) {
+    let game = game_of(&store, instance);
+    if !game.map(|game| store.revoke(&game)).unwrap_or(false) {
         anyhow::bail!("this orchestrator has never seen an instance called '{instance}'");
     }
     store.save()?;
@@ -385,7 +396,10 @@ fn revoke(instance: &str) -> Result<()> {
 fn set_label(instance: &str, label: &str) -> Result<()> {
     let store = open_store()?;
     let mut store = store.lock().expect("store lock");
-    if !store.set_label(instance, label) {
+    let game = game_of(&store, instance);
+    // Renames the game, which is to say both of its endpoints. The label is what somebody typed to
+    // mean "this Minecraft install", not "the client half of it".
+    if !game.map(|game| store.set_label(&game, label)).unwrap_or(false) {
         anyhow::bail!("this orchestrator has never seen an instance called '{instance}'");
     }
     store.save()?;
@@ -524,6 +538,16 @@ fn list_instances() -> Result<()> {
                 .unwrap_or("(unknown directory)")
         );
         println!("{:<24} {}", "", instance.label);
+        if !instance.endpoints.is_empty() {
+            // The game id is what an approval is filed under; these are what a call can be routed
+            // to. A singleplayer world has both, and they are not interchangeable.
+            let addressable: Vec<String> = instance
+                .endpoints
+                .iter()
+                .map(|side| format!("{}.{side}", instance.id))
+                .collect();
+            println!("{:<24} {}", "", addressable.join("  "));
+        }
     }
     Ok(())
 }
@@ -680,10 +704,19 @@ fn spawn_control_watcher(
             // Reload the approvals and disconnect anything that was revoked while connected.
             match ApprovalStore::load(&store_path) {
                 Ok(reloaded) => {
+                    // Matched on the game rather than the endpoint id. A revocation is filed
+                    // against the game, so comparing endpoint ids against the store would find
+                    // nothing and leave a revoked instance connected until it happened to drop.
                     let revoked: Vec<String> = registry
-                        .ids()
+                        .all()
                         .into_iter()
-                        .filter(|id| reloaded.get(id).map(|known| known.revoked).unwrap_or(false))
+                        .filter(|handle| {
+                            reloaded
+                                .get(&handle.info().approval_id)
+                                .map(|known| known.revoked)
+                                .unwrap_or(false)
+                        })
+                        .map(|handle| handle.id())
                         .collect();
 
                     // Swap the contents rather than the Arc: the link listener holds the same one.
@@ -693,8 +726,13 @@ fn spawn_control_watcher(
 
                     for id in revoked {
                         if let Some(instance) = registry.get(&id) {
-                            events.note(Actor::Human, Some(id.clone()), "revoked; disconnecting");
-                            info!(instance = %id, "revoked; disconnecting");
+                            events.note_about(
+                                Actor::Human,
+                                Some(id.clone()),
+                                instance.info().label,
+                                "revoked; disconnecting",
+                            );
+                            info!(instance = %id, label = %instance.info().label, "revoked; disconnecting");
                             instance.mark_closed();
                             registry.remove(&id, &instance);
                         }

@@ -11,6 +11,8 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::instance::ENDPOINT_SEPARATOR;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,6 +49,14 @@ pub struct ApprovedInstance {
     /// up or ignored.
     #[serde(default)]
     pub label_is_custom: bool,
+    /// Endpoint sides this game has been seen linking with, e.g. `["client", "server"]`.
+    ///
+    /// Recorded so the `instance` enum in every tool schema stays stable across a relaunch. The
+    /// addressable id is per *endpoint* while an approval is per *game*, so without this the store
+    /// could only offer a bare game id — which is not a valid target for anything. An older store
+    /// file has none and simply contributes nothing until the game next connects.
+    #[serde(default)]
+    pub endpoints: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -144,6 +154,9 @@ impl ApprovalStore {
     pub fn approve(&mut self, id: &str, secret: &str, label: &str, game_directory: Option<&str>, now: &str) {
         let existing = self.file.instances.get(id);
         let label_is_custom = existing.is_some_and(|instance| instance.label_is_custom);
+        let endpoints = existing
+            .map(|instance| instance.endpoints.clone())
+            .unwrap_or_default();
         let label = if label_is_custom {
             existing
                 .map(|instance| instance.label.clone())
@@ -162,6 +175,7 @@ impl ApprovalStore {
                 revoked: false,
                 approved_at: Some(now.to_string()),
                 label_is_custom,
+                endpoints,
             },
         );
     }
@@ -172,11 +186,9 @@ impl ApprovalStore {
     /// an instance's secret — nor should it: the secret lives in the game's config and in the
     /// handshake, and a command-line tool that handled it would put it in shell history.
     pub fn approve_known(&mut self, id: &str, secret_hash: &str, label: &str, game_directory: Option<&str>) {
-        let label_is_custom = self
-            .file
-            .instances
-            .get(id)
-            .is_some_and(|known| known.label_is_custom);
+        let existing = self.file.instances.get(id);
+        let label_is_custom = existing.is_some_and(|known| known.label_is_custom);
+        let endpoints = existing.map(|known| known.endpoints.clone()).unwrap_or_default();
         self.file.instances.insert(
             id.to_string(),
             ApprovedInstance {
@@ -187,6 +199,7 @@ impl ApprovalStore {
                 revoked: false,
                 approved_at: Some(String::new()),
                 label_is_custom,
+                endpoints,
             },
         );
     }
@@ -207,6 +220,7 @@ impl ApprovalStore {
         let secret_hash = existing
             .map(|known| known.secret_hash.clone())
             .unwrap_or_default();
+        let endpoints = existing.map(|known| known.endpoints.clone()).unwrap_or_default();
         self.file.instances.insert(
             id.to_string(),
             ApprovedInstance {
@@ -217,6 +231,7 @@ impl ApprovalStore {
                 revoked: true,
                 approved_at: None,
                 label_is_custom,
+                endpoints,
             },
         );
     }
@@ -270,6 +285,51 @@ impl ApprovalStore {
         None
     }
 
+    /// The game an addressable instance id belongs to, for an instance that is not connected.
+    ///
+    /// Approval, revocation and labelling are all per game, while routing is per endpoint, so every
+    /// caller holding an id a person or a model chose has to cross this seam. A connected instance
+    /// answers it directly from its `approval_id`; this is the fallback for one that is only on
+    /// disk.
+    ///
+    /// Matched by rebuilding each game's endpoint ids rather than by splitting `addressable` on a
+    /// separator: splitting assumes no game id contains one, and a hand-edited `identity.instanceId`
+    /// is not bound by what the mod's slugify would have produced. A bare game id matches itself, so
+    /// a human typing the id off a roster gets what they meant.
+    pub fn game_of(&self, addressable: &str) -> Option<String> {
+        if self.file.instances.contains_key(addressable) {
+            return Some(addressable.to_string());
+        }
+        self.file
+            .instances
+            .values()
+            .find(|known| {
+                known
+                    .endpoints
+                    .iter()
+                    .any(|side| addressable == format!("{}{}{side}", known.id, ENDPOINT_SEPARATOR))
+            })
+            .map(|known| known.id.clone())
+    }
+
+    /// Records that this game has an endpoint on `side`, so the id stays addressable while it is off.
+    ///
+    /// Idempotent, and returns whether anything changed — the caller only needs to save the store
+    /// when it did, and a reconnecting instance calls this on every handshake.
+    pub fn note_endpoint(&mut self, id: &str, side: &str) -> bool {
+        let Some(instance) = self.file.instances.get_mut(id) else {
+            return false;
+        };
+        if instance.endpoints.iter().any(|known| known == side) {
+            return false;
+        }
+        instance.endpoints.push(side.to_string());
+        // Sorted so the tool schema's `instance` enum does not depend on which side happened to
+        // connect first. "client" before "server" also happens to be the order they link in.
+        instance.endpoints.sort();
+        true
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -312,6 +372,55 @@ mod tests {
             path: PathBuf::from("unused.json"),
             file: StoreFile::default(),
         }
+    }
+
+    #[test]
+    fn a_games_endpoints_are_remembered_so_its_ids_stay_addressable_while_it_is_off() {
+        // The `instance` enum in every tool schema is built from this. An approval is filed under
+        // the game id, which is not a valid routing target, so without a record of which endpoints
+        // the game has there is nothing addressable to offer between launches.
+        let mut store = store();
+        store.approve("modb-dev", SECRET, "modB dev", None, "0");
+
+        assert!(store.note_endpoint("modb-dev", "client"));
+        assert!(store.note_endpoint("modb-dev", "server"));
+        assert!(
+            !store.note_endpoint("modb-dev", "client"),
+            "a reconnecting instance calls this every handshake and must not keep dirtying the store"
+        );
+        assert_eq!(
+            store.get("modb-dev").unwrap().endpoints,
+            vec!["client".to_string(), "server".to_string()]
+        );
+    }
+
+    #[test]
+    fn re_approving_a_rotated_secret_keeps_the_endpoints_already_seen() {
+        let mut store = store();
+        store.approve("modb-dev", SECRET, "modB dev", None, "0");
+        store.note_endpoint("modb-dev", "server");
+
+        store.approve("modb-dev", OTHER_SECRET, "modB dev", None, "1");
+
+        assert_eq!(
+            store.get("modb-dev").unwrap().endpoints,
+            vec!["server".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_endpoint_id_resolves_back_to_the_game_it_is_approved_under() {
+        // Every caller holding an id a person or a model chose has to cross this seam: routing is
+        // per endpoint, approval is per game.
+        let mut store = store();
+        store.approve("modb-dev", SECRET, "modB dev", None, "0");
+        store.note_endpoint("modb-dev", "client");
+        store.note_endpoint("modb-dev", "server");
+
+        assert_eq!(store.game_of("modb-dev.server").as_deref(), Some("modb-dev"));
+        // A human typing the id off a roster gets what they meant.
+        assert_eq!(store.game_of("modb-dev").as_deref(), Some("modb-dev"));
+        assert_eq!(store.game_of("something-else.client"), None);
     }
 
     #[test]

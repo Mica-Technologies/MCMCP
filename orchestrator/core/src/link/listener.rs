@@ -157,7 +157,7 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
             protocol::REASON_MALFORMED_HELLO
         };
         let _ = framing::write_frame(&mut write_half, &protocol::rejected(reason, &problem)).await;
-        warn!(instance = %hello.instance_id, %problem, "refused a link");
+        warn!(instance = %hello.instance_id, label = %hello.fallback_label(), %problem, "refused a link");
         return Ok(());
     }
 
@@ -202,7 +202,7 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
         ApprovalOutcome::Reject { reason, message } => {
             let frame = protocol::rejected(reason, message);
             let _ = framing::write_frame(&mut write_half, &frame).await;
-            warn!(instance = %hello.instance_id, %reason, "refused a link");
+            warn!(instance = %hello.instance_id, label = %hello.fallback_label(), %reason, "refused a link");
             return Ok(());
         }
     }
@@ -220,11 +220,13 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
             hello.game_directory.as_deref(),
             &now_rfc3339(),
         );
+        store.note_endpoint(&hello.instance_id, hello.side.as_str());
         if let Some(previous) = store.note_directory(&hello.instance_id, hello.game_directory.as_deref()) {
             // A known id from a new path is a moved instance, which is fine and stays approved. It
             // is also what a copied config looks like, so it earns a line rather than silence.
             warn!(
                 instance = %hello.instance_id,
+                label = %hello.fallback_label(),
                 from = %previous,
                 to = hello.game_directory.as_deref().unwrap_or("(unknown)"),
                 "an approved instance reported a new game directory"
@@ -257,24 +259,29 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
         }
     });
 
+    // The addressable id, not the raw hello id: both endpoints of a singleplayer world share one
+    // `instanceId`, and registering them under it made the integrated server displace the client.
+    let instance_id = instance.id();
+
     context.registry.insert(Arc::clone(&instance));
-    info!(instance = %hello.instance_id, %label, side = hello.side.as_str(), "instance linked");
+    info!(instance = %instance_id, %label, side = hello.side.as_str(), "instance linked");
 
     // Spawned, not awaited: initialize and the catalogue fetch send requests whose answers only
     // arrive once the read loop below is running. Awaiting here would deadlock on the first one.
     let bootstrap = {
         let instance = Arc::clone(&instance);
         let events = context.events.clone();
-        let id = hello.instance_id.clone();
+        let id = instance_id.clone();
+        let name = label.clone();
         tokio::spawn(async move {
             match instance.initialize().await {
                 Ok(_) => {
                     let tools = instance.catalogue().tools.len();
-                    info!(instance = %id, tools, "instance ready");
+                    info!(instance = %id, label = %name, tools, "instance ready");
                     let _ = events.send(UpstreamEvent::Connected { instance: id });
                 }
                 Err(error) => {
-                    error!(instance = %id, %error, "instance failed to initialise");
+                    error!(instance = %id, label = %name, %error, "instance failed to initialise");
                 }
             }
         })
@@ -284,12 +291,12 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
 
     bootstrap.abort();
     instance.mark_closed();
-    context.registry.remove(&hello.instance_id, &instance);
+    context.registry.remove(&instance_id, &instance);
     writer.abort();
     let _ = context.events.send(UpstreamEvent::Disconnected {
-        instance: hello.instance_id.clone(),
+        instance: instance_id.clone(),
     });
-    info!(instance = %hello.instance_id, "instance unlinked");
+    info!(instance = %instance_id, %label, "instance unlinked");
 
     result
 }
@@ -314,17 +321,20 @@ where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     let id = instance.id();
+    // Resolved once: the label is what makes a log line auditable, and an id like `run-d0a639` on
+    // its own tells a person reading the trail nothing about which game it was.
+    let label = instance.info().label;
     while let Some(frame) = framing::read_frame(reader).await? {
         if protocol::is_control_frame(&frame) {
             // Nothing sends a post-handshake control frame yet. Ignoring an unknown one rather than
             // dropping the link is what lets a newer mod talk to an older orchestrator.
-            debug!(instance = %id, "ignored a post-handshake control frame");
+            debug!(instance = %id, %label, "ignored a post-handshake control frame");
             continue;
         }
 
         if jsonrpc::is_response(&frame) {
             if !instance.complete(frame) {
-                debug!(instance = %id, "an answer arrived for a request nobody was waiting on");
+                debug!(instance = %id, %label, "an answer arrived for a request nobody was waiting on");
             }
             continue;
         }
@@ -344,7 +354,7 @@ where
         // game until its own timeout, and the game has no way to tell that from a slow answer.
         if jsonrpc::id_of(&frame).is_some() {
             let method = jsonrpc::method_of(&frame).unwrap_or("(unknown)").to_string();
-            debug!(instance = %id, %method, "forwarding a server-to-client request");
+            debug!(instance = %id, %label, %method, "forwarding a server-to-client request");
             let _ = context.events.send(UpstreamEvent::Request {
                 instance: id.clone(),
                 message: frame,

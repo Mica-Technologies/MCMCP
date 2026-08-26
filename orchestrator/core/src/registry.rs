@@ -182,6 +182,7 @@ mod tests {
         Arc::new(Instance::new(
             InstanceInfo {
                 id: id.into(),
+                approval_id: id.into(),
                 label: id.into(),
                 side: Side::Client,
                 game_directory: None,
@@ -263,6 +264,30 @@ mod tests {
     #[test]
     fn nothing_connected_is_its_own_answer() {
         assert_eq!(Registry::new().resolve(None), FocusResolution::NoInstances);
+    }
+
+    #[test]
+    fn the_two_endpoints_of_one_game_coexist_instead_of_displacing_each_other() {
+        // The singleplayer bug in one test. Both sides dial in with the same instanceId, so keying
+        // on it meant the integrated server — which links at FMLServerStartingEvent, long after the
+        // client links at postInit — replaced the client and marked it closed. The game showed up
+        // as a server with only the server tool set.
+        let registry = Registry::new();
+        let client = instance("modb-dev.client");
+        let server = instance("modb-dev.server");
+
+        registry.insert(Arc::clone(&client));
+        assert!(
+            registry.insert(Arc::clone(&server)).is_none(),
+            "nothing is displaced"
+        );
+
+        assert_eq!(registry.count(), 2);
+        assert!(
+            client.is_alive(),
+            "the client link must survive the server linking"
+        );
+        assert_eq!(registry.focus().as_deref(), Some("modb-dev.client"));
     }
 
     #[test]

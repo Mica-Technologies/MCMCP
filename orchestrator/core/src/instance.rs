@@ -43,10 +43,46 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// The MCP protocol version the orchestrator negotiates with instances.
 pub const INSTANCE_PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// Separates a game's id from the endpoint suffix in an addressable instance id.
+///
+/// A dot rather than a slash, and the reason is not cosmetic: [`crate::catalogue::qualify_uri`]
+/// inserts an instance id as a resource URI's *authority*, and `unqualify_uri` splits it back off at
+/// the first slash. `atm9-3f2a1c/client` would round-trip as instance `atm9-3f2a1c` and a mangled
+/// original URI — silently, and only for resources. The mod's `slugify` emits nothing but
+/// `[a-z0-9-]`, so a dot cannot collide with a game id it did not put there.
+pub const ENDPOINT_SEPARATOR: char = '.';
+
+/// The addressable id for one endpoint of one game.
+///
+/// Both sides of a singleplayer world dial in with the *same* `instanceId` — one identity per game
+/// directory, shared by the client and the integrated server — so keying the registry on it made the
+/// second link displace the first. Whichever connected last decided what the whole game looked like,
+/// and because the integrated server links at `FMLServerStartingEvent`, long after the client links
+/// at `postInit`, that was reliably the server: a singleplayer client would appear as a server and
+/// lose every client-only tool.
+///
+/// Both sides are suffixed rather than only the server. An asymmetric rule buys a shorter name for
+/// clients at the cost of two rules instead of one, and of privileging a side for no reason a person
+/// reading the roster could infer.
+pub fn endpoint_id(instance_id: &str, side: Side) -> String {
+    format!("{instance_id}{ENDPOINT_SEPARATOR}{}", side.as_str())
+}
+
 /// What an instance told us about itself, plus what we decided to call it.
 #[derive(Debug, Clone)]
 pub struct InstanceInfo {
+    /// The addressable id: one endpoint of one game, as [`endpoint_id`] builds it.
+    ///
+    /// This is what a model names in an `instance` argument, what focus points at, and what every
+    /// routed result is stamped with.
     pub id: String,
+    /// The id this endpoint's *game* is approved under — the raw `instanceId` from the hello.
+    ///
+    /// Carried rather than parsed back out of [`Self::id`]. Approval, revocation and labelling are
+    /// all per-game: a person approves a Minecraft install once, not once per endpoint, and renaming
+    /// a game renames both of its endpoints. Keeping the two keys as separate fields is what stops
+    /// a store lookup from being handed a routing key that was never in the store.
+    pub approval_id: String,
     pub label: String,
     pub side: Side,
     pub game_directory: Option<String>,
@@ -58,7 +94,8 @@ pub struct InstanceInfo {
 impl InstanceInfo {
     pub fn from_hello(hello: &Hello, label: String) -> Self {
         Self {
-            id: hello.instance_id.clone(),
+            id: endpoint_id(&hello.instance_id, hello.side),
+            approval_id: hello.instance_id.clone(),
             label,
             side: hello.side,
             game_directory: hello.game_directory.clone(),
@@ -75,6 +112,10 @@ impl InstanceInfo {
     pub fn to_json(&self, connected: bool, focused: bool) -> Value {
         json!({
             "instance": self.id,
+            // The game both endpoints of a singleplayer world share. Without it a model sees two
+            // entries with the same label and no way to tell "two games" from "one game, two
+            // endpoints" — which decides whether acting on both is redundant or destructive.
+            "game": self.approval_id,
             "label": self.label,
             "side": self.side.as_str(),
             "connected": connected,
@@ -386,7 +427,8 @@ mod tests {
 
     fn info() -> InstanceInfo {
         InstanceInfo {
-            id: "modb-dev".into(),
+            id: "modb-dev.client".into(),
+            approval_id: "modb-dev".into(),
             label: "modB dev".into(),
             side: Side::Client,
             game_directory: Some("E:\\instances\\modB".into()),
@@ -394,6 +436,69 @@ mod tests {
             minecraft_version: "1.12.2".into(),
             endpoint_url: Some("http://127.0.0.1:25585/mcp".into()),
         }
+    }
+
+    fn hello(side: &str) -> Hello {
+        serde_json::from_value(json!({
+            "type": "hello",
+            "linkProtocol": 1,
+            "instanceId": "modb-dev",
+            "instanceSecret": "a".repeat(64),
+            "instanceName": "modB dev",
+            "side": side,
+            "gameDirectory": "E:\\instances\\modB",
+            "modVersion": "2026.08.24",
+            "minecraftVersion": "1.12.2",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn both_endpoints_of_one_game_get_different_addresses() {
+        // The bug this exists to prevent: a singleplayer world's client and integrated server dial
+        // in with the same instanceId, so keying the registry on it made the server — which links
+        // later, at FMLServerStartingEvent — displace the client. The game then appeared as a
+        // server and lost every client-only tool.
+        let client = InstanceInfo::from_hello(&hello("client"), "modB dev".into());
+        let server = InstanceInfo::from_hello(&hello("server"), "modB dev".into());
+
+        assert_ne!(client.id, server.id);
+        assert_eq!(client.id, "modb-dev.client");
+        assert_eq!(server.id, "modb-dev.server");
+    }
+
+    #[test]
+    fn both_endpoints_of_one_game_are_approved_under_one_id() {
+        // Approval is per game: a person approves a Minecraft install once, not once per endpoint.
+        let client = InstanceInfo::from_hello(&hello("client"), "modB dev".into());
+        let server = InstanceInfo::from_hello(&hello("server"), "modB dev".into());
+
+        assert_eq!(client.approval_id, "modb-dev");
+        assert_eq!(server.approval_id, "modb-dev");
+    }
+
+    #[test]
+    fn an_addressable_id_survives_being_put_into_a_resource_uri() {
+        // qualify_uri inserts the instance id as a URI authority and unqualify_uri splits it back
+        // off at the first slash. A slash-separated endpoint id would round-trip as the game id
+        // plus a mangled URI — silently, and only for resources.
+        let id = endpoint_id("modb-dev", Side::Server);
+        let qualified = crate::catalogue::qualify_uri(&id, "minecraft://game/mods").unwrap();
+
+        assert_eq!(
+            crate::catalogue::unqualify_uri(&qualified),
+            Some((id, "minecraft://game/mods".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_summary_names_the_game_both_endpoints_share() {
+        // Without it a model sees two entries with the same label and no way to tell "two games"
+        // from "one game, two endpoints".
+        let summary = info().to_json(true, false);
+
+        assert_eq!(summary["instance"], "modb-dev.client");
+        assert_eq!(summary["game"], "modb-dev");
     }
 
     #[tokio::test]
@@ -544,7 +649,7 @@ mod tests {
             !text.contains("secret"),
             "the roster summary reaches a model's context"
         );
-        assert_eq!(summary["instance"], "modb-dev");
+        assert_eq!(summary["instance"], "modb-dev.client");
         assert_eq!(summary["side"], "client");
         assert_eq!(summary["connected"], true);
     }

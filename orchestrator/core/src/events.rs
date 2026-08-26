@@ -119,6 +119,13 @@ pub struct Event {
     pub level: Level,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
+    /// The instance's human-readable label at the time this happened.
+    ///
+    /// Recorded rather than resolved when the log is read, and that is the point: an id like
+    /// `run-d0a639` is a directory slug plus a few bytes of entropy, and nobody auditing a trail
+    /// knows which game it was. Labels also change, so a name looked up later would relabel history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(flatten)]
     pub kind: EventKind,
 }
@@ -130,13 +137,38 @@ impl Event {
             actor,
             level,
             instance,
+            label: None,
             kind,
         }
     }
 
+    /// Names the instance this event is about, for the log line.
+    ///
+    /// Separate from [`Self::new`] because most callers have an id and no label to hand; whoever
+    /// does have one chains this on. An event that never gets one still reads correctly, just by id.
+    pub fn labelled(mut self, label: impl Into<String>) -> Self {
+        let label = label.into();
+        // A label equal to the id is what an instance nobody has renamed reports, and rendering
+        // "run-d0a639 (run-d0a639)" helps nobody.
+        if !label.is_empty() && Some(&label) != self.instance.as_ref() {
+            self.label = Some(label);
+        }
+        self
+    }
+
     /// A one-line rendering, for a terminal or a compact list.
     pub fn summary(&self) -> String {
-        let where_ = self.instance.as_deref().unwrap_or("-");
+        // "modB dev (run-d0a639.client)" — the name a person recognises, and the id they can act
+        // on. Neither alone is enough: the id is unreadable, and labels are not unique.
+        let named;
+        let where_ = match (self.instance.as_deref(), self.label.as_deref()) {
+            (Some(id), Some(label)) => {
+                named = format!("{label} ({id})");
+                named.as_str()
+            }
+            (Some(id), None) => id,
+            (None, _) => "-",
+        };
         match &self.kind {
             EventKind::InstanceLinked { label, side, .. } => {
                 format!("{where_}: linked as \"{label}\" ({side})")
@@ -282,6 +314,31 @@ impl EventLog {
         ));
     }
 
+    /// [`Self::note`], for a caller that knows the instance's human-readable label.
+    ///
+    /// Worth the second method rather than an `Option<String>` on the first: the callers that have
+    /// a label and the callers that do not are different code paths, and a parameter everybody
+    /// passes `None` to is a parameter everybody forgets.
+    pub fn note_about(
+        &self,
+        actor: Actor,
+        instance: Option<String>,
+        label: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.record(
+            Event::new(
+                actor,
+                Level::Info,
+                instance,
+                EventKind::Note {
+                    message: message.into(),
+                },
+            )
+            .labelled(label),
+        );
+    }
+
     /// The most recent `limit` entries matching `filter`, oldest first.
     pub fn slice(&self, filter: &Filter, limit: usize) -> Vec<Event> {
         let ring = self.ring.lock().expect("event ring lock");
@@ -383,6 +440,53 @@ mod tests {
             all.last().unwrap().summary(),
             format!("entry {}", RING_CAPACITY + 9)
         );
+    }
+
+    #[test]
+    fn a_summary_names_the_instance_as_well_as_identifying_it() {
+        // The id alone is a directory slug plus entropy. Somebody auditing what a model did needs
+        // to recognise which game it was without cross-referencing a roster.
+        let event = Event::new(
+            Actor::Model,
+            Level::Info,
+            Some("run-d0a639.client".into()),
+            EventKind::Note {
+                message: "did a thing".into(),
+            },
+        )
+        .labelled("modB dev");
+
+        assert_eq!(event.label.as_deref(), Some("modB dev"));
+
+        let blocked = Event::new(
+            Actor::Model,
+            Level::Warn,
+            Some("run-d0a639.client".into()),
+            EventKind::ToolBlocked {
+                tool: "server_set_block".into(),
+                rule: "deny".into(),
+            },
+        )
+        .labelled("modB dev");
+
+        assert_eq!(
+            blocked.summary(),
+            "modB dev (run-d0a639.client): server_set_block blocked by deny"
+        );
+    }
+
+    #[test]
+    fn an_instance_nobody_renamed_is_not_named_twice() {
+        // The mod's fallback label is the instance id. "run-d0a639 (run-d0a639)" helps nobody.
+        let event = Event::new(
+            Actor::Model,
+            Level::Info,
+            Some("run-d0a639".into()),
+            EventKind::InstanceUnlinked,
+        )
+        .labelled("run-d0a639");
+
+        assert_eq!(event.summary(), "run-d0a639: unlinked");
     }
 
     #[test]

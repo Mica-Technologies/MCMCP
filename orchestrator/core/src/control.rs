@@ -130,7 +130,7 @@ mod tests {
 
         let policy = load_policy(&missing).expect("an absent policy should be the default");
 
-        assert_eq!(policy.rules_for("anything").destructive, Rule::Allow);
+        assert_eq!(policy.rules_for("anything", "anything").destructive, Rule::Allow);
     }
 
     #[test]
@@ -156,7 +156,7 @@ mod tests {
         save_policy(&path, &policy).expect("policy should save");
         let restored = load_policy(&path).expect("policy should load");
 
-        assert_eq!(restored.rules_for("alpha").destructive, Rule::Ask);
+        assert_eq!(restored.rules_for("alpha", "alpha").destructive, Rule::Ask);
         let _ = std::fs::remove_dir_all(&directory);
     }
 }

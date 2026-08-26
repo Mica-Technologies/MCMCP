@@ -178,6 +178,8 @@ struct AppState {
 #[derive(Serialize)]
 struct InstanceView {
     instance: String,
+    /// The game this endpoint belongs to — both endpoints of a singleplayer world share one.
+    game: String,
     label: String,
     side: String,
     connected: bool,
@@ -188,6 +190,42 @@ struct InstanceView {
     http_endpoint: Option<String>,
     tools: usize,
     revoked: bool,
+}
+
+/// The human-readable label for an instance id, for a log line.
+///
+/// Falls back to the id: a log entry that is missing its name is worth more than one that is missing
+/// its subject. `run-d0a639` is a directory slug plus a few bytes of entropy, and nobody reading an
+/// audit trail knows which game that was.
+fn label_of(state: &State<'_, AppState>, instance: &str) -> String {
+    if let Some(handle) = state.registry.get(instance) {
+        return handle.info().label;
+    }
+    state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| {
+            store
+                .game_of(instance)
+                .and_then(|game| store.get(&game).map(|known| known.label.clone()))
+        })
+        .unwrap_or_else(|| instance.to_string())
+}
+
+/// The game an id from the UI belongs to.
+///
+/// Rows in the roster are addressed per endpoint (`atm9-3f2a1c.client`) while approval, revocation
+/// and labelling are all filed per game (`atm9-3f2a1c`). Every command that touches the store has to
+/// cross that seam, and doing it in one place is what stops one of them from being missed.
+fn game_of(state: &State<'_, AppState>, instance: &str) -> Result<String, String> {
+    if let Some(handle) = state.registry.get(instance) {
+        return Ok(handle.info().approval_id);
+    }
+    let store = state.store.lock().map_err(|_| "the approval store is locked")?;
+    store
+        .game_of(instance)
+        .ok_or_else(|| format!("this orchestrator has never seen an instance called {instance}"))
 }
 
 #[tauri::command]
@@ -202,6 +240,7 @@ fn list_instances(state: State<'_, AppState>) -> Vec<InstanceView> {
             InstanceView {
                 focused: focus.as_deref() == Some(info.id.as_str()),
                 instance: info.id,
+                game: info.approval_id,
                 label: info.label,
                 side: info.side.as_str().to_string(),
                 connected: true,
@@ -216,7 +255,9 @@ fn list_instances(state: State<'_, AppState>) -> Vec<InstanceView> {
         .collect();
 
     // Known but not running, so "where did my other game go" has an answer that is not silence.
-    let connected: Vec<String> = views.iter().map(|view| view.instance.clone()).collect();
+    // Matched on the game rather than the endpoint id: a running singleplayer world contributes two
+    // endpoint rows under one game, and comparing endpoint ids would list that game as missing.
+    let connected: Vec<String> = views.iter().map(|view| view.game.clone()).collect();
     if let Ok(store) = state.store.lock() {
         for known in store.all() {
             if connected.contains(&known.id) {
@@ -224,6 +265,7 @@ fn list_instances(state: State<'_, AppState>) -> Vec<InstanceView> {
             }
             views.push(InstanceView {
                 instance: known.id.clone(),
+                game: known.id.clone(),
                 label: known.label.clone(),
                 side: String::new(),
                 connected: false,
@@ -337,14 +379,18 @@ fn answer_approval(state: State<'_, AppState>, app: AppHandle, id: u64, answer: 
 
     match &outcome {
         ApprovalOutcome::Approve => {
-            state
-                .events
-                .note(Actor::Human, Some(hello.instance_id.clone()), "approved");
-        }
-        ApprovalOutcome::Pending => {
-            state.events.note(
+            state.events.note_about(
                 Actor::Human,
                 Some(hello.instance_id.clone()),
+                hello.label.clone(),
+                "approved",
+            );
+        }
+        ApprovalOutcome::Pending => {
+            state.events.note_about(
+                Actor::Human,
+                Some(hello.instance_id.clone()),
+                hello.label.clone(),
                 "refused for now; it will ask again",
             );
         }
@@ -356,9 +402,10 @@ fn answer_approval(state: State<'_, AppState>, app: AppHandle, id: u64, answer: 
                 store.deny_forever(&hello.instance_id, &hello.label, hello.game_directory.as_deref());
                 let _ = store.save();
             }
-            state.events.note(
+            state.events.note_about(
                 Actor::Human,
                 Some(hello.instance_id.clone()),
+                hello.label.clone(),
                 "declined permanently",
             );
         }
@@ -384,9 +431,11 @@ fn answer_gate(state: State<'_, AppState>, app: AppHandle, id: u64, allow: bool)
     let Some(gate) = state.gates.answer(id, allow) else {
         return false;
     };
-    state.events.note(
+    let label = label_of(&state, &gate.instance);
+    state.events.note_about(
         Actor::Human,
         Some(gate.instance),
+        label,
         format!("{} {}", if allow { "allowed" } else { "blocked" }, gate.tool),
     );
     let _ = app.emit(CHANGED, ());
@@ -401,15 +450,19 @@ fn set_focus(state: State<'_, AppState>, app: AppHandle, instance: String) -> Re
     }
     // Recorded as a human action, which is the point of the distinction: "focus moved to beta"
     // means something entirely different depending on who moved it.
-    state.events.record(mcmcp_orchestrator_core::events::Event::new(
-        Actor::Human,
-        Level::Info,
-        Some(instance.clone()),
-        mcmcp_orchestrator_core::events::EventKind::FocusChanged {
-            from: previous,
-            to: instance,
-        },
-    ));
+    let label = label_of(&state, &instance);
+    state.events.record(
+        mcmcp_orchestrator_core::events::Event::new(
+            Actor::Human,
+            Level::Info,
+            Some(instance.clone()),
+            mcmcp_orchestrator_core::events::EventKind::FocusChanged {
+                from: previous,
+                to: instance,
+            },
+        )
+        .labelled(label),
+    );
     let _ = app.emit(CHANGED, ());
     Ok(())
 }
@@ -421,8 +474,12 @@ fn set_label(
     instance: String,
     label: String,
 ) -> Result<(), String> {
+    // A label belongs to the game, not to one of its endpoints. Renaming a singleplayer world
+    // through its client row while its server row kept the old name would be a bug, not a feature.
+    let game = game_of(&state, &instance)?;
+
     let mut store = state.store.lock().map_err(|_| "the approval store is locked")?;
-    if !store.set_label(&instance, &label) {
+    if !store.set_label(&game, &label) {
         return Err(format!(
             "this orchestrator has never seen an instance called {instance}"
         ));
@@ -430,8 +487,10 @@ fn set_label(
     store.save().map_err(|error| error.to_string())?;
     drop(store);
 
-    if let Some(handle) = state.registry.get(&instance) {
-        handle.set_label(label.clone());
+    for handle in state.registry.all() {
+        if handle.info().approval_id == game {
+            handle.set_label(label.clone());
+        }
     }
     state
         .events
@@ -449,8 +508,12 @@ fn revoke(state: State<'_, AppState>, app: AppHandle, instance: String) -> Resul
         .require_human("revoking an instance")
         .map_err(|error| error.to_string())?;
 
+    // Revocation is filed against the game, not one of its endpoints: withdrawing trust from a
+    // singleplayer client while its integrated server stayed connected would not be a revocation.
+    let game = game_of(&state, &instance)?;
+
     let mut store = state.store.lock().map_err(|_| "the approval store is locked")?;
-    if !store.revoke(&instance) {
+    if !store.revoke(&game) {
         return Err(format!(
             "this orchestrator has never seen an instance called {instance}"
         ));
@@ -460,16 +523,23 @@ fn revoke(state: State<'_, AppState>, app: AppHandle, instance: String) -> Resul
 
     // Disconnect now rather than at its next attempt: a healthy link would never reconnect, so
     // "revoked" would mean "revoked, eventually, if it happens to drop".
-    if let Some(handle) = state.registry.get(&instance) {
-        handle.mark_closed();
-        state.registry.remove(&instance, &handle);
+    for handle in state.registry.all() {
+        if handle.info().approval_id == game {
+            let id = handle.id();
+            handle.mark_closed();
+            state.registry.remove(&id, &handle);
+        }
     }
-    state.events.record(mcmcp_orchestrator_core::events::Event::new(
-        Actor::Human,
-        Level::Warn,
-        Some(instance),
-        mcmcp_orchestrator_core::events::EventKind::InstanceRevoked,
-    ));
+    let label = label_of(&state, &instance);
+    state.events.record(
+        mcmcp_orchestrator_core::events::Event::new(
+            Actor::Human,
+            Level::Warn,
+            Some(instance),
+            mcmcp_orchestrator_core::events::EventKind::InstanceRevoked,
+        )
+        .labelled(label),
+    );
     let _ = app.emit(CHANGED, ());
     Ok(())
 }
@@ -495,7 +565,9 @@ fn approve_known(state: State<'_, AppState>, app: AppHandle, instance: String) -
     store.save().map_err(|error| error.to_string())?;
     drop(store);
 
-    state.events.note(Actor::Human, Some(instance), "approved");
+    state
+        .events
+        .note_about(Actor::Human, Some(instance), known.label, "approved");
     let _ = app.emit(CHANGED, ());
     Ok(())
 }
@@ -611,9 +683,14 @@ fn set_policy_rule(
     control::save_policy(&state.policy_path, &policy).map_err(|error| error.to_string())?;
     drop(policy);
 
-    state.events.note(
+    let label = instance
+        .as_deref()
+        .map(|id| label_of(&state, id))
+        .unwrap_or_default();
+    state.events.note_about(
         Actor::Human,
         instance,
+        label,
         format!("gating changed to {rule:?} for {class:?}"),
     );
     let _ = app.emit(CHANGED, ());
@@ -930,9 +1007,10 @@ fn spawn_background(
                     tokio::spawn(async move {
                         while let Some(request) = approvals_rx.recv().await {
                             let summary = request.hello.clone();
-                            events.note(
+                            events.note_about(
                                 Actor::System,
                                 Some(summary.instance_id.clone()),
+                                summary.label.clone(),
                                 "waiting to be approved",
                             );
                             approvals.push(summary, request.respond);

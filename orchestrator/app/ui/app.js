@@ -216,7 +216,11 @@ async function renderInstances() {
   for (const instance of instances) {
     const option = document.createElement("option");
     option.value = instance.instance;
-    option.textContent = instance.label;
+    // Labelled by side as well as name: a singleplayer world is two rows sharing one label, and a
+    // filter offering the same word twice is a filter nobody can use.
+    option.textContent = instance.side
+      ? `${instance.label} (${instance.side})`
+      : instance.label;
     select.appendChild(option);
   }
   select.value = chosen;

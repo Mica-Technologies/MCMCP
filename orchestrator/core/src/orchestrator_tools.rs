@@ -59,7 +59,11 @@ fn instance_property(addressable: &[String], description: &str) -> Value {
 }
 
 pub fn definitions(addressable: &[String]) -> Vec<Value> {
-    let target = instance_property(addressable, "The instance id, as reported by mcmcp_instances.");
+    let target = instance_property(
+        addressable,
+        "The instance id, as reported by mcmcp_instances. Ids are '<game>.client' or \
+         '<game>.server' — one game open in singleplayer is two of them.",
+    );
 
     vec![
         own(json!({
@@ -70,7 +74,11 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                 currently focused. Call this before acting when more than one game may be open — the \
                 games are usually different worlds with different mods, and acting on the wrong one \
                 is rarely harmless. Also lists instances this orchestrator knows but that are not \
-                running right now.",
+                running right now.\n\nEach entry is one ENDPOINT, addressed as '<game>.client' or \
+                '<game>.server', and its 'game' field says which game it belongs to. A singleplayer \
+                world is two entries sharing one game: the client has the camera, the input and the \
+                screenshots, and the server has authoritative world state and commands. Two entries \
+                with the same 'game' are one running game, not two.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true },
         })),
@@ -92,7 +100,8 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
             "title": "Rename an instance",
             "description": "Give an instance a human-readable label, so it can be told apart from the \
                 others in later calls and in the orchestrator's own roster. Names the instance for \
-                everyone, not just this session.",
+                everyone, not just this session. The label belongs to the GAME, so renaming through \
+                either endpoint renames both.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
