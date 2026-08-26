@@ -31,11 +31,39 @@ ORCH_BINARY="${ORCH_BINARY:-orchestrator/target/debug/mcmcp-orchestrator}"
 SUCCESS_RE='Done \([0-9.]+s\)!'
 FAILURE_RE='Encountered an unexpected exception|MissingModsException|for invalid side|A fatal error has occurred|Failed to start the minecraft server|FML has found a problem'
 
-if [ ! -x "$ORCH_BINARY" ] && [ ! -x "${ORCH_BINARY}.exe" ]; then
-  echo "==> FAIL: no orchestrator binary at ${ORCH_BINARY}; run 'cargo build' in orchestrator/ first"
+# Windows needs the extension spelled out, and the reason is not obvious. Under Git Bash
+# `test -x foo` succeeds when only `foo.exe` exists, because MSYS resolves the extension for you.
+# Python's CreateProcess does not, so probing with `-x` alone leaves the extensionless name in
+# ORCH_BINARY and the run dies on "The system cannot find the file specified" — naming a binary
+# that is sitting right there. Ask for the .exe explicitly, and take it when it answers.
+if [ -f "${ORCH_BINARY}.exe" ]; then
+  ORCH_BINARY="${ORCH_BINARY}.exe"
+fi
+if [ ! -x "$ORCH_BINARY" ]; then
+  echo "==> FAIL: no orchestrator binary at ${ORCH_BINARY}; run 'cargo build -p mcmcp-orchestrator' in orchestrator/ first"
   exit 1
 fi
-[ -x "$ORCH_BINARY" ] || ORCH_BINARY="${ORCH_BINARY}.exe"
+
+# Present and executable is not the same as runnable, and the way this goes wrong is nasty. The
+# desktop app declares the headless binary as a Tauri externalBin, and building the app copies that
+# sidecar next to the app binary with the target triple stripped — which is exactly cargo's output
+# path for the CLI crate. So `cargo build --workspace` leaves the placeholder text file sitting
+# where the real binary was: right name, right place, executable bit set, and it dies at exec with
+# an error that names a file you can see. Ask it what version it is instead of trusting the path.
+if ! "$ORCH_BINARY" --version >/dev/null 2>&1; then
+  echo "==> FAIL: ${ORCH_BINARY} exists but will not run."
+  echo "    Building the desktop app overwrites it with the sidecar placeholder, so this is what"
+  echo "    'cargo build --workspace' leaves behind. Rebuild the headless binary on its own:"
+  echo "        cd orchestrator && cargo build -p mcmcp-orchestrator"
+  exit 1
+fi
+
+# Hand the driver an absolute path. A relative one works everywhere bash runs it and nowhere
+# CreateProcess does: Windows will not resolve a relative path with forward slashes against the
+# working directory, so Python reports the file as missing while bash three lines up has just run
+# it successfully. Git Bash rewrites an absolute path into a Windows one when it crosses into a
+# native process, which is what makes this work on both platforms.
+ORCH_BINARY="$(cd "$(dirname "$ORCH_BINARY")" && pwd)/$(basename "$ORCH_BINARY")"
 
 PYTHON_BIN="$(command -v python3 || command -v python || true)"
 if [ -z "$PYTHON_BIN" ]; then
