@@ -522,11 +522,29 @@ Click a coordinate rather than a named widget.
 **This is the fallback that makes modded screens reachable at all.** `client_gui_widgets` only sees
 vanilla widgets, and many mods build their interfaces out of their own classes — SuperMartijn642's
 Core Lib among them — so a screen full of controls can report zero buttons. Clicking a point needs
-none of that: every screen receives clicks through `GuiScreen.mouseClicked`, whatever it is built
-from.
+none of that.
 
 The workflow is screenshot → read the pixel → click it, which is why `pixel` is the default space.
 `gui` is Minecraft's scaled space, matching the positions `client_gui_widgets` reports.
+
+The click is delivered the way the game delivers one: LWJGL's mouse state is set to the target point
+and the screen's own `handleMouseInput()` is called, press then release. The reply reports `via` —
+`lwjgl` for that path, or `mouseClicked` if LWJGL's state could not be driven and the older direct
+call was used instead — and `handlesOwnMouseInput`, which says whether this screen takes over mouse
+handling rather than leaving it to `GuiScreen`.
+
+!!! warning "Why not just call `mouseClicked`?"
+
+    Because it is one branch *inside* how a click is delivered, not the delivery itself. The real
+    path is `handleInput()` → `handleMouseInput()` → `mouseClicked`, and a screen may override
+    `handleMouseInput` and never reach the last step.
+
+    MalisisCore's screens do exactly that: they hit-test against `Mouse.getX()/getY()` and dispatch
+    to their own component tree. Until this tool drove LWJGL's state, every MalisisDoors,
+    MalisisSwitches and MalisisCore screen was silently unclickable — the call returned success, the
+    screen did not change, and nothing was logged. It produced a false bug report against a widget
+    that was working perfectly. This is the mouse counterpart of the `handleKeyboardInput` problem
+    described under `client_gui_key`.
 
 #### `client_gui_key`
 

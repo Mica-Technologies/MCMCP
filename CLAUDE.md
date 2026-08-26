@@ -186,6 +186,18 @@ frequently model-generated and arrive with the wrong primitive type.
   bindings.
 - Game directory comes from `Loader.instance().getConfigDir().getParentFile()` — stable on both sides,
   unlike the client-only `Minecraft.gameDir`.
+- **`GuiScreen.mouseClicked` is not how a click is delivered.** The real path is `handleInput()` →
+  `handleMouseInput()` → `mouseClicked`, and a screen may override `handleMouseInput` and never reach
+  the last step. MalisisCore's screens hit-test `Mouse.getX()/getY()` themselves, so calling
+  `mouseClicked` on them clicked nothing while reporting success — every Malisis screen was silently
+  unclickable, and it produced a false bug report against a working widget. `SyntheticMouse` sets
+  LWJGL's mouse state and calls the screen's own `handleMouseInput()`, press then release. This is
+  the mouse twin of the `handleKeyboardInput` problem `client_gui_key` already worked around; assume
+  any new input tool has the same trap.
+- **LWJGL's mouse origin is bottom-left**, GUI space and screenshots are top-left. `SyntheticMouse`
+  flips Y once, in `toLwjglY`. If clicks land a consistent distance from the wrong edge, start there.
+- **Set both `x`/`y` and `event_x`/`event_y`.** Vanilla's `handleMouseInput` reads the event pair;
+  MalisisGui reads the plain pair. Setting one works on half the screens in the wild.
 
 ### Do not edit `build.gradle`
 

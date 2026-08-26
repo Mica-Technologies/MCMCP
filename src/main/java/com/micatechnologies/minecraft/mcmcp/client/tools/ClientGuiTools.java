@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp.client.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
+import com.micatechnologies.minecraft.mcmcp.client.SyntheticMouse;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
@@ -38,13 +39,19 @@ import net.minecraftforge.fml.relauncher.SideOnly;
  *
  * <h2>Clicks go through the screen's own handler</h2>
  *
- * {@code client_gui_click} does not call {@code actionPerformed} on the button directly. It invokes
- * the screen's {@code mouseClicked} at the button's centre, which is the same entry point the real
- * mouse handler uses. That distinction matters for the same reason it matters in
- * {@link ClientInputTools}: screens routinely override {@code mouseClicked} to do their own hit
- * testing, to reject clicks while something is loading, or to treat a click on a list differently
- * from a click on a button. Calling {@code actionPerformed} would bypass all of it and fire actions
- * the real UI would have refused.
+ * {@code client_gui_click} does not call {@code actionPerformed} on the button directly. It delivers
+ * a click at the button's centre through {@link SyntheticMouse}, which sets LWJGL's mouse state and
+ * calls the screen's {@code handleMouseInput()} - the same route a real click takes. That distinction
+ * matters for the same reason it matters in {@link ClientInputTools}: screens routinely override the
+ * mouse path to do their own hit testing, to reject clicks while something is loading, or to treat a
+ * click on a list differently from a click on a button. Calling {@code actionPerformed} would bypass
+ * all of it and fire actions the real UI would have refused.
+ *
+ * <p>Calling {@code mouseClicked} directly is not enough either, and that was this class's original
+ * mistake. {@code mouseClicked} is one branch *inside* the real path; a screen that overrides
+ * {@code handleMouseInput} - MalisisCore's do - may never reach it, so the click landed nowhere while
+ * still reporting success. {@code mouseClicked} remains as a fallback for builds where LWJGL's state
+ * cannot be driven, and every click result names the path it took in its {@code via} field.
  *
  * <h2>Reflection, and why it is named twice</h2>
  *
@@ -186,6 +193,37 @@ public final class ClientGuiTools {
     private static Method mouseClickedMethod() {
         return findMethod(GuiScreen.class, new Class<?>[]{int.class, int.class, int.class},
             "mouseClicked", "func_73864_a");
+    }
+
+    /**
+     * Delivers a click at a point in GUI space, and reports which path carried it.
+     *
+     * <p>Prefers {@link SyntheticMouse}, which sets LWJGL's mouse state and calls the screen's
+     * {@code handleMouseInput()} - the same route a real click takes. That matters because
+     * {@code mouseClicked} is only one branch *inside* the real route, and a screen that overrides
+     * {@code handleMouseInput} may never reach it: MalisisCore's screens do their own hit testing and
+     * ignore {@code mouseClicked} entirely, so calling it clicked nothing and reported success.
+     *
+     * <p>Falls back to {@code mouseClicked} when LWJGL cannot be driven - a shaded build, or
+     * LWJGL3ify's shim - because that is still correct for most screens and a working majority beats
+     * a uniform failure.
+     *
+     * @return the delivery path, for the caller to put in its result: models retry a click that did
+     *         nothing, and knowing which path ran is the difference between "the button is broken"
+     *         and "this screen needs the other path".
+     */
+    private static String deliverClick(GuiScreen screen, int guiX, int guiY, int button,
+                                       int scaledWidth, int scaledHeight) throws Exception {
+        if (SyntheticMouse.click(screen, guiX, guiY, button, scaledWidth, scaledHeight)) {
+            return "lwjgl";
+        }
+        Method mouseClicked = mouseClickedMethod();
+        if (mouseClicked == null) {
+            throw new IllegalStateException("Could not drive LWJGL's mouse state, and could not locate "
+                + "GuiScreen.mouseClicked on this Minecraft build; GUI clicking is unavailable.");
+        }
+        mouseClicked.invoke(screen, guiX, guiY, button);
+        return "mouseClicked";
     }
 
     @Nullable
@@ -524,12 +562,6 @@ public final class ClientGuiTools {
                                 + "' is disabled, so clicking it would do nothing.");
                         }
 
-                        Method mouseClicked = mouseClickedMethod();
-                        if (mouseClicked == null) {
-                            throw new IllegalStateException("Could not locate GuiScreen.mouseClicked on "
-                                + "this Minecraft build; GUI clicking is unavailable.");
-                        }
-
                         // The centre of the button, in the scaled coordinate space that both
                         // buttonList positions and mouseClicked use. Clicking the corner would land
                         // outside any button whose hit box is inset from its drawn bounds.
@@ -538,9 +570,12 @@ public final class ClientGuiTools {
 
                         String clickedLabel = target.displayString;
                         String screenBefore = screen.getClass().getSimpleName();
-                        mouseClicked.invoke(screen, mouseX, mouseY, 0);
+                        ScaledResolution buttonResolution = new ScaledResolution(mc);
+                        String via = deliverClick(screen, mouseX, mouseY, 0,
+                            buttonResolution.getScaledWidth(), buttonResolution.getScaledHeight());
 
                         JsonObject json = describeScreen(mc.currentScreen);
+                        json.addProperty("via", via);
                         json.addProperty("clickedLabel", clickedLabel);
                         json.addProperty("clickedAtX", mouseX);
                         json.addProperty("clickedAtY", mouseY);
@@ -669,17 +704,15 @@ public final class ClientGuiTools {
                         int guiX = "gui".equals(space) ? x : toGuiX(mc, x);
                         int guiY = "gui".equals(space) ? y : toGuiY(mc, y);
 
-                        Method mouseClicked = mouseClickedMethod();
-                        if (mouseClicked == null) {
-                            throw new IllegalStateException("Could not locate GuiScreen.mouseClicked on "
-                                + "this Minecraft build; GUI clicking is unavailable.");
-                        }
-
                         String screenBefore = screen.getClass().getSimpleName();
-                        mouseClicked.invoke(screen, guiX, guiY, mouseButton);
-
                         ScaledResolution resolution = new ScaledResolution(mc);
+                        String via = deliverClick(screen, guiX, guiY, mouseButton,
+                            resolution.getScaledWidth(), resolution.getScaledHeight());
+
                         JsonObject json = describeScreen(mc.currentScreen);
+                        json.addProperty("via", via);
+                        json.addProperty("handlesOwnMouseInput",
+                            SyntheticMouse.overridesHandleMouseInput(screen));
                         json.addProperty("clickedGuiX", guiX);
                         json.addProperty("clickedGuiY", guiY);
                         json.addProperty("space", space);
