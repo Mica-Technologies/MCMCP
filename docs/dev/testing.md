@@ -105,6 +105,47 @@ Environment:
 | `SMOKE_LOG` | `server-smoke.log` | |
 | `MCP_PORT` | `25588` | The server endpoint under `runServer` — see [Building](building.md#dev-launch-ports). |
 
+## Orchestrator end-to-end test
+
+`.github/scripts/orchestrator-e2e.sh`, run on every pull request alongside the smoke test.
+
+This is the **only** place the two implementations of the link protocol meet. The mod's unit tests
+prove its framing against byte arrays, the orchestrator's prove aggregation against fixtures, and the
+smoke test proves the mod dials out and a *stub* can answer. None of them would catch the two real
+halves disagreeing — a renamed field, a changed default, a version bump on one side only. That
+failure breaks no build. It produces a handshake that never completes, at runtime, on a user's
+machine.
+
+It boots a dedicated server, starts the real orchestrator binary *second* — the mod retries its link
+on a backoff, so this exercises the retry path and matches the order people actually start things in
+— then drives a real MCP client through it: aggregation, instance stamping, focus resolution, a
+readable error for an unknown instance, and namespaced resources read back.
+
+```bash
+export JAVA_HOME=~/.jdks/azul-21.0.x
+cd orchestrator && cargo build -p mcmcp-orchestrator && cd ..
+bash .github/scripts/orchestrator-e2e.sh
+```
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SMOKE_TIMEOUT` | `900` | Seconds to wait for the server to start. |
+| `LINK_TIMEOUT` | `150` | Seconds to wait for the link once the orchestrator is up. |
+| `ORCH_BINARY` | `orchestrator/target/debug/mcmcp-orchestrator` | |
+
+Two things that make a local run fail for reasons that are not the code:
+
+- **The installed orchestrator app listens on `25580`**, which is the port the script's own
+  orchestrator wants. With the app running, the game links to *it* rather than to the one under test
+  and the script waits out its timeout. Quit the app first. The same applies to the smoke test, whose
+  stub also wants `25580` — for that one you can instead point `orchestrator.orchestratorPort` in
+  `run/server/config/mcmcp.cfg` at a free port and pass the same value as `LINK_PORT`.
+- **Build the headless binary on its own**, not with `cargo build -p mcmcp-orchestrator-app`. The
+  desktop app declares the shim as a Tauri `externalBin`, and building it copies that sidecar next to
+  the app binary with the target triple stripped — which is exactly cargo's output path for the CLI
+  crate, so it overwrites the real binary with the placeholder. The script now detects this and says
+  so rather than failing at exec.
+
 ## Client endpoint testing
 
 The client endpoint has no CI equivalent — a dev client needs a display, and its most valuable tools
@@ -123,7 +164,7 @@ See [Getting a dev client into a world](building.md#getting-a-dev-client-into-a-
 for why `-PmcJoin` exists. From there everything runs over HTTP against `:25585`:
 
 1. `mcmcp_endpoint_info` — confirm `side: client` and the permission set.
-2. `tools/list` — 19 tools, no `server_*` among them.
+2. `tools/list` — 32 tools, no `server_*` among them.
 3. `client_gui_state` — `worldLoaded: true`, `screenName: none`.
 4. `client_connection_info` — `singleplayer: false`, the server address, the player list.
 5. `client_player_state` — position, biome, `standingOn`. **Check that `blockPosition` and

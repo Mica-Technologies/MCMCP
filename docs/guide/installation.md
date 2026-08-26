@@ -42,7 +42,7 @@ Confirm it in game:
 
 ```
 MCMCP endpoints:
-  client: http://127.0.0.1:25585/mcp — 0 session(s), 19 tool(s)
+  client: http://127.0.0.1:25585/mcp — 0 session(s), 32 tool(s)
 ```
 
 !!! note "`/mcmcp` requires permission level 2"

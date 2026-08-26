@@ -1,6 +1,6 @@
 # Tools
 
-46 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+47 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,

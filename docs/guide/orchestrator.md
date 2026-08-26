@@ -24,7 +24,7 @@ in-game says so — the only sign is a line in `logs/latest.log`.
 You can fix that by hand. Give each instance a different port, add a separate entry per instance to
 your MCP client's config, and keep track of which port is which game. It works, and it costs a config
 edit for every instance you add, plus one tool catalogue per instance in every request your model
-makes — the same 46 tools, three times over, distinguished only by a prefix.
+makes — the same 47 tools, three times over, distinguished only by a prefix.
 
 The orchestrator replaces that with one connection out of each game to one place.
 
@@ -105,6 +105,23 @@ Read-only tools also accept `instance: "*"`, which runs them on every connected 
 returns the answers together — the fastest way to compare a mod against a control. Tools that change
 anything do not offer it, and are refused if asked.
 
+### `connected` is not the same as `ready`
+
+`mcmcp_instances` reports both, and the difference matters when a game is misbehaving. An instance is
+registered the moment its link is up, which is *before* anything has asked it what it can do —
+`connected: true` only means the socket exists. `ready: true` means its catalogue has actually been
+loaded and its tools are reachable.
+
+A game that is `connected` but not `ready` is either still coming up or retrying a bootstrap that is
+failing. Its tools are genuinely not callable yet, and a call naming it comes back saying so. The
+orchestrator keeps retrying for as long as the link is up, so this normally resolves itself within
+seconds; one that stays that way has something wrong, and the reason is in `orchestrator.log` and in
+the event log as a failed-bootstrap entry.
+
+An instance that is not ready contributes nothing to the aggregated tool list — deliberately, and not
+merely by having nothing to add. The aggregate is cached, so letting an empty catalogue into it would
+replace the tool surface every other instance had.
+
 ## Telling several games apart
 
 `mcmcp_compare_instances` reports only what is **different** between the connected games — the mods
@@ -115,11 +132,11 @@ games open is "which of these is the mod I am working on".
 Against a real pair it answers that outright:
 
 ```
-run-d0a639 ("run", client)
+run-d0a639.client ("run", client)
   mods only here: albedo, albedocore, com.boydti.fawe, immersiveengineering, worldedit
   tools only here: none
 
-server-fc5e56 ("server", server)
+server-fc5e56.server ("server", server)
   mods only here: jei, theoneprobe
   tools only here: server_broadcast, server_find_blocks, …
 ```
@@ -236,7 +253,7 @@ you want to paste it back into the conversation that caused it. **Export** write
 Also available headless:
 
 ```bash
-mcmcp-orchestrator log --instance modb-dev --grep screenshot
+mcmcp-orchestrator log --instance modb-dev.client --grep screenshot
 mcmcp-orchestrator log --json --limit 20
 ```
 

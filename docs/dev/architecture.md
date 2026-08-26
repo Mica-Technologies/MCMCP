@@ -22,6 +22,7 @@ com.micatechnologies.minecraft.mcmcp
 └── client/                   CLIENT-ONLY — never named from common code
     ├── ClientThreadBridge
     ├── ClientInputScheduler
+    ├── ClientInputLock
     ├── ClientChatRecorder
     └── tools/                Client tools, resources, prompts
 ```

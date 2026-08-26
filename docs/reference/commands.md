@@ -21,10 +21,10 @@ The first thing to run when something is not connecting.
 
 ```
 MCMCP instance: modB dev (modb-dev-3f2a1c)
-  client — 1 session(s), 19 tool(s)
+  client — 1 session(s), 32 tool(s)
     http http://127.0.0.1:25585/mcp — listening
     orchestrator link 127.0.0.1:25580 — connected
-  server — 0 session(s), 17 tool(s)
+  server — 0 session(s), 18 tool(s)
     http http://127.0.0.1:25586/mcp — listening
     orchestrator link 127.0.0.1:25580 — retrying
 ```
