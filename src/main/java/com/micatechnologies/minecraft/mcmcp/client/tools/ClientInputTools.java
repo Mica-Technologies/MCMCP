@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.client.tools;
 
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
+import com.micatechnologies.minecraft.mcmcp.client.ClientInputLock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -50,12 +51,26 @@ public final class ClientInputTools {
 
     public static void register() {
         ClientInputScheduler.register();
+        ClientInputLock.register();
         registerSendChat();
         registerLook();
         registerMove();
         registerKeyPress();
         registerInteract();
         registerSelectHotbarSlot();
+        registerInputLock();
+    }
+
+    /** The lock's state, in the shape every path here reports it. */
+    static JsonObject lockStatus() {
+        JsonObject json = new JsonObject();
+        json.addProperty("locked", ClientInputLock.isLocked());
+        json.addProperty("secondsRemaining", ClientInputLock.secondsRemaining());
+        String why = ClientInputLock.reason();
+        if (!why.isEmpty()) {
+            json.addProperty("reason", why);
+        }
+        return json;
     }
 
     /**
@@ -477,6 +492,86 @@ public final class ClientInputTools {
                                 + "attack did nothing beyond the first click. Call client_view with "
                                 + "grabInputFocus true, then attack again.");
                         }
+                        return json;
+                    }
+                });
+                return ToolResult.structured(result);
+            })
+            .build());
+    }
+
+    /**
+     * Takes the human's keyboard and mouse out of the game while a model drives it.
+     *
+     * <p>Registered here rather than in a file of its own because it is the same subject as the rest
+     * of this class from the model's side — one of these tools drives input, and this one decides
+     * whether anything else is driving it at the same time.
+     *
+     * <p>Gated on {@code allowPlayerControl}. Somebody who turned off a model's ability to move
+     * their player has certainly not agreed to it taking their mouse, and a second permission for
+     * that would be a second thing to get wrong.
+     *
+     * <p>Not marked destructive: it changes nothing in the world and undoes itself. It is also not
+     * idempotent — calling it again while locked extends the lock, which is the point.
+     */
+    private static void registerInputLock() {
+        McpRegistry.registerTool(McpTool.named("client_input_lock")
+            .title("Lock or unlock the player's own input")
+            .description("Hold the human's keyboard and mouse out of the game so they cannot disturb "
+                + "what you are doing. Use this before a sequence where a stray mouse movement would "
+                + "break the plan — aiming at a block and then mining it, lining up a jump, reading "
+                + "the crosshair target and acting on it — and unlock as soon as it is done.\n\n"
+                + "While locked, nothing the person at the keyboard does reaches the game: no camera "
+                + "movement, no clicks, no keys, no pause menu. Your own input tools are unaffected.\n\n"
+                + "They can always take it back by pressing Escape twice, and it expires on its own, "
+                + "so it is not a promise that you keep control — check 'locked' in the result of a "
+                + "later call rather than assuming. Nothing tells you when a human releases it.\n\n"
+                + "Lock for as little as the task needs. Somebody is sitting there unable to use their "
+                + "computer, and a lock left on after you finish reads as a crash.")
+            .schema(JsonSchema.object()
+                .bool("locked", "True to take the keyboard and mouse, false to give them back.")
+                .integer("seconds", "How long to hold them for, in seconds. Locking again before this "
+                    + "runs out extends it. Ignored when releasing.", 1, 7200)
+                .string("reason", "A short phrase shown on screen, so the person watching can tell a "
+                    + "task in progress from a stuck agent. For example 'mining the iron vein'.")
+                .required("locked")
+                .build())
+            .clientOnly()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("Player control is disabled by "
+                        + "permissions.allowPlayerControl in the MCMCP config.");
+                }
+
+                if (!context.has("locked")) {
+                    // Never defaulted. Guessing 'true' would take somebody's mouse on a malformed
+                    // call, and guessing 'false' would report success for a lock that never happened.
+                    return ToolResult.error("client_input_lock needs 'locked': true to take the "
+                        + "keyboard and mouse, false to give them back.");
+                }
+                final boolean wanted = context.getBoolean("locked", false);
+                final int seconds = context.getBoundedInt("seconds", 300, 1,
+                    McmcpConfig.getMaxInputLockSeconds());
+                final String why = context.getString("reason", "");
+
+                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() {
+                        // requireInWorld rather than a null check: locking at the main menu would
+                        // hold the keyboard away from the only screen that can open a world, and
+                        // there is nothing there worth protecting from a stray click anyway.
+                        ClientStateTools.requireInWorld();
+
+                        boolean was = ClientInputLock.isLocked();
+                        if (wanted) {
+                            ClientInputLock.lock(seconds, why);
+                        }
+                        else {
+                            ClientInputLock.release("released by the model");
+                        }
+
+                        JsonObject json = lockStatus();
+                        json.addProperty("wasLocked", was);
                         return json;
                     }
                 });

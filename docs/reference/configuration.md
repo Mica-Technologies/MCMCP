@@ -335,6 +335,14 @@ stall the tick loop. A 64×64×64 region is 262,144 block writes and will visibl
 Longest a single input tool may hold a key down, in ticks (20 = 1 second). Bounds how far one call can
 move the player before the model gets to look again.
 
+### `maxInputLockSeconds`
+
+`integer` 5–7200 · default `1800`
+
+Longest `client_input_lock` may hold the keyboard and mouse away from the player. The lock always
+expires, so a model that stops answering cannot leave the machine locked; this is the ceiling on how
+long that takes. Pressing Escape twice releases it immediately whatever this is set to.
+
 ### `maxLogLines`
 
 `integer` 10–5000 · default `500`
@@ -396,6 +404,7 @@ orchestrator {
 limits {
     I:gameThreadTimeoutMillis=5000
     I:maxBlockVolume=32768
+    I:maxInputLockSeconds=1800
     I:maxInputTicks=200
     I:maxLogLines=500
     I:maxScanRadius=32

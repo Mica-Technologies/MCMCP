@@ -359,6 +359,26 @@ re-check rather than expecting one call to finish.
 
 Returns the target before and after, plus the held item.
 
+#### `client_input_lock`
+
+Requires `permissions.allowPlayerControl` · `locked` required, optional `seconds`, `reason`
+
+Holds the human's own keyboard and mouse out of the game so a stray movement cannot disturb what a
+model is doing. While locked, nothing from the physical keyboard or mouse reaches the game — no
+camera movement, no clicks, no keys, no pause menu, and no auto-pause when the window loses focus.
+MCMCP's own input tools are unaffected.
+
+Three things release it, and a model cannot suppress any of them:
+
+- **Pressing Escape twice** within about three quarters of a second. A single press does nothing.
+- **Expiry.** `seconds` defaults to 300 and is capped by `limits.maxInputLockSeconds` (default 1800).
+  Locking again before it runs out extends it.
+- **Leaving the world**, and anything that stops MCMCP ticking. The blocking is work done every
+  tick rather than a state the game is put into, so nothing can strand the input.
+
+The lock says so on screen and in chat when it engages. Check `locked` in a later result rather than
+assuming you still hold it — nothing notifies a model when a human takes it back.
+
 #### `client_select_slot`
 
 Requires `permissions.allowInventoryChanges` · `slot` 0–8

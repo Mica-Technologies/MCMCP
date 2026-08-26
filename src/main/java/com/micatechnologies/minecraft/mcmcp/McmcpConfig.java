@@ -115,6 +115,7 @@ public class McmcpConfig {
     private static int maxScanRadius = 32;
     private static int maxBlockVolume = 32768;
     private static int maxInputTicks = 200;
+    private static int maxInputLockSeconds = 1800;
     private static int maxLogLines = 500;
 
     private McmcpConfig() {
@@ -327,6 +328,12 @@ public class McmcpConfig {
             "Longest a single input tool may hold a key or button down, in ticks (20 ticks = 1 second). "
                 + "Bounds how far one call can move the player before the model gets to look again.");
 
+        maxInputLockSeconds = configuration.getInt("maxInputLockSeconds", CATEGORY_LIMITS, 1800, 5, 7200,
+            "Longest client_input_lock may hold the keyboard and mouse away from the player, in "
+                + "seconds. The lock always expires on its own, so a model that stops answering "
+                + "cannot leave the machine locked; this is the ceiling on how long that takes. "
+                + "Pressing Escape twice releases it immediately whatever this is set to.");
+
         maxLogLines = configuration.getInt("maxLogLines", CATEGORY_LIMITS, 500, 10, 5000,
             "Most log lines returnable in one call.");
 
@@ -468,6 +475,10 @@ public class McmcpConfig {
 
     public static int getMaxInputTicks() {
         return maxInputTicks;
+    }
+
+    public static int getMaxInputLockSeconds() {
+        return maxInputLockSeconds;
     }
 
     public static int getMaxLogLines() {
