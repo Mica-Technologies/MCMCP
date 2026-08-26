@@ -18,7 +18,7 @@ access, and it is off by default.
 
 ## What it exposes
 
-**45 tools.** World queries and bulk region read/write for survey-then-build workflows; player state
+**46 tools.** World queries and bulk region read/write for survey-then-build workflows; player state
 and inventory; command execution with captured output; camera, movement and interaction on the
 client; screenshots, GUI inspection, chat capture and log tailing for debugging.
 

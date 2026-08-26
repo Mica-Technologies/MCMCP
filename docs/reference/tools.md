@@ -1,6 +1,6 @@
 # Tools
 
-45 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+46 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -78,6 +78,22 @@ Reports `loaded: false` without reading if the chunk is not loaded. `getBlockSta
 position silently returns air, so a naive read would confidently describe a mountain as empty space —
 and on a server, asking can force a chunk load, turning a read into a write with a disk hit.
 
+Two fields appear only when they have something to say, so their presence is itself information.
+
+`actualState` is the state the block is really drawn and interacted with, reported when it differs
+from the stored `state`. Blocks that connect or mount to their neighbours — fences, walls, redstone,
+and most modded blocks with attachment hardware — keep placeholder values in the chunk and resolve
+the real ones in `Block.getActualState` at draw time. The placeholder is commonly *every connection
+present*, so `state` alone describes a fence standing alone in a field as connected on all four
+sides, and reports two blocks being compared as identical when they render completely differently.
+When present, `actualState` carries the full property set, not just what changed.
+
+`boundingBox` is the block's selection box in **block-relative** coordinates, reported when it is
+not a full cube. Block-relative rather than world coordinates because that is the frame the box is
+written in, so a value here compares directly against the source. This is the shape a crosshair
+actually catches: a box on the wrong face is invisible in a screenshot but makes a block
+unclickable from the side it should be clickable from.
+
 #### `server_get_blocks`
 
 :material-eye: Read-only
@@ -135,6 +151,21 @@ Worth checking before an expensive scan: ticks are 50 ms apart, so a mean above 
 server is already behind and every scheduled task is queued behind it.
 
 ### Building
+
+#### `server_save_world`
+
+:material-cog: Idempotent · optional `players`
+
+Flushes every loaded dimension to disk, the same call `/save-all` makes.
+
+Worth having as a tool because an **integrated** server has no `/save-all` — that command is
+registered by the dedicated server only — and its autosave interval is long enough that a session
+can end with changes a tool already reported as applied still not on disk. The workaround that does
+force a save, leaving the world, also unloads it and leaves a client wedged at the main menu.
+
+Saves non-silently, so the familiar `Saving chunks for level ...` line still reaches the log; that
+is the only externally visible confirmation the save happened. `players` (default true) also writes
+player data. Saving blocks the server thread for its duration, which is noticeable on a large world.
 
 #### `server_set_block`
 
@@ -269,6 +300,10 @@ adjust, check again — and a full state response each time is wasteful.
 
 Positions outside the loaded view distance report `loaded: false`. The client genuinely does not know
 what is there and will not be told until it gets closer.
+
+Carries the same `actualState` and `boundingBox` fields as
+[`server_get_block`](#server_get_block) — and on the client is where `actualState` is most directly
+the truth, since this is the side that draws the block.
 
 #### `client_nearby_entities`
 

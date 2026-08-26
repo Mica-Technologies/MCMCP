@@ -150,7 +150,11 @@ public final class ClientStateTools {
             .title("Get block")
             .description("Read the block at a world position as this client sees it. Positions outside "
                 + "the loaded view distance report loaded=false — the client genuinely does not know "
-                + "what is there, and will not be told until it gets closer.")
+                + "what is there, and will not be told until it gets closer.\n\n"
+                + "Includes 'actualState' when the block's drawn state differs from the state stored "
+                + "in the chunk, which is the only way to see what a block that connects or mounts to "
+                + "its neighbours has actually resolved to, and 'boundingBox' when the block is not a "
+                + "full cube.")
             .schema(JsonSchema.object()
                 .integer("x", "Block X coordinate.")
                 .integer("y", "Block Y coordinate, 0-255.")

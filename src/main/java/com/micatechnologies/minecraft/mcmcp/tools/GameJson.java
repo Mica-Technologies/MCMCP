@@ -1,6 +1,7 @@
 package com.micatechnologies.minecraft.mcmcp.tools;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.util.Map;
 import javax.annotation.Nullable;
@@ -14,6 +15,7 @@ import net.minecraft.inventory.IInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.ResourceLocation;
+import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.RayTraceResult;
@@ -141,9 +143,108 @@ public final class GameJson {
         }
         json.add("state", properties);
 
+        JsonObject actual = actualStateProperties(world, pos, state, properties);
+        if (actual != null) {
+            json.add("actualState", actual);
+        }
+        JsonObject bounds = boundingBox(world, pos, state);
+        if (bounds != null) {
+            json.add("boundingBox", bounds);
+        }
+
         json.addProperty("blockLight", world.getLightFor(EnumSkyBlock.BLOCK, pos));
         json.addProperty("skyLight", world.getLightFor(EnumSkyBlock.SKY, pos));
         json.addProperty("hardness", state.getBlockHardness(world, pos));
+        return json;
+    }
+
+    /**
+     * The block's state as it is actually drawn and interacted with, when that differs from the
+     * state stored in the chunk.
+     *
+     * <p>Blocks whose appearance depends on their surroundings — fences, walls, redstone wire, and
+     * any modded block that connects or mounts to its neighbours — keep placeholder values in the
+     * chunk and compute the real ones in {@code Block.getActualState} every time they are drawn.
+     * Reading only the stored state therefore describes every such block identically no matter what
+     * is around it, and worse, the placeholder is commonly "every connection present": a fence
+     * standing alone in a field reads as connected on all four sides. That silently defeats any
+     * attempt to verify connection or mounting behaviour, because the answer looks confidently
+     * correct and is the same for every case being compared.
+     *
+     * <p>Reported only when it differs from {@code state}, so the key's presence is itself the
+     * signal that this block computes its appearance at render time. When present it carries the
+     * block's full property set, not only the properties that changed.
+     *
+     * @return the actual-state properties, or {@code null} when they match the stored state
+     */
+    @Nullable
+    private static JsonObject actualStateProperties(World world, BlockPos pos, IBlockState state,
+                                                    JsonObject stored) {
+        IBlockState actual;
+        try {
+            actual = state.getActualState(world, pos);
+        } catch (RuntimeException e) {
+            // getActualState reads neighbours and, on a modded block, is third-party code. One
+            // block that throws must not take the whole read down with it.
+            return null;
+        }
+        if (actual == state) {
+            return null;
+        }
+
+        JsonObject properties = new JsonObject();
+        boolean differs = false;
+        for (Map.Entry<IProperty<?>, Comparable<?>> entry : actual.getProperties().entrySet()) {
+            String name = entry.getKey().getName();
+            String value = String.valueOf(entry.getValue());
+            properties.addProperty(name, value);
+            JsonElement before = stored.get(name);
+            if (before == null || !value.equals(before.getAsString())) {
+                differs = true;
+            }
+        }
+        return differs ? properties : null;
+    }
+
+    /**
+     * The block's selection box, in block-relative coordinates, when it is not a full cube.
+     *
+     * <p>This is the shape a player's crosshair actually catches, and for a mod that gives its
+     * blocks hand-written bounding boxes it is the only way to check one without standing in front
+     * of it and squinting: a box on the wrong face, or one that stops short of the geometry it is
+     * supposed to cover, is invisible in a screenshot but makes the block unclickable from the side
+     * it should be clickable from.
+     *
+     * <p>Block-relative rather than world coordinates because that is the frame the box is written
+     * in — a value here compares directly against the source. Absent when the block fills its cube,
+     * which is the default and would otherwise repeat on almost every read.
+     *
+     * @return {@code minX/minY/minZ/maxX/maxY/maxZ}, or {@code null} for a full cube or on failure
+     */
+    @Nullable
+    private static JsonObject boundingBox(World world, BlockPos pos, IBlockState state) {
+        AxisAlignedBB box;
+        try {
+            box = state.getBoundingBox(world, pos);
+        } catch (RuntimeException e) {
+            // Same reasoning as actualState: this is third-party code on a modded block.
+            return null;
+        }
+        if (box == null) {
+            return null;
+        }
+        boolean fullCube = box.minX == 0.0 && box.minY == 0.0 && box.minZ == 0.0
+            && box.maxX == 1.0 && box.maxY == 1.0 && box.maxZ == 1.0;
+        if (fullCube) {
+            return null;
+        }
+        JsonObject json = new JsonObject();
+        json.addProperty("minX", round(box.minX));
+        json.addProperty("minY", round(box.minY));
+        json.addProperty("minZ", round(box.minZ));
+        json.addProperty("maxX", round(box.maxX));
+        json.addProperty("maxY", round(box.maxY));
+        json.addProperty("maxZ", round(box.maxZ));
         return json;
     }
 

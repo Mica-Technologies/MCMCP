@@ -43,6 +43,7 @@ public final class ServerWorldTools {
         registerNearbyEntities();
         registerWorldInfo();
         registerSetBlock();
+        registerSaveWorld();
     }
 
     /**
@@ -70,7 +71,14 @@ public final class ServerWorldTools {
             .title("Get block")
             .description("Read the block at a world position, including its block state properties, "
                 + "light levels and hardness. Reports loaded=false without reading if the chunk is not "
-                + "loaded, since an unloaded position would otherwise read as empty air.")
+                + "loaded, since an unloaded position would otherwise read as empty air.\n\n"
+                + "Two fields appear only when they have something to say. 'actualState' is the state "
+                + "the block is really drawn and interacted with, present when it differs from the "
+                + "stored 'state' — blocks that connect or mount to their neighbours keep placeholder "
+                + "values in the chunk, commonly 'every connection present', so 'state' alone "
+                + "describes a lone fence as connected on all four sides and cannot distinguish two "
+                + "cases being compared. 'boundingBox' is the block-relative selection box, present "
+                + "when the block is not a full cube.")
             .schema(JsonSchema.object()
                 .integer("x", "Block X coordinate.")
                 .integer("y", "Block Y coordinate, 0-255.")
@@ -385,6 +393,69 @@ public final class ServerWorldTools {
                         json.addProperty("changed", changed);
                         json.add("previous", previous);
                         json.add("current", GameJson.block(world, pos));
+                        return json;
+                    }
+                });
+                return ToolResult.structured(result);
+            })
+            .build());
+    }
+
+    /**
+     * Forces a world save.
+     *
+     * <p>An integrated server has no {@code /save-all} command — that one is registered by the
+     * dedicated server only — and its autosave interval is long enough that a model finishing a
+     * task has no reason to believe its changes reached disk. The alternative that does work,
+     * leaving the world, unloads it and leaves a client wedged at the main menu, which is a heavy
+     * price for a flush.
+     */
+    private static void registerSaveWorld() {
+        McpRegistry.registerTool(McpTool.named("server_save_world")
+            .title("Save world")
+            .description("Flush every loaded dimension to disk. Use this before ending a session or "
+                + "killing the game, since anything written since the last autosave is otherwise "
+                + "lost — an integrated server has no /save-all command and autosaves infrequently, "
+                + "so changes a tool reported as applied can still not be on disk. Saving blocks the "
+                + "server thread for as long as it takes, which on a large world is noticeable.")
+            .schema(JsonSchema.object()
+                .bool("players", "Also write player data. Defaults to true; there is rarely a "
+                    + "reason to save the world without it.")
+                .build())
+            .serverOnly()
+            .idempotent()
+            .handler(context -> {
+                final boolean players = context.getBoolean("players", true);
+                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() {
+                        MinecraftServer server = ServerThreadBridge.server();
+                        if (server == null) {
+                            throw new IllegalStateException("No Minecraft server is running");
+                        }
+                        JsonArray dimensions = new JsonArray();
+                        for (WorldServer world : server.worlds) {
+                            if (world == null) {
+                                continue;
+                            }
+                            JsonObject entry = new JsonObject();
+                            entry.addProperty("dimension", world.provider.getDimension());
+                            entry.addProperty("name", world.getWorldInfo().getWorldName());
+                            dimensions.add(entry);
+                        }
+
+                        // The same call /save-all makes. Passing false rather than true leaves the
+                        // familiar "Saving chunks for level ..." line in the log, which is the only
+                        // externally visible confirmation the save happened.
+                        server.saveAllWorlds(false);
+                        if (players) {
+                            server.getPlayerList().saveAllPlayerData();
+                        }
+
+                        JsonObject json = new JsonObject();
+                        json.addProperty("saved", dimensions.size());
+                        json.addProperty("players", players);
+                        json.add("dimensions", dimensions);
                         return json;
                     }
                 });
