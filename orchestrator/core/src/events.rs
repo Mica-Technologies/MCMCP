@@ -124,7 +124,14 @@ pub struct Event {
     /// Recorded rather than resolved when the log is read, and that is the point: an id like
     /// `run-d0a639` is a directory slug plus a few bytes of entropy, and nobody auditing a trail
     /// knows which game it was. Labels also change, so a name looked up later would relabel history.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Serialised as `instance_label`, and that rename is load-bearing rather than cosmetic:
+    /// `kind` is `#[serde(flatten)]`, and two of its variants carry a `label` of their own. A field
+    /// called `label` out here consumes that key first, leaving the flattened variant to fail with
+    /// "missing field `label`" — which `show_log` swallows, because a half-written final line is
+    /// normal in a file a live process is appending to. The result is an event kind that silently
+    /// stops appearing in the log rather than an error anybody sees.
+    #[serde(default, rename = "instance_label", skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(flatten)]
     pub kind: EventKind,
@@ -170,11 +177,13 @@ impl Event {
             (None, _) => "-",
         };
         match &self.kind {
-            EventKind::InstanceLinked { label, side, .. } => {
-                format!("{where_}: linked as \"{label}\" ({side})")
-            }
+            // The label is in the prefix now, so naming it again here read as
+            // `server (run-d0a639.server): linked as "server" (server)`. These two variants keep
+            // their own `label` on the record — it is what the roster was told at the time, and a
+            // rename later should not rewrite what happened — but the line does not repeat it.
+            EventKind::InstanceLinked { side, .. } => format!("{where_}: linked ({side})"),
             EventKind::InstanceUnlinked => format!("{where_}: unlinked"),
-            EventKind::InstanceApproved { label } => format!("{where_}: approved as \"{label}\""),
+            EventKind::InstanceApproved { .. } => format!("{where_}: approved"),
             EventKind::InstanceRejected { reason } => format!("{where_}: refused ({reason})"),
             EventKind::InstanceRevoked => format!("{where_}: revoked"),
             EventKind::FocusChanged { from, to } => match from {
@@ -440,6 +449,75 @@ mod tests {
             all.last().unwrap().summary(),
             format!("entry {}", RING_CAPACITY + 9)
         );
+    }
+
+    #[test]
+    fn every_event_kind_survives_the_round_trip_through_the_log_file() {
+        // `show_log` reads the file back with `if let Ok(event)`, so a kind that cannot be parsed
+        // does not raise anything — it just stops appearing. Two variants carry a `label` of their
+        // own, and an outer field of the same name silently ate it.
+        let kinds = vec![
+            EventKind::InstanceLinked {
+                label: "IE Dedicated Server".into(),
+                side: "server".into(),
+                game_directory: Some("E:/gitRepos/x".into()),
+            },
+            EventKind::InstanceUnlinked,
+            EventKind::InstanceApproved {
+                label: "modB dev".into(),
+            },
+            EventKind::InstanceRejected {
+                reason: "revoked".into(),
+            },
+            EventKind::InstanceRevoked,
+            EventKind::FocusChanged {
+                from: Some("a".into()),
+                to: "b".into(),
+            },
+            EventKind::LabelChanged {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            EventKind::ToolCall {
+                tool: "client_move".into(),
+                arguments: serde_json::json!({"direction": "forward"}),
+                is_error: false,
+                duration_ms: 12,
+            },
+            EventKind::ToolBlocked {
+                tool: "server_set_block".into(),
+                rule: "deny".into(),
+            },
+            EventKind::CatalogueChanged { tools: 45 },
+            EventKind::Note {
+                message: "hello".into(),
+            },
+        ];
+
+        for kind in kinds {
+            let described = format!("{kind:?}");
+            let event = Event::new(Actor::System, Level::Info, Some("run-d0a639.server".into()), kind)
+                .labelled("IE Dedicated Server");
+            let line = serde_json::to_string(&event).expect("serialises");
+            let parsed: Event = serde_json::from_str(&line).unwrap_or_else(|error| {
+                panic!(
+                    "{described} did not survive the round trip: {error}
+  {line}"
+                )
+            });
+
+            assert_eq!(
+                parsed.label.as_deref(),
+                Some("IE Dedicated Server"),
+                "{described}"
+            );
+            assert_eq!(
+                parsed.instance.as_deref(),
+                Some("run-d0a639.server"),
+                "{described}"
+            );
+            assert_eq!(parsed.summary(), event.summary(), "{described}");
+        }
     }
 
     #[test]
