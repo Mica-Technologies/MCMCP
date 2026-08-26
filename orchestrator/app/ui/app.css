@@ -175,3 +175,13 @@ input.rename {
   background: var(--bg-raised); border: 1px solid var(--line); border-radius: 999px;
   padding: 8px 18px; font-size: 12.5px; box-shadow: 0 6px 24px rgba(0, 0, 0, .4);
 }
+
+/* The build the app came from, beside its name in the header. Deliberately quiet: it matters
+   when something is wrong and should not compete with the name the rest of the time. */
+.version {
+  font-size: 0.62em;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  opacity: 0.55;
+  vertical-align: middle;
+}

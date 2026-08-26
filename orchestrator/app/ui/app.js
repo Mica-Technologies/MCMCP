@@ -320,6 +320,10 @@ async function renderSettings() {
   $("strict-approval").checked = settings.strict_approval;
   $("autostart").checked = settings.autostart;
   $("require-explicit").checked = settings.require_explicit_instance_for_destructive;
+  // Both places, from one source. The header is what somebody glances at; the Settings row is
+  // what they copy into a bug report.
+  $("app-version").textContent = settings.version;
+  $("app-version-detail").textContent = settings.version;
   $("state-dir").textContent = settings.state_directory;
   $("link-port").textContent = `127.0.0.1:${settings.link_port}`;
   $("empty-port").textContent = `127.0.0.1:${settings.link_port}`;

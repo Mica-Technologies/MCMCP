@@ -58,7 +58,7 @@ directions and someone chasing one is not chasing the other.
 
 ```
 MCMCP orchestrator link for modB dev (modb-dev-3f2a1c):
-  client -> 127.0.0.1:25580: connected — connected to MCMCP Orchestrator 0.1.0
+  client -> 127.0.0.1:25580: connected — connected to MCMCP Orchestrator 26.8.26
     Named as mod B (dev) in the orchestrator.
 ```
 

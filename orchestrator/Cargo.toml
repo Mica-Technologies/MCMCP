@@ -11,9 +11,15 @@ members = ["core", "cli", "app"]
 # edited (see CLAUDE.md), so the convention carries the constraint instead:
 #
 #   mod releases tag YYYY.MM.DD          <- the only tags this repository ever gets
-#   orchestrator releases bump this line <- no tag, ever
+#   orchestrator releases derive from it <- no tag, ever
+#
+# The value committed here is a PLACEHOLDER. A release overwrites it from the mod's version, via
+# .github/scripts/orchestrator-version.sh, because the shape an installer accepts is not the shape
+# the mod uses: an MSI major number may not exceed 255, so 2026.08.26 ships as 26.8.26 and a
+# pre-release's hhmm becomes a numeric pre-release identifier. Editing it by hand does nothing to a
+# release — change the script instead.
 [workspace.package]
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
 rust-version = "1.85"
 license = "LGPL-2.1"

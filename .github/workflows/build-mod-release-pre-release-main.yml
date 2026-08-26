@@ -268,6 +268,17 @@ jobs:
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --locked --version "^2"
 
+      # The app carries the date it was built from, like the jar beside it in the release.
+      #
+      # It is written here rather than committed because the shape the installers accept is not the
+      # shape the mod uses: an MSI major number may not exceed 255, so 2026.08.26 becomes 26.8.26 and
+      # a pre-release's hhmm becomes a numeric pre-release identifier. Deriving it from MOD_VERSION
+      # keeps one source of truth and means the app in a release always matches the jar it shipped
+      # with — and, more to the point, that consecutive builds differ at all, which is what an
+      # installer needs before it will treat one as an upgrade of the other.
+      - name: Set the app version from the mod version
+        run: bash .github/scripts/orchestrator-version.sh "${{ needs.assemble_release.outputs.mod_version }}" --write
+
       # The headless binary and the shim are the same executable, and the shim is what an MCP client
       # spawns — so it ships beside the app rather than instead of it.
       - name: Build the headless orchestrator

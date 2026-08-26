@@ -574,6 +574,12 @@ fn approve_known(state: State<'_, AppState>, app: AppHandle, instance: String) -
 
 #[derive(Serialize)]
 struct Settings {
+    /// The app's own version, which is the date it was built from.
+    ///
+    /// Worth showing rather than leaving to Add/Remove Programs: the orchestrator and the mod ship
+    /// as one release and have to speak the same link protocol, so "which one am I running" is the
+    /// first question when a game will not connect.
+    version: String,
     strict_approval: bool,
     autostart: bool,
     require_explicit_instance_for_destructive: bool,
@@ -608,6 +614,7 @@ fn get_settings(app: AppHandle, state: State<'_, AppState>) -> Settings {
         destructive: rule_name(rules.destructive),
     };
     Settings {
+        version: env!("CARGO_PKG_VERSION").to_string(),
         strict_approval: state
             .store
             .lock()

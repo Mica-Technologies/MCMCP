@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "mcmcp-orchestrator"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "mcmcp-orchestrator-app"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "mcmcp-orchestrator-core",
@@ -1860,7 +1860,7 @@ dependencies = [
 
 [[package]]
 name = "mcmcp-orchestrator-core"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "serde",

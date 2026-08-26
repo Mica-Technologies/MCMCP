@@ -339,6 +339,26 @@ the *desktop* one. Everything else in MCMCP — every tool, resource and prompt,
 CI proves both paths on every commit: one job drives the HTTP endpoint against a real dedicated
 server, another drives a real MCP client through the orchestrator against the same thing.
 
+## Upgrading
+
+Install the new version over the old one — the installers do a major upgrade in place, keeping your
+approvals, labels and gating, which live in the state directory rather than beside the program.
+
+The app carries the release date as its version (`26.8.26` for the `2026.08.26` release; the two-digit
+year and unpadded month are what an MSI will accept). It is shown beside the name in the app's header
+and in **Settings → Where things live**, which is the quickest way to tell what you are running.
+
+Something usually has to close first, and the installer asks before closing anything:
+
+- **the app**, if its window is open;
+- **the shim**, `mcmcp-orchestrator.exe`, which is the one that actually catches people out. An MCP
+  client spawns it on your behalf, so it is frequently running without anybody having started it
+  knowingly, and it holds the file the installer is about to replace.
+
+Answering *cancel* to either prompt cancels the install rather than closing your session anyway. A
+closed shim is restarted by its MCP client on the next call, so the cost of letting it go is one
+reconnect.
+
 !!! note "Installers are unsigned"
 
     Windows SmartScreen and macOS Gatekeeper will both complain about the orchestrator installers.
