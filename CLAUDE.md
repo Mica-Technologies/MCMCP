@@ -186,6 +186,12 @@ frequently model-generated and arrive with the wrong primitive type.
   bindings.
 - Game directory comes from `Loader.instance().getConfigDir().getParentFile()` — stable on both sides,
   unlike the client-only `Minecraft.gameDir`.
+- **`EntityPlayerSP.sendChatMessage` is not how chat is sent.** It only sends the packet. The real
+  path is `GuiScreen.sendChatMessage`: Forge's `ClientChatEvent`, the sent-message history, then
+  `ClientCommandHandler.executeCommand`, and only then the packet. Skipping it meant every
+  client-side command — `/malisis` and anything else registered with `ClientCommandHandler` — went to
+  the server and came back "Unknown command", indistinguishable from the mod not registering it.
+  Same shape as the `mouseClicked` bug below: an inner step mistaken for the entry point.
 - **`GuiScreen.mouseClicked` is not how a click is delivered.** The real path is `handleInput()` →
   `handleMouseInput()` → `mouseClicked`, and a screen may override `handleMouseInput` and never reach
   the last step. MalisisCore's screens hit-test `Mouse.getX()/getY()` themselves, so calling

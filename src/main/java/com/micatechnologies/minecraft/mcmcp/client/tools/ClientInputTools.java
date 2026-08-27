@@ -17,6 +17,8 @@ import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.KeyBinding;
+import net.minecraftforge.client.ClientCommandHandler;
+import net.minecraftforge.event.ForgeEventFactory;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -128,13 +130,22 @@ public final class ClientInputTools {
      * Sends chat or a command as the player.
      *
      * <p>The client-side counterpart to {@code server_run_command}, and the one that works without
-     * any server-side install. It goes through {@code sendChatMessage}, which is byte-for-byte what
-     * pressing T and typing produces — so a command runs at the player's own permission level on
-     * whatever server they are on, and nothing here can elevate that.
+     * any server-side install. It reproduces {@code GuiScreen.sendChatMessage} step for step — the
+     * Forge {@code ClientChatEvent}, the sent-message history, the client command handler, and only
+     * then the packet — so a command runs at the player's own permission level on whatever server
+     * they are on, and nothing here can elevate that.
+     *
+     * <p>{@code EntityPlayerSP.sendChatMessage} on its own is <em>not</em> that path, and using it was
+     * a bug: it does nothing but send the packet. Client-side commands — anything registered with
+     * Forge's {@code ClientCommandHandler}, such as MalisisCore's {@code /malisis} — never ran. They
+     * went to the server instead and came back as "Unknown command", which reads exactly like the mod
+     * having failed to register its command. Mods that rewrite or cancel chat through
+     * {@code ClientChatEvent} were bypassed for the same reason.
      *
      * <p>Output does not come back in the tool result: the server replies asynchronously into the
      * chat window, and there is no request/response pairing to hook. Read it with
-     * {@code client_read_chat} afterwards.
+     * {@code client_read_chat} afterwards. A command handled on the client produces no server reply at
+     * all, which is why the result reports which of the two happened.
      */
     private static void registerSendChat() {
         McpRegistry.registerTool(McpTool.named("client_send_chat")
@@ -172,16 +183,38 @@ public final class ClientInputTools {
                         + "truncated.");
                 }
 
-                context.onGameThread(new Callable<Void>() {
+                Boolean handledOnClient = context.onGameThread(new Callable<Boolean>() {
                     @Override
-                    public Void call() {
+                    public Boolean call() {
                         Minecraft mc = ClientStateTools.requireInWorld();
-                        mc.player.sendChatMessage(message);
-                        return null;
+                        // Mirrors GuiScreen.sendChatMessage(msg, true), which is what pressing Enter in
+                        // the chat box runs. Each step matters: the event lets mods rewrite or cancel
+                        // the message, the history makes it reachable with the up arrow, and the client
+                        // command handler is the only place a client-side command ever runs.
+                        String outgoing = ForgeEventFactory.onClientSendMessage(message);
+                        if (outgoing.isEmpty()) {
+                            return Boolean.TRUE;
+                        }
+                        mc.ingameGUI.getChatGUI().addToSentMessages(outgoing);
+                        if (ClientCommandHandler.instance.executeCommand(mc.player, outgoing) != 0) {
+                            return Boolean.TRUE;
+                        }
+                        mc.player.sendChatMessage(outgoing);
+                        return Boolean.FALSE;
                     }
                 });
+
+                boolean clientSide = Boolean.TRUE.equals(handledOnClient);
+                JsonObject json = new JsonObject();
+                json.addProperty("message", message);
+                json.addProperty("isCommand", isCommand);
+                json.addProperty("handledOnClient", clientSide);
                 return ToolResult.text((isCommand ? "Command sent: " : "Message sent: ") + message
-                    + "\nUse client_read_chat to see the response.");
+                    + (clientSide
+                        ? "\nHandled on the client, so no server reply will arrive. Any output went "
+                            + "straight to the chat window; read it with client_read_chat."
+                        : "\nUse client_read_chat to see the response."))
+                    .withStructured(json);
             })
             .build());
     }

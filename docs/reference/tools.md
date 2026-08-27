@@ -343,6 +343,20 @@ with `client_read_chat`.
 
 256-character limit — the vanilla one. Longer messages are rejected by the server, not truncated.
 
+The message takes the same route as pressing Enter in the chat box: Forge's `ClientChatEvent`, the
+sent-message history, then Forge's client command handler, and only then the packet. The reply
+reports `handledOnClient`, which is `true` when a client-side command consumed the message — in that
+case no server reply is ever coming, and whatever the command printed went straight to the chat
+window.
+
+!!! warning "Client-side commands need the whole path"
+
+    Sending through `EntityPlayerSP.sendChatMessage` alone only sends the packet, and that was this
+    tool's original bug. Any command registered with Forge's `ClientCommandHandler` — MalisisCore's
+    `/malisis` among them — never ran at all. It went to the server, which answered "Unknown
+    command", which reads exactly like the mod having failed to register it. Mods that rewrite or
+    cancel chat through `ClientChatEvent` were bypassed for the same reason.
+
 #### `client_look`
 
 Requires `permissions.allowPlayerControl`
