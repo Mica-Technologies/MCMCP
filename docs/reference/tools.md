@@ -470,6 +470,18 @@ anything mods print to chat. This is how you see the result of `client_send_chat
 Frame rate, heap usage, render distance, graphics settings, and the game and screenshot directories.
 Roughly what F3 shows.
 
+#### `client_reload_resources`
+
+No arguments
+
+Reloads every client resource from disk — textures, models, sounds, language files and shaders —
+exactly as F3+T does. The only way to re-run a mod's resource-reload listeners without restarting
+the game, which is what makes it useful for iterating on shaders.
+
+Starts the reload and does not wait for it: a full reload takes seconds and grows with the pack, so
+blocking would report a timeout for a reload that is going fine. The game thread is busy throughout,
+so the next tool call queues behind it and returns once the reload has finished.
+
 ### GUI control
 
 `client_gui_state` says *which* screen is open; these act on it. Between them they reach everything

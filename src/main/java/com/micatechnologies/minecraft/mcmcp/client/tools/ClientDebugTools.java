@@ -57,6 +57,7 @@ public final class ClientDebugTools {
         registerGuiState();
         registerReadChat();
         registerRuntimeInfo();
+        registerReloadResources();
     }
 
     // ------------------------------------------------------------------
@@ -317,6 +318,44 @@ public final class ClientDebugTools {
                     }
                 });
                 return ToolResult.structured(result);
+            })
+            .build());
+    }
+
+    // ------------------------------------------------------------------
+    // Resource reload
+    // ------------------------------------------------------------------
+
+    private static void registerReloadResources() {
+        McpRegistry.registerTool(McpTool.named("client_reload_resources")
+            .title("Reload client resources")
+            .description("Reload every client resource from disk — textures, models, sounds, "
+                + "language files and shaders — exactly as pressing F3+T does. Use this to pick "
+                + "up an edit to a resource without restarting the game, which is the only way to "
+                + "re-run a mod's resource-reload listeners in a session.\n\n"
+                + "The reload is started and not waited for. A full reload takes seconds and grows "
+                + "with the pack, so blocking would report a timeout for a reload that is proceeding "
+                + "perfectly well. The game thread is busy for the duration, so the next tool call "
+                + "queues behind it and returns once the reload has finished — which is also how "
+                + "to wait for it.")
+            .schema(JsonSchema.noArguments())
+            .clientOnly()
+            .handler(context -> {
+                // Fire-and-forget for the same reason client_world_create is: refreshResources
+                // re-reads every pack on the client thread and blocks it for far longer than a
+                // scheduled task is allowed to take.
+                context.onGameThreadAsync(new Runnable() {
+                    @Override
+                    public void run() {
+                        Minecraft.getMinecraft().refreshResources();
+                    }
+                });
+
+                JsonObject result = new JsonObject();
+                result.addProperty("reloadStarted", true);
+                return ToolResult.text("Reloading client resources. This takes a few seconds; the "
+                    + "next tool call will wait for it to finish.")
+                    .withStructured(result);
             })
             .build());
     }
