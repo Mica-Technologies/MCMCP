@@ -19,7 +19,6 @@ import net.minecraft.block.state.IBlockState;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
-import net.minecraftforge.fml.common.registry.ForgeRegistries;
 
 /**
  * Bulk region read and write — the pair of tools that make an agent able to survey an area and then
@@ -276,10 +275,10 @@ public final class ServerBuildTools {
 
                 final Block replaceOnly;
                 if (replaceOnlyId != null && !replaceOnlyId.isEmpty()) {
-                    replaceOnly = ForgeRegistries.BLOCKS.getValue(new ResourceLocation(replaceOnlyId));
+                    replaceOnly = BlockIds.resolve(replaceOnlyId);
                     if (replaceOnly == null) {
-                        return ToolResult.error("No block is registered with the id '" + replaceOnlyId
-                            + "' for replaceOnly.");
+                        return ToolResult.error(
+                            BlockIds.describeUnknown(replaceOnlyId, "use as replaceOnly"));
                     }
                 }
                 else {
@@ -312,8 +311,8 @@ public final class ServerBuildTools {
                     }
                     for (Placement placement : placements) {
                         if (placement.block == null) {
-                            return ToolResult.error("No block is registered with the id '"
-                                + placement.blockId + "'.");
+                            return ToolResult.error(
+                                BlockIds.describeUnknown(placement.blockId, "place"));
                         }
                         if (placement.pos.getY() < 0 || placement.pos.getY() > 255) {
                             return ToolResult.error("y must be between 0 and 255; got "
@@ -350,9 +349,9 @@ public final class ServerBuildTools {
                 if (blockId == null || blockId.isEmpty()) {
                     return ToolResult.error("Fill mode requires a 'block' argument.");
                 }
-                final Block fillBlock = ForgeRegistries.BLOCKS.getValue(new ResourceLocation(blockId));
+                final Block fillBlock = BlockIds.resolve(blockId);
                 if (fillBlock == null) {
-                    return ToolResult.error("No block is registered with the id '" + blockId + "'.");
+                    return ToolResult.error(BlockIds.describeUnknown(blockId, "fill with"));
                 }
 
                 final int metadata = context.getBoundedInt("metadata", 0, 0, 15);
@@ -444,7 +443,7 @@ public final class ServerBuildTools {
                 new BlockPos(Json.getInt(item, "x", 0), Json.getInt(item, "y", 0),
                     Json.getInt(item, "z", 0)),
                 id,
-                ForgeRegistries.BLOCKS.getValue(new ResourceLocation(id)),
+                BlockIds.resolve(id),
                 Math.max(0, Math.min(15, Json.getInt(item, "metadata", 0)))));
         }
         return placements;

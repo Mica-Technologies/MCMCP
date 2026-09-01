@@ -14,11 +14,9 @@ import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.Entity;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
-import net.minecraftforge.fml.common.registry.ForgeRegistries;
 
 /**
  * World inspection and mutation on the server endpoint.
@@ -134,11 +132,9 @@ public final class ServerWorldTools {
             .readOnly()
             .handler(context -> {
                 final String blockId = context.requireString("block");
-                final Block target = ForgeRegistries.BLOCKS.getValue(new ResourceLocation(blockId));
+                final Block target = BlockIds.resolve(blockId);
                 if (target == null) {
-                    return ToolResult.error("No block is registered with the id '" + blockId
-                        + "'. Ids are namespaced, e.g. 'minecraft:stone'. Use game_list_mods to see "
-                        + "which mods are present.");
+                    return ToolResult.error(BlockIds.describeUnknown(blockId, "search for"));
                 }
 
                 final int centreX = context.requireInt("x");
@@ -362,9 +358,9 @@ public final class ServerWorldTools {
                 }
 
                 final String blockId = context.requireString("block");
-                final Block target = ForgeRegistries.BLOCKS.getValue(new ResourceLocation(blockId));
+                final Block target = BlockIds.resolve(blockId);
                 if (target == null) {
-                    return ToolResult.error("No block is registered with the id '" + blockId + "'.");
+                    return ToolResult.error(BlockIds.describeUnknown(blockId, "place"));
                 }
 
                 final int x = context.requireInt("x");

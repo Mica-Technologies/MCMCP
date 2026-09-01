@@ -66,6 +66,23 @@ Returns the lines as text, with a structured form alongside.
 
 ## Server endpoint
 
+### Block ids
+
+Every tool that takes a `block` argument resolves it the same way, and rejects an id that is not
+registered rather than falling back to anything.
+
+That guarantee is worth stating because Forge does not give it for free. The block registry is a
+*defaulted* registry whose default is `minecraft:air`, so the obvious lookup returns air — not
+null — for an id nobody registered. Before this was handled, a search for a misspelled id came back
+as a search for air: `blocksScanned` equal to `matches`, contiguous "hits" hanging in mid-air, and a
+confident report that a block sat somewhere it had never been. On the writing side the same slip was
+destructive, a fill with a mistyped id quietly erasing the region it was meant to build.
+
+An unresolvable id now returns an error naming the closest ids actually registered in that
+namespace, or saying the namespace is not loaded at all and listing the ones that are. Air itself
+stays perfectly addressable as `minecraft:air`; what is no longer possible is reaching it by
+accident.
+
 ### World inspection
 
 #### `server_get_block`
@@ -133,6 +150,9 @@ Searches expanding shells outward from the centre, so results are nearest-first 
 early returns the closest matches rather than an arbitrary corner of the box.
 
 Skips unloaded chunks; never force-loads. Radius bounded by `limits.maxScanRadius`.
+
+An unregistered `block` is an error, never an empty result and never a search for air — see
+[Block ids](#block-ids).
 
 #### `server_nearby_entities`
 
