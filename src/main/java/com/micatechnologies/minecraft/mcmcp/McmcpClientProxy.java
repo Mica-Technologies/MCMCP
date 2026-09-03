@@ -76,4 +76,10 @@ public class McmcpClientProxy implements McmcpProxy {
     public McpEndpoint getClientEndpoint() {
         return clientEndpoint;
     }
+
+    @Override
+    @Nullable
+    public String creativeTabLabel(net.minecraft.creativetab.CreativeTabs tab) {
+        return tab.getTabLabel();
+    }
 }

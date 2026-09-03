@@ -32,6 +32,7 @@ public final class CommonTools {
         registerEndpointInfo();
         registerModList();
         registerReadLog();
+        RegistryDumpTools.register();
 
         ServerWorldTools.register();
         ServerBuildTools.register();

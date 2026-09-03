@@ -52,4 +52,11 @@ public interface McmcpProxy {
     /** The running client endpoint, or null on a server or when it is disabled or failed to bind. */
     @Nullable
     McpEndpoint getClientEndpoint();
+
+    /**
+     * The label of a creative tab ("tabhvac"), or null on a side that cannot read it.
+     * {@code CreativeTabs.getTabLabel} is client-only and stripped from a dedicated server.
+     */
+    @Nullable
+    String creativeTabLabel(net.minecraft.creativetab.CreativeTabs tab);
 }

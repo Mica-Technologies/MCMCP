@@ -237,7 +237,7 @@ TOOLS_BODY="$(curl -fsS --max-time 10 \
 
 # Spot-check one tool from each registration path: a common one and a server-only one. If either
 # is missing, registration ran but something filtered it out.
-for expected in '"mcmcp_endpoint_info"' '"server_get_blocks"'; do
+for expected in '"mcmcp_endpoint_info"' '"game_dump_registries"' '"server_get_blocks"'; do
   case "$TOOLS_BODY" in
     *"$expected"*) echo "    found ${expected}" ;;
     *) mcp_failure "tools/list is missing ${expected}: ${TOOLS_BODY}" ;;

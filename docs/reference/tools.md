@@ -49,6 +49,26 @@ Every loaded mod, with id, name and version.
 Not trivia on a modded instance: what can be crafted, what a block does, and what mechanics exist all
 depend on which mods are present.
 
+### `game_dump_registries`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `namespace` | string | Required. The part before the colon in an id, e.g. `csm`. |
+| `file` | string | File name inside `mcmcp/dumps/`. Default `registries-<namespace>.json`. No path separators. |
+| `display_names` | boolean | Default true. Include each block's and item's translated display name. |
+
+Writes every block, item, tile-entity key, sound event, recipe and entity registered under one
+namespace to a JSON file in the game directory, in registry order, with each block's and item's
+class, creative tab (index on both sides, label on the client) and display name. The response
+carries the path, a SHA-256 of the file and per-registry counts; the entries are in the file.
+
+This exists for refactors that must not change what a mod registers — splitting a mod into
+modules, rewriting registration, reordering tabs. Dump before, dump after, diff. Registry order
+is what the creative inventory renders, so take both dumps in the same state: at the main menu the
+order is registration order, inside a world it is the saved id mapping.
+
 ### `game_read_log`
 
 :material-eye: Read-only

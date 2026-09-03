@@ -41,4 +41,10 @@ public class McmcpCommonProxy implements McmcpProxy {
     public McpEndpoint getClientEndpoint() {
         return null;
     }
+
+    @Override
+    @Nullable
+    public String creativeTabLabel(net.minecraft.creativetab.CreativeTabs tab) {
+        return null;
+    }
 }
