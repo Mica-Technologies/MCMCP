@@ -1406,14 +1406,9 @@ impl Router {
     }
 
     async fn rebuild_and_announce(&self, reason: &str) {
-        self.build_aggregate().await;
-        for method in [
-            "notifications/tools/list_changed",
-            "notifications/resources/list_changed",
-            "notifications/prompts/list_changed",
-        ] {
-            self.notify_downstream(jsonrpc::notification(method, None));
-        }
+        let before = self.cached_aggregate();
+        let after = self.build_aggregate().await;
+        self.announce_changes(before.as_ref(), &after);
         self.notify_downstream(jsonrpc::notification(
             "notifications/message",
             Some(json!({
@@ -1422,6 +1417,40 @@ impl Router {
                 "data": reason,
             })),
         ));
+    }
+
+    /// Tells the client which of its three lists actually moved.
+    ///
+    /// The comparison is the whole point, and skipping it is expensive in a way nothing downstream
+    /// reports. A `list_changed` makes the host re-read `tools/list` and replace ~49 tool
+    /// definitions — some 15k tokens — in the prompt it sends for every subsequent turn, which
+    /// invalidates its prompt cache and re-bills the conversation so far. Announcing on every
+    /// connect and disconnect therefore charged that to a mod-development loop whose whole shape is
+    /// relaunching the game, for a catalogue that came back byte-identical: `addressable` covers
+    /// instances seen recently as well as connected ones precisely so a relaunch does not churn the
+    /// schemas, and the announcement was throwing that away.
+    ///
+    /// A first build has nothing to compare against and announces everything, which is right — the
+    /// client asked at a point when there was no catalogue and needs to know one exists now.
+    fn announce_changes(&self, before: Option<&Aggregate>, after: &Aggregate) {
+        let (tools, resources, prompts) = match before {
+            Some(before) => (
+                before.tools != after.tools,
+                before.resources != after.resources || before.resource_templates != after.resource_templates,
+                before.prompts != after.prompts,
+            ),
+            None => (true, true, true),
+        };
+
+        for (changed, method) in [
+            (tools, "notifications/tools/list_changed"),
+            (resources, "notifications/resources/list_changed"),
+            (prompts, "notifications/prompts/list_changed"),
+        ] {
+            if changed {
+                self.notify_downstream(jsonrpc::notification(method, None));
+            }
+        }
     }
 
     /// Sends an instance's request on to the MCP client, under an id of our own.
@@ -1527,8 +1556,13 @@ impl Router {
                 {
                     warn!(instance = %instance_id, label = %self.label_of(instance_id), %error, "could not re-read a catalogue");
                 }
-                self.build_aggregate().await;
-                self.notify_downstream(jsonrpc::notification(&method, None));
+                // Compared rather than forwarded, for the reason in `announce_changes`. One game's
+                // list_changed does not imply the aggregate moved: a tool that was already
+                // contributed by another instance collapses into the same entry, and a re-register
+                // of an identical tool is not a change at all.
+                let before = self.cached_aggregate();
+                let after = self.build_aggregate().await;
+                self.announce_changes(before.as_ref(), &after);
             }
 
             "notifications/resources/updated" => {
@@ -1802,6 +1836,101 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .map(str::to_string)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_relaunched_game_with_the_same_tools_does_not_invalidate_the_clients_catalogue() {
+        // The cost this guards is invisible from here and large. A `list_changed` makes the host
+        // re-read tools/list and swap ~49 tool definitions — some 15k tokens — into the prompt it
+        // sends for every later turn, discarding its prompt cache and re-billing the conversation so
+        // far. Announcing on every connect charged that to the one loop the orchestrator exists to
+        // serve: relaunching a dev client over and over, each time with a byte-identical catalogue.
+        let (router, alpha, _outbound) = router_with("alpha");
+        alpha.set_catalogue(Catalogue {
+            tools: vec![json!({"name": "client_move", "description": "move"})],
+            ..Catalogue::default()
+        });
+
+        // The first connect has no cached surface to compare against and must announce.
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "alpha".into(),
+            })
+            .await;
+        let mut downstream = router.subscribe_downstream();
+
+        // A relaunch: the same instance, the same tools, the same focus.
+        router
+            .handle_upstream(UpstreamEvent::Disconnected {
+                instance: "alpha".into(),
+            })
+            .await;
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "alpha".into(),
+            })
+            .await;
+
+        let mut announced = Vec::new();
+        while let Ok(message) = downstream.try_recv() {
+            if let Some(method) = jsonrpc::method_of(&message)
+                && method.ends_with("list_changed")
+            {
+                announced.push(method.to_string());
+            }
+        }
+        assert!(
+            announced.is_empty(),
+            "nothing about the surface moved, but it announced: {announced:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_game_that_brings_new_tools_does_announce_them() {
+        // The other half: gating must not become silence. A second game contributing a tool the
+        // first lacks genuinely changes the surface, and a client that is not told keeps calling a
+        // catalogue that is missing it.
+        let (router, alpha, _outbound) = router_with("alpha");
+        alpha.set_catalogue(Catalogue {
+            tools: vec![json!({"name": "client_move", "description": "move"})],
+            ..Catalogue::default()
+        });
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "alpha".into(),
+            })
+            .await;
+        let mut downstream = router.subscribe_downstream();
+
+        alpha.set_catalogue(Catalogue {
+            tools: vec![
+                json!({"name": "client_move", "description": "move"}),
+                json!({"name": "csm_inspect", "description": "a mod registered this"}),
+            ],
+            ..Catalogue::default()
+        });
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "alpha".into(),
+            })
+            .await;
+
+        let mut announced = Vec::new();
+        while let Ok(message) = downstream.try_recv() {
+            if let Some(method) = jsonrpc::method_of(&message)
+                && method.ends_with("list_changed")
+            {
+                announced.push(method.to_string());
+            }
+        }
+        assert!(
+            announced.contains(&"notifications/tools/list_changed".to_string()),
+            "the tool list moved and should have been announced; got {announced:?}"
+        );
+        assert!(
+            !announced.contains(&"notifications/prompts/list_changed".to_string()),
+            "no prompt changed; announcing one re-reads a list for nothing"
+        );
     }
 
     #[tokio::test]

@@ -122,6 +122,18 @@ An instance that is not ready contributes nothing to the aggregated tool list �
 merely by having nothing to add. The aggregate is cached, so letting an empty catalogue into it would
 replace the tool surface every other instance had.
 
+### Relaunching a game does not disturb the tool list
+
+Connecting and disconnecting only tells your client its lists changed when they *actually* changed.
+That comparison is worth more than it sounds. A `list_changed` makes a host re-read `tools/list` and
+swap some fifty tool definitions into the prompt it sends for every subsequent turn, which throws
+away its prompt cache and re-bills the conversation so far — and the loop the orchestrator exists to
+serve is relaunching a dev client over and over, each time with a byte-identical catalogue.
+
+This is also why the `instance` enum covers games seen recently rather than only connected ones: a
+relaunch that rewrote every tool's schema would be a change, and would announce itself. A game that
+brings tools the others lack still announces, because then the surface really is different.
+
 ## Telling several games apart
 
 `mcmcp_compare_instances` reports only what is **different** between the connected games — the mods
