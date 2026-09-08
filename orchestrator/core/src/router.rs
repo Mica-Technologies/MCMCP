@@ -1654,9 +1654,15 @@ pub fn tool_error(message: &str) -> Value {
     })
 }
 
+/// The orchestrator's own tools' results, in the same shape the mod's `ToolResult.structured` uses.
+///
+/// Compact rather than pretty for the reason given there: this text block is read into a model's
+/// context and billed on every call, and pretty-printing buys readability nobody is present to use.
+/// `mcmcp_read_logs` and `mcmcp_compare_instances` are the ones that make it matter — both return
+/// arrays whose every element the pretty printer would put on its own indented line.
 fn structured_result(value: Value) -> Value {
     json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }],
+        "content": [{ "type": "text", "text": serde_json::to_string(&value).unwrap_or_default() }],
         "structuredContent": value,
         "isError": false,
     })

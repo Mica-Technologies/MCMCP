@@ -66,11 +66,20 @@ public final class ToolResult {
      * <p>The text is generated from the structured form rather than written separately so the two
      * cannot disagree — a result whose prose says one thing and whose JSON says another is worse
      * than having only one of them.
+     *
+     * <p>Compact, not pretty-printed, and that is worth a sentence because the pretty form is the
+     * more obvious choice and was the original one. This text block goes into a model's context and
+     * is paid for on every call; Gson's pretty printer puts each array element on its own indented
+     * line, so {@code server_get_blocks}' 4,096-entry palette index array — the encoding that exists
+     * precisely to make a region read cheap — expanded to 4,096 lines of {@code "    3,"}. A 16³
+     * region measured 29,420 bytes pretty against 8,649 compact, and the saving runs 30–40% on
+     * ordinary object-shaped results too. Nothing reads this as a document: a human wanting the
+     * readable form has the file that {@code game_dump_registries} writes, which is still pretty.
      */
     public static ToolResult structured(JsonObject data) {
         ToolResult result = ok();
         result.structuredContent = data;
-        result.withText(Json.writePretty(data));
+        result.withText(Json.write(data));
         return result;
     }
 

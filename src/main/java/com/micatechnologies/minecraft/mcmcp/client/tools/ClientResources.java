@@ -79,7 +79,7 @@ public final class ClientResources {
                     }
                 });
                 return Collections.singletonList(
-                    McpContent.textResource(uri, "application/json", Json.writePretty(payload)));
+                    McpContent.textResource(uri, "application/json", Json.write(payload)));
             })
             .build());
     }
@@ -115,7 +115,7 @@ public final class ClientResources {
                 payload.addProperty("count", lines.size());
                 payload.add("lines", lines);
                 return Collections.singletonList(
-                    McpContent.textResource(uri, "application/json", Json.writePretty(payload)));
+                    McpContent.textResource(uri, "application/json", Json.write(payload)));
             })
             .build());
     }

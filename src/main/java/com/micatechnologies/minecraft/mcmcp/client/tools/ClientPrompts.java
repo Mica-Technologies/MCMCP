@@ -68,7 +68,7 @@ public final class ClientPrompts {
                 text.append("Survey the player's surroundings in Minecraft and describe where they "
                     + "are, what is around them, and anything notable or dangerous.\n\n");
                 text.append("Current state:\n\n```json\n")
-                    .append(com.micatechnologies.minecraft.mcmcp.json.Json.writePretty(state))
+                    .append(com.micatechnologies.minecraft.mcmcp.json.Json.write(state))
                     .append("\n```\n\n");
                 text.append("Build on that with the tools rather than restating it: "
                     + "client_nearby_entities for what is moving, client_get_block for specific "

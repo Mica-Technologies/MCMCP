@@ -31,7 +31,13 @@ import javax.annotation.Nullable;
  */
 public final class Json {
 
-    /** Pretty printer used for config dumps and log output; the wire format uses {@link #compact()}. */
+    /**
+     * Pretty printer for JSON a <em>human</em> reads — on-disk dumps that get opened in an editor or
+     * fed to {@code diff}. Nothing that crosses the wire uses it: every byte of an MCP response is
+     * paid for in a model's context, and Gson's pretty printer puts each array element on its own
+     * indented line, which is catastrophic for the large primitive arrays MCMCP's cheapest encodings
+     * are built out of. The wire format uses {@link #compact()}.
+     */
     private static final Gson PRETTY = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
 
     /**

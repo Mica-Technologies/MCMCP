@@ -67,7 +67,7 @@ public final class CommonResources {
                 payload.addProperty("count", mods.size());
                 payload.add("mods", mods);
                 return Collections.singletonList(
-                    McpContent.textResource(uri, "application/json", Json.writePretty(payload)));
+                    McpContent.textResource(uri, "application/json", Json.write(payload)));
             })
             .build());
     }
@@ -141,7 +141,7 @@ public final class CommonResources {
                     }
                 });
                 return Collections.singletonList(
-                    McpContent.textResource(uri, "application/json", Json.writePretty(payload)));
+                    McpContent.textResource(uri, "application/json", Json.write(payload)));
             })
             .build());
     }
@@ -174,7 +174,7 @@ public final class CommonResources {
                     }
                 });
                 return Collections.singletonList(
-                    McpContent.textResource(uri, "application/json", Json.writePretty(payload)));
+                    McpContent.textResource(uri, "application/json", Json.write(payload)));
             })
             .build());
     }
