@@ -311,21 +311,56 @@ fn prefix_name(resource: &mut Value, label: &str) {
 // Persistence
 // ------------------------------------------------------------------
 
-/// Reads a cached aggregate, treating anything unreadable as absent.
+/// The persisted form: an aggregate plus the orchestrator version that built it.
+///
+/// The stamp exists because this cache does not hold raw catalogues, it holds the *finished* tool
+/// list — availability notes appended, the `instance` property injected into all forty-nine schemas.
+/// All of that is built by code in this file, so an upgrade that changes how a tool is described
+/// changes what should be in here, and nothing in the old format said which build had written it.
+///
+/// Observed exactly that: an upgrade shortened the injected `instance` description, and the
+/// orchestrator went on serving the previous build's 342-character version because no game had
+/// connected yet to trigger a rebuild. Nothing was broken and it healed on the next link, but "the
+/// change you just installed is not visible and will be later" is not a state worth shipping.
+#[derive(Serialize, Deserialize)]
+struct CachedAggregate {
+    /// The orchestrator version that wrote this file, from `CARGO_PKG_VERSION`.
+    ///
+    /// Which is `0.0.0` in a local development build, where CI has not stamped the real date-derived
+    /// version in. So this catches an upgrade between releases — the case it is for — and does not
+    /// catch rebuilding from edited source at the same version. In that loop, delete the file.
+    built_by: String,
+    aggregate: Aggregate,
+}
+
+/// Reads a cached aggregate, treating anything unreadable *or stale* as absent.
 ///
 /// A corrupt cache is not worth failing over, unlike a corrupt approval store: the worst outcome is
 /// an empty tool list until the first game connects, which is a few seconds of inconvenience rather
-/// than a lost security decision.
+/// than a lost security decision. A cache written by a different build is discarded on exactly the
+/// same grounds — a few seconds against serving a description this build does not agree with.
+///
+/// A file in the older unstamped format has no `built_by` and so fails to parse, which lands in the
+/// same branch and rebuilds. That is the intended upgrade path, not an accident.
 pub fn load_cache(path: &std::path::Path) -> Option<Aggregate> {
+    load_cache_built_by(path, crate::VERSION)
+}
+
+fn load_cache_built_by(path: &std::path::Path, version: &str) -> Option<Aggregate> {
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    let cached: CachedAggregate = serde_json::from_str(&text).ok()?;
+    (cached.built_by == version).then_some(cached.aggregate)
 }
 
 pub fn save_cache(path: &std::path::Path, aggregate: &Aggregate) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let text = serde_json::to_string(aggregate).map_err(std::io::Error::other)?;
+    let stamped = CachedAggregate {
+        built_by: crate::VERSION.to_string(),
+        aggregate: aggregate.clone(),
+    };
+    let text = serde_json::to_string(&stamped).map_err(std::io::Error::other)?;
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, text)?;
     std::fs::rename(&temporary, path)
@@ -656,5 +691,80 @@ mod tests {
 
         assert!(aggregate.tools.is_empty());
         assert!(aggregate.resources.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Cache persistence
+    // ------------------------------------------------------------------
+
+    fn cache_file(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("mcmcp-cache-test-{name}.json"));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn a_cache_this_build_wrote_is_used() {
+        let path = cache_file("same-version");
+        let built = aggregate(
+            &[contribution("alpha", vec!["client_move"])],
+            &["alpha".into()],
+            None,
+        );
+        save_cache(&path, &built).expect("the cache should write");
+
+        let loaded = load_cache(&path).expect("this build's own cache should load");
+
+        assert_eq!(loaded.tools.len(), 1);
+        assert_eq!(loaded.tools[0]["name"], "client_move");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_cache_a_different_build_wrote_is_discarded_rather_than_served() {
+        // The regression this exists for. The cache holds finished tool definitions, so an upgrade
+        // that changes how a tool is described leaves a file describing tools the way the previous
+        // build did — and the orchestrator served it, because nothing said which build had written
+        // it. An empty tool list for the few seconds until a game connects is the better answer.
+        let path = cache_file("other-version");
+        let built = aggregate(
+            &[contribution("alpha", vec!["client_move"])],
+            &["alpha".into()],
+            None,
+        );
+        save_cache(&path, &built).expect("the cache should write");
+
+        assert!(load_cache_built_by(&path, "some-other-version").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_cache_from_before_the_stamp_existed_is_discarded() {
+        // The upgrade path itself: files already on disk are the bare aggregate with no `built_by`,
+        // and must rebuild rather than load. Written as the old format on purpose — serialising the
+        // current one would not reproduce what is actually sitting in everyone's state directory.
+        let path = cache_file("unstamped");
+        let built = aggregate(
+            &[contribution("alpha", vec!["client_move"])],
+            &["alpha".into()],
+            None,
+        );
+        std::fs::write(&path, serde_json::to_string(&built).expect("serialises"))
+            .expect("the fixture should write");
+
+        assert!(load_cache(&path).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_cache_is_absent_rather_than_an_error() {
+        let missing = std::env::temp_dir().join("mcmcp-cache-test-nonexistent.json");
+        let _ = std::fs::remove_file(&missing);
+        assert!(load_cache(&missing).is_none());
+
+        let corrupt = cache_file("corrupt");
+        std::fs::write(&corrupt, "{not json").expect("the fixture should write");
+        assert!(load_cache(&corrupt).is_none());
+        let _ = std::fs::remove_file(&corrupt);
     }
 }
