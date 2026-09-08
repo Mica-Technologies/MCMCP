@@ -82,7 +82,9 @@ order is registration order, inside a world it is the saved id mapping.
 Reads the tail of a log file, seeking backwards from the end. A filtered read scans up to 200,000
 lines back; an unfiltered one stops as soon as it has enough.
 
-Returns the lines as text, with a structured form alongside.
+Returns the lines as text. The structured form alongside carries `file`, `returnedLines` and the
+`filter` — metadata about the read, not the lines again. Repeating them there doubled the cost of
+every log read to say nothing new.
 
 ## Server endpoint
 
