@@ -478,12 +478,29 @@ Do this before using an item or placing a block. Returns what is now held.
 
 #### `client_screenshot`
 
-Requires `permissions.allowScreenshots` · optional `name`, `inline`
+Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
 
-**Not inline by default.** A 1080p PNG base64-encodes to 1.4–2.7 MB of JSON per call. Pass
-`inline: true` when the model needs to see the frame.
+**Not inline by default.** An inline frame costs a model roughly `width × height / 750` tokens, spent
+whether or not it ends up looking at the picture. Pass `inline: true` when it needs to see the frame.
+
+**`max_dimension` caps what that costs.** It bounds the long edge of the inline copy only — the file
+on disk is always full resolution. Without it, the price of a screenshot is set by however large the
+player dragged the game window, which is not a property of the question being asked.
+
+| Long edge | Approximate tokens | Good for |
+|---|---|---|
+| 640 | ~550 | Which screen is open, roughly where the player is looking |
+| 1280 (default) | ~1,230 | Reading GUI labels and the F3 overlay |
+| 1568 | ~1,850 | Fine detail — and the ceiling |
+
+Above 1568 nothing is gained: the image is downscaled to that before it reaches the model either way,
+having been paid for in transfer the whole distance. The tool clamps to it regardless of what is
+asked for. Scaling is done in halving steps so small text survives the reduction.
+
+The result reports `capturedWidth`/`capturedHeight`, the `inlineWidth`/`inlineHeight` actually sent,
+and `approximateImageTokens`, so the cost of the size chosen is visible in the response.
 
 Captures the last rendered frame, so open GUIs, chat and the F3 overlay all appear.
 

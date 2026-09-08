@@ -31,15 +31,28 @@ Screenshot saved to C:\...\.minecraft\screenshots\mcmcp-1753992104233.png
 
 plus a `resource_link` to `minecraft://client/screenshot/mcmcp-1753992104233.png`.
 
-**The image is not in the response by default.** A 1080p PNG is 1–2 MB, which base64-encodes to
-1.4–2.7 MB of JSON, spent whether or not anything ends up looking at the picture. The default gives
-you a path — enough for a developer to open the file — and a link a client can follow on demand.
+**The image is not in the response by default.** An inline frame costs a model something like a
+thousand tokens, spent whether or not anything ends up looking at the picture. The default gives you
+a path — enough for a developer to open the file — and a link a client can follow on demand.
 
 When the model genuinely needs to see the frame:
 
 ```json
 {"name": "client_screenshot", "arguments": {"inline": true, "name": "before-place.png"}}
 ```
+
+**Say how big it should be.** An image is charged by its area, roughly `width × height / 750` tokens,
+so without `max_dimension` the price of a screenshot is set by however large the game window happens
+to be — the same question costing three times as much on a 1080p client as on a 720p one. It caps the
+long edge of the inline copy only; the saved file keeps its full resolution.
+
+```json
+{"name": "client_screenshot", "arguments": {"inline": true, "max_dimension": 640}}
+```
+
+640 (~550 tokens) is enough to tell which screen is open or roughly where the player is looking; 1280
+(~1,230, the default) reads GUI labels and the F3 overlay. 1568 is the ceiling — beyond it the image
+is downscaled before the model ever sees it, so the extra pixels are paid for and discarded.
 
 Things worth knowing:
 

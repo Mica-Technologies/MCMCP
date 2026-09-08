@@ -12,10 +12,13 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpContent;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.tools.ScreenshotImages;
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.concurrent.Callable;
+import javax.imageio.ImageIO;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.util.ScreenShotHelper;
@@ -30,11 +33,17 @@ import net.minecraftforge.fml.relauncher.SideOnly;
  *
  * By default {@code client_screenshot} writes the PNG, returns its absolute path and attaches an MCP
  * resource link — it does not inline the image. That is a deliberate default and worth understanding
- * before overriding it: a 1080p PNG is roughly 1–2 MB, which base64-encodes to 1.4–2.7 MB of JSON
- * <em>per call</em>, and it is spent whether or not the model ends up looking at the picture. The
- * path alone is enough for a developer to open the file, and the resource link lets a client fetch
- * the bytes on demand through {@code resources/read}. Pass {@code inline: true} when the model
- * genuinely needs to see the frame in the same turn.
+ * before overriding it: an inline frame costs a model something like a thousand tokens, and it is
+ * spent whether or not it ends up looking at the picture. The path alone is enough for a developer
+ * to open the file, and the resource link lets a client fetch the bytes on demand through
+ * {@code resources/read}. Pass {@code inline: true} when the model genuinely needs to see the frame
+ * in the same turn.
+ *
+ * <p>When it does, {@code max_dimension} decides what that costs. Without it the price of a
+ * screenshot was set by how large the player happened to have dragged the game window — the same
+ * question costing three times as much on a 1080p client as on a 720p one, for no more answer. See
+ * {@link ScreenshotImages} for the arithmetic. The file on disk is never scaled; only the copy in the
+ * response is.
  *
  * <p>Screenshots run on the client thread because reading the framebuffer requires a live OpenGL
  * context, which only that thread has. That is also why they capture the last rendered frame rather
@@ -69,17 +78,27 @@ public final class ClientDebugTools {
             .title("Take screenshot")
             .description("Capture the game window and save it as a PNG under the game's screenshots "
                 + "directory. Returns the absolute file path and a resource link.\n\n"
-                + "The image is NOT included in the response unless you pass inline=true — a full "
-                + "screenshot costs one to three megabytes of base64 per call. Take the path when you "
-                + "just need a record of what happened; take the image when you actually need to look "
-                + "at the frame.\n\n"
+                + "The image is NOT included in the response unless you pass inline=true. Take the "
+                + "path when you just need a record of what happened; take the image when you "
+                + "actually need to look at the frame.\n\n"
+                + "An inline image costs you roughly width x height / 750 tokens, so its price is set "
+                + "by the size of the game window unless you say otherwise. Use max_dimension to say "
+                + "otherwise: it caps the long edge of the inline copy only, and the file on disk is "
+                + "always saved at full resolution.\n\n"
                 + "Captures the most recently rendered frame, so anything drawn over the game — an "
                 + "open GUI, a chat window, a debug overlay — appears in it.")
             .schema(JsonSchema.object()
                 .string("name", "File name for the screenshot, without a path. '.png' is appended if "
                     + "missing. Defaults to a timestamped name.")
-                .bool("inline", "Include the PNG in the response as base64 image content. Expensive; "
-                    + "defaults to false.")
+                .bool("inline", "Include the PNG in the response as base64 image content. Costs "
+                    + "tokens in proportion to its area; defaults to false.")
+                .integer("max_dimension", "Longest edge of the INLINE copy, in pixels; the saved file "
+                        + "keeps its full resolution. Useful values: 640 (~550 tokens) to check which "
+                        + "screen is open or roughly where the player is looking, 1280 (~1,230, the "
+                        + "default) to read GUI labels and the F3 overlay, 1568 (~1,850) for fine "
+                        + "detail. Above 1568 nothing is gained — the image is downscaled to that "
+                        + "before it reaches you either way. Ignored unless inline is true.",
+                    ScreenshotImages.MIN_MAX_DIMENSION, ScreenshotImages.PROVIDER_CEILING)
                 .build())
             .clientOnly()
             .handler(context -> {
@@ -90,6 +109,9 @@ public final class ClientDebugTools {
 
                 final String requestedName = context.getString("name", null);
                 final boolean inline = context.getBoolean("inline", false);
+                final int maxDimension = context.getBoundedInt("max_dimension",
+                    ScreenshotImages.DEFAULT_MAX_DIMENSION,
+                    ScreenshotImages.MIN_MAX_DIMENSION, ScreenshotImages.PROVIDER_CEILING);
 
                 final String fileName = buildScreenshotName(requestedName);
                 if (fileName == null) {
@@ -134,7 +156,31 @@ public final class ClientDebugTools {
                             + savedPath + ". ScreenShotHelper writes asynchronously on some drivers; "
                             + "retry, or read the resource link instead.");
                     }
-                    result.withContent(McpContent.image(Files.readAllBytes(file.toPath()), "image/png"));
+
+                    // Read the frame back off disk rather than capturing it a second time. Three
+                    // things fall out of that and all of them matter: the framebuffer is not read
+                    // twice, no image object crosses back off the game thread, and the inline copy
+                    // is provably the same picture as the file — including any change a mod's
+                    // ScreenshotEvent handler made to it on the way out.
+                    BufferedImage full = ImageIO.read(file);
+                    if (full == null) {
+                        return ToolResult.error("The screenshot at " + savedPath + " could not be "
+                            + "decoded as an image. Read the resource link instead.");
+                    }
+                    BufferedImage sent = ScreenshotImages.fitWithin(full, maxDimension);
+                    byte[] png = sent == full
+                        ? Files.readAllBytes(file.toPath())
+                        : ScreenshotImages.toPng(sent);
+
+                    structured.addProperty("capturedWidth", full.getWidth());
+                    structured.addProperty("capturedHeight", full.getHeight());
+                    structured.addProperty("inlineWidth", sent.getWidth());
+                    structured.addProperty("inlineHeight", sent.getHeight());
+                    structured.addProperty("inlineBytes", png.length);
+                    structured.addProperty("approximateImageTokens",
+                        ScreenshotImages.approximateTokens(sent.getWidth(), sent.getHeight()));
+
+                    result.withContent(McpContent.image(png, "image/png"));
                 }
                 return result;
             })
