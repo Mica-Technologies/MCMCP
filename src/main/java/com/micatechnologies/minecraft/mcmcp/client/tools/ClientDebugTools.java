@@ -1,6 +1,5 @@
 package com.micatechnologies.minecraft.mcmcp.client.tools;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
@@ -265,7 +264,10 @@ public final class ClientDebugTools {
                 + "other players' messages, death messages, and anything mods print to chat.\n\n"
                 + "This is how you see the result of a command sent with client_send_chat. The server "
                 + "replies asynchronously, so allow a moment — or a tick or two of any other tool — "
-                + "between sending and reading.")
+                + "between sending and reading.\n\n"
+                + "Each line reads '[HH:MM:SS] message'. Anything that is not ordinary player chat "
+                + "is tagged after the time: '(SYSTEM)' for command output and server messages, "
+                + "'(GAME_INFO)' for the action bar above the hotbar.")
             .schema(JsonSchema.object()
                 .integer("lines", "How many recent lines to return.", 1, 300)
                 .string("filter", "Case-insensitive substring; only matching lines are returned.")
@@ -283,28 +285,37 @@ public final class ClientDebugTools {
                 List<ClientChatRecorder.Entry> entries =
                     ClientChatRecorder.recent(needle == null ? lineCount : 300);
 
-                JsonArray lines = new JsonArray();
+                // One rendering of each line, not two. This used to send every message as text and
+                // again as a JSON object carrying the same string plus its type and timestamp,
+                // which doubled the cost of a chat read to carry two fields. Both now live in the
+                // text, where they cost about eleven characters instead of a fifty-byte object
+                // wrapper around a string that was already there.
+                int returned = 0;
                 StringBuilder text = new StringBuilder();
                 for (ClientChatRecorder.Entry entry : entries) {
                     if (needle != null
                         && !entry.getText().toLowerCase(java.util.Locale.ROOT).contains(needle)) {
                         continue;
                     }
-                    JsonObject line = new JsonObject();
-                    line.addProperty("text", entry.getText());
-                    line.addProperty("type", entry.getType());
-                    line.addProperty("timestamp", entry.getTimestampMillis());
-                    lines.add(line);
+                    returned++;
                     if (text.length() > 0) {
                         text.append('\n');
+                    }
+                    text.append(String.format(java.util.Locale.ROOT, "[%tT] ",
+                        entry.getTimestampMillis()));
+                    // Only when it is not ordinary chat. CHAT is the overwhelming majority, so
+                    // naming it on every line would spend more than the field is worth; SYSTEM
+                    // (command output, the reason this tool is usually called) and GAME_INFO (the
+                    // action bar, which is not chat at all) are the ones worth distinguishing.
+                    if (!"CHAT".equals(entry.getType())) {
+                        text.append('(').append(entry.getType()).append(") ");
                     }
                     text.append(entry.getText());
                 }
 
                 JsonObject structured = new JsonObject();
-                structured.addProperty("returned", lines.size());
+                structured.addProperty("returned", returned);
                 structured.addProperty("buffered", ClientChatRecorder.size());
-                structured.add("lines", lines);
 
                 return ToolResult.text(text.length() == 0 ? "(no chat messages match)" : text.toString())
                     .withStructured(structured);

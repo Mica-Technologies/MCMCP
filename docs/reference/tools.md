@@ -530,6 +530,11 @@ Call this when an input tool appears to have had no effect — an open GUI swall
 The rolling 300-line buffer of received chat: command output, other players, death messages, and
 anything mods print to chat. This is how you see the result of `client_send_chat`.
 
+Each line reads `[HH:MM:SS] message`. Anything that is not ordinary player chat is tagged after the
+time — `(SYSTEM)` for command output and server messages, `(GAME_INFO)` for the action bar. The
+structured payload carries `returned` and `buffered` only; the messages themselves are in the text
+once rather than in both places.
+
 #### `client_runtime_info`
 
 :material-eye: Read-only · no arguments
