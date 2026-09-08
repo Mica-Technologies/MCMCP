@@ -179,18 +179,27 @@ pub fn inject_instance_argument(tool: &mut Value, addressable: &[String], focuse
     );
 }
 
+/// The `instance` property, written short on purpose.
+///
+/// This string is stamped onto every one of ~49 tools, so each sentence in it is paid for 49 times
+/// in the catalogue a client holds — the long form ran to ~340 characters, some 4k tokens of
+/// near-identical boilerplate across the surface. Everything cut from it is said once already, in
+/// the server instructions the host puts in front of the tool list: that `instance` names which game
+/// to act on, that omitting it uses focus, and that `mcmcp_instances` is how to see what is
+/// connected. Repeating that per tool taught a model nothing it was not about to read anyway.
+///
+/// What stays is what is *specific to this tool and this moment* and appears nowhere else: which
+/// instance focus currently points at, the enum of ids, and — on a read-only tool — that `"*"` is
+/// accepted. With one instance addressable even focus is redundant, so the whole thing collapses to
+/// a clause.
 fn instance_property(addressable: &[String], focused: Option<&str>, fannable: bool) -> Value {
-    let mut description =
-        String::from("Which running game instance to act on. Omit it to use the focused instance");
+    let mut description = String::from("Which game to act on; omit for the focused one");
     match focused {
-        Some(focused) => description.push_str(&format!(" (currently {focused}).")),
-        None => description.push('.'),
+        Some(focused) if addressable.len() > 1 => description.push_str(&format!(" ({focused}).")),
+        _ => description.push('.'),
     }
-    description.push_str(" Call mcmcp_instances to see what is connected and what each one is.");
-    if fannable {
-        description.push_str(
-            " This tool only reads, so \"*\" is also accepted and runs it on every connected              instance at once — useful for comparing two games without asking each in turn.",
-        );
+    if fannable && addressable.len() > 1 {
+        description.push_str(" \"*\" runs it on every connected game.");
     }
 
     let mut property = json!({ "type": "string", "description": description });
@@ -501,12 +510,27 @@ mod tests {
         // omitted `instance` would land.
         let mut tool = json!({"name": "t", "inputSchema": {"type": "object"}});
 
+        inject_instance_argument(&mut tool, &["alpha".into(), "beta".into()], Some("alpha"));
+
+        let description = tool["inputSchema"]["properties"]["instance"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("alpha"), "got: {description}");
+    }
+
+    #[test]
+    fn one_addressable_instance_leaves_nothing_to_say_about_focus() {
+        // The description is stamped onto every tool, so anything true-but-useless in it is paid
+        // for ~49 times. With a single instance, naming the focused one names the only one.
+        let mut tool = json!({"name": "t", "inputSchema": {"type": "object"}});
+
         inject_instance_argument(&mut tool, &["alpha".into()], Some("alpha"));
 
         let description = tool["inputSchema"]["properties"]["instance"]["description"]
             .as_str()
             .unwrap();
-        assert!(description.contains("currently alpha"));
+        assert!(!description.contains("alpha"), "got: {description}");
+        assert!(description.len() < 60, "got {} chars", description.len());
     }
 
     #[test]
