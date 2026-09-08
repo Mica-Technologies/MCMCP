@@ -613,6 +613,15 @@ impl Router {
             Ok(mut result) => {
                 let info = instance.info();
                 let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                let declares_output_schema = instance
+                    .catalogue()
+                    .tools
+                    .iter()
+                    .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                    .is_some_and(|tool| tool.get("outputSchema").is_some());
+                // Stamped before it is measured, deliberately: the event should record what the
+                // client was actually sent, and the stamp is part of that.
+                annotate_result(&mut result, &info.id, &info.label, declares_output_schema);
                 self.record_event(Event::new(
                     Actor::Model,
                     if is_error { Level::Warn } else { Level::Info },
@@ -622,18 +631,16 @@ impl Router {
                         arguments: logged_arguments.clone(),
                         is_error,
                         duration_ms,
+                        result_bytes: wire_bytes(&result),
                     },
                 ));
-                let declares_output_schema = instance
-                    .catalogue()
-                    .tools
-                    .iter()
-                    .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
-                    .is_some_and(|tool| tool.get("outputSchema").is_some());
-                annotate_result(&mut result, &info.id, &info.label, declares_output_schema);
                 Ok(result)
             }
             Err(error) => {
+                let result = tool_error(&format!(
+                    "instance '{}' did not complete that call: {error}",
+                    instance.id()
+                ));
                 self.record_event(Event::new(
                     Actor::Model,
                     Level::Error,
@@ -643,12 +650,10 @@ impl Router {
                         arguments: logged_arguments.clone(),
                         is_error: true,
                         duration_ms,
+                        result_bytes: wire_bytes(&result),
                     },
                 ));
-                Ok(tool_error(&format!(
-                    "instance '{}' did not complete that call: {error}",
-                    instance.id()
-                )))
+                Ok(result)
             }
         }
     }
@@ -1678,6 +1683,36 @@ fn unqualified_uri_help(uri: &str) -> String {
          minecraft://<instance>/game/mods — '{uri}' may be an unqualified URI from a single \
          instance. Call resources/list to see the current ones."
     )
+}
+
+/// How large `value` is on the wire, without building a copy of it to find out.
+///
+/// The obvious `to_string(&value).len()` would allocate the whole payload a second time, and the
+/// payloads worth measuring are exactly the ones where that hurts — a region read or a log tail is
+/// tens of kilobytes, and it is serialised again a moment later on its way downstream. Serialising
+/// into a sink that counts and keeps nothing costs the traversal and no memory.
+fn wire_bytes(value: &Value) -> usize {
+    /// Counts what is written to it and discards it.
+    struct Counter(usize);
+
+    impl std::io::Write for Counter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0 += buffer.len();
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = Counter(0);
+    // A Value that came off the wire cannot fail to go back onto it, so a failure here is not
+    // worth propagating through every call site; it would only mean an event says 0.
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => counter.0,
+        Err(_) => 0,
+    }
 }
 
 /// A successful response carrying a failure the model must read.

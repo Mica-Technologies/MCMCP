@@ -364,6 +364,22 @@ program's own `tracing` output, and it exists because the desktop app has no ter
 everything the orchestrator said about its own workings went to a stderr nobody could read. It is
 appended to across runs and rotated to `orchestrator.log.1` once it passes 8 MB.
 
+A tool call records how long it took **and how large its answer was**:
+
+```
+run-d0a639 (modB dev): server_get_blocks ok in 412ms, 8.4 KB
+```
+
+Everything a tool returns is read into a model's context and paid for on every turn after that, and
+nothing else reports what that came to — so without this, which of your tools are expensive could
+only be estimated by reading their code. Records written before the field existed load as zero and
+print no size rather than claiming the call returned nothing.
+
+Bytes are not tokens, and the gap is not uniform: text runs about a token per four bytes, but an
+image is billed by its area however it was encoded, so an inline 1280×720 screenshot is around
+200 KB here and about 1,230 tokens to a model. Sorting your tools by this column would put
+screenshots on top and be wrong about it.
+
 `MCMCP_ORCHESTRATOR_HOME` overrides all of it.
 
 ## What needs the app, and what does not

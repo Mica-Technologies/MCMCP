@@ -106,6 +106,21 @@ pub enum EventKind {
         #[serde(default)]
         is_error: bool,
         duration_ms: u64,
+        /// Size of the answer as it went to the client, in bytes of JSON.
+        ///
+        /// Recorded because it was otherwise unknowable. Everything a tool returns is read into a
+        /// model's context and paid for on every turn thereafter, and nothing anywhere reported
+        /// what that came to — so which tools are expensive in a real session could only be
+        /// estimated from reading their code. This is the observation.
+        ///
+        /// **Bytes are not tokens, and the gap is not uniform.** Text costs roughly a token per
+        /// four bytes; an image is billed by its area regardless of how it was encoded, so an
+        /// inline 1280x720 screenshot is some 200 KB here and about 1,230 tokens to a model.
+        /// Sorting tools by this number would put screenshots at the top and be wrong about it.
+        ///
+        /// Defaulted, so event logs written before it existed still load.
+        #[serde(default)]
+        result_bytes: usize,
     },
     /// A call the gating policy refused before it reached a game.
     ToolBlocked {
@@ -210,16 +225,40 @@ impl Event {
                 tool,
                 is_error,
                 duration_ms,
+                result_bytes,
                 ..
             } => {
                 let outcome = if *is_error { "failed" } else { "ok" };
-                format!("{where_}: {tool} {outcome} in {duration_ms}ms")
+                // Omitted at zero rather than printed as "0 B", so a line read out of a log written
+                // before this field existed does not claim the call returned nothing.
+                match result_bytes {
+                    0 => format!("{where_}: {tool} {outcome} in {duration_ms}ms"),
+                    bytes => format!(
+                        "{where_}: {tool} {outcome} in {duration_ms}ms, {}",
+                        human_bytes(*bytes)
+                    ),
+                }
             }
             EventKind::ToolBlocked { tool, rule } => format!("{where_}: {tool} blocked by {rule}"),
             EventKind::CatalogueChanged { tools } => format!("{where_}: catalogue now {tools} tools"),
             EventKind::Note { message } => message.clone(),
         }
     }
+}
+
+/// A byte count at a glance, for a log line a person skims.
+///
+/// One decimal past a kilobyte and none below it: the difference between 412 and 413 bytes is never
+/// what somebody scanning this is looking for, and the difference between 8 KB and 84 KB always is.
+fn human_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let kilobytes = bytes as f64 / 1024.0;
+    if kilobytes < 1024.0 {
+        return format!("{kilobytes:.1} KB");
+    }
+    format!("{:.1} MB", kilobytes / 1024.0)
 }
 
 /// What to filter a slice of the log by.
@@ -445,6 +484,7 @@ mod tests {
                 arguments: json!({"x": 1}),
                 is_error,
                 duration_ms: 12,
+                result_bytes: 480,
             },
         )
     }
@@ -498,6 +538,7 @@ mod tests {
                 arguments: serde_json::json!({"direction": "forward"}),
                 is_error: false,
                 duration_ms: 12,
+                result_bytes: 480,
             },
             EventKind::ToolBlocked {
                 tool: "server_set_block".into(),
@@ -708,6 +749,61 @@ mod tests {
         let text = serde_json::to_string(&event).unwrap();
         assert!(text.contains("modB dev"));
         assert!(!text.to_lowercase().contains("secret"));
+    }
+
+    #[test]
+    fn a_tool_calls_line_says_how_large_its_answer_was() {
+        // The point of recording it: which tools are expensive in a real session was previously
+        // knowable only by reading their code and estimating.
+        let line = tool_call("alpha", "server_get_blocks", false).summary();
+
+        assert!(line.contains("480 B"), "got: {line}");
+    }
+
+    #[test]
+    fn an_event_written_before_sizes_were_recorded_does_not_claim_it_returned_nothing() {
+        // result_bytes is serde-defaulted so old events.jsonl files still load, which means every
+        // one of them deserialises as zero. Printing that as "0 B" would read as a tool that
+        // answered with nothing, which is a claim about the past this cannot support.
+        let event = Event::new(
+            Actor::Model,
+            Level::Info,
+            Some("alpha".into()),
+            EventKind::ToolCall {
+                tool: "client_move".into(),
+                arguments: json!({}),
+                is_error: false,
+                duration_ms: 12,
+                result_bytes: 0,
+            },
+        );
+
+        let line = event.summary();
+        assert!(line.contains("12ms"), "got: {line}");
+        assert!(!line.contains(" B"), "got: {line}");
+    }
+
+    #[test]
+    fn a_tool_call_from_an_older_log_still_loads() {
+        // events.jsonl is appended to across upgrades and never migrated, so every record written
+        // before this field existed must still parse. Built by writing a current record and taking
+        // the key back out, rather than by hand: the stored shape is a flattened tag, and a
+        // hand-written fixture that guessed it wrong would pass while proving nothing.
+        let current = serde_json::to_value(tool_call("alpha", "client_move", false))
+            .expect("an event should serialise");
+        let mut older = current.as_object().expect("an object").clone();
+        assert!(
+            older.remove("result_bytes").is_some(),
+            "the field should have been there to remove"
+        );
+
+        let event: Event =
+            serde_json::from_value(Value::Object(older)).expect("an older record should still load");
+
+        match event.kind {
+            EventKind::ToolCall { result_bytes, .. } => assert_eq!(result_bytes, 0),
+            other => panic!("expected a tool call, got {other:?}"),
+        }
     }
 
     #[test]
