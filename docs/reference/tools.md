@@ -448,6 +448,14 @@ re-check rather than expecting one call to finish.
 
 Returns the target before and after, plus the held item.
 
+!!! note "Post-action targets are brief"
+
+    `client_look`, `client_move` and `client_interact` report their target as id, position and face
+    only — enough to confirm where the camera landed or whether what you were aiming at changed.
+    For the full block, with its state properties, bounding box, light levels and hardness, call
+    `client_looking_at` or `client_get_block`. Those are what the detail is for; carrying it on
+    every movement call made it 79% of a `client_move` response.
+
 #### `client_input_lock`
 
 Requires `permissions.allowPlayerControl` · `locked` required, optional `seconds`, `reason`

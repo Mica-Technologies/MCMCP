@@ -493,7 +493,11 @@ public final class ClientInputTools {
                     @Override
                     public JsonObject call() {
                         Minecraft mc = ClientStateTools.requireInWorld();
-                        return GameJson.rayTrace(mc.world, mc.objectMouseOver);
+                        // Brief, and this is the call where it counts most: client_interact reports
+                        // a target on both sides of the action, so the full form was paid for twice
+                        // in one reply. "Did what I was aiming at change" is answered by the id and
+                        // the position, which is all either half of the comparison needs.
+                        return GameJson.rayTraceBrief(mc.world, mc.objectMouseOver);
                     }
                 });
 

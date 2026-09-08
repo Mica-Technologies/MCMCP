@@ -428,4 +428,64 @@ public final class GameJson {
         }
         return json;
     }
+
+    /**
+     * The same ray trace, answering only "what am I now pointed at".
+     *
+     * <p>For the reports a tool appends to an action it has just taken, where the target is
+     * confirmation rather than the question. {@link #rayTrace} embeds a whole {@link #block}
+     * — display name, every state property, {@code actualState}, the bounding box, both light
+     * levels, hardness — and against a modded block that came to 531 bytes on a {@code client_move}
+     * reply whose own content is 140. The field was 79% of the response, on every call of a loop
+     * that is nothing but repeated calls.
+     *
+     * <p>Depth was the waste, not the field. A model turning the camera and checking where it landed
+     * needs the id, the position and the face; it does not need the hardness of the block it happens
+     * to be facing, and when it does, {@code client_looking_at} and {@code client_get_block} answer
+     * exactly that and are one call away. Those two keep the full form, as do the standalone
+     * orienting payloads — {@code client_player_state}, the prompts and the resources — where the
+     * detail is what was asked for rather than something appended to an answer about movement.
+     */
+    public static JsonObject rayTraceBrief(World world, @Nullable RayTraceResult result) {
+        JsonObject json = new JsonObject();
+        if (result == null || result.typeOfHit == RayTraceResult.Type.MISS) {
+            json.addProperty("type", "miss");
+            return json;
+        }
+        if (result.typeOfHit == RayTraceResult.Type.BLOCK) {
+            BlockPos pos = result.getBlockPos();
+            json.addProperty("type", "block");
+            // Loaded is checked for the same reason block() checks it: getBlockState reads an
+            // unloaded position as air, which would report empty sky in front of a wall.
+            if (!world.isBlockLoaded(pos)) {
+                json.addProperty("block", "mcmcp:unloaded");
+            }
+            else {
+                ResourceLocation name = world.getBlockState(pos).getBlock().getRegistryName();
+                json.addProperty("block", name == null ? "unknown" : name.toString());
+            }
+            json.add("position", blockPos(pos));
+            EnumFacing face = result.sideHit;
+            json.addProperty("face", face == null ? "unknown" : face.getName());
+            return json;
+        }
+
+        json.addProperty("type", "entity");
+        if (result.entityHit != null) {
+            Entity hit = result.entityHit;
+            JsonObject brief = new JsonObject();
+            brief.addProperty("id", hit.getEntityId());
+            brief.addProperty("name", hit.getName());
+            if (hit instanceof EntityPlayer) {
+                brief.addProperty("type", "minecraft:player");
+            }
+            else {
+                ResourceLocation key = EntityList.getKey(hit);
+                brief.addProperty("type", key == null ? "unknown" : key.toString());
+            }
+            brief.add("blockPosition", blockPos(blockPosOf(hit)));
+            json.add("entity", brief);
+        }
+        return json;
+    }
 }

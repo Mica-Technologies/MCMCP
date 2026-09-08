@@ -74,10 +74,13 @@ public final class ClientStateTools {
      * end up where I asked". {@code client_looking_at} deliberately still reports
      * {@code objectMouseOver}, because that is the target the game will actually act on and it is
      * never stale when read from a standalone call.
+     *
+     * <p>Brief, for the same reason it is blocks-only: this is confirmation appended to an answer
+     * about movement, not the answer itself. See {@link GameJson#rayTraceBrief}.
      */
     static JsonObject freshLookTarget(Minecraft mc) {
         double reach = mc.playerController == null ? 4.5D : mc.playerController.getBlockReachDistance();
-        return GameJson.rayTrace(mc.world, mc.player.rayTrace(reach, 1.0F));
+        return GameJson.rayTraceBrief(mc.world, mc.player.rayTrace(reach, 1.0F));
     }
 
     private static void registerPlayerState() {
