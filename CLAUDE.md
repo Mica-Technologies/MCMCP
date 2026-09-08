@@ -246,6 +246,30 @@ confirmation.
 Publish bounds in the schema. They are load-bearing, not decorative: a model will set a scan radius to
 100000 unless the ceiling is stated.
 
+### Every byte of a response is billed to a context window
+
+Nothing reports this and it compounds silently, so it is a rule rather than a judgement call.
+
+**Never pretty-print anything that crosses the wire.** `Json.writePretty` is for files a human opens;
+`ToolResult.structured` and the orchestrator's `structured_result` use the compact form. Gson and
+`serde_json` both put every array element on its own indented line, which is worst exactly where the
+payload is largest: `server_get_blocks`' palette index array — the encoding that exists to make a
+region read cheap — measured 29,420 bytes pretty against 8,649 compact for one 16³ region. Ordinary
+object-shaped results run 30–40% smaller too.
+
+**A description repeated per tool is paid for ~49 times.** The orchestrator's injected `instance`
+property is the one to watch: it is stamped onto every tool, so a sentence added to it costs about
+600 tokens across the catalogue. Anything the MCP server instructions already say belongs there, once,
+not in every schema.
+
+**An image is charged by area, not file size** — roughly `width × height / 750` tokens, and anything
+over 1568px on the long edge is downscaled to it before tokenising, so resolution past that is paid
+for and discarded. Any tool returning an image takes a size cap; see `ScreenshotImages`.
+
+**Prefer a path and a resource link to an inline payload.** `game_dump_registries` is the model:
+write the file, return its path, a SHA-256 and the counts. A client that wants the bytes can follow
+the link; one that does not pays a few dozen bytes.
+
 ### Testing
 
 Anything in `protocol/`, `mcp/` or `json/` gets a unit test. Anything needing a world does not — put
