@@ -92,20 +92,32 @@ jobs:
             echo "tag=${{ env.PRE_TAG }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # The version is taken from the tag by `git describe --abbrev=0 --tags` (build.gradle:1553),
-      # which has no --match and, when several tags point at one commit, does not prefer the one we
-      # just created. It cannot be overridden either: `-PmodVersion` looks like the escape hatch and
-      # is not one, because loadProjectProperties (build.gradle:1494) copies every key of
-      # buildscript.properties over the project properties unconditionally, and modVersion is empty
-      # there. So the only way to control the built version is to control which tags describe can see.
+      # State the version instead of letting the build infer it.
       #
-      # A push to main tags the commit as a pre-release before anyone dispatches a release, leaving
-      # two tags on it. Within one UTC day `2026.09.08` sorts ahead of `2026.09.08-pre.1916...` and
-      # the release wins by luck. Dispatch a release after midnight UTC and the pre-release tag from
-      # the day before sorts ahead of `2026.09.09` instead — which shipped a release whose jar,
-      # orchestrator archives and installers were all stamped with the pre-release version, and whose
-      # installers were therefore a semver *pre-release* of the version already installed, so no
-      # machine would have taken them as an upgrade.
+      # Left to itself the build takes it from `git describe --abbrev=0 --tags` (build.gradle:1553),
+      # which has no --match and, with several tags on one commit, does not prefer the one just
+      # created. A push to main tags the commit as a pre-release before anyone dispatches a release,
+      # so two tags sit on it. Within one UTC day `2026.09.08` sorts ahead of
+      # `2026.09.08-pre.1916...` and the release wins by luck; dispatch after midnight UTC and
+      # `2026.09.08-pre.2007...` sorts ahead of `2026.09.09` instead. That shipped a release whose
+      # jar, orchestrator archives and installers were all stamped with the pre-release version --
+      # and whose installers were therefore a semver pre-release of the version already installed,
+      # which no machine would take as an upgrade.
+      #
+      # buildscript.properties rather than `-PmodVersion`, which reads like the escape hatch
+      # build.gradle:329 implies and is not one: loadProjectProperties (build.gradle:1494) copies
+      # every key of this file over the project properties unconditionally, so whatever -P supplied
+      # is overwritten by the empty value here. Writing the file is therefore the supported way in,
+      # and it is a CI-only edit that is never committed.
+      - name: Pin the mod version to the tag being published
+        run: |
+          chosen="${{ steps.publish_tag.outputs.tag }}"
+          sed -i "s|^modVersion =.*|modVersion = $chosen|" buildscript.properties
+          grep -n '^modVersion' buildscript.properties
+
+      # Still worth doing with the version pinned, because `getLastTag` also feeds the generated
+      # changelog (build.gradle:1170), which asks git the same ambiguous question. Do not remove it
+      # as redundant.
       - name: Leave only the tag being built on this commit
         run: |
           chosen="${{ steps.publish_tag.outputs.tag }}"
