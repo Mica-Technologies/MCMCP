@@ -92,6 +92,27 @@ jobs:
             echo "tag=${{ env.PRE_TAG }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # The version is taken from the tag by `git describe --abbrev=0 --tags` (build.gradle:1553),
+      # which has no --match and, when several tags point at one commit, does not prefer the one we
+      # just created. It cannot be overridden either: `-PmodVersion` looks like the escape hatch and
+      # is not one, because loadProjectProperties (build.gradle:1494) copies every key of
+      # buildscript.properties over the project properties unconditionally, and modVersion is empty
+      # there. So the only way to control the built version is to control which tags describe can see.
+      #
+      # A push to main tags the commit as a pre-release before anyone dispatches a release, leaving
+      # two tags on it. Within one UTC day `2026.09.08` sorts ahead of `2026.09.08-pre.1916...` and
+      # the release wins by luck. Dispatch a release after midnight UTC and the pre-release tag from
+      # the day before sorts ahead of `2026.09.09` instead — which shipped a release whose jar,
+      # orchestrator archives and installers were all stamped with the pre-release version, and whose
+      # installers were therefore a semver *pre-release* of the version already installed, so no
+      # machine would have taken them as an upgrade.
+      - name: Leave only the tag being built on this commit
+        run: |
+          chosen="${{ steps.publish_tag.outputs.tag }}"
+          git tag --points-at "${{ github.sha }}" | grep -vxF "$chosen" | xargs -r git tag -d
+          echo "Local tags now on this commit:"
+          git tag --points-at "${{ github.sha }}"
+
       - name: Assemble Mod with Gradle
         run: ./gradlew build -Dhttp.socketTimeout=60000 -Dhttp.connectionTimeout=60000 -Dorg.gradle.internal.http.socketTimeout=60000 -Dorg.gradle.internal.http.connectionTimeout=60000
 
@@ -118,6 +139,21 @@ jobs:
       # not to — and the resulting jar would ship claiming that version, silently.
       - name: Check the mod version looks like a mod version
         run: bash .github/scripts/check-mod-version.sh "${{ env.MOD_VERSION }}"
+
+      # The check above asks whether the version has a plausible *shape*, which is why it did not
+      # catch a release built as `2026.09.08-pre.2007.UTC+0000+a306a0a`: that is a perfectly
+      # well-formed version, just not the one being published. This asks the other question — is it
+      # the version we said we were publishing — and it is the one that fails a release loudly
+      # instead of shipping artifacts labelled as something else.
+      - name: Fail if the built version is not the tag being published
+        run: |
+          built="${{ env.MOD_VERSION }}"
+          chosen="${{ steps.publish_tag.outputs.tag }}"
+          if [ "$built" != "$chosen" ]; then
+            echo "::error::Built version '$built' does not match the published tag '$chosen'. The jar, the orchestrator archives and the installers would all be stamped '$built'. Refusing to publish."
+            exit 1
+          fi
+          echo "Built version matches the published tag: $built"
 
       - name: Save Mod Archive Base Name to GITHUB_ENV
         run: |
