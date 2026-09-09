@@ -109,7 +109,16 @@ jobs:
       - name: Leave only the tag being built on this commit
         run: |
           chosen="${{ steps.publish_tag.outputs.tag }}"
-          git tag --points-at "${{ github.sha }}" | grep -vxF "$chosen" | xargs -r git tag -d
+          # The `|| true` is load-bearing: grep exits 1 when the chosen tag is the only one on the
+          # commit, which is the ordinary case for a pre-release build. This step inherits the
+          # workflow default of `bash -e`, where a non-zero exit mid-pipeline is ignored — but a step
+          # that declares `shell: bash` also gets `-o pipefail`, where the same line fails the whole
+          # release. Written to survive either, because this is a pattern worth copying to the other
+          # repositories on the same buildscript and it must not depend on that distinction.
+          others="$(git tag --points-at "${{ github.sha }}" | grep -vxF "$chosen" || true)"
+          if [ -n "$others" ]; then
+            echo "$others" | xargs git tag -d
+          fi
           echo "Local tags now on this commit:"
           git tag --points-at "${{ github.sha }}"
 
