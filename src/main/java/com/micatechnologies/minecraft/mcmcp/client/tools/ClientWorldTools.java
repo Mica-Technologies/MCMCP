@@ -7,6 +7,7 @@ import com.micatechnologies.minecraft.mcmcp.client.ClientDeferredTasks;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.util.List;
 import java.util.Locale;
@@ -400,79 +401,7 @@ public final class ClientWorldTools {
                         + "permissions.allowPlayerControl in the MCMCP config.");
                 }
 
-                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
-                    @Override
-                    public JsonObject call() {
-                        Minecraft mc = Minecraft.getMinecraft();
-                        JsonObject json = new JsonObject();
-                        if (mc.world == null) {
-                            json.addProperty("left", false);
-                            json.addProperty("note", "No world was loaded.");
-                            return json;
-                        }
-
-                        json.addProperty("left", true);
-                        json.addProperty("wasSingleplayer", mc.isSingleplayer());
-                        return json;
-                    }
-                });
-
-                if (result.get("left").getAsBoolean()) {
-                    // The leave itself must NOT run from the scheduled-task queue. Minecraft drains
-                    // that queue while holding its lock, and leaving blocks the client thread until
-                    // Netty finishes closing the channel -- during which Netty fires
-                    // ClientDisconnectionFromServerEvent, whose handlers commonly call
-                    // addScheduledTask and block on that same lock. That deadlocks, and the game
-                    // hangs on disconnect. Running from the client tick puts this in the same
-                    // context as the vanilla "Save and Quit to Title" button, which is outside the
-                    // drain. See ClientDeferredTasks.
-                    ClientDeferredTasks.runNextTick(new Runnable() {
-                        @Override
-                        public void run() {
-                            Minecraft mc = Minecraft.getMinecraft();
-                            if (mc.world == null) {
-                                return;
-                            }
-                            // sendQuittingDisconnectingPacket is what tells an integrated server to
-                            // save and shut down. Skipping it and calling loadWorld(null) alone
-                            // leaves the server thread running and the save incomplete.
-                            mc.world.sendQuittingDisconnectingPacket();
-
-                            // Then wait for the integrated server to actually be down before
-                            // loadWorld(null). IntegratedServer.initiateShutdown, which loadWorld
-                            // calls, reads:
-                            //
-                            //     if (isServerRunning())
-                            //     Futures.getUnchecked(this.addScheduledTask(...));
-                            //
-                            // which races: if the server is still "running" when that check runs
-                            // but its thread exits before the task is picked up, the task never
-                            // executes and getUnchecked parks the client thread forever. Waiting
-                            // here makes isServerRunning() false by the time loadWorld looks, so
-                            // the guard skips the await entirely and the race cannot happen.
-                            //
-                            // The wait is bounded, and the server saves on its own thread without
-                            // needing this one, so blocking the tick briefly is safe.
-                            IntegratedServer server = mc.getIntegratedServer();
-                            if (server != null) {
-                                long deadline = System.currentTimeMillis() + SERVER_STOP_WAIT_MILLIS;
-                                while (server.isServerRunning()
-                                    && System.currentTimeMillis() < deadline) {
-                                    try {
-                                        Thread.sleep(SERVER_STOP_POLL_MILLIS);
-                                    }
-                                    catch (InterruptedException e) {
-                                        Thread.currentThread().interrupt();
-                                        break;
-                                    }
-                                }
-                            }
-
-                            mc.loadWorld(null);
-                            mc.displayGuiScreen(new GuiMainMenu());
-                        }
-                    }).get(WORLD_LEAVE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
-                }
+                JsonObject result = leaveLoadedWorld(context);
 
                 return ToolResult.text(result.get("left").getAsBoolean()
                     ? "Left the world; back at the main menu."
@@ -480,5 +409,101 @@ public final class ClientWorldTools {
                     .withStructured(result);
             })
             .build());
+    }
+
+    /**
+     * Leaves whatever world is loaded and returns to the main menu, saving on the way out.
+     *
+     * <p>Shared with {@code client_quit}, which leaves before shutting the game down. Quitting must
+     * use exactly this sequence rather than a shorter one of its own: both hazards below are
+     * invisible until the day they hang a client, and having one implementation is what stops a
+     * second caller from rediscovering them.
+     *
+     * <p>Blocks until the leave has finished, so the caller can report truthfully whether the world
+     * was saved.
+     *
+     * @param context the calling tool's context, used to reach the game thread
+     *
+     * @return {@code {"left": true, "wasSingleplayer": …}}, or {@code {"left": false, "note": …}} if
+     *         no world was loaded
+     *
+     * @throws Exception if the leave did not finish within {@link #WORLD_LEAVE_TIMEOUT_MILLIS}
+     */
+    static JsonObject leaveLoadedWorld(ToolContext context) throws Exception {
+        JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+            @Override
+            public JsonObject call() {
+                Minecraft mc = Minecraft.getMinecraft();
+                JsonObject json = new JsonObject();
+                if (mc.world == null) {
+                    json.addProperty("left", false);
+                    json.addProperty("note", "No world was loaded.");
+                    return json;
+                }
+
+                json.addProperty("left", true);
+                json.addProperty("wasSingleplayer", mc.isSingleplayer());
+                return json;
+            }
+        });
+
+        if (result.get("left").getAsBoolean()) {
+            // The leave itself must NOT run from the scheduled-task queue. Minecraft drains
+            // that queue while holding its lock, and leaving blocks the client thread until
+            // Netty finishes closing the channel -- during which Netty fires
+            // ClientDisconnectionFromServerEvent, whose handlers commonly call
+            // addScheduledTask and block on that same lock. That deadlocks, and the game
+            // hangs on disconnect. Running from the client tick puts this in the same
+            // context as the vanilla "Save and Quit to Title" button, which is outside the
+            // drain. See ClientDeferredTasks.
+            ClientDeferredTasks.runNextTick(new Runnable() {
+                @Override
+                public void run() {
+                    Minecraft mc = Minecraft.getMinecraft();
+                    if (mc.world == null) {
+                        return;
+                    }
+                    // sendQuittingDisconnectingPacket is what tells an integrated server to
+                    // save and shut down. Skipping it and calling loadWorld(null) alone
+                    // leaves the server thread running and the save incomplete.
+                    mc.world.sendQuittingDisconnectingPacket();
+
+                    // Then wait for the integrated server to actually be down before
+                    // loadWorld(null). IntegratedServer.initiateShutdown, which loadWorld
+                    // calls, reads:
+                    //
+                    //     if (isServerRunning())
+                    //     Futures.getUnchecked(this.addScheduledTask(...));
+                    //
+                    // which races: if the server is still "running" when that check runs
+                    // but its thread exits before the task is picked up, the task never
+                    // executes and getUnchecked parks the client thread forever. Waiting
+                    // here makes isServerRunning() false by the time loadWorld looks, so
+                    // the guard skips the await entirely and the race cannot happen.
+                    //
+                    // The wait is bounded, and the server saves on its own thread without
+                    // needing this one, so blocking the tick briefly is safe.
+                    IntegratedServer server = mc.getIntegratedServer();
+                    if (server != null) {
+                        long deadline = System.currentTimeMillis() + SERVER_STOP_WAIT_MILLIS;
+                        while (server.isServerRunning()
+                            && System.currentTimeMillis() < deadline) {
+                            try {
+                                Thread.sleep(SERVER_STOP_POLL_MILLIS);
+                            }
+                            catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
+                    }
+
+                    mc.loadWorld(null);
+                    mc.displayGuiScreen(new GuiMainMenu());
+                }
+            }).get(WORLD_LEAVE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        }
+
+        return result;
     }
 }

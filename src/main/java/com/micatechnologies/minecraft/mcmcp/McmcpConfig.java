@@ -93,6 +93,7 @@ public class McmcpConfig {
     private static boolean allowScreenshots = true;
     private static boolean allowLogAccess = true;
     private static boolean allowChat = true;
+    private static boolean allowProcessControl = true;
     private static Set<String> blockedCommands = Collections.emptySet();
 
     // Identity
@@ -293,6 +294,17 @@ public class McmcpConfig {
         allowChat = configuration.getBoolean("allowChat", CATEGORY_PERMISSIONS, true,
             "Allow sending chat messages as the player. Client endpoint only.");
 
+        allowProcessControl = configuration.getBoolean("allowProcessControl", CATEGORY_PERMISSIONS, true,
+            "Allow tools that end the game process: client_quit, and server_stop on the server "
+                + "endpoint.\n"
+                + "On by default, and a switch of its own rather than a corner of allowPlayerControl, "
+                + "because it is the one capability whose exercise also ends the endpoint that has "
+                + "it. On a dev instance that is the point -- stop cleanly, relaunch, re-measure -- "
+                + "and gating it by default would defeat it. Turn it off on anything somebody else "
+                + "is playing on.\n"
+                + "Worlds are saved on the way out either way, the same as the Quit Game button and "
+                + "the /stop command.");
+
         // Limits
         maxSessions = configuration.getInt("maxSessions", CATEGORY_LIMITS, 8, 1, 64,
             "Concurrent MCP sessions per endpoint. Each permitted session reserves an HTTP worker "
@@ -463,6 +475,10 @@ public class McmcpConfig {
 
     public static boolean isAllowChat() {
         return allowChat;
+    }
+
+    public static boolean isAllowProcessControl() {
+        return allowProcessControl;
     }
 
     public static int getMaxScanRadius() {

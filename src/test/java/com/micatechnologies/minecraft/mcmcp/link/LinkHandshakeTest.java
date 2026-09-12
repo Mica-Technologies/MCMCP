@@ -50,6 +50,22 @@ class LinkHandshakeTest {
     }
 
     @Test
+    void helloSaysWhichProcessItIsAndNotOnlyWhichGame() {
+        // Two games launched from one directory share an instance id, a directory and a mod version,
+        // and only the one that won the port answers. Without these the roster shows two identical
+        // rows and a caller has no way to know it is talking to last build's client.
+        JsonObject hello = LinkHandshake.hello(identity(), "client", "E:\\instances\\modB",
+            "2026.08.24", "1.12.2", null);
+
+        assertTrue(hello.get(LinkProtocol.FIELD_PID).getAsLong() > 0L,
+            "this JVM should report a real process id");
+        assertTrue(hello.get(LinkProtocol.FIELD_STARTED_AT).getAsString()
+                .matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z"),
+            "startedAt has to be ISO-8601 UTC, because the orchestrator and the app both show it "
+                + "to a human unparsed");
+    }
+
+    @Test
     void helloOmitsOptionalFieldsRatherThanSendingEmptyStrings() {
         // A dedicated server has no client endpoint URL, and a game directory can fail to resolve.
         // Absent and empty mean different things to whoever reads the roster.

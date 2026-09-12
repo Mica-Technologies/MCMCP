@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.link;
 
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
+import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import javax.annotation.Nullable;
 
@@ -16,6 +17,12 @@ import javax.annotation.Nullable;
  * this?</em> A prompt that says "instance {@code atm9-3f2a1c} wants to connect" is unanswerable; one
  * that names the directory, the side and the Minecraft version is not. The same fields are what let
  * the orchestrator notice a known id arriving from a new directory, which is the copied-config case.
+ *
+ * <p>The pid and start time are the answer to a narrower question the roster could not answer at
+ * all: <em>which of these two identical-looking rows am I actually talking to?</em> The instance id
+ * lives in a config file, so two games launched from one directory share it, and MCMCP's ports go to
+ * whichever bound first. Read here rather than passed in because they are facts about the JVM this
+ * code is running in, and there is no caller better placed to know them.
  *
  * <p>Pure data: no sockets here and no Minecraft. The mod version and Minecraft version arrive as
  * strings from the caller rather than being read off {@code McmcpConstants} and {@code ForgeVersion},
@@ -55,6 +62,11 @@ public final class LinkHandshake {
         if (endpointUrl != null && !endpointUrl.isEmpty()) {
             frame.addProperty(LinkProtocol.FIELD_ENDPOINT_URL, endpointUrl);
         }
+        long pid = McmcpProcess.pid();
+        if (pid != McmcpProcess.UNKNOWN_PID) {
+            frame.addProperty(LinkProtocol.FIELD_PID, pid);
+        }
+        frame.addProperty(LinkProtocol.FIELD_STARTED_AT, McmcpProcess.startedAtIso());
         return frame;
     }
 

@@ -1,6 +1,6 @@
 # Tools
 
-47 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+51 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -21,7 +21,7 @@ Available on both endpoints.
 :material-eye: Read-only · no arguments
 
 Reports which side the endpoint runs on, which protocol versions it speaks, which permission groups
-are enabled, and the configured limits.
+are enabled, the configured limits, and which game — and which *process* — is answering.
 
 **Call this first.** Several tool families can be turned off in configuration, and disabled tools stay
 listed rather than vanishing — so this is how a client learns what will actually work before it plans
@@ -32,13 +32,20 @@ around something that will not.
   "side": "client",
   "gameAvailable": true,
   "negotiatedProtocolVersion": "2025-06-18",
+  "instance": { "id": "modb-dev-3f2a1c", "name": "modB dev" },
+  "process": { "pid": 28056, "startedAt": "2026-09-11T08:14:02Z", "uptimeSeconds": 412 },
   "permissions": {
     "commands": true, "playerControl": true, "inventoryChanges": true,
-    "worldEdits": false, "screenshots": true, "logAccess": true, "chat": true
+    "worldEdits": false, "screenshots": true, "logAccess": true, "chat": true,
+    "processControl": true
   },
   "limits": { "maxScanRadius": 32, "maxInputTicks": 200, "maxLogLines": 500 }
 }
 ```
+
+`instance.id` lives in a config file, so two games launched from one directory share it. `process` is
+what tells those two apart — and only one of them is answering. See the warning under
+[`client_runtime_info`](#client_runtime_info) for how that goes wrong.
 
 ### `game_list_mods`
 
@@ -314,6 +321,34 @@ Chat message to every connected player. Worth using before acting on someone's w
 
 Requires `permissions.allowChat` · `player`, `message` required
 
+### Lifecycle
+
+#### `server_stop`
+
+:material-alert: Destructive · requires `permissions.allowProcessControl` · no arguments
+
+Stops the server, exactly as `/stop` does: players are disconnected, every world is saved, and the
+process exits.
+
+Not reversible from here — nothing in MCMCP can start a server back up, because afterwards there is
+no endpoint left to ask. On a shared server, use `server_broadcast` first.
+
+`stop` is in `permissions.blockedCommands` by default and should stay there. A blocklist is how the
+irreversible members of a whole command set are kept out; a tool is the opposite shape — one action,
+one switch, and a reply that says what was actually stopped.
+
+On a singleplayer client running an integrated server this stops the *world*, not the game: the
+client returns to the main menu and keeps running. The reply's `dedicated` says which it was.
+[`client_quit`](#client_quit) is what ends a client.
+
+```json
+{"stopping": true, "dedicated": true, "onlinePlayers": 0, "pid": 28056}
+```
+
+The reply is written and flushed before the shutdown begins. A dropped connection instead of a reply
+would leave a caller unable to tell a clean stop from a crash, which is the one case where a clear
+answer is worth most.
+
 ## Client endpoint
 
 ### State
@@ -542,6 +577,27 @@ once rather than in both places.
 Frame rate, heap usage, render distance, graphics settings, and the game and screenshot directories.
 Roughly what F3 shows.
 
+Also `process`, with this game's `pid`, `startedAt` and `uptimeSeconds`:
+
+```json
+{"pid": 28056, "startedAt": "2026-09-11T08:14:02Z", "uptimeSeconds": 412}
+```
+
+!!! warning "If a freshly built change appears to have done nothing, check `startedAt` first"
+
+    MCMCP's ports are fixed, and the game that bound them keeps them. A Gradle `runClient` forks its
+    own JVM, so stopping the Gradle task leaves the **game** running and still holding `clientPort`.
+    The next `runClient` produces a second game that cannot bind — and every call keeps reaching the
+    first one.
+
+    Nothing reports an error. The endpoint answers normally; it is just answering from the previous
+    build. Two clients launched from one directory are identical in every other field MCMCP reports:
+    same instance id, same game directory, same mod version. `pid` and `startedAt` are the only
+    fields that tell them apart, and `mcmcp_instances` carries them too.
+
+    [`client_quit`](#client_quit) is how to avoid getting there — stop cleanly, relaunch, re-measure.
+    When a client has stopped responding and cannot be asked to quit, the pid is what you kill.
+
 #### `client_reload_resources`
 
 No arguments
@@ -752,3 +808,35 @@ Back to the main menu, saving on the way out.
     on the call itself reports a timeout for a world that is loading perfectly well.
 
     Follow both with `client_wait` and `waitFor: "worldLoaded"`.
+
+### Lifecycle
+
+#### `client_quit`
+
+:material-alert: Destructive · requires `permissions.allowProcessControl`
+
+| Argument | Notes |
+| --- | --- |
+| `leaveWorld` | Leave the current world first, so a singleplayer save is flushed. Defaults to `true`. |
+
+Ends the client's process, exactly as the Quit Game button does.
+
+Use this to restart a client rather than killing it from outside. That matters more than it sounds:
+a game left running by a stopped launcher task goes on answering every call from a build you are no
+longer working on, with no error to say so — see the warning under
+[`client_runtime_info`](#client_runtime_info).
+
+```json
+{"quitting": true, "leftWorld": true, "wasSingleplayer": true, "pid": 28056}
+```
+
+The reply is written and flushed before the shutdown begins, so a caller can tell "quit worked" from
+"quit crashed". After it, the endpoint stops answering and the port is released within a second or
+two.
+
+`leaveWorld: true` runs the full [`client_world_leave`](#client_world_leave) sequence and waits for
+it, so `leftWorld` in the reply is a statement about a save that has actually completed. The leave
+and the shutdown deliberately land in different ticks: squeezing them into one races the integrated
+server's shutdown.
+
+[`server_stop`](#server_stop) is the counterpart for a server.

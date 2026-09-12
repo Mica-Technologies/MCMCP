@@ -178,6 +178,20 @@ diagnostics.
 
 Sending chat messages.
 
+### `allowProcessControl`
+
+`boolean` · default `true`
+
+Ending the game: [`client_quit`](tools.md#client_quit) on a client,
+[`server_stop`](tools.md#server_stop) on a server.
+
+A switch of its own rather than a corner of `allowPlayerControl`, because it is the one capability
+whose exercise also ends the endpoint that has it. On a development instance that is exactly the
+point — "stop cleanly, relaunch, re-measure" is a normal step in a harness, and gating it by default
+would defeat it. Turn it off on anything somebody else is playing on.
+
+Worlds are saved on the way out either way, the same as the Quit Game button and `/stop`.
+
 ## `identity`
 
 Who this game instance is. Generated on first launch; see
@@ -374,6 +388,7 @@ permissions {
     B:allowInventoryChanges=true
     B:allowLogAccess=true
     B:allowPlayerControl=true
+    B:allowProcessControl=true
     B:allowScreenshots=true
     B:allowWorldEdits=false
 

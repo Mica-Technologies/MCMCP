@@ -237,7 +237,7 @@ TOOLS_BODY="$(curl -fsS --max-time 10 \
 
 # Spot-check one tool from each registration path: a common one and a server-only one. If either
 # is missing, registration ran but something filtered it out.
-for expected in '"mcmcp_endpoint_info"' '"game_dump_registries"' '"server_get_blocks"'; do
+for expected in '"mcmcp_endpoint_info"' '"game_dump_registries"' '"server_get_blocks"' '"server_stop"'; do
   case "$TOOLS_BODY" in
     *"$expected"*) echo "    found ${expected}" ;;
     *) mcp_failure "tools/list is missing ${expected}: ${TOOLS_BODY}" ;;
@@ -269,6 +269,18 @@ esac
 case "$CALL_BODY" in
   *'"side": "server"'*|*'"side":"server"'*) ;;
   *) mcp_failure "endpoint_info did not report the server side: ${CALL_BODY}" ;;
+esac
+
+# The process identity. It is what tells two games launched from one directory apart, and the
+# failure it exists to prevent is silent -- a stale endpoint answering for a build nobody is
+# working on -- so its absence has to be loud here instead.
+case "$CALL_BODY" in
+  *'"pid"'*) ;;
+  *) mcp_failure "endpoint_info did not report a process id: ${CALL_BODY}" ;;
+esac
+case "$CALL_BODY" in
+  *'"startedAt"'*) ;;
+  *) mcp_failure "endpoint_info did not report a process start time: ${CALL_BODY}" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -325,7 +337,76 @@ curl -fsS --max-time 5 -X DELETE "http://127.0.0.1:${MCP_PORT}/mcp" \
   -H "Mcp-Session-Id: ${SESSION_ID}" > /dev/null 2>&1 \
   || echo "    (session delete failed; not fatal)"
 
+# ---------------------------------------------------------------------------
+# server_stop
+#
+# The one tool whose success cannot be asserted from its own reply: a stop that answers and then
+# does not stop looks exactly like a stop that worked. So this section ends the server for real and
+# waits for the JVM to go, which is also what leaves the runner with nothing to clean up.
+#
+# A fresh session, because the one above has just been deleted.
+# ---------------------------------------------------------------------------
+
+echo "==> Re-initializing a session to call server_stop"
+STOP_HEADERS="$(mktemp)"
+curl -fsS --max-time 10 -D "$STOP_HEADERS" \
+  -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcmcp-smoke-test","version":"1.0"}}}' \
+  > /dev/null 2>&1 \
+  || mcp_failure "could not re-initialize a session for server_stop"
+
+STOP_SESSION="$(grep -i '^Mcp-Session-Id:' "$STOP_HEADERS" | tail -1 | cut -d: -f2- | tr -d '[:space:]')"
+rm -f "$STOP_HEADERS"
+if [ -z "$STOP_SESSION" ]; then
+  mcp_failure "the re-initialize did not return an Mcp-Session-Id header"
+fi
+
+curl -s -o /dev/null --max-time 10 \
+  -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Mcp-Session-Id: ${STOP_SESSION}" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+echo "==> tools/call server_stop"
+STOP_BODY="$(curl -fsS --max-time 10 \
+  -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Mcp-Session-Id: ${STOP_SESSION}" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"server_stop","arguments":{}}}' 2>&1)" \
+  || mcp_failure "server_stop request failed: ${STOP_BODY}"
+
+# The reply has to arrive ahead of the shutdown. A caller that gets a dropped connection instead
+# cannot tell a clean stop from a crash, which is the one case where a clear answer matters most.
+case "$STOP_BODY" in
+  *'"isError":false'*) echo "    server_stop answered before shutting down" ;;
+  *) mcp_failure "server_stop did not return a successful result: ${STOP_BODY}" ;;
+esac
+case "$STOP_BODY" in
+  *'"dedicated": true'*|*'"dedicated":true'*) ;;
+  *) mcp_failure "server_stop did not report a dedicated server: ${STOP_BODY}" ;;
+esac
+
+echo "==> Waiting for the server process to exit"
+stop_waited=0
+while [ "$stop_waited" -lt 120 ]; do
+  if ! pgrep -f 'net.minecraft.server' > /dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+  stop_waited=$((stop_waited + 2))
+done
+if pgrep -f 'net.minecraft.server' > /dev/null 2>&1; then
+  mcp_failure "server_stop answered but the server was still running ${stop_waited}s later"
+fi
+echo "    server exited after ${stop_waited}s"
+
 shutdown_server
 rm -f "$LINK_RESULT"
-echo "==> PASS: dedicated server started, served a full MCP handshake over HTTP, and linked to an orchestrator"
+echo "==> PASS: dedicated server started, served a full MCP handshake over HTTP, linked to an orchestrator, and stopped itself on request"
 exit 0

@@ -6,6 +6,7 @@ import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
+import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpContent;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -339,7 +340,12 @@ public final class ClientDebugTools {
             .title("Client runtime info")
             .description("Report client performance and environment: frame rate, heap usage, render "
                 + "distance, graphics settings and the game directory. Roughly what the F3 debug "
-                + "overlay shows. Check frame rate here if the client seems to be struggling.")
+                + "overlay shows. Check frame rate here if the client seems to be struggling.\n\n"
+                + "Also reports this game's process id and start time. Two clients launched from one "
+                + "directory are identical in every other field MCMCP reports, and only the one that "
+                + "won the port answers — so if a freshly built change appears to have had no "
+                + "effect, check 'process.startedAt' against when you built it before doubting the "
+                + "change.")
             .schema(JsonSchema.noArguments())
             .clientOnly()
             .readOnly()
@@ -363,6 +369,11 @@ public final class ClientDebugTools {
                         json.addProperty("gameDirectory", McmcpPaths.gameDirectory().getAbsolutePath());
                         json.addProperty("screenshotDirectory",
                             McmcpPaths.screenshotsDirectory().getAbsolutePath());
+
+                        // The pid and start time of this game, so a caller holding two clients from
+                        // one directory can tell which one it is actually talking to. See
+                        // McmcpProcess for the failure this exists to make visible.
+                        json.add("process", McmcpProcess.toJson());
 
                         JsonObject memory = new JsonObject();
                         memory.addProperty("maxMegabytes", maxMemory / 1_048_576L);

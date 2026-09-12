@@ -4,6 +4,7 @@ import com.micatechnologies.minecraft.mcmcp.client.ClientThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientDebugTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientGuiTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientInputTools;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientLifecycleTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientPrompts;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientResources;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientStateTools;
@@ -47,6 +48,7 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientGuiTools.register();
         ClientSyncTools.register();
         ClientWorldTools.register();
+        ClientLifecycleTools.register();
         ClientResources.register();
         ClientPrompts.register();
     }

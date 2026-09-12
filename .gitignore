@@ -80,3 +80,6 @@ orchestrator/app/gen/schemas/
 
 # Staged by stage-orchestrator-sidecar.sh before bundling; a copy of a build output.
 orchestrator/app/binaries/
+
+# `mkdocs build` output. The wiki is published from CI, never from a checkout.
+site/

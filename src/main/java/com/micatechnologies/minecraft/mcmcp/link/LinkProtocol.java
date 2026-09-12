@@ -61,6 +61,8 @@ public final class LinkProtocol {
     public static final String FIELD_MOD_VERSION = "modVersion";
     public static final String FIELD_MINECRAFT_VERSION = "minecraftVersion";
     public static final String FIELD_ENDPOINT_URL = "endpointUrl";
+    public static final String FIELD_PID = "pid";
+    public static final String FIELD_STARTED_AT = "startedAt";
 
     // welcome fields
     public static final String FIELD_ORCHESTRATOR = "orchestrator";

@@ -89,6 +89,12 @@ pub struct InstanceInfo {
     pub mod_version: String,
     pub minecraft_version: String,
     pub endpoint_url: Option<String>,
+    /// The game's OS process id, and when that process started.
+    ///
+    /// Carried through to the roster because they are the only fields that tell two games launched
+    /// from one directory apart — see [`Hello::pid`].
+    pub pid: Option<i64>,
+    pub started_at: Option<String>,
 }
 
 impl InstanceInfo {
@@ -102,6 +108,8 @@ impl InstanceInfo {
             mod_version: hello.mod_version.clone(),
             minecraft_version: hello.minecraft_version.clone(),
             endpoint_url: hello.endpoint_url.clone(),
+            pid: hello.pid,
+            started_at: hello.started_at.clone(),
         }
     }
 
@@ -124,6 +132,10 @@ impl InstanceInfo {
             "modVersion": self.mod_version,
             "minecraftVersion": self.minecraft_version,
             "httpEndpoint": self.endpoint_url,
+            // Which process, as opposed to which game. Two clients launched from one directory are
+            // identical in every field above, and only one of them is answering.
+            "pid": self.pid,
+            "startedAt": self.started_at,
         })
     }
 }
@@ -494,6 +506,8 @@ mod tests {
             mod_version: "2026.08.24".into(),
             minecraft_version: "1.12.2".into(),
             endpoint_url: Some("http://127.0.0.1:25585/mcp".into()),
+            pid: None,
+            started_at: None,
         }
     }
 
@@ -579,6 +593,32 @@ mod tests {
 
         assert_eq!(summary["instance"], "modb-dev.client");
         assert_eq!(summary["game"], "modb-dev");
+    }
+
+    #[test]
+    fn a_summary_names_the_process_so_two_games_from_one_directory_are_tellable_apart() {
+        // The failure this exists for: a stopped launcher task leaves the game running and holding
+        // the port, the next launch cannot bind, and every call keeps reaching the old build. Both
+        // rows carry the same id, label, directory and mod version — the pid is the only field that
+        // differs, and startedAt is what says which of them predates the build being tested.
+        let mut hello = hello("client");
+        hello.pid = Some(28056);
+        hello.started_at = Some("2026-09-11T08:14:02Z".into());
+
+        let summary = InstanceInfo::from_hello(&hello, "modB dev".into()).to_json(true, false);
+
+        assert_eq!(summary["pid"], 28056);
+        assert_eq!(summary["startedAt"], "2026-09-11T08:14:02Z");
+    }
+
+    #[test]
+    fn a_hello_without_a_process_id_still_parses() {
+        // Older mods do not send one, and a JVM is not obliged to expose a parsable pid. Rejecting
+        // the handshake over an advisory field would take a game offline for a diagnostic.
+        let summary = InstanceInfo::from_hello(&hello("client"), "modB dev".into()).to_json(true, false);
+
+        assert!(summary["pid"].is_null());
+        assert!(summary["startedAt"].is_null());
     }
 
     #[tokio::test]

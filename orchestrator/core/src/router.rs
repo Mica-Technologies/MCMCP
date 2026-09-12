@@ -1790,6 +1790,8 @@ mod tests {
                 mod_version: "test".into(),
                 minecraft_version: "1.12.2".into(),
                 endpoint_url: None,
+                pid: None,
+                started_at: None,
             },
             sender,
         ));
@@ -1846,6 +1848,8 @@ mod tests {
                 mod_version: "test".into(),
                 minecraft_version: "1.12.2".into(),
                 endpoint_url: None,
+                pid: None,
+                started_at: None,
             },
             sender,
         ));

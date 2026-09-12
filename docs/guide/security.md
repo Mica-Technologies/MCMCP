@@ -108,8 +108,9 @@ The `permissions` category gates whole families of tools:
 | `allowScreenshots` | on | Screen capture |
 | `allowLogAccess` | on | Reading the game log |
 | `allowChat` | on | Sending chat |
+| `allowProcessControl` | on | Ending the game: `client_quit`, `server_stop` |
 
-Two design notes:
+Three design notes:
 
 **Disabled tools stay listed.** They return an error naming the setting that disabled them, rather
 than vanishing. A model that can read the permission state — via `mcmcp_endpoint_info`, which reports
@@ -119,6 +120,12 @@ leaves it guessing why its plan is impossible.
 **`allowWorldEdits` is off by default** because direct world writes are a categorically different
 grant from "act as the player". They bypass claim protection, block-place events and every other
 mod's hooks. Everything else defaults on because it is bounded by what the player could already do.
+
+**`allowProcessControl` is its own switch** rather than a corner of `allowPlayerControl`, because it
+is the one capability whose exercise also ends the endpoint that has it. It defaults on: on a
+development instance "stop cleanly, relaunch, re-measure" is a normal step in a harness, and gating
+it would defeat the purpose. Turn it off on anything somebody else is playing on — closing the window
+is not destructive, but doing it under someone is.
 
 ### The command blocklist
 

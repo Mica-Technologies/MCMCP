@@ -153,6 +153,7 @@ async function renderInstances() {
         ${instance.connected ? `<dt>Side</dt><dd>${escapeHtml(instance.side)}</dd>` : ""}
         ${instance.connected ? `<dt>Tools</dt><dd>${instance.tools}</dd>` : ""}
         ${instance.http_endpoint ? `<dt>Direct</dt><dd>${escapeHtml(instance.http_endpoint)}</dd>` : ""}
+        ${instance.pid != null ? `<dt>Process</dt><dd>${instance.pid}${instance.started_at ? ` · up since ${escapeHtml(instance.started_at)}` : ""}</dd>` : ""}
       </dl>
       <div class="actions"></div>`;
 

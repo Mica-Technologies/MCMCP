@@ -6,6 +6,7 @@ import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
+import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
@@ -38,6 +39,7 @@ public final class CommonTools {
         ServerBuildTools.register();
         ServerPlayerTools.register();
         ServerCommandTools.register();
+        ServerLifecycleTools.register();
     }
 
     /**
@@ -55,8 +57,9 @@ public final class CommonTools {
                 + "of the game it runs on, which MCP protocol versions it speaks, and which capability "
                 + "groups the operator has enabled or disabled. Call this first — several tool "
                 + "families can be turned off in configuration, and this reports which. The instance "
-                + "id and name identify which running game you are attached to, which matters when "
-                + "more than one is open at a time.")
+                + "id and name identify which running game you are attached to, and the process id "
+                + "and start time identify which running *process*, which is what tells two games "
+                + "launched from one directory apart.")
             .schema(JsonSchema.noArguments())
             .readOnly()
             .closedWorld()
@@ -79,6 +82,13 @@ public final class CommonTools {
                 instance.addProperty("name", identity.getInstanceName());
                 info.add("instance", instance);
 
+                // Which *process* this is, which the instance id deliberately does not say: the id
+                // lives in the config file, so two games launched from one directory share it. When
+                // a stale game is still holding the port, these three fields are the only thing in
+                // MCMCP's whole surface that tells the two apart -- and 'startedAt' is what makes
+                // "this endpoint predates my last build" answerable without a process listing.
+                info.add("process", McmcpProcess.toJson());
+
                 JsonArray protocols = new JsonArray();
                 for (String version : McpProtocol.supportedVersions()) {
                     protocols.add(version);
@@ -94,6 +104,7 @@ public final class CommonTools {
                 permissions.addProperty("screenshots", McmcpConfig.isAllowScreenshots());
                 permissions.addProperty("logAccess", McmcpConfig.isAllowLogAccess());
                 permissions.addProperty("chat", McmcpConfig.isAllowChat());
+                permissions.addProperty("processControl", McmcpConfig.isAllowProcessControl());
                 info.add("permissions", permissions);
 
                 JsonObject limits = new JsonObject();

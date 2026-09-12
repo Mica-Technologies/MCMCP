@@ -24,7 +24,7 @@ in-game says so — the only sign is a line in `logs/latest.log`.
 You can fix that by hand. Give each instance a different port, add a separate entry per instance to
 your MCP client's config, and keep track of which port is which game. It works, and it costs a config
 edit for every instance you add, plus one tool catalogue per instance in every request your model
-makes — the same 47 tools, three times over, distinguished only by a prefix.
+makes — the same 51 tools, three times over, distinguished only by a prefix.
 
 The orchestrator replaces that with one connection out of each game to one place.
 
@@ -133,6 +133,21 @@ serve is relaunching a dev client over and over, each time with a byte-identical
 This is also why the `instance` enum covers games seen recently rather than only connected ones: a
 relaunch that rewrote every tool's schema would be a change, and would announce itself. A game that
 brings tools the others lack still announces, because then the surface really is different.
+
+### Two launches of the same game
+
+Every row also carries `pid` and `startedAt`. They are the only fields that differ between two games
+launched from the same directory: the instance id lives in that directory's config file, so a second
+launch reports the same id, the same label, the same directory and the same mod version.
+
+That is not hypothetical. MCMCP's ports are fixed, and the game that bound them keeps them. A Gradle
+`runClient` forks its own JVM, so stopping the Gradle task leaves the **game** running and still
+holding `clientPort`; the next launch cannot bind, and every call keeps reaching the first one. The
+endpoint answers normally — from the previous build, with nothing to say so.
+
+Compare `startedAt` against when you last built. [`client_quit`](../reference/tools.md#client_quit)
+is how to avoid getting there in the first place, and the pid is what you kill when a client has
+stopped responding and cannot be asked.
 
 ## Telling several games apart
 

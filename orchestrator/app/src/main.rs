@@ -189,6 +189,12 @@ struct InstanceView {
     mod_version: String,
     minecraft_version: String,
     http_endpoint: Option<String>,
+    /// Which process, as opposed to which game.
+    ///
+    /// Two games launched from one directory share every field above, and only the one that won the
+    /// port is answering. The roster is where a person notices that, so the pid belongs on the card.
+    pid: Option<i64>,
+    started_at: Option<String>,
     tools: usize,
     revoked: bool,
 }
@@ -249,6 +255,8 @@ fn list_instances(state: State<'_, AppState>) -> Vec<InstanceView> {
                 mod_version: info.mod_version,
                 minecraft_version: info.minecraft_version,
                 http_endpoint: info.endpoint_url,
+                pid: info.pid,
+                started_at: info.started_at,
                 tools: instance.catalogue().tools.len(),
                 revoked: false,
             }
@@ -275,6 +283,8 @@ fn list_instances(state: State<'_, AppState>) -> Vec<InstanceView> {
                 mod_version: String::new(),
                 minecraft_version: String::new(),
                 http_endpoint: None,
+                pid: None,
+                started_at: None,
                 tools: 0,
                 revoked: known.revoked,
             });

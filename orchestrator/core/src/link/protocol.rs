@@ -75,6 +75,21 @@ pub struct Hello {
     pub minecraft_version: String,
     #[serde(rename = "endpointUrl", default)]
     pub endpoint_url: Option<String>,
+    /// The game's OS process id, when its JVM would tell it.
+    ///
+    /// The one field here that distinguishes two instances rather than describing one. The instance
+    /// id comes from a config file, so two games launched from one directory share it and are
+    /// otherwise indistinguishable in the roster — while only the one that won the port is
+    /// answering. Optional because a JVM is not obliged to expose a pid in a parsable form, and a
+    /// guessed one would be worse than none.
+    #[serde(default)]
+    pub pid: Option<i64>,
+    /// When the game's JVM started, ISO-8601 UTC.
+    ///
+    /// A string rather than an epoch count so that "is this endpoint older than my last build" is a
+    /// comparison a person or a model can make by eye.
+    #[serde(rename = "startedAt", default)]
+    pub started_at: Option<String>,
 }
 
 impl Hello {
