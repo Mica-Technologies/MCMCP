@@ -475,6 +475,8 @@ public final class ClientInputTools {
                     "attack", "use")
                 .integer("ticks", "How long to hold the button. One tick is a single click; longer "
                     + "holds mine continuously.", 1, 1200)
+                .bool("sneak", "Hold sneak while using. This lets you place blocks or use items "
+                    + "without activating the block being aimed at. Only applies to 'use'.")
                 .required("action")
                 .build())
             .clientOnly()
@@ -487,6 +489,10 @@ public final class ClientInputTools {
 
                 final String action = context.requireString("action");
                 final int ticks = context.getBoundedInt("ticks", 1, 1, McmcpConfig.getMaxInputTicks());
+                final boolean sneak = context.getBoolean("sneak", false);
+                if (sneak && !"use".equals(action)) {
+                    return ToolResult.error("'sneak' is only supported with action 'use'.");
+                }
                 final String keyName = "attack".equals(action) ? "attack" : "use";
 
                 final JsonObject targetBefore = context.onGameThread(new Callable<JsonObject>() {
@@ -504,6 +510,9 @@ public final class ClientInputTools {
                 CompletableFuture<Void> hold = context.onGameThread(new Callable<CompletableFuture<Void>>() {
                     @Override
                     public CompletableFuture<Void> call() {
+                        if (sneak) {
+                            ClientInputScheduler.hold(binding("sneak"), ticks);
+                        }
                         return ClientInputScheduler.hold(binding(keyName), ticks);
                     }
                 });
@@ -517,6 +526,9 @@ public final class ClientInputTools {
                         JsonObject json = new JsonObject();
                         json.addProperty("action", action);
                         json.addProperty("ticks", ticks);
+                        if (sneak) {
+                            json.addProperty("sneak", true);
+                        }
                         json.add("targetBefore", targetBefore);
                         json.add("targetAfter", ClientStateTools.freshLookTarget(mc));
                         json.add("mainHand", GameJson.itemStack(mc.player.getHeldItemMainhand()));

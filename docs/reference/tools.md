@@ -483,6 +483,10 @@ any key another mod has bound.
 Breaking a block takes many ticks of held attack and depends on the tool held. Hold longer and
 re-check rather than expecting one call to finish.
 
+For `use`, set `sneak: true` to hold sneak and right click together. This places a block or uses the
+held item without activating the block under the crosshair. It is deliberately an allowlisted
+modifier rather than a way to send arbitrary simultaneous key presses.
+
 Returns the target before and after, plus the held item.
 
 !!! note "Post-action targets are brief"

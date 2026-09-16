@@ -16,6 +16,7 @@ import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import org.lwjgl.input.Keyboard;
 import org.lwjgl.input.Mouse;
+import org.lwjgl.opengl.Display;
 
 /**
  * Holds the human's keyboard and mouse out of the game while a model is driving the client.
@@ -293,6 +294,25 @@ public final class ClientInputLock {
     }
 
     /**
+     * Keeps a hovered, inactive game window from consuming physical mouse input.
+     *
+     * <p>LWJGL can keep reporting accumulated mouse movement while its window is inactive. Minecraft
+     * then turns the camera even though the person never clicked back into the game. That is both
+     * surprising in ordinary play and disastrous for an agent which has aimed before acting. This is
+     * deliberately narrower than the input lock: inactive windows discard only mouse input, while a
+     * focused window remains entirely under the player's control unless they explicitly take the
+     * lock.
+     */
+    private static void discardInactiveMouseInput() {
+        if (Display.isCreated() && !Display.isActive()) {
+            while (Mouse.next()) {
+                // Reading removes the event before Minecraft's input handlers see it.
+            }
+            consumeLookDelta();
+        }
+    }
+
+    /**
      * Event subscriber, kept as a nested class so an accidental second {@code register()} cannot put
      * the lock's own statics on the event bus twice.
      */
@@ -300,7 +320,12 @@ public final class ClientInputLock {
 
         @SubscribeEvent
         public void onClientTick(TickEvent.ClientTickEvent event) {
-            if (event.phase != TickEvent.Phase.START || !locked) {
+            if (event.phase != TickEvent.Phase.START) {
+                return;
+            }
+
+            if (!locked) {
+                discardInactiveMouseInput();
                 return;
             }
 
@@ -336,7 +361,11 @@ public final class ClientInputLock {
          */
         @SubscribeEvent
         public void onRenderTick(TickEvent.RenderTickEvent event) {
-            if (event.phase != TickEvent.Phase.START || !locked) {
+            if (event.phase != TickEvent.Phase.START) {
+                return;
+            }
+            if (!locked) {
+                discardInactiveMouseInput();
                 return;
             }
             try {

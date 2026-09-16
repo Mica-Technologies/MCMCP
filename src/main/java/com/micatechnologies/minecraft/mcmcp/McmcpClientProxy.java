@@ -1,6 +1,7 @@
 package com.micatechnologies.minecraft.mcmcp;
 
 import com.micatechnologies.minecraft.mcmcp.client.ClientThreadBridge;
+import com.micatechnologies.minecraft.mcmcp.client.ClientIdentification;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientDebugTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientGuiTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientInputTools;
@@ -42,6 +43,7 @@ public class McmcpClientProxy implements McmcpProxy {
 
     @Override
     public void registerSideSpecific() {
+        ClientIdentification.register();
         ClientStateTools.register();
         ClientDebugTools.register();
         ClientInputTools.register();
