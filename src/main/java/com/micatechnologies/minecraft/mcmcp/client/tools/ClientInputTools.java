@@ -4,13 +4,20 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputLock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -105,9 +112,64 @@ public final class ClientInputTools {
         return map;
     }
 
+    /** The names {@link #bindings()} answers to, in the order the schemas list them. */
+    private static final String[] KEY_NAMES = {
+        "forward", "back", "left", "right", "jump", "sneak", "sprint",
+        "attack", "use", "drop", "inventory", "pickBlock", "swapHands"};
+
     @Nullable
     private static KeyBinding binding(String name) {
         return bindings().get(name);
+    }
+
+    /**
+     * Bindings the game reads as held state when it updates the player: movement, jump, sneak,
+     * sprint. Every other binding is an action handled as a click.
+     */
+    private static final Set<String> STATE_KEYS = new HashSet<>(Arrays.asList(
+        "forward", "back", "left", "right", "jump", "sneak", "sprint"));
+
+    /**
+     * How many ticks a combination's state keys go down ahead of its actions.
+     *
+     * <p>{@code Minecraft.runTick} handles clicks before it updates the player, and the player update
+     * is where sneak and sprint are read and sent to the server. Pressed in the same tick, sneak and
+     * use right-click as a player who is not sneaking yet. One tick of lead is enough for both the
+     * client and the server's packet order to see the modifier first.
+     */
+    static int comboLeadTicks(List<String> keys) {
+        boolean hasState = false;
+        boolean hasAction = false;
+        for (String key : keys) {
+            if (STATE_KEYS.contains(key)) {
+                hasState = true;
+            }
+            else {
+                hasAction = true;
+            }
+        }
+        return hasState && hasAction ? 1 : 0;
+    }
+
+    /**
+     * Holds several named bindings as one combination. State keys lead by {@link #comboLeadTicks}
+     * and are held until the actions release, so each action spends its whole hold modified.
+     *
+     * <p>Must run on the client thread. The future completes when the last key is released.
+     */
+    private static CompletableFuture<Void> holdTogether(List<String> keys, int ticks) {
+        int lead = comboLeadTicks(keys);
+        List<CompletableFuture<Void>> holds = new ArrayList<>(keys.size());
+        for (String key : keys) {
+            KeyBinding target = binding(key);
+            if (target == null) {
+                throw new IllegalArgumentException("Unknown key '" + key + "'");
+            }
+            holds.add(STATE_KEYS.contains(key)
+                ? ClientInputScheduler.hold(target, 0, ticks + lead)
+                : ClientInputScheduler.hold(target, lead, ticks));
+        }
+        return CompletableFuture.allOf(holds.toArray(new CompletableFuture[0]));
     }
 
     /**
@@ -404,17 +466,19 @@ public final class ClientInputTools {
     private static void registerKeyPress() {
         McpRegistry.registerTool(McpTool.named("client_key")
             .title("Press a key")
-            .description("Hold one of the game's named keybindings down for a number of ticks. This is "
+            .description("Hold the game's named keybindings down for a number of ticks. This is "
                 + "the general-purpose input tool; client_move and client_interact are more convenient "
                 + "wrappers over the common cases.\n\n"
+                + "Pass 'keys' to press a combination, such as sneak + use or sprint + jump + forward. "
+                + "Movement, jump, sneak and sprint go down one tick before any action key, so the "
+                + "action happens with them already in effect.\n\n"
                 + "Only the named bindings listed in the schema can be driven — arbitrary key codes "
                 + "are deliberately not accepted, since they could hit any key another mod has bound.")
             .schema(JsonSchema.object()
-                .enumeration("key", "Which keybinding to press.",
-                    "forward", "back", "left", "right", "jump", "sneak", "sprint",
-                    "attack", "use", "drop", "inventory", "pickBlock", "swapHands")
-                .integer("ticks", "How long to hold it, in ticks (20 per second).", 1, 1200)
-                .required("key")
+                .enumeration("key", "Which keybinding to press.", KEY_NAMES)
+                .array("keys", "Several keybindings to hold together, instead of 'key'.",
+                    JsonSchema.enumItems(KEY_NAMES))
+                .integer("ticks", "How long to hold them, in ticks (20 per second).", 1, 1200)
                 .build())
             .clientOnly()
             .handler(context -> {
@@ -423,32 +487,47 @@ public final class ClientInputTools {
                         + "permissions.allowPlayerControl in the MCMCP config.");
                 }
 
-                final String key = context.requireString("key");
+                // Both spellings are merged rather than one rejected: a model that sends key and keys
+                // together means all of them.
+                Set<String> requested = new LinkedHashSet<>();
+                String single = context.getString("key", null);
+                if (single != null) {
+                    requested.add(single);
+                }
+                requested.addAll(Json.getStringList(context.getArguments(), "keys"));
+                if (requested.isEmpty()) {
+                    return ToolResult.error("Name a keybinding with 'key', or several with 'keys'.");
+                }
+                // Checked before anything is pressed, so a bad name in a combination cannot leave
+                // the valid half of it held with nobody waiting on the release.
+                for (String name : requested) {
+                    if (!Arrays.asList(KEY_NAMES).contains(name)) {
+                        return ToolResult.error("Unknown key '" + name + "'. Use one of: "
+                            + String.join(", ", KEY_NAMES) + ".");
+                    }
+                }
+                final List<String> keys = new ArrayList<>(requested);
                 final int ticks = context.getBoundedInt("ticks", 1, 1, McmcpConfig.getMaxInputTicks());
 
                 CompletableFuture<Void> hold = context.onGameThread(new Callable<CompletableFuture<Void>>() {
                     @Override
                     public CompletableFuture<Void> call() {
                         ClientStateTools.requireInWorld();
-                        KeyBinding target = binding(key);
-                        if (target == null) {
-                            throw new IllegalArgumentException("Unknown key '" + key + "'");
-                        }
-                        return ClientInputScheduler.hold(target, ticks);
+                        return holdTogether(keys, ticks);
                     }
                 });
 
-                awaitHold(hold, ticks);
+                awaitHold(hold, ticks + comboLeadTicks(keys));
                 // Same focus gate client_interact explains: only continuous attack is affected, so
                 // only attack is worth warning about. Everything else applies regardless.
-                boolean unfocusedAttack = "attack".equals(key)
+                boolean unfocusedAttack = keys.contains("attack")
                     && !context.onGameThread(new Callable<Boolean>() {
                         @Override
                         public Boolean call() {
                             return Minecraft.getMinecraft().inGameHasFocus;
                         }
                     });
-                return ToolResult.text("Held '" + key + "' for " + ticks + " tick(s)."
+                return ToolResult.text("Held '" + String.join("' + '", keys) + "' for " + ticks + " tick(s)."
                     + (unfocusedAttack
                         ? " The game does not have input focus, so this did nothing beyond the first"
                             + " click — call client_view with grabInputFocus true first."
@@ -475,8 +554,8 @@ public final class ClientInputTools {
                     "attack", "use")
                 .integer("ticks", "How long to hold the button. One tick is a single click; longer "
                     + "holds mine continuously.", 1, 1200)
-                .bool("sneak", "Hold sneak while using. This lets you place blocks or use items "
-                    + "without activating the block being aimed at. Only applies to 'use'.")
+                .bool("sneak", "Sneak while clicking. With 'use', this places a block or uses the "
+                    + "held item against a block that would otherwise open or activate.")
                 .required("action")
                 .build())
             .clientOnly()
@@ -490,9 +569,6 @@ public final class ClientInputTools {
                 final String action = context.requireString("action");
                 final int ticks = context.getBoundedInt("ticks", 1, 1, McmcpConfig.getMaxInputTicks());
                 final boolean sneak = context.getBoolean("sneak", false);
-                if (sneak && !"use".equals(action)) {
-                    return ToolResult.error("'sneak' is only supported with action 'use'.");
-                }
                 final String keyName = "attack".equals(action) ? "attack" : "use";
 
                 final JsonObject targetBefore = context.onGameThread(new Callable<JsonObject>() {
@@ -507,17 +583,15 @@ public final class ClientInputTools {
                     }
                 });
 
+                final List<String> keys = sneak ? Arrays.asList("sneak", keyName) : Arrays.asList(keyName);
                 CompletableFuture<Void> hold = context.onGameThread(new Callable<CompletableFuture<Void>>() {
                     @Override
                     public CompletableFuture<Void> call() {
-                        if (sneak) {
-                            ClientInputScheduler.hold(binding("sneak"), ticks);
-                        }
-                        return ClientInputScheduler.hold(binding(keyName), ticks);
+                        return holdTogether(keys, ticks);
                     }
                 });
 
-                awaitHold(hold, ticks);
+                awaitHold(hold, ticks + comboLeadTicks(keys));
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override

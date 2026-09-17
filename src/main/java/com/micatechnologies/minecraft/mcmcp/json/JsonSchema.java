@@ -133,6 +133,13 @@ public final class JsonSchema {
         return property(name, property);
     }
 
+    /** An item schema for {@link #array}: a string constrained to {@code values}. */
+    public static JsonObject enumItems(String... values) {
+        JsonObject item = primitive("string", null);
+        item.add("enum", Json.arrayOfStrings(Arrays.asList(values)));
+        return item;
+    }
+
     public JsonSchema stringArray(String name, String description) {
         return array(name, description, primitive("string", null));
     }

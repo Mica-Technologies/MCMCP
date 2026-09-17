@@ -66,18 +66,30 @@ public final class ClientInputScheduler {
      * @param ticks how long to hold, in game ticks (20 per second); values below 1 are treated as 1
      */
     public static CompletableFuture<Void> hold(KeyBinding binding, int ticks) {
-        int keyCode = binding.getKeyCode();
-        KeyBinding.setKeyBindState(keyCode, true);
-        // onTick increments the binding's press counter, which is what isPressed() consumes. Without
-        // it, click-style bindings (attack, use) register as "held" but never as "clicked", so
-        // Minecraft.runTick never calls clickMouse and nothing happens.
-        KeyBinding.onTick(keyCode);
+        return hold(binding, 0, ticks);
+    }
 
-        CompletableFuture<Void> future = new CompletableFuture<>();
-        synchronized (PENDING) {
-            PENDING.add(new PendingRelease(binding, Math.max(1, ticks), future));
+    /**
+     * Presses {@code binding} after {@code delayTicks} ticks and releases it {@code ticks} later.
+     *
+     * <p>The delay exists for key combinations. {@code Minecraft.runTick} handles clicks before it
+     * updates the player, and the player update is where sneak is read and sent to the server. Sneak
+     * and use pressed together therefore right-click as a player who is not sneaking yet — which
+     * opens the chest the combination was meant to place against. Pressing the action a tick later
+     * lets the modifier land first, on the client and in the server's packet order alike.
+     *
+     * @param delayTicks ticks to wait before pressing; 0 presses immediately
+     */
+    public static CompletableFuture<Void> hold(KeyBinding binding, int delayTicks, int ticks) {
+        PendingRelease pending = new PendingRelease(binding, Math.max(0, delayTicks), Math.max(1, ticks),
+            new CompletableFuture<Void>());
+        if (pending.delayTicks == 0) {
+            pending.press();
         }
-        return future;
+        synchronized (PENDING) {
+            PENDING.add(pending);
+        }
+        return pending.future;
     }
 
     /**
@@ -94,7 +106,11 @@ public final class ClientInputScheduler {
         }
         for (PendingRelease pending : releasing) {
             try {
-                KeyBinding.setKeyBindState(pending.binding.getKeyCode(), false);
+                // A press still waiting on its delay never went down, and releasing it here would
+                // let go of a key the human may be holding.
+                if (pending.pressed) {
+                    KeyBinding.setKeyBindState(pending.binding.getKeyCode(), false);
+                }
             }
             catch (Exception e) {
                 Mcmcp.LOGGER.error("MCMCP failed to release a synthetic key press", e);
@@ -135,6 +151,14 @@ public final class ClientInputScheduler {
                 Iterator<PendingRelease> iterator = PENDING.iterator();
                 while (iterator.hasNext()) {
                     PendingRelease pending = iterator.next();
+                    if (!pending.pressed) {
+                        // Pressed at the end of this tick, so the next tick is the first to see it.
+                        // Its hold starts counting from there, not here.
+                        if (--pending.delayTicks <= 0) {
+                            pending.press();
+                        }
+                        continue;
+                    }
                     if (--pending.remainingTicks > 0) {
                         continue;
                     }
@@ -163,12 +187,26 @@ public final class ClientInputScheduler {
         final KeyBinding binding;
         final CompletableFuture<Void> future;
 
+        int delayTicks;
         int remainingTicks;
+        boolean pressed;
 
-        PendingRelease(KeyBinding binding, int remainingTicks, CompletableFuture<Void> future) {
+        PendingRelease(KeyBinding binding, int delayTicks, int remainingTicks,
+                       CompletableFuture<Void> future) {
             this.binding = binding;
+            this.delayTicks = delayTicks;
             this.remainingTicks = remainingTicks;
             this.future = future;
+        }
+
+        void press() {
+            int keyCode = binding.getKeyCode();
+            KeyBinding.setKeyBindState(keyCode, true);
+            // onTick increments the binding's press counter, which is what isPressed() consumes.
+            // Without it, click-style bindings (attack, use) register as "held" but never as
+            // "clicked", so Minecraft.runTick never calls clickMouse and nothing happens.
+            KeyBinding.onTick(keyCode);
+            pressed = true;
         }
     }
 }

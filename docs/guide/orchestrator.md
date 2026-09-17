@@ -217,6 +217,10 @@ you to click through the one prompt that is meant to mean something.
 folder's name and is how you and a model tell several running games apart. Name it after what you are
 doing in it — `mymod dev`, `vanilla control`. Renaming it in the app wins over this value.
 
+A client shows the name in its window title (`Minecraft 1.12.2 - MCMCP [mymod dev]`), in the top
+right of the main menu, and as a line of the F3 overlay. A rename in the app reaches the game the next
+time it connects.
+
 `instanceSecret` is a password: it is what stops any other process on your machine from claiming to
 be an instance you have already approved. Never logged, never printed by a command, never in a tool
 result. Rotate it by clearing the value and restarting; you will be asked to approve again.

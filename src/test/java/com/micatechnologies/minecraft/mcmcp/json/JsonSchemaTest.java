@@ -95,6 +95,21 @@ class JsonSchemaTest {
         assertEquals("forward", property.getAsJsonArray("enum").get(0).getAsString());
     }
 
+    @Test
+    void emitsEnumValuesForArrayItems() {
+        JsonObject property = JsonSchema.object()
+            .array("keys", "Which keys", JsonSchema.enumItems("sneak", "use"))
+            .build()
+            .getAsJsonObject("properties")
+            .getAsJsonObject("keys");
+
+        assertEquals("array", property.get("type").getAsString());
+        JsonObject items = property.getAsJsonObject("items");
+        assertEquals("string", items.get("type").getAsString());
+        assertFalse(items.has("description"));
+        assertEquals("use", items.getAsJsonArray("enum").get(1).getAsString());
+    }
+
     /**
      * A no-argument schema is still an object with an empty properties map.
      *

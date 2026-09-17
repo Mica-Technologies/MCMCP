@@ -111,6 +111,21 @@ public final class ClientInputLock {
 
     private static long lastEscapeMillis;
 
+    /**
+     * How long mouse input stays discarded after the window regains focus.
+     *
+     * <p>Long enough to catch the activating click, short enough that nobody clicks deliberately
+     * inside it.
+     */
+    private static final long FOCUS_CLICK_GRACE_MILLIS = 200L;
+
+    /**
+     * Whether the window was active at the last check. Client thread only. Starts true, so a window
+     * that launches already focused is not mistaken for one regaining focus.
+     */
+    private static boolean wasActive = true;
+    private static long ignoreMouseUntilMillis;
+
     private ClientInputLock() {
     }
 
@@ -294,21 +309,33 @@ public final class ClientInputLock {
     }
 
     /**
-     * Keeps a hovered, inactive game window from consuming physical mouse input.
+     * Keeps mouse input aimed at another window out of a game window that does not have focus.
      *
-     * <p>LWJGL can keep reporting accumulated mouse movement while its window is inactive. Minecraft
-     * then turns the camera even though the person never clicked back into the game. That is both
-     * surprising in ordinary play and disastrous for an agent which has aimed before acting. This is
-     * deliberately narrower than the input lock: inactive windows discard only mouse input, while a
-     * focused window remains entirely under the player's control unless they explicitly take the
-     * lock.
+     * <p>Vanilla already skips mouse look while the window is inactive, but LWJGL keeps accumulating
+     * the movement of a cursor passing over it. The first active frame then turns the camera by all of
+     * it at once, so an agent that aimed before a person hovered by finds itself aimed somewhere else.
+     * This only bites with {@code pauseOnLostFocus} off — otherwise the pause menu regrabs the mouse,
+     * which resets the delta — and off is exactly how an unattended client runs.
+     *
+     * <p>The click that brings the window back is dropped too. It arrives with the activation, and
+     * with no pause menu to land on it would attack or use whatever the crosshair is on.
+     * {@link #FOCUS_CLICK_GRACE_MILLIS} covers it arriving a message pump or two later.
+     *
+     * <p>Deliberately narrower than the lock: only mouse input, and only while the window is not the
+     * one the person is using. Synthetic input is unaffected, for the reasons the class comment gives.
      */
-    private static void discardInactiveMouseInput() {
-        if (Display.isCreated() && !Display.isActive()) {
-            while (Mouse.next()) {
-                // Reading removes the event before Minecraft's input handlers see it.
-            }
-            consumeLookDelta();
+    private static void discardUnfocusedMouseInput() {
+        if (!Display.isCreated()) {
+            return;
+        }
+        boolean active = Display.isActive();
+        long now = System.currentTimeMillis();
+        if (active && !wasActive) {
+            ignoreMouseUntilMillis = now + FOCUS_CLICK_GRACE_MILLIS;
+        }
+        wasActive = active;
+        if (!active || now < ignoreMouseUntilMillis) {
+            drainQueues();
         }
     }
 
@@ -325,7 +352,7 @@ public final class ClientInputLock {
             }
 
             if (!locked) {
-                discardInactiveMouseInput();
+                discardUnfocusedMouseInput();
                 return;
             }
 
@@ -365,7 +392,7 @@ public final class ClientInputLock {
                 return;
             }
             if (!locked) {
-                discardInactiveMouseInput();
+                discardUnfocusedMouseInput();
                 return;
             }
             try {

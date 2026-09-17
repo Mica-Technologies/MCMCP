@@ -1,10 +1,16 @@
 package com.micatechnologies.minecraft.mcmcp.client;
 
+import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
-import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
+import com.micatechnologies.minecraft.mcmcp.transport.McpEndpoint;
+import com.micatechnologies.minecraft.mcmcp.transport.McpTransport;
+import com.micatechnologies.minecraft.mcmcp.transport.ReverseTransport;
+import java.util.List;
+import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiMainMenu;
 import net.minecraft.client.gui.ScaledResolution;
+import net.minecraft.util.text.TextFormatting;
 import net.minecraftforge.client.event.GuiScreenEvent;
 import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.common.MinecraftForge;
@@ -18,8 +24,9 @@ import org.lwjgl.opengl.Display;
  * Makes the particular MCMCP instance visible wherever a person identifies a running client.
  *
  * <p>Several development clients often use the same game directory and look otherwise identical.
- * The configured instance name is intentionally safe to show: unlike the instance secret and bearer
- * token, it is an operator-facing label already sent to the orchestrator.
+ * The name shown is the one a person would use for the instance: the label typed into the
+ * orchestrator if there is one, otherwise the configured {@code instanceName}. Both are
+ * operator-facing labels already sent over the link, unlike the instance secret and bearer token.
  */
 @SideOnly(Side.CLIENT)
 public final class ClientIdentification {
@@ -43,15 +50,35 @@ public final class ClientIdentification {
         return PREFIX + instanceName + "]";
     }
 
-    private static String instanceName() {
-        McmcpIdentity identity = McmcpConfig.identity();
-        return identity.getInstanceName();
+    /**
+     * The name to show: an orchestrator label wins over the configured one, as
+     * {@code LinkHandshake.Result#getAssignedName} documents, because somebody chose it on purpose.
+     */
+    static String displayName(@Nullable String assignedName, String configuredName) {
+        return assignedName == null || assignedName.trim().isEmpty() ? configuredName : assignedName.trim();
     }
 
-    private static void drawLabel(Minecraft mc, int x, int y) {
-        if (mc.fontRenderer != null) {
-            mc.fontRenderer.drawStringWithShadow("MCMCP [" + instanceName() + "]", x, y, 0xFF55FF);
+    /**
+     * Reads the label from whichever orchestrator link has one.
+     *
+     * <p>A label belongs to the game rather than an endpoint, so in singleplayer the client and
+     * integrated-server links carry the same one. The last label received is kept across a dropped
+     * link: a window that renames itself whenever the orchestrator restarts identifies nothing.
+     */
+    private static String instanceName() {
+        String assigned = null;
+        List<McpEndpoint> endpoints = Mcmcp.allEndpoints();
+        for (McpEndpoint endpoint : endpoints) {
+            for (McpTransport transport : endpoint.transports()) {
+                if (transport instanceof ReverseTransport) {
+                    String name = ((ReverseTransport) transport).getAssignedName();
+                    if (name != null) {
+                        assigned = name;
+                    }
+                }
+            }
         }
+        return displayName(assigned, McmcpConfig.identity().getInstanceName());
     }
 
     /** Forge listeners kept together so registration cannot accidentally occur twice. */
@@ -69,16 +96,20 @@ public final class ClientIdentification {
             }
         }
 
-        /** Adds the instance name to the F3 overlay without altering any debug values. */
+        /**
+         * Adds the instance as a line of the F3 overlay, under the game version.
+         *
+         * <p>Through Forge's text event rather than drawn afterwards: F3's own lines start at the
+         * top-left corner, so anything painted there lands on top of them.
+         */
         @SubscribeEvent
-        public void onDebugOverlay(RenderGameOverlayEvent.Post event) {
-            if (event.getType() != RenderGameOverlayEvent.ElementType.ALL) {
+        public void onDebugText(RenderGameOverlayEvent.Text event) {
+            if (!Minecraft.getMinecraft().gameSettings.showDebugInfo) {
                 return;
             }
-            Minecraft mc = Minecraft.getMinecraft();
-            if (mc.gameSettings.showDebugInfo) {
-                drawLabel(mc, 2, 2);
-            }
+            List<String> left = event.getLeft();
+            left.add(Math.min(1, left.size()),
+                TextFormatting.LIGHT_PURPLE + "MCMCP [" + instanceName() + "]");
         }
 
         /** Identifies a client before a world is opened, where the title is easy to miss. */
@@ -88,12 +119,13 @@ public final class ClientIdentification {
                 return;
             }
             Minecraft mc = Minecraft.getMinecraft();
+            if (mc.fontRenderer == null) {
+                return;
+            }
             ScaledResolution resolution = new ScaledResolution(mc);
             String label = "MCMCP [" + instanceName() + "]";
-            if (mc.fontRenderer != null) {
-                int x = resolution.getScaledWidth() - mc.fontRenderer.getStringWidth(label) - 3;
-                mc.fontRenderer.drawStringWithShadow(label, x, 3, 0xFF55FF);
-            }
+            int x = resolution.getScaledWidth() - mc.fontRenderer.getStringWidth(label) - 3;
+            mc.fontRenderer.drawStringWithShadow(label, x, 3, 0xFF55FF);
         }
     }
 }

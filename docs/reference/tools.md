@@ -465,10 +465,16 @@ Returns the **distance actually travelled**, which is zero if something was in t
 
 #### `client_key`
 
-Requires `permissions.allowPlayerControl` · `key`, optional `ticks`
+Requires `permissions.allowPlayerControl` · `key` or `keys`, optional `ticks`
 
 The general-purpose input tool. Named bindings only: `forward`, `back`, `left`, `right`, `jump`,
-`sneak`, `sprint`, `attack`, `use`, `drop`, `inventory`, `swapHands`.
+`sneak`, `sprint`, `attack`, `use`, `drop`, `inventory`, `pickBlock`, `swapHands`.
+
+Pass `keys` to hold a combination, such as `["sneak", "use"]` or `["sprint", "jump", "forward"]`.
+Movement, `jump`, `sneak` and `sprint` go down one tick before any action key and stay down until it
+releases. Minecraft handles clicks before it updates the player, so pressed in the same tick, sneak +
+use would right-click as a player who is not sneaking yet and open the chest it was meant to place
+against.
 
 Arbitrary key codes are deliberately not accepted — they are meaningless to a model, and could hit
 any key another mod has bound.
@@ -483,9 +489,9 @@ any key another mod has bound.
 Breaking a block takes many ticks of held attack and depends on the tool held. Hold longer and
 re-check rather than expecting one call to finish.
 
-For `use`, set `sneak: true` to hold sneak and right click together. This places a block or uses the
-held item without activating the block under the crosshair. It is deliberately an allowlisted
-modifier rather than a way to send arbitrary simultaneous key presses.
+Set `sneak: true` to click while sneaking. With `use`, this places a block or uses the held item
+against a block that would otherwise open or activate. Sneak leads by one tick, as in `client_key`.
+For other combinations, use `client_key` with `keys`.
 
 Returns the target before and after, plus the held item.
 
