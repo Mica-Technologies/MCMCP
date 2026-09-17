@@ -311,11 +311,11 @@ public final class ClientInputLock {
     /**
      * Keeps mouse input aimed at another window out of a game window that does not have focus.
      *
-     * <p>Vanilla already skips mouse look while the window is inactive, but LWJGL keeps accumulating
-     * the movement of a cursor passing over it. The first active frame then turns the camera by all of
-     * it at once, so an agent that aimed before a person hovered by finds itself aimed somewhere else.
-     * This only bites with {@code pauseOnLostFocus} off — otherwise the pause menu regrabs the mouse,
-     * which resets the delta — and off is exactly how an unattended client runs.
+     * <p>Two ways a cursor passing over a background window turns the camera. When LWJGL knows the
+     * window is inactive, vanilla skips mouse look but LWJGL keeps accumulating the movement, and the
+     * first active frame turns by all of it at once. When the window was launched in the background,
+     * LWJGL can believe it is active all along (see {@link WindowFocus}) and vanilla turns the camera
+     * live. Either way an agent that aimed before a person hovered by finds itself aimed elsewhere.
      *
      * <p>The click that brings the window back is dropped too. It arrives with the activation, and
      * with no pause menu to land on it would attack or use whatever the crosshair is on.
@@ -328,7 +328,9 @@ public final class ClientInputLock {
         if (!Display.isCreated()) {
             return;
         }
-        boolean active = Display.isActive();
+        // Not Display.isActive(): a window launched in the background can report active until
+        // somebody clicks into it and out again, and that is exactly when hovering turns the camera.
+        boolean active = WindowFocus.isFocused();
         long now = System.currentTimeMillis();
         if (active && !wasActive) {
             ignoreMouseUntilMillis = now + FOCUS_CLICK_GRACE_MILLIS;

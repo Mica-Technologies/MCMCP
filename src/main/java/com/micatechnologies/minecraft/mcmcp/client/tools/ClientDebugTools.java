@@ -5,6 +5,7 @@ import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
+import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -240,6 +241,8 @@ public final class ClientDebugTools {
                         json.addProperty("screenName", screen == null ? "none"
                             : screen.getClass().getSimpleName());
                         json.addProperty("inGameFocus", mc.inGameHasFocus);
+                        // Whether a person is using this window, which inGameFocus does not say.
+                        json.addProperty("windowFocused", WindowFocus.isFocused());
                         json.addProperty("worldLoaded", mc.world != null);
                         json.addProperty("playerPresent", mc.player != null);
                         json.addProperty("paused", mc.isGamePaused());

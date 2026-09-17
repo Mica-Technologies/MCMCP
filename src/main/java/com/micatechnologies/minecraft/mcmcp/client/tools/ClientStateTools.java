@@ -18,6 +18,7 @@ import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
+import org.lwjgl.opengl.Display;
 
 /**
  * World and player inspection from the client's point of view.
@@ -58,6 +59,24 @@ public final class ClientStateTools {
         }
         return mc;
     }
+
+    /**
+     * Whether a loaded singleplayer world will pause itself: {@code pauseOnLostFocus} is on and the
+     * window is in the background, which is the normal state of an unattended client.
+     *
+     * <p>Judged by cause rather than by the pause menu being open, because the menu only appears
+     * half a second after the world does — a check at load time would nearly always miss it, and the
+     * model would find a frozen game a call later with nothing to say why. Must run on the client
+     * thread.
+     */
+    static boolean pausesOnLostFocus(Minecraft mc) {
+        return mc.gameSettings.pauseOnLostFocus && Display.isCreated() && !Display.isActive();
+    }
+
+    /** The sentence tool replies append when {@link #pausesOnLostFocus} holds. */
+    static final String LOST_FOCUS_PAUSE_WARNING = " The game window is in the background and "
+        + "pauseOnLostFocus is on, so the game pauses behind the pause menu once the world is up. Call "
+        + "client_view with pauseOnLostFocus false, which also closes that menu.";
 
     /**
      * A ray trace computed from the player's rotation <em>right now</em>.

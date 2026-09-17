@@ -566,6 +566,10 @@ Captures the last rendered frame, so open GUIs, chat and the F3 overlay all appe
 Whether a GUI is open and which one, window focus, whether a world is loaded, display size, and how
 many synthetic key holds are still in flight.
 
+`inGameFocus` is Minecraft's own flag: whether the game, rather than a screen, takes the mouse.
+`windowFocused` is whether the window is actually the one in front. They differ for a client launched
+in the background, which Minecraft can believe is focused until somebody clicks into it.
+
 Call this when an input tool appears to have had no effect — an open GUI swallows movement keys.
 
 #### `client_read_chat`

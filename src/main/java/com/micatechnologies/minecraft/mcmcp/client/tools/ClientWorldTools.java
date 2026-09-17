@@ -213,6 +213,9 @@ public final class ClientWorldTools {
                 // — waiting on it reports a timeout for a world that is loading perfectly well, which
                 // is worse than not waiting at all. The caller waits on the observable outcome
                 // instead, which is what client_wait's 'worldLoaded' is for.
+                // Read before the launch is scheduled: launchIntegratedServer holds the client thread
+                // for seconds, and a game-thread call queued behind it would time out.
+                final boolean pauses = pausesOnLostFocus(context);
                 context.getGameThread().runOnGameThread(new Runnable() {
                     @Override
                     public void run() {
@@ -232,9 +235,13 @@ public final class ClientWorldTools {
                 result.addProperty("hardcore", hardcore);
                 result.addProperty("cheats", allowCheats && !hardcore);
                 result.addProperty("loadingStarted", true);
+                if (pauses) {
+                    result.addProperty("pausesOnLostFocus", true);
+                }
 
                 return ToolResult.text("Creating world '" + name + "' in folder '" + folderName
-                    + "'. Loading has started; wait for it with client_wait waitFor 'worldLoaded'.")
+                    + "'. Loading has started; wait for it with client_wait waitFor 'worldLoaded'."
+                    + (pauses ? ClientStateTools.LOST_FOCUS_PAUSE_WARNING : ""))
                     .withStructured(result);
             })
             .build());
@@ -363,6 +370,9 @@ public final class ClientWorldTools {
                     }
                 });
 
+                // Read before the launch is scheduled: launchIntegratedServer holds the client thread
+                // for seconds, and a game-thread call queued behind it would time out.
+                final boolean pauses = pausesOnLostFocus(context);
                 context.getGameThread().runOnGameThread(new Runnable() {
                     @Override
                     public void run() {
@@ -376,9 +386,14 @@ public final class ClientWorldTools {
                 result.addProperty("folderName", folderName);
                 result.addProperty("displayName", displayName);
                 result.addProperty("loadingStarted", true);
+                if (pauses) {
+                    result.addProperty("pausesOnLostFocus", true);
+                }
 
                 return ToolResult.text("Loading world '" + displayName + "'. Wait for it with "
-                    + "client_wait waitFor 'worldLoaded'.").withStructured(result);
+                    + "client_wait waitFor 'worldLoaded'."
+                    + (pauses ? ClientStateTools.LOST_FOCUS_PAUSE_WARNING : ""))
+                    .withStructured(result);
             })
             .build());
     }
@@ -429,6 +444,16 @@ public final class ClientWorldTools {
      *
      * @throws Exception if the leave did not finish within {@link #WORLD_LEAVE_TIMEOUT_MILLIS}
      */
+    /** {@link ClientStateTools#pausesOnLostFocus}, read on the client thread. */
+    private static boolean pausesOnLostFocus(ToolContext context) throws Exception {
+        return context.onGameThread(new Callable<Boolean>() {
+            @Override
+            public Boolean call() {
+                return ClientStateTools.pausesOnLostFocus(Minecraft.getMinecraft());
+            }
+        });
+    }
+
     static JsonObject leaveLoadedWorld(ToolContext context) throws Exception {
         JsonObject result = context.onGameThread(new Callable<JsonObject>() {
             @Override

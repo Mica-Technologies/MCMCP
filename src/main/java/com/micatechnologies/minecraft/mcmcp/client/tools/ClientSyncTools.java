@@ -142,7 +142,10 @@ public final class ClientSyncTools {
                         state.addProperty("waitedMillis", System.currentTimeMillis() - start);
                         state.addProperty("waitFor", waitFor);
                         return ToolResult.text("Condition '" + waitFor + "' met after "
-                            + (System.currentTimeMillis() - start) + "ms.").withStructured(state);
+                            + (System.currentTimeMillis() - start) + "ms."
+                            + ("worldLoaded".equals(waitFor) && state.has("pausesOnLostFocus")
+                                ? ClientStateTools.LOST_FOCUS_PAUSE_WARNING : ""))
+                            .withStructured(state);
                     }
 
                     Thread.sleep(POLL_INTERVAL_MILLIS);
@@ -177,6 +180,9 @@ public final class ClientSyncTools {
         // Tested by type rather than by class name: the name is obfuscated in a released jar, so a
         // string comparison would quietly stop matching in exactly the build nobody tests this in.
         json.addProperty("terrainReady", !(screen instanceof GuiDownloadTerrain));
+        if (mc.world != null && ClientStateTools.pausesOnLostFocus(mc)) {
+            json.addProperty("pausesOnLostFocus", true);
+        }
         return json;
     }
 
