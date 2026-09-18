@@ -375,8 +375,13 @@ adjust, check again — and a full state response each time is wasteful.
 
 `relative: true` treats the coordinates as offsets from the player's block position.
 
-Positions outside the loaded view distance report `loaded: false`. The client genuinely does not know
-what is there and will not be told until it gets closer.
+Positions outside the loaded view distance report `loaded: false` and nothing else. The client
+genuinely does not know what is there and will not be told until it gets closer.
+
+!!! note "Why this is not `World.isBlockLoaded(pos)`"
+    On a client that call is always true, and the read behind it lands on a shared empty chunk that
+    answers air, sky light 15 and Plains — a complete, plausible reading of open sky for terrain the
+    client was never sent. `GameJson.isLoaded` asks the question that has an answer.
 
 Carries the same `actualState` and `boundingBox` fields as
 [`server_get_block`](#server_get_block) — and on the client is where `actualState` is most directly

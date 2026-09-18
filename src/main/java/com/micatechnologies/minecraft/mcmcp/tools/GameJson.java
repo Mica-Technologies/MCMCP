@@ -112,6 +112,23 @@ public final class GameJson {
     // ------------------------------------------------------------------
 
     /**
+     * Whether this side actually holds the chunk {@code pos} is in.
+     *
+     * <p>Not {@link World#isBlockLoaded(BlockPos)}, which is the obvious call and is always true on a
+     * client. It passes {@code allowEmpty = true}, and {@code WorldClient.isChunkLoaded} is
+     * {@code allowEmpty || !provideChunk(x, z).isEmpty()} — so the question is never asked. The read
+     * that follows lands on {@code ChunkProviderClient}'s shared {@code EmptyChunk}, which answers
+     * air, block light 0, sky light 15 and, having no biome array, Plains: a complete, plausible
+     * reading of open sky for a chunk the client was never sent. That is how a conduit run traced
+     * across a few hundred blocks came back "broken" at the edge of the view distance.
+     *
+     * <p>{@code WorldServer.isChunkLoaded} ignores the flag, so the server side is unchanged.
+     */
+    public static boolean isLoaded(World world, BlockPos pos) {
+        return world.isBlockLoaded(pos, false);
+    }
+
+    /**
      * Describes the block at {@code pos}.
      *
      * <p>Reports {@code loaded: false} and nothing else for an unloaded chunk rather than reading
@@ -124,7 +141,7 @@ public final class GameJson {
         JsonObject json = new JsonObject();
         json.add("position", blockPos(pos));
 
-        if (!world.isBlockLoaded(pos)) {
+        if (!isLoaded(world, pos)) {
             json.addProperty("loaded", false);
             return json;
         }
@@ -390,7 +407,7 @@ public final class GameJson {
 
     @Nullable
     public static String biomeName(World world, BlockPos pos) {
-        if (!world.isBlockLoaded(pos)) {
+        if (!isLoaded(world, pos)) {
             return null;
         }
         Biome biome = world.getBiome(pos);
@@ -457,7 +474,7 @@ public final class GameJson {
             json.addProperty("type", "block");
             // Loaded is checked for the same reason block() checks it: getBlockState reads an
             // unloaded position as air, which would report empty sky in front of a wall.
-            if (!world.isBlockLoaded(pos)) {
+            if (!isLoaded(world, pos)) {
                 json.addProperty("block", "mcmcp:unloaded");
             }
             else {
