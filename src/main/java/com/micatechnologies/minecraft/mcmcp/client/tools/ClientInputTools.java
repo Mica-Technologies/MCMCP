@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.client.tools;
 
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
+import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputLock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
@@ -63,6 +64,7 @@ public final class ClientInputTools {
     public static void register() {
         ClientInputScheduler.register();
         ClientInputLock.register();
+        ClientFrameClock.register();
         registerSendChat();
         registerLook();
         registerMove();
@@ -288,12 +290,17 @@ public final class ClientInputTools {
     // ------------------------------------------------------------------
 
     /**
-     * How long {@code client_look} leaves the game alone before reading the rotation back.
-     *
-     * <p>Two ticks. Mouse look happens per frame, so anything turning the camera has had several
-     * chances by then, and it is short against the round trip of the call it is added to.
+     * What {@code client_look} lets the game do before reading the rotation back: two frames, because
+     * the mouse turns the camera per frame, and one tick, because a mount clamps its rider and a
+     * server corrects a player per tick. Measured against a live client at 120 frames a second this
+     * is about 40ms; the fixed 100ms sleep it replaced waited longer than that and, on a client
+     * drawing eight frames a second, could still have returned before one of them.
      */
-    private static final long LOOK_SETTLE_MILLIS = 100L;
+    private static final int LOOK_SETTLE_FRAMES = 2;
+    private static final int LOOK_SETTLE_TICKS = 1;
+
+    /** Longest the settle is waited for. Past it the game is hitching, and the read goes ahead. */
+    private static final long LOOK_SETTLE_TIMEOUT_MILLIS = 500L;
 
     /**
      * How far the camera may be from where it was put and still count as having stayed there. Wide
@@ -387,8 +394,11 @@ public final class ClientInputTools {
                 // screenshots of the ground were taken before anybody thought to doubt it.
                 //
                 // On the worker, not the client thread, for the reason client_wait gives: a
-                // scheduled task that sleeps stops the frames being waited for.
-                Thread.sleep(LOOK_SETTLE_MILLIS);
+                // scheduled task that waits stops the frames being waited for.
+                final long settleStart = System.currentTimeMillis();
+                ClientFrameClock.await(LOOK_SETTLE_FRAMES, LOOK_SETTLE_TICKS,
+                    LOOK_SETTLE_TIMEOUT_MILLIS);
+                final long settledAfter = System.currentTimeMillis() - settleStart;
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -408,6 +418,7 @@ public final class ClientInputTools {
                         if (yawDrift > LOOK_HELD_TOLERANCE_DEGREES
                             || pitchDrift > LOOK_HELD_TOLERANCE_DEGREES) {
                             json.addProperty("held", false);
+                            json.addProperty("riding", mc.player.isRiding());
                             json.addProperty("windowFocused",
                                 WindowFocus.isFocused());
                             json.addProperty("inputLocked", ClientInputLock.isLocked());
@@ -419,16 +430,20 @@ public final class ClientInputTools {
                 if (result.has("held")) {
                     return ToolResult.error("The camera did not stay where it was put. client_look "
                         + "set yaw " + Math.round(applied[0] * 100.0D) / 100.0D + ", pitch "
-                        + Math.round(applied[1] * 100.0D) / 100.0D + "; " + LOOK_SETTLE_MILLIS
+                        + Math.round(applied[1] * 100.0D) / 100.0D + "; " + settledAfter
                         + "ms later the player is at yaw " + result.get("yaw").getAsDouble()
                         + ", pitch " + result.get("pitch").getAsDouble() + " (windowFocused="
                         + result.get("windowFocused").getAsBoolean() + ", inputLocked="
                         + result.get("inputLocked").getAsBoolean() + "). A screenshot taken now "
                         + "shows that view, not the one asked for. "
-                        + (result.get("inputLocked").getAsBoolean()
+                        + (result.get("riding").getAsBoolean()
+                            ? "The player is riding something, and a vehicle or mount limits how far "
+                                + "its rider can turn — a boat allows 105 degrees either side of its "
+                                + "own heading. Turn the vehicle, or dismount with client_key sneak."
+                            : result.get("inputLocked").getAsBoolean()
                             ? "The input lock is held, so this is not the mouse: something in the "
-                                + "game is setting the rotation — a vehicle or mount that limits how "
-                                + "far the rider can turn, or the server correcting the player."
+                                + "game is setting the rotation, most likely the server correcting "
+                                + "the player."
                             : "Something is turning the camera between frames, almost always mouse "
                                 + "movement reaching this window, and looking again will not help "
                                 + "while it is. Take client_input_lock, which keeps the mouse out, "

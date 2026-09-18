@@ -469,12 +469,15 @@ camera about 1.6 blocks low.
 Pitch is clamped to `[-90, 90]`; yaw is wrapped, so repeated relative turns do not accumulate without
 bound.
 
-Returns the angles **read back about two ticks after the turn**, with yaw as -180 to 180, and what
-the crosshair is now on. If the camera is no longer where it was put, the call is an error that says
+Returns the angles **read back once the game has run with them** — two frames, because the mouse
+turns the camera per frame, and one tick, because a mount clamps its rider and a server corrects a
+player per tick; about 40 ms at 120 fps — with yaw as -180 to 180, and what the crosshair is now on. If the camera is no longer where it was put, the call is an error that says
 where it ended up, whether the window has focus and whether the input lock is held. Writing the
 rotation always succeeds; what goes wrong is something else turning the camera on the next frame —
 almost always mouse movement reaching the window — and a reply that echoed the requested angles made
-every screenshot after it silently wrong. [`client_input_lock`](#client_input_lock) is the remedy.
+every screenshot after it silently wrong. [`client_input_lock`](#client_input_lock) is the remedy for
+the mouse; when the player is riding, the error says so instead, since a boat allows its rider only
+105° either side of its own heading.
 
 #### `client_move`
 
