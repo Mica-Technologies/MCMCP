@@ -118,11 +118,21 @@ async function renderInstances() {
   const instances = await invoke("list_instances");
   const connected = instances.filter((instance) => instance.connected);
 
-  document.querySelector(".dot").classList.toggle("is-live", connected.length > 0);
-  $("subtitle").textContent =
-    connected.length === 0
+  // An orchestrator that could not bind the link port has an empty roster for a different reason
+  // than one nobody has connected to: the games are all connected — to whichever process did bind
+  // it. Saying "no game connected" there is true of this window and wrong about the machine.
+  const failure = await invoke("link_failure");
+  const dot = document.querySelector(".dot");
+  dot.classList.toggle("is-live", !failure && connected.length > 0);
+  dot.classList.toggle("is-down", Boolean(failure));
+  $("subtitle").textContent = failure
+    ? "not listening — another orchestrator has the port"
+    : connected.length === 0
       ? "no game connected"
       : `${connected.length} connected · ${connected.reduce((sum, i) => sum + i.tools, 0)} tools`;
+  $("subtitle").title = failure ?? "";
+  $("link-failure").hidden = !failure;
+  $("link-failure-detail").textContent = failure ?? "";
 
   const container = $("instances");
   container.innerHTML = "";

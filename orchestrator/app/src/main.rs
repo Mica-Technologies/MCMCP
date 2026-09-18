@@ -166,6 +166,11 @@ struct AppState {
     approvals: Arc<ApprovalQueue>,
     gates: Arc<GateQueue>,
     link_port: u16,
+    /// Why this process is not listening for games, when it is not.
+    ///
+    /// Set once, by the background thread, if the link port cannot be bound. The roster reads it so
+    /// that an orchestrator no game can reach does not describe itself as one no game has reached.
+    link_failure: Mutex<Option<String>>,
 }
 
 // ----------------------------------------------------------------------------------
@@ -291,6 +296,17 @@ fn list_instances(state: State<'_, AppState>) -> Vec<InstanceView> {
         }
     }
     views
+}
+
+/// Why this orchestrator cannot be reached by a game, or `None` when it can.
+///
+/// An empty roster has two meanings that look identical: nothing has connected, and nothing *can*.
+/// The second is what a headless `mcmcp-orchestrator serve` holding the link port produces — every
+/// game is connected, to it — and "no game connected" is then true of this process and useless to
+/// the person reading it.
+#[tauri::command]
+fn link_failure(state: State<'_, AppState>) -> Option<String> {
+    state.link_failure.lock().ok().and_then(|failure| failure.clone())
 }
 
 #[derive(Deserialize)]
@@ -898,9 +914,22 @@ fn main() -> anyhow::Result<()> {
         approvals: Arc::clone(&approvals),
         gates: Arc::clone(&gates),
         link_port,
+        link_failure: Mutex::new(None),
     };
 
     tauri::Builder::default()
+        // First, as the plugin requires, and ahead of anything that would open a window. A second
+        // copy is not hypothetical: login autostart and a shim's on-demand launch land within
+        // seconds of each other, and so do two MCP clients starting their shims at once. The loser
+        // could bind neither port, so every game and every shim was attached to the first copy
+        // while the second sat in the tray with an empty roster — and whichever window a person
+        // happened to open was as likely as not the one saying "no game connected". The second copy
+        // now exits here and the first shows itself, which is what launching it again meant.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, _arguments, _directory| {
+                reveal(app);
+            },
+        ))
         // No arguments passed to the launched copy: started at login it should behave exactly as it
         // does when started by hand, and a flag here would be a second code path nobody exercises.
         .plugin(tauri_plugin_autostart::init(
@@ -910,6 +939,7 @@ fn main() -> anyhow::Result<()> {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             list_instances,
+            link_failure,
             list_events,
             pending_approvals,
             answer_approval,
@@ -1144,14 +1174,14 @@ fn spawn_background(
                         // saying plainly — the window would otherwise sit there looking healthy
                         // while no game could ever reach it.
                         warn!(%error, %address, "could not listen for instances");
-                        events.note(
-                            Actor::System,
-                            None,
-                            format!(
-                                "Could not listen on {address}: {error}. Another orchestrator is \
-                                 probably already running."
-                            ),
+                        let message = format!(
+                            "Could not listen on {address}: {error}. Another orchestrator is \
+                             probably already running."
                         );
+                        if let Ok(mut failure) = app.state::<AppState>().link_failure.lock() {
+                            *failure = Some(message.clone());
+                        }
+                        events.note(Actor::System, None, message);
                         let _ = app.emit(CHANGED, ());
                     }
                 }

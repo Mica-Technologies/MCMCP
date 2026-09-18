@@ -39,6 +39,12 @@
 
     <main>
       <section id="panel-instances" class="panel">
+        <p id="link-failure" class="empty is-down" hidden>
+          This orchestrator is not the one your games are talking to.
+          <span id="link-failure-detail"></span>
+          Games and MCP clients are attached to that one; quit this copy and open the other from
+          its tray icon.
+        </p>
         <div id="instances" class="cards"></div>
         <p id="instances-empty" class="empty" hidden>
           No game has connected yet. Start Minecraft with MCMCP installed — the link is on by

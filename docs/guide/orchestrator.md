@@ -253,6 +253,17 @@ It writes a normal login item — a Run key entry on Windows, a LaunchAgent on m
 entry on Linux — and the checkbox reads back from the system rather than from a setting of its own,
 so removing the entry by hand is reflected honestly.
 
+### Only one copy runs
+
+Starting the app while it is already running shows the running one's window and exits. That matters
+more than it sounds: a login item and a shim's on-demand launch land within seconds of each other,
+and the copy that loses can bind neither port — so every game and every MCP client is attached to
+the first, while the second would sit in the tray with an empty roster saying "no game connected".
+
+If something other than the app holds the link port — a headless `mcmcp-orchestrator serve`, say —
+the app cannot be reached by any game, and says so: the header reads **not listening** rather than
+"no game connected", with the bind error beneath it.
+
 ## Gating
 
 Off by default, because the orchestrator is not a security boundary — your MCP client is already
