@@ -82,6 +82,9 @@ public final class ServerWorldTools {
                 .integer("y", "Block Y coordinate, 0-255.")
                 .integer("z", "Block Z coordinate.")
                 .integer("dimension", "Dimension id: 0 overworld, -1 nether, 1 end. Defaults to 0.")
+                .bool("nbt", "Also return 'blockEntity': the tile entity's full saved NBT, or "
+                    + "present=false when the block has none. Off by default; a machine's tag can "
+                    + "be kilobytes.")
                 .required("x", "y", "z")
                 .build())
             .serverOnly()
@@ -91,6 +94,7 @@ public final class ServerWorldTools {
                 final int y = context.requireInt("y");
                 final int z = context.requireInt("z");
                 final int dimension = context.getInt("dimension", 0);
+                final boolean nbt = context.getBoolean("nbt", false);
 
                 JsonObject block = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -98,6 +102,9 @@ public final class ServerWorldTools {
                         WorldServer world = requireWorld(dimension);
                         BlockPos pos = new BlockPos(x, y, z);
                         JsonObject json = GameJson.block(world, pos);
+                        if (nbt && json.get("loaded").getAsBoolean()) {
+                            json.add("blockEntity", GameJson.blockEntity(world, pos));
+                        }
                         json.addProperty("dimension", dimension);
                         String biome = GameJson.biomeName(world, pos);
                         if (biome != null) {

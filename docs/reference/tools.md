@@ -117,9 +117,16 @@ accident.
 
 #### `server_get_block`
 
-:material-eye: Read-only · `x`, `y`, `z` required · optional `dimension`
+:material-eye: Read-only · `x`, `y`, `z` required · optional `dimension`, `nbt`
 
 Block id, metadata, state properties, light levels, hardness and biome at one position.
+
+`nbt: true` adds `blockEntity` — the tile entity's saved tag, as
+`{"source": "server", "nbt": {...}}`, or `{"present": false}` when the block has none. Off by default,
+because a machine's tag can run to kilobytes. NBT's number widths are dropped (`3b` reads as `3`);
+arrays and lists past 256 entries are cut to `{"elided": "int[]", "length": N}` rather than ending
+silently; and a tag over 32 KB comes back as its top-level `keys` with `truncated: true`. The tile
+entity is looked up without creating one, so the read stays a read.
 
 Reports `loaded: false` without reading if the chunk is not loaded. `getBlockState` on an unloaded
 position silently returns air, so a naive read would confidently describe a mountain as empty space —
@@ -372,9 +379,15 @@ adjust, check again — and a full state response each time is wasteful.
 
 #### `client_get_block`
 
-:material-eye: Read-only · `x`, `y`, `z` required · optional `relative`
+:material-eye: Read-only · `x`, `y`, `z` required · optional `relative`, `nbt`
 
 `relative: true` treats the coordinates as offsets from the player's block position.
+
+`nbt: true` adds `blockEntity`, in the shape [`server_get_block`](#server_get_block) describes — but
+with `"source": "client-synced"`, and that is the part to read. A client is sent only what the server
+syncs so the block can be *drawn*, so a key missing here means "not synced", not "not set". It is
+still the only NBT there is on a server you do not run, and it replaces sending `/blockdata` and
+reading the reply out of chat.
 
 Positions outside the loaded view distance report `loaded: false` and nothing else. The client
 genuinely does not know what is there and will not be told until it gets closer.

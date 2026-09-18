@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
 import java.util.Map;
 import javax.annotation.Nullable;
 import net.minecraft.block.state.IBlockState;
@@ -13,6 +14,8 @@ import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.inventory.IInventory;
 import net.minecraft.item.ItemStack;
+import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.AxisAlignedBB;
@@ -23,6 +26,7 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.EnumSkyBlock;
 import net.minecraft.world.World;
 import net.minecraft.world.biome.Biome;
+import net.minecraft.world.chunk.Chunk;
 
 /**
  * Turns live game objects into the JSON that MCP tools and resources return.
@@ -262,6 +266,57 @@ public final class GameJson {
         json.addProperty("maxX", round(box.maxX));
         json.addProperty("maxY", round(box.maxY));
         json.addProperty("maxZ", round(box.maxZ));
+        return json;
+    }
+
+    /** Largest tile entity tag returned whole, measured as the JSON it becomes. */
+    private static final int MAX_BLOCK_ENTITY_CHARS = 32 * 1024;
+
+    /**
+     * The tile entity at {@code pos} and its NBT, as this side holds it.
+     *
+     * <p>{@code source} is the point. On a server the tag is the block's whole saved state. On a
+     * client it is only what the server chose to send — {@code getUpdateTag} and update packets,
+     * which a mod writes for what it has to <em>draw</em> — so a missing key means "not synced",
+     * not "not set", and the two read identically unless the result says which side answered.
+     *
+     * <p>Looked up with {@code CHECK}, which never creates one: {@code World.getTileEntity} will
+     * construct a missing tile entity for a block that should have one, and a read must not.
+     *
+     * @return {@code {"present": false}} when there is none, which is an answer and not an omission
+     */
+    public static JsonObject blockEntity(World world, BlockPos pos) {
+        JsonObject json = new JsonObject();
+        TileEntity tile = !isLoaded(world, pos) ? null
+            : world.getChunk(pos).getTileEntity(pos, Chunk.EnumCreateEntityType.CHECK);
+        if (tile == null) {
+            json.addProperty("present", false);
+            return json;
+        }
+        json.addProperty("source", world.isRemote ? "client-synced" : "server");
+
+        JsonElement nbt;
+        try {
+            nbt = NbtJson.toJson(tile.writeToNBT(new NBTTagCompound()));
+        } catch (RuntimeException e) {
+            // writeToNBT is third-party code on a modded block, and on a client it may be reading
+            // fields the mod only ever populates on the server.
+            json.addProperty("error", "The tile entity could not write its tag: " + e);
+            return json;
+        }
+
+        int size = Json.write(nbt).length();
+        if (size > MAX_BLOCK_ENTITY_CHARS) {
+            JsonArray keys = new JsonArray();
+            for (Map.Entry<String, JsonElement> entry : nbt.getAsJsonObject().entrySet()) {
+                keys.add(entry.getKey());
+            }
+            json.addProperty("truncated", true);
+            json.addProperty("chars", size);
+            json.add("keys", keys);
+            return json;
+        }
+        json.add("nbt", nbt);
         return json;
     }
 

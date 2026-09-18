@@ -184,6 +184,10 @@ public final class ClientStateTools {
                 .integer("z", "Block Z coordinate.")
                 .bool("relative", "Treat x, y and z as offsets from the player's block position "
                     + "instead of absolute coordinates.")
+                .bool("nbt", "Also return 'blockEntity': the tile entity's NBT as this client holds "
+                    + "it, or present=false when there is none. A client is sent only what the "
+                    + "server syncs for drawing the block, so a missing key means not synced, not "
+                    + "unset; server_get_block has the whole tag. Off by default.")
                 .required("x", "y", "z")
                 .build())
             .clientOnly()
@@ -193,6 +197,7 @@ public final class ClientStateTools {
                 final int y = context.requireInt("y");
                 final int z = context.requireInt("z");
                 final boolean relative = context.getBoolean("relative", false);
+                final boolean nbt = context.getBoolean("nbt", false);
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -202,6 +207,9 @@ public final class ClientStateTools {
                         BlockPos pos = new BlockPos(origin.getX() + x, origin.getY() + y,
                             origin.getZ() + z);
                         JsonObject json = GameJson.block(mc.world, pos);
+                        if (nbt && json.get("loaded").getAsBoolean()) {
+                            json.add("blockEntity", GameJson.blockEntity(mc.world, pos));
+                        }
                         String biome = GameJson.biomeName(mc.world, pos);
                         if (biome != null) {
                             json.addProperty("biome", biome);
