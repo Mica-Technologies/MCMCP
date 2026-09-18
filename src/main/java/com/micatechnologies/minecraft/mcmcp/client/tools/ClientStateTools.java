@@ -157,7 +157,8 @@ public final class ClientStateTools {
                     public JsonObject call() {
                         Minecraft mc = requireInWorld();
                         JsonObject json = GameJson.rayTrace(mc.world, mc.objectMouseOver);
-                        json.addProperty("yaw", Math.round(mc.player.rotationYaw * 100.0D) / 100.0D);
+                        json.addProperty("yaw", Math.round(net.minecraft.util.math.MathHelper
+                            .wrapDegrees(mc.player.rotationYaw) * 100.0D) / 100.0D);
                         json.addProperty("pitch", Math.round(mc.player.rotationPitch * 100.0D) / 100.0D);
                         return json;
                     }

@@ -293,7 +293,10 @@ public final class GameJson {
 
         json.add("position", vec(entity.posX, entity.posY, entity.posZ));
         json.add("blockPosition", blockPos(blockPosOf(entity)));
-        json.addProperty("yaw", round(entity.rotationYaw));
+        // Wrapped, because the game never does: mouse look only ever adds to rotationYaw, so a player
+        // who has been turning for a while reads 24507.33, which says nothing about which way they
+        // face and cannot be compared with the -180..180 that client_look reports.
+        json.addProperty("yaw", round(MathHelper.wrapDegrees(entity.rotationYaw)));
         json.addProperty("pitch", round(entity.rotationPitch));
         json.add("velocity", vec(entity.motionX, entity.motionY, entity.motionZ));
         json.addProperty("onGround", entity.onGround);

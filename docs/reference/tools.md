@@ -456,7 +456,12 @@ camera about 1.6 blocks low.
 Pitch is clamped to `[-90, 90]`; yaw is wrapped, so repeated relative turns do not accumulate without
 bound.
 
-Returns the new angles and what the crosshair is now on.
+Returns the angles **read back about two ticks after the turn**, with yaw as -180 to 180, and what
+the crosshair is now on. If the camera is no longer where it was put, the call is an error that says
+where it ended up, whether the window has focus and whether the input lock is held. Writing the
+rotation always succeeds; what goes wrong is something else turning the camera on the next frame —
+almost always mouse movement reaching the window — and a reply that echoed the requested angles made
+every screenshot after it silently wrong. [`client_input_lock`](#client_input_lock) is the remedy.
 
 #### `client_move`
 

@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputLock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
+import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -24,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.KeyBinding;
+import net.minecraft.util.math.MathHelper;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.event.ForgeEventFactory;
 import net.minecraftforge.fml.relauncher.Side;
@@ -285,6 +287,20 @@ public final class ClientInputTools {
     // Camera
     // ------------------------------------------------------------------
 
+    /**
+     * How long {@code client_look} leaves the game alone before reading the rotation back.
+     *
+     * <p>Two ticks. Mouse look happens per frame, so anything turning the camera has had several
+     * chances by then, and it is short against the round trip of the call it is added to.
+     */
+    private static final long LOOK_SETTLE_MILLIS = 100L;
+
+    /**
+     * How far the camera may be from where it was put and still count as having stayed there. Wide
+     * enough to ignore float noise, and far narrower than anything that changes what is on screen.
+     */
+    private static final float LOOK_HELD_TOLERANCE_DEGREES = 1.0F;
+
     private static void registerLook() {
         McpRegistry.registerTool(McpTool.named("client_look")
             .title("Look")
@@ -293,7 +309,9 @@ public final class ClientInputTools {
                 + "computes the angles for you.\n\n"
                 + "Yaw is degrees clockwise from south: 0 faces south (+Z), 90 faces west (-X), 180 "
                 + "faces north (-Z), 270 faces east (+X). Pitch is degrees down from horizontal, from "
-                + "-90 (straight up) to 90 (straight down).")
+                + "-90 (straight up) to 90 (straight down).\n\n"
+                + "The reply is the rotation read back a moment after the turn, with yaw as "
+                + "-180 to 180, and is an error if something turned the camera away again.")
             .schema(JsonSchema.object()
                 .number("yaw", "Absolute yaw in degrees.")
                 .number("pitch", "Absolute pitch in degrees, -90 to 90.", -90.0D, 90.0D)
@@ -310,9 +328,9 @@ public final class ClientInputTools {
                         + "permissions.allowPlayerControl in the MCMCP config.");
                 }
 
-                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                final float[] applied = context.onGameThread(new Callable<float[]>() {
                     @Override
-                    public JsonObject call() {
+                    public float[] call() {
                         Minecraft mc = ClientStateTools.requireInWorld();
                         float yaw = mc.player.rotationYaw;
                         float pitch = mc.player.rotationPitch;
@@ -347,7 +365,7 @@ public final class ClientInputTools {
                         // The server rejects a pitch outside [-90, 90] outright, and an unwrapped yaw
                         // accumulates without bound across repeated relative turns.
                         pitch = Math.max(-90.0F, Math.min(90.0F, pitch));
-                        yaw = net.minecraft.util.math.MathHelper.wrapDegrees(yaw);
+                        yaw = MathHelper.wrapDegrees(yaw);
 
                         mc.player.rotationYaw = yaw;
                         mc.player.rotationPitch = pitch;
@@ -356,14 +374,66 @@ public final class ClientInputTools {
                         mc.player.prevRotationYaw = yaw;
                         mc.player.prevRotationPitch = pitch;
                         mc.player.rotationYawHead = yaw;
+                        return new float[]{yaw, pitch};
+                    }
+                });
+
+                // Read it back after the game has had a few frames with it, and report that —
+                // not what was written. Writing the rotation always succeeds; what goes wrong is
+                // that something else turns the camera on the very next frame, and the reply used
+                // to echo the requested angles regardless. Seen against a live client: mouse
+                // movement reaching the window drove the pitch into its 90 degree clamp and spun the
+                // yaw every frame, client_look answered "pitch 6.39" each time it was asked, and five
+                // screenshots of the ground were taken before anybody thought to doubt it.
+                //
+                // On the worker, not the client thread, for the reason client_wait gives: a
+                // scheduled task that sleeps stops the frames being waited for.
+                Thread.sleep(LOOK_SETTLE_MILLIS);
+
+                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() {
+                        Minecraft mc = ClientStateTools.requireInWorld();
+                        float yaw = MathHelper.wrapDegrees(mc.player.rotationYaw);
+                        float pitch = mc.player.rotationPitch;
 
                         JsonObject json = new JsonObject();
                         json.addProperty("yaw", Math.round(yaw * 100.0D) / 100.0D);
                         json.addProperty("pitch", Math.round(pitch * 100.0D) / 100.0D);
                         json.add("lookingAt", ClientStateTools.freshLookTarget(mc));
+
+                        float yawDrift = Math.abs(MathHelper
+                            .wrapDegrees(yaw - applied[0]));
+                        float pitchDrift = Math.abs(pitch - applied[1]);
+                        if (yawDrift > LOOK_HELD_TOLERANCE_DEGREES
+                            || pitchDrift > LOOK_HELD_TOLERANCE_DEGREES) {
+                            json.addProperty("held", false);
+                            json.addProperty("windowFocused",
+                                WindowFocus.isFocused());
+                            json.addProperty("inputLocked", ClientInputLock.isLocked());
+                        }
                         return json;
                     }
                 });
+
+                if (result.has("held")) {
+                    return ToolResult.error("The camera did not stay where it was put. client_look "
+                        + "set yaw " + Math.round(applied[0] * 100.0D) / 100.0D + ", pitch "
+                        + Math.round(applied[1] * 100.0D) / 100.0D + "; " + LOOK_SETTLE_MILLIS
+                        + "ms later the player is at yaw " + result.get("yaw").getAsDouble()
+                        + ", pitch " + result.get("pitch").getAsDouble() + " (windowFocused="
+                        + result.get("windowFocused").getAsBoolean() + ", inputLocked="
+                        + result.get("inputLocked").getAsBoolean() + "). A screenshot taken now "
+                        + "shows that view, not the one asked for. "
+                        + (result.get("inputLocked").getAsBoolean()
+                            ? "The input lock is held, so this is not the mouse: something in the "
+                                + "game is setting the rotation — a vehicle or mount that limits how "
+                                + "far the rider can turn, or the server correcting the player."
+                            : "Something is turning the camera between frames, almost always mouse "
+                                + "movement reaching this window, and looking again will not help "
+                                + "while it is. Take client_input_lock, which keeps the mouse out, "
+                                + "then call client_look again."));
+                }
                 return ToolResult.structured(result);
             })
             .build());
