@@ -317,12 +317,14 @@ public final class ClientDebugTools {
                     text.append(entry.getText());
                 }
 
-                JsonObject structured = new JsonObject();
-                structured.addProperty("returned", returned);
-                structured.addProperty("buffered", ClientChatRecorder.size());
-
-                return ToolResult.text(text.length() == 0 ? "(no chat messages match)" : text.toString())
-                    .withStructured(structured);
+                // The counts go in a header line, not in structured content. They used to be
+                // {returned, buffered} alongside the text, and a client that reads
+                // structuredContent as the whole answer — which it is entitled to — showed
+                // "returned: 6" and none of the six. See ToolResult.withStructured.
+                String header = "# " + returned + " of " + ClientChatRecorder.size() + " buffered "
+                    + "line(s)\n";
+                return ToolResult.text(header
+                    + (text.length() == 0 ? "(no chat messages match)" : text.toString()));
             })
             .build());
     }

@@ -718,44 +718,16 @@ impl Router {
             }
         }
 
-        let mut content = Vec::new();
-        let mut structured = Map::new();
-        let mut any_error = false;
-
-        for (info, outcome) in results {
-            match outcome {
-                Ok(result) => {
-                    if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
-                        any_error = true;
-                    }
-                    if let Some(items) = result.get("content").and_then(Value::as_array) {
-                        content.push(json!({
-                            "type": "text",
-                            "text": format!("[{} · {}]", info.label, info.id),
-                        }));
-                        content.extend(items.iter().cloned());
-                    }
-                    structured.insert(
-                        info.id.clone(),
-                        result.get("structuredContent").cloned().unwrap_or(Value::Null),
-                    );
-                }
-                Err(error) => {
-                    any_error = true;
-                    content.push(json!({
-                        "type": "text",
-                        "text": format!("[{} · {}] did not answer: {error}", info.label, info.id),
-                    }));
-                    structured.insert(info.id.clone(), json!({ "error": error.to_string() }));
-                }
-            }
-        }
-
-        json!({
-            "content": content,
-            "structuredContent": { "byInstance": Value::Object(structured) },
-            "isError": any_error,
-        })
+        combine_fan_out(
+            results
+                .into_iter()
+                .map(|(info, outcome)| FanOutAnswer {
+                    label: info.label,
+                    id: info.id,
+                    outcome: outcome.map_err(|error| error.to_string()),
+                })
+                .collect(),
+        )
     }
 
     /// Turns a policy decision into either nothing (proceed) or a tool error.
@@ -1670,6 +1642,77 @@ pub fn annotate_result(result: &mut Value, instance_id: &str, label: &str, decla
     }
 }
 
+/// One instance's answer to a fanned-out call, or why it has none.
+pub struct FanOutAnswer {
+    pub label: String,
+    pub id: String,
+    pub outcome: std::result::Result<Value, String>,
+}
+
+/// Merges the answers to an `instance: "*"` call into one result.
+///
+/// The text blocks are every instance's own, each under a banner naming it. `structuredContent` is
+/// `{"byInstance": {...}}` — **but only when that is the whole answer.** A client may read
+/// `structuredContent` in place of the text, and some do, so a `byInstance` holding less than the
+/// text does is how an answer goes missing: a log read or a chat read is text alone, and fanned out
+/// it used to come back as `{"byInstance": {"alpha": null}}` with the lines thrown away.
+///
+/// A refusal is the one text-only answer that can be carried across, as `{"error": ...}`, and it is
+/// worth doing: a client-only tool fanned out over a client and a server is the ordinary case, and
+/// it should not cost the client's structured answer.
+pub fn combine_fan_out(answers: Vec<FanOutAnswer>) -> Value {
+    let mut content = Vec::new();
+    let mut structured = Map::new();
+    let mut any_error = false;
+    let mut all_structured = true;
+
+    for answer in answers {
+        let FanOutAnswer { label, id, outcome } = answer;
+        match outcome {
+            Ok(result) => {
+                let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                any_error |= is_error;
+
+                let items = result.get("content").and_then(Value::as_array);
+                if let Some(items) = items {
+                    content.push(json!({ "type": "text", "text": format!("[{label} · {id}]") }));
+                    content.extend(items.iter().cloned());
+                }
+
+                match result.get("structuredContent") {
+                    Some(value) if !value.is_null() => {
+                        structured.insert(id, value.clone());
+                    }
+                    _ if is_error => {
+                        let message = items
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|item| item.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        structured.insert(id, json!({ "error": message }));
+                    }
+                    _ => all_structured = false,
+                }
+            }
+            Err(error) => {
+                any_error = true;
+                content.push(json!({
+                    "type": "text",
+                    "text": format!("[{label} · {id}] did not answer: {error}"),
+                }));
+                structured.insert(id, json!({ "error": error }));
+            }
+        }
+    }
+
+    let mut combined = json!({ "content": content, "isError": any_error });
+    if all_structured {
+        combined["structuredContent"] = json!({ "byInstance": Value::Object(structured) });
+    }
+    combined
+}
+
 /// The sentence to add when a resource URI did not resolve.
 ///
 /// Behind one confusing case: a URI that was never qualified does not *fail* to parse. Through this
@@ -2137,6 +2180,67 @@ mod tests {
 
         assert_eq!(result["content"][0]["type"], "text");
         assert_eq!(result["content"][1]["type"], "image");
+    }
+
+    fn answer(id: &str, outcome: std::result::Result<Value, String>) -> FanOutAnswer {
+        FanOutAnswer {
+            label: id.to_string(),
+            id: id.to_string(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn a_fanned_out_text_only_answer_is_not_hidden_behind_structured_content() {
+        // game_read_log answers in text alone. A client that reads structuredContent as the whole
+        // answer would otherwise be handed {"byInstance": {"alpha": null}} and no log lines.
+        let combined = combine_fan_out(vec![
+            answer(
+                "alpha",
+                Ok(json!({ "content": [{"type": "text", "text": "a log line"}] })),
+            ),
+            answer(
+                "beta",
+                Ok(json!({
+                    "content": [{"type": "text", "text": "{\"x\":1}"}],
+                    "structuredContent": {"x": 1},
+                })),
+            ),
+        ]);
+
+        assert!(combined.get("structuredContent").is_none());
+        let text = serde_json::to_string(&combined["content"]).unwrap();
+        assert!(text.contains("a log line") && text.contains("[alpha · alpha]"));
+        assert_eq!(combined["isError"], false);
+    }
+
+    #[test]
+    fn a_fan_out_keeps_by_instance_when_one_side_only_refuses() {
+        // A client-only tool over a client and a server: the refusal has no structured content of
+        // its own, and that must not cost the client's.
+        let combined = combine_fan_out(vec![
+            answer(
+                "client",
+                Ok(json!({
+                    "content": [{"type": "text", "text": "{\"x\":1}"}],
+                    "structuredContent": {"x": 1},
+                })),
+            ),
+            answer(
+                "server",
+                Ok(json!({
+                    "content": [{"type": "text", "text": "only available on the client"}],
+                    "isError": true,
+                })),
+            ),
+            answer("gone", Err("the link closed".to_string())),
+        ]);
+
+        let by_instance = &combined["structuredContent"]["byInstance"];
+        assert_eq!(by_instance["client"]["x"], 1);
+        assert_eq!(by_instance["server"]["error"], "only available on the client");
+        assert_eq!(by_instance["gone"]["error"], "the link closed");
+        assert_eq!(combined["isError"], true);
     }
 
     #[test]

@@ -89,9 +89,10 @@ order is registration order, inside a world it is the saved id mapping.
 Reads the tail of a log file, seeking backwards from the end. A filtered read scans up to 200,000
 lines back; an unfiltered one stops as soon as it has enough.
 
-Returns the lines as text. The structured form alongside carries `file`, `returnedLines` and the
-`filter` — metadata about the read, not the lines again. Repeating them there doubled the cost of
-every log read to say nothing new.
+Returns text only: a header line — `# <path> — N lines matching "<filter>"` — and then the lines.
+There is deliberately no structured form. A client may show `structuredContent` in place of the text
+when both are present, so a structured payload carrying only the counts hid the lines themselves, and
+one carrying the lines as well doubled the cost of every log read.
 
 ## Server endpoint
 
@@ -585,9 +586,10 @@ The rolling 300-line buffer of received chat: command output, other players, dea
 anything mods print to chat. This is how you see the result of `client_send_chat`.
 
 Each line reads `[HH:MM:SS] message`. Anything that is not ordinary player chat is tagged after the
-time — `(SYSTEM)` for command output and server messages, `(GAME_INFO)` for the action bar. The
-structured payload carries `returned` and `buffered` only; the messages themselves are in the text
-once rather than in both places.
+time — `(SYSTEM)` for command output and server messages, `(GAME_INFO)` for the action bar.
+
+Returns text only, opening with `# N of M buffered line(s)`. There is no structured form, for the
+reason given under [`game_read_log`](#game_read_log).
 
 #### `client_runtime_info`
 

@@ -97,6 +97,20 @@ public final class ToolResult {
         return this;
     }
 
+    /**
+     * Attaches structured data to a result whose text was written by hand.
+     *
+     * <p><b>{@code data} must be the whole answer on its own.</b> The text beside it may be a
+     * one-line summary of it, never the other way round. The spec has servers repeat structured
+     * content as text for clients that predate it, so a client that finds {@code structuredContent}
+     * is entitled to show that and drop the text blocks — and some do. {@code game_read_log} and
+     * {@code client_read_chat} once put their lines in the text and only the counts here, to avoid
+     * sending the lines twice; through such a client they answered {@code "returned": 6} and none of
+     * the six.
+     *
+     * <p>A result whose payload is prose — a log excerpt, chat — should be {@link #text} alone, with
+     * any metadata as a header line.
+     */
     public ToolResult withStructured(JsonObject data) {
         this.structuredContent = data;
         return this;

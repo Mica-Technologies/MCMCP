@@ -50,6 +50,18 @@ class ToolResultTest {
     }
 
     @Test
+    void a_result_whose_payload_is_text_offers_a_client_nothing_to_read_instead_of_it() {
+        // A client may show structuredContent in place of the text blocks when both are present.
+        // game_read_log and client_read_chat once sent their lines as text and only the counts as
+        // structured content, and through such a client answered "returned: 6" and none of the six.
+        // They are text alone now, and this is what makes that safe.
+        JsonObject result = ToolResult.text("# latest.log — 1 line\n[12:00:00] a line").toJson(LATEST);
+
+        assertFalse(result.has("structuredContent"));
+        assertTrue(textOf(result).contains("[12:00:00] a line"));
+    }
+
+    @Test
     void a_tool_that_ran_and_failed_is_a_successful_response_carrying_an_error_flag() {
         // A JSON-RPC error is eaten by the client's plumbing and frequently never reaches the model,
         // which then retries the identical call forever.
