@@ -36,9 +36,11 @@ import net.minecraft.entity.EntityList;
 import net.minecraft.profiler.Profiler;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.tileentity.TileEntity;
+import net.minecraft.util.ITickable;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
+import net.minecraft.world.WorldServer;
 import net.minecraftforge.server.timings.ForgeTimings;
 import net.minecraftforge.server.timings.TimeTracker;
 
@@ -82,6 +84,7 @@ public final class PerformanceTools {
         registerTickStats();
         registerProfileTicking();
         registerProfileSections();
+        registerCensus();
     }
 
     /** Sleeps on the calling worker in slices, so a cancelled request stops within a tenth of a second. */
@@ -397,12 +400,12 @@ public final class PerformanceTools {
             .description("Report TPS and tick duration (MSPT) over the last 5 seconds, 1 minute and 5 "
                 + "minutes: mean, median, p95, p99 and max. A tick has a 50 ms budget. A high mean is "
                 + "steady load; a low median with a high max is a hitch, and the mean in "
-                + "server_world_info hides that. Measure before and after a change to see its cost.")
+                + "server_world_info hides that. Measure before and after a change to see its cost. "
+                + "'dimensions' splits the last 100 ticks by dimension.")
             .schema(JsonSchema.noArguments())
             .serverOnly()
             .readOnly()
             .closedWorld()
-            .offGameThread()
             .handler(context -> {
                 long now = System.nanoTime();
                 JsonObject json = new JsonObject();
@@ -419,9 +422,39 @@ public final class PerformanceTools {
                     }
                     previousSamples = samples;
                 }
+                json.add("dimensions", context.onGameThread(new Callable<JsonArray>() {
+                    @Override
+                    public JsonArray call() {
+                        return dimensionTickTimes(requireServer());
+                    }
+                }));
                 return ToolResult.structured(json);
             })
             .build());
+    }
+
+    /**
+     * Mean and worst tick per dimension, from the table behind {@code /forge tps}. Game thread only.
+     *
+     * <p>A hundred ticks and no more — it is Forge's ring, not ours — but it is the only thing that
+     * says which dimension a slow tick belongs to without running a profile.
+     */
+    private static JsonArray dimensionTickTimes(MinecraftServer server) {
+        JsonArray dimensions = new JsonArray();
+        for (Map.Entry<Integer, long[]> entry : server.worldTickTimes.entrySet()) {
+            long total = 0L;
+            long max = 0L;
+            for (long sample : entry.getValue()) {
+                total += sample;
+                max = Math.max(max, sample);
+            }
+            JsonObject json = new JsonObject();
+            json.addProperty("dim", entry.getKey());
+            json.addProperty("meanMs", DurationWindow.millis(total / (double) Math.max(1, entry.getValue().length)));
+            json.addProperty("maxMs", DurationWindow.millis(max));
+            dimensions.add(json);
+        }
+        return dimensions;
     }
 
     private static JsonObject tickWindow(long nowNanos, long seconds) {
@@ -695,6 +728,178 @@ public final class PerformanceTools {
             row.addProperty("totalMicros", DurationWindow.micros(sums[0]));
             row.addProperty("tileEntities", (int) sums[1]);
             row.addProperty("entities", (int) sums[2]);
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    // ------------------------------------------------------------------
+    // Census
+    // ------------------------------------------------------------------
+
+    /**
+     * What there is, as opposed to what is slow.
+     *
+     * <p>The ticking profile ranks objects by what each costs, and the commonest cause of a slow tick
+     * is not on that list: nothing is expensive, there are simply four thousand of it. This counts.
+     */
+    private static void registerCensus() {
+        McpRegistry.registerTool(McpTool.named("server_census")
+            .title("Count entities and tile entities")
+            .description("Count what is loaded, per dimension: entities by type, tile entities by "
+                + "block (and how many of them tick), and the most crowded chunks with what fills "
+                + "them. Use it when the tick is slow but server_profile_ticking shows nothing "
+                + "individually expensive — the cause is then usually quantity — and to check that "
+                + "a farm or a test build has not leaked entities.")
+            .schema(JsonSchema.object()
+                .integer("top", "Rows per list. Default 10.", 1, 50)
+                .integer("dimension", "Only this dimension id. Default: all loaded.")
+                .build())
+            .serverOnly()
+            .readOnly()
+            .closedWorld()
+            .handler(context -> {
+                final int top = context.getBoundedInt("top", 10, 1, 50);
+                final Integer dimension = context.has("dimension") ? context.getInt("dimension", 0) : null;
+                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() {
+                        JsonArray dimensions = new JsonArray();
+                        for (WorldServer world : requireServer().worlds) {
+                            if (world != null
+                                && (dimension == null || dimension == world.provider.getDimension())) {
+                                dimensions.add(census(world, top));
+                            }
+                        }
+                        JsonObject json = new JsonObject();
+                        json.add("dimensions", dimensions);
+                        return json;
+                    }
+                });
+                return ToolResult.structured(result);
+            })
+            .build());
+    }
+
+    /** Counts per chunk: how many of each kind, and how many of each type, to name what fills it. */
+    private static final class ChunkCount {
+        int entities;
+        int tileEntities;
+        final Map<String, int[]> types = new HashMap<String, int[]>();
+    }
+
+    /** Game thread only. */
+    private static JsonObject census(WorldServer world, int top) {
+        Map<String, int[]> entityTypes = new HashMap<String, int[]>();
+        // block -> {count, ticking}
+        Map<String, int[]> tileEntityTypes = new HashMap<String, int[]>();
+        final Map<Long, ChunkCount> chunks = new HashMap<Long, ChunkCount>();
+        int ticking = 0;
+
+        for (Entity entity : world.loadedEntityList) {
+            ResourceLocation key = EntityList.getKey(entity);
+            String type = key == null ? entity.getName() : key.toString();
+            bump(entityTypes, type, 0, 2);
+            ChunkCount chunk = chunkCount(chunks, GameJson.blockPosOf(entity));
+            chunk.entities++;
+            bump(chunk.types, type, 0, 1);
+        }
+        for (TileEntity tileEntity : world.loadedTileEntityList) {
+            ResourceLocation block = tileEntity.getBlockType() == null ? null
+                : tileEntity.getBlockType().getRegistryName();
+            String type = block == null ? tileEntity.getClass().getSimpleName() : block.toString();
+            bump(tileEntityTypes, type, 0, 2);
+            if (tileEntity instanceof ITickable) {
+                bump(tileEntityTypes, type, 1, 2);
+                ticking++;
+            }
+            ChunkCount chunk = chunkCount(chunks, tileEntity.getPos());
+            chunk.tileEntities++;
+            bump(chunk.types, type, 0, 1);
+        }
+
+        JsonObject entities = new JsonObject();
+        entities.addProperty("total", world.loadedEntityList.size());
+        entities.add("byType", topCounts(entityTypes, top, "entity", false));
+
+        JsonObject tileEntities = new JsonObject();
+        tileEntities.addProperty("total", world.loadedTileEntityList.size());
+        tileEntities.addProperty("ticking", ticking);
+        tileEntities.add("byType", topCounts(tileEntityTypes, top, "block", true));
+
+        List<Long> crowded = new ArrayList<Long>(chunks.keySet());
+        Collections.sort(crowded, new Comparator<Long>() {
+            @Override
+            public int compare(Long a, Long b) {
+                ChunkCount left = chunks.get(a);
+                ChunkCount right = chunks.get(b);
+                return Integer.compare(right.entities + right.tileEntities, left.entities + left.tileEntities);
+            }
+        });
+        JsonArray crowdedRows = new JsonArray();
+        for (int i = 0; i < crowded.size() && i < top; i++) {
+            long packed = crowded.get(i);
+            ChunkCount chunk = chunks.get(packed);
+            String commonest = null;
+            int commonestCount = 0;
+            for (Map.Entry<String, int[]> type : chunk.types.entrySet()) {
+                if (type.getValue()[0] > commonestCount) {
+                    commonest = type.getKey();
+                    commonestCount = type.getValue()[0];
+                }
+            }
+            JsonObject row = new JsonObject();
+            row.addProperty("chunkX", (int) (packed >> 32));
+            row.addProperty("chunkZ", (int) packed);
+            row.addProperty("entities", chunk.entities);
+            row.addProperty("tileEntities", chunk.tileEntities);
+            row.addProperty("mostly", commonest + " x" + commonestCount);
+            crowdedRows.add(row);
+        }
+
+        JsonObject json = new JsonObject();
+        json.addProperty("dim", world.provider.getDimension());
+        json.addProperty("loadedChunks", world.getChunkProvider().getLoadedChunkCount());
+        json.add("entities", entities);
+        json.add("tileEntities", tileEntities);
+        json.add("crowdedChunks", crowdedRows);
+        return json;
+    }
+
+    private static void bump(Map<String, int[]> counts, String key, int slot, int slots) {
+        int[] counter = counts.get(key);
+        if (counter == null) {
+            counts.put(key, counter = new int[slots]);
+        }
+        counter[slot]++;
+    }
+
+    private static ChunkCount chunkCount(Map<Long, ChunkCount> chunks, BlockPos pos) {
+        long packed = ((long) (pos.getX() >> 4) << 32) | ((pos.getZ() >> 4) & 0xFFFFFFFFL);
+        ChunkCount chunk = chunks.get(packed);
+        if (chunk == null) {
+            chunks.put(packed, chunk = new ChunkCount());
+        }
+        return chunk;
+    }
+
+    private static JsonArray topCounts(final Map<String, int[]> counts, int top, String label, boolean ticking) {
+        List<String> keys = new ArrayList<String>(counts.keySet());
+        Collections.sort(keys, new Comparator<String>() {
+            @Override
+            public int compare(String a, String b) {
+                int byCount = Integer.compare(counts.get(b)[0], counts.get(a)[0]);
+                return byCount != 0 ? byCount : a.compareTo(b);
+            }
+        });
+        JsonArray rows = new JsonArray();
+        for (int i = 0; i < keys.size() && i < top; i++) {
+            JsonObject row = new JsonObject();
+            row.addProperty(label, keys.get(i));
+            row.addProperty("count", counts.get(keys.get(i))[0]);
+            if (ticking) {
+                row.addProperty("ticking", counts.get(keys.get(i))[1]);
+            }
             rows.add(row);
         }
         return rows;

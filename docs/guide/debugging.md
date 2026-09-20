@@ -180,8 +180,9 @@ garbage-heavy code shows up before it becomes a GC pause.
 | Symptom | Tool | Names |
 | --- | --- | --- |
 | Slow tick | `server_profile_ticking` | the tile entity or entity, with its position |
+| Slow tick, nothing individually expensive | `server_census` | what there is too much of, and in which chunk |
 | Slow tick, no tile entity to blame | `server_profile_sections` | the phase — scheduled ticks, random ticks, spawning |
-| Slow frame | `client_profile_rendering` | the block whose TESR is expensive, with its position |
+| Slow frame | `client_profile_rendering` | the block (TESR) or entity whose renderer is expensive, with its position |
 | Slow frame, no TESR to blame | `client_profile_sections` | the phase — `terrain`, `updatechunks`, `entities` |
 | Any of the above, and now *why* | `game_cpu_sample` | the method, and the mod package it belongs to |
 | Hitches at intervals | `game_health` | garbage collection |

@@ -1,6 +1,6 @@
 # Tools
 
-59 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+60 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -275,11 +275,14 @@ read hooks Forge and vanilla already have.
 
 TPS and tick duration over the last 5 seconds, 1 minute and 5 minutes: mean, min, median, p95, p99
 and max in milliseconds, plus `ticksOver50Ms`. A window is omitted when the server has not been up
-long enough for it to differ from the one before it.
+long enough for it to differ from the one before it. `dimensions` splits the last 100 ticks by
+dimension — mean and worst — which is the only thing that says *which world* a slow tick belongs to
+without running a profile.
 
 ```json
 {"last5s": {"samples": 100, "meanMs": 5.4, "minMs": 3.98, "medianMs": 4.9, "p95Ms": 9.1,
-            "p99Ms": 31.6, "maxMs": 74.4, "tps": 20.0, "ticksOver50Ms": 1}}
+            "p99Ms": 31.6, "maxMs": 74.4, "tps": 20.0, "ticksOver50Ms": 1},
+ "dimensions": [{"dim": 0, "meanMs": 4.9, "maxMs": 71.2}, {"dim": -1, "meanMs": 0.3, "maxMs": 1.1}]}
 ```
 
 `server_world_info` reports only a mean over 100 ticks, which cannot tell a server that is uniformly
@@ -327,6 +330,31 @@ for less than five seconds.
     this report does not add up to it, [`server_profile_sections`](#server_profile_sections) shows
     which phase holds the rest, and [`game_cpu_sample`](#game_cpu_sample) finds it by method.
     Players are not tracked, and a passenger's cost is charged to its vehicle.
+
+#### `server_census`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `top` | integer 1–50 | Default 10. Rows per list. |
+| `dimension` | integer | Only this dimension. Default: all loaded. |
+
+Counts what is loaded, per dimension: entities by type, tile entities by block with how many of them
+tick, and the most crowded chunks with what fills them.
+
+```json
+{"dimensions": [{"dim": 0, "loadedChunks": 625,
+  "entities": {"total": 334, "byType": [{"entity": "minecraft:sheep", "count": 148}]},
+  "tileEntities": {"total": 74, "ticking": 67,
+                   "byType": [{"block": "minecraft:hopper", "count": 36, "ticking": 36}]},
+  "crowdedChunks": [{"chunkX": -13, "chunkZ": 12, "entities": 4, "tileEntities": 35,
+                     "mostly": "minecraft:hopper x35"}]}]}
+```
+
+[`server_profile_ticking`](#server_profile_ticking) ranks objects by what each one costs, and the
+commonest cause of a slow tick is not on that list: nothing is expensive, there are simply four
+thousand of it. This is also the quick check that a farm or a test build has not leaked entities.
 
 #### `server_profile_sections`
 
@@ -864,20 +892,36 @@ screenshot taken meanwhile, and drawing F3 inflates the `gui` section.
 | `top` | integer 1–50 | Default 15. Rows per list. |
 | `gl_finish` | boolean | Default false. Wait for the GPU around each renderer call. |
 
-Times every tile entity renderer call and reports the most expensive blocks in view, with position,
-and totals by block type with the renderer's class. **This is the tool that names the block behind
-a slow frame.** Costs are microseconds per frame; at 60 FPS a whole frame has 16,667.
+Times every tile entity renderer and entity renderer call and reports the most expensive blocks and
+entities in view, with position, and totals by type with the renderer's class. **This is the tool
+that names the block or entity behind a slow frame.** Costs are microseconds per frame; at 60 FPS a
+whole frame has 16,667.
 
-Only blocks that are actually being rendered are measured, so face the scene under test. By default
+```json
+{"tileEntities": {"rendered": 27, "totalMicrosPerFrame": 78.1,
+   "costliest": [{"block": "minecraft:ender_chest", "pos": {"x": -208, "y": 76, "z": 200},
+                  "microsPerFrame": 4.6}],
+   "byType": [{"block": "minecraft:ender_chest",
+               "renderer": "net.minecraft.client.renderer.tileentity.TileEntityEnderChestRenderer",
+               "count": 27, "totalMicrosPerFrame": 78.1, "worstMicrosPerFrame": 4.6}]},
+ "entities": {"rendered": 0, "totalMicrosPerFrame": 0.0, "costliest": [], "byType": []},
+ "frames": 361, "meanRenderWorkMs": 1.5, "glFinish": false}
+```
+
+An entity's time includes its shadow and fire overlay. Players are not covered: their renderers live
+in a separate private map.
+
+Only what is actually being rendered is measured, so face the scene under test. By default
 the times are CPU time submitting draw calls, which understates a renderer whose cost is on the GPU;
 `gl_finish` drains the GPU before and after every call, which is more truthful for heavy geometry
 and lowers FPS while it runs. A `FastTESR`'s time covers filling the shared vertex buffer, not the
 batch's draw.
 
-Works by swapping each registered renderer for a timing wrapper for the length of the profile and
-putting the originals back afterwards. A mod that fetches its own renderer out of the dispatcher's
-map and casts it would fail during that window; that is rare, and is why the wrappers are never left
-in. One client profile runs at a time.
+Works by swapping each registered renderer — in the tile entity dispatcher's map and the render
+manager's — for a timing wrapper for the length of the profile, and putting the originals back
+afterwards. A mod that fetches its own renderer out of either map *per frame* and casts it would
+fail during that window. Vanilla never does, and it is rare in mods (fetching once at startup to add
+a layer is the common pattern, and is unaffected); it is why the wrappers are never left in. One client profile runs at a time.
 
 ### GUI control
 

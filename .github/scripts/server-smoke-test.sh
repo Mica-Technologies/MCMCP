@@ -237,7 +237,8 @@ TOOLS_BODY="$(curl -fsS --max-time 10 \
 
 # Spot-check one tool from each registration path: a common one and a server-only one. If either
 # is missing, registration ran but something filtered it out.
-for expected in '"mcmcp_endpoint_info"' '"game_dump_registries"' '"server_get_blocks"' '"server_stop"'                 '"server_profile_ticking"' '"game_cpu_sample"'; do
+for expected in '"mcmcp_endpoint_info"' '"game_dump_registries"' '"server_get_blocks"' '"server_stop"' \
+                '"server_profile_ticking"' '"server_census"' '"game_cpu_sample"'; do
   case "$TOOLS_BODY" in
     *"$expected"*) echo "    found ${expected}" ;;
     *) mcp_failure "tools/list is missing ${expected}: ${TOOLS_BODY}" ;;
@@ -288,7 +289,14 @@ esac
 # the round trip -- enable, tick, read, reset -- on a real dedicated server, which is also where a
 # client class leaking into PerformanceTools would surface.
 echo "==> tools/call server_profile_ticking"
-PROFILE_BODY="$(curl -fsS --max-time 30   -X POST "http://127.0.0.1:${MCP_PORT}/mcp"   -H "Authorization: Bearer ${TOKEN}"   -H "Mcp-Session-Id: ${SESSION_ID}"   -H 'Content-Type: application/json'   -H 'Accept: application/json'   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"server_profile_ticking","arguments":{"duration_seconds":1,"top":1}}}' 2>&1)"   || mcp_failure "server_profile_ticking request failed: ${PROFILE_BODY}"
+PROFILE_BODY="$(curl -fsS --max-time 30 \
+  -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Mcp-Session-Id: ${SESSION_ID}" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"server_profile_ticking","arguments":{"duration_seconds":1,"top":1}}}' 2>&1)" \
+  || mcp_failure "server_profile_ticking request failed: ${PROFILE_BODY}"
 
 case "$PROFILE_BODY" in
   *'"isError":false'*) echo "    call succeeded" ;;

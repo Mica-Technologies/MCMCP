@@ -23,9 +23,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.renderer.BufferBuilder;
+import net.minecraft.client.renderer.culling.ICamera;
+import net.minecraft.client.renderer.entity.Render;
 import net.minecraft.client.renderer.tileentity.TileEntityRendererDispatcher;
 import net.minecraft.client.renderer.tileentity.TileEntitySpecialRenderer;
 import net.minecraft.client.settings.GameSettings;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityList;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.ResourceLocation;
 import net.minecraftforge.fml.relauncher.Side;
@@ -34,7 +38,7 @@ import org.lwjgl.opengl.GL11;
 
 /**
  * The client's half of {@link PerformanceTools}: what a frame costs, which phase of it, and which
- * block's renderer.
+ * block's or entity's renderer.
  *
  * <h2>What can and cannot be pinned on a block</h2>
  *
@@ -234,26 +238,28 @@ public final class ClientPerformanceTools {
     }
 
     // ------------------------------------------------------------------
-    // Per-block render cost
+    // Per-block and per-entity render cost
     // ------------------------------------------------------------------
 
-    /** Nanoseconds and calls per tile entity for the profile in progress. Client thread only. */
-    private static Map<TileEntity, long[]> renderTimes;
+    /** Nanoseconds and calls per object for the profile in progress. Client thread only. */
+    private static Map<TileEntity, long[]> tileEntityTimes;
+    private static Map<Entity, long[]> entityTimes;
     private static boolean finishGl;
 
     private static void registerProfileRendering() {
         McpRegistry.registerTool(McpTool.named("client_profile_rendering")
-            .title("Profile block renderers")
-            .description("Time every tile entity renderer (TESR) call for a few seconds and report "
-                + "the most expensive blocks in view, with position, plus totals by block type with "
-                + "the renderer class. This is the tool that names the block behind a slow frame. "
-                + "Costs are microseconds per frame; at 60 FPS a whole frame has 16,667.\n\n"
-                + "Only blocks drawn by a TESR and currently being rendered are measured — face "
-                + "the scene under test. Blocks drawn as baked models have no per-block cost to "
-                + "time; see client_profile_sections. Times are CPU time submitting draw calls; "
-                + "set gl_finish to include GPU time, which is more truthful for heavy geometry "
-                + "and lowers FPS while measuring. A FastTESR's time covers filling the shared "
-                + "buffer, not its draw. Blocks for the duration.")
+            .title("Profile block and entity renderers")
+            .description("Time every tile entity renderer (TESR) and entity renderer call for a few "
+                + "seconds and report the most expensive blocks and entities in view, with "
+                + "position, plus totals by type with the renderer class. This is the tool that "
+                + "names the block or entity behind a slow frame. Costs are microseconds per "
+                + "frame; at 60 FPS a whole frame has 16,667.\n\n"
+                + "Only what is currently being rendered is measured — face the scene under test. "
+                + "Blocks drawn as baked models have no per-block cost to time; see "
+                + "client_profile_sections. Players are not covered. Times are CPU time submitting "
+                + "draw calls; set gl_finish to include GPU time, which is more truthful for heavy "
+                + "geometry and lowers FPS while measuring. A FastTESR's time covers filling the "
+                + "shared buffer, not its draw. Blocks for the duration.")
             .schema(JsonSchema.object()
                 .integer("duration_seconds", "How long to measure. Default 5.", 1, 30)
                 .integer("top", "Rows per list. Default 15.", 1, 50)
@@ -285,9 +291,13 @@ public final class ClientPerformanceTools {
                     JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                         @Override
                         public JsonObject call() {
-                            Map<TileEntity, long[]> times = removeTimingRenderers();
+                            Map<TileEntity, long[]> tileEntities = tileEntityTimes;
+                            Map<Entity, long[]> entities = entityTimes;
+                            removeTimingRenderers();
                             long frames = Math.max(1L, ClientFrameClock.frames() - framesBefore);
-                            JsonObject json = buildRenderReport(times, frames, top);
+                            JsonObject json = new JsonObject();
+                            json.add("tileEntities", tileEntityReport(tileEntities, frames, top));
+                            json.add("entities", entityReport(entities, frames, top));
                             json.addProperty("frames", frames);
                             return json;
                         }
@@ -314,12 +324,15 @@ public final class ClientPerformanceTools {
      * Swaps every registered renderer for a timing wrapper around it. Client thread only.
      *
      * <p>For the length of one profile and no longer. While the wrappers are in, a mod that fetches
-     * its own renderer back out of this map and casts it to its own class would fail the cast; that
-     * is rare, and being in the map for seconds rather than for the session is what keeps it rare.
+     * its own renderer back out of either map and casts it to its own class would fail the cast.
+     * Vanilla never does — its only such cast is for players, whose renderers live in a separate
+     * map this leaves alone — and being in the maps for seconds rather than for the session is what
+     * keeps the exposure to mods small.
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static void installTimingRenderers(boolean glFinish) {
-        renderTimes = new IdentityHashMap<TileEntity, long[]>();
+        tileEntityTimes = new IdentityHashMap<TileEntity, long[]>();
+        entityTimes = new IdentityHashMap<Entity, long[]>();
         finishGl = glFinish;
         Map renderers = TileEntityRendererDispatcher.instance.renderers;
         for (Object object : renderers.entrySet()) {
@@ -328,18 +341,24 @@ public final class ClientPerformanceTools {
                 entry.setValue(new TimingRenderer((TileEntitySpecialRenderer) entry.getValue()));
             }
         }
+        Map entityRenderers = Minecraft.getMinecraft().getRenderManager().entityRenderMap;
+        for (Object object : entityRenderers.entrySet()) {
+            Map.Entry entry = (Map.Entry) object;
+            if (entry.getValue() != null && !(entry.getValue() instanceof TimingEntityRenderer)) {
+                entry.setValue(new TimingEntityRenderer((Render) entry.getValue()));
+            }
+        }
     }
 
     /**
-     * Puts the real renderers back and hands over what was measured. Client thread only, and safe to
-     * call when nothing is installed.
+     * Puts the real renderers back. Client thread only, and safe to call when nothing is installed.
      *
-     * <p>Walks the map rather than a list saved at install time: the dispatcher caches a renderer it
-     * found through a superclass under the subclass's key, so the map can have gained entries —
+     * <p>Walks the maps rather than a list saved at install time: both dispatchers cache a renderer
+     * they found through a superclass under the subclass's key, so a map can have gained entries —
      * holding a wrapper — since then.
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private static Map<TileEntity, long[]> removeTimingRenderers() {
+    private static void removeTimingRenderers() {
         Map renderers = TileEntityRendererDispatcher.instance.renderers;
         for (Object object : renderers.entrySet()) {
             Map.Entry entry = (Map.Entry) object;
@@ -347,73 +366,121 @@ public final class ClientPerformanceTools {
                 entry.setValue(((TimingRenderer) entry.getValue()).delegate);
             }
         }
-        Map<TileEntity, long[]> times = renderTimes;
-        renderTimes = null;
-        return times == null ? new IdentityHashMap<TileEntity, long[]>() : times;
+        Map entityRenderers = Minecraft.getMinecraft().getRenderManager().entityRenderMap;
+        for (Object object : entityRenderers.entrySet()) {
+            Map.Entry entry = (Map.Entry) object;
+            if (entry.getValue() instanceof TimingEntityRenderer) {
+                entry.setValue(((TimingEntityRenderer) entry.getValue()).delegate);
+            }
+        }
+        tileEntityTimes = null;
+        entityTimes = null;
     }
 
-    private static void recordRender(TileEntity tileEntity, long nanos) {
-        Map<TileEntity, long[]> times = renderTimes;
-        if (times == null || tileEntity == null) {
+    private static <T> void record(Map<T, long[]> times, T object, long nanos) {
+        if (times == null || object == null) {
             return;
         }
-        long[] entry = times.get(tileEntity);
+        long[] entry = times.get(object);
         if (entry == null) {
-            times.put(tileEntity, entry = new long[2]);
+            times.put(object, entry = new long[2]);
         }
         entry[0] += nanos;
         entry[1]++;
     }
 
-    /** Client thread only. */
-    private static JsonObject buildRenderReport(Map<TileEntity, long[]> times, long frames, int top) {
-        final class Row {
-            String block;
-            String renderer;
-            TileEntity tileEntity;
-            double nanosPerFrame;
+    private static long startTiming() {
+        if (finishGl) {
+            // Drain what is already queued, so it is not billed to this object.
+            GL11.glFinish();
         }
+        return System.nanoTime();
+    }
 
-        List<Row> rows = new ArrayList<Row>();
+    private static long stopTiming(long started) {
+        if (finishGl) {
+            GL11.glFinish();
+        }
+        return System.nanoTime() - started;
+    }
+
+    /** One rendered object, reduced to what the report prints. */
+    private static final class Rendered {
+        String type;
+        String renderer;
+        JsonObject pos;
+        double nanosPerFrame;
+    }
+
+    /** Client thread only, after the wrappers are out — so renderer lookups name the real class. */
+    private static JsonObject tileEntityReport(Map<TileEntity, long[]> times, long frames, int top) {
+        List<Rendered> rows = new ArrayList<Rendered>();
+        if (times != null) {
+            for (Map.Entry<TileEntity, long[]> entry : times.entrySet()) {
+                TileEntity tileEntity = entry.getKey();
+                Rendered row = new Rendered();
+                row.nanosPerFrame = entry.getValue()[0] / (double) frames;
+                ResourceLocation block = tileEntity.getBlockType() == null ? null
+                    : tileEntity.getBlockType().getRegistryName();
+                row.type = block == null ? tileEntity.getClass().getSimpleName() : block.toString();
+                TileEntitySpecialRenderer<?> renderer =
+                    TileEntityRendererDispatcher.instance.getRenderer(tileEntity);
+                row.renderer = renderer == null ? null : renderer.getClass().getName();
+                row.pos = GameJson.blockPos(tileEntity.getPos());
+                rows.add(row);
+            }
+        }
+        return renderedSection(rows, top, "block");
+    }
+
+    /** Client thread only, after the wrappers are out. */
+    private static JsonObject entityReport(Map<Entity, long[]> times, long frames, int top) {
+        List<Rendered> rows = new ArrayList<Rendered>();
+        if (times != null) {
+            for (Map.Entry<Entity, long[]> entry : times.entrySet()) {
+                Entity entity = entry.getKey();
+                Rendered row = new Rendered();
+                row.nanosPerFrame = entry.getValue()[0] / (double) frames;
+                ResourceLocation key = EntityList.getKey(entity);
+                row.type = key == null ? entity.getName() : key.toString();
+                Render<?> renderer = Minecraft.getMinecraft().getRenderManager().getEntityRenderObject(entity);
+                row.renderer = renderer == null ? null : renderer.getClass().getName();
+                row.pos = GameJson.blockPos(GameJson.blockPosOf(entity));
+                rows.add(row);
+            }
+        }
+        return renderedSection(rows, top, "entity");
+    }
+
+    private static JsonObject renderedSection(List<Rendered> rows, int top, String typeLabel) {
+        Collections.sort(rows, new Comparator<Rendered>() {
+            @Override
+            public int compare(Rendered a, Rendered b) {
+                return Double.compare(b.nanosPerFrame, a.nanosPerFrame);
+            }
+        });
+
         double totalNanos = 0.0D;
-        // block -> {count, summed ns/frame, worst ns/frame}
+        // type -> {count, summed ns/frame, worst ns/frame}
         final Map<String, double[]> byType = new HashMap<String, double[]>();
         Map<String, String> rendererOfType = new HashMap<String, String>();
-        for (Map.Entry<TileEntity, long[]> entry : times.entrySet()) {
-            Row row = new Row();
-            row.tileEntity = entry.getKey();
-            row.nanosPerFrame = entry.getValue()[0] / (double) frames;
-            ResourceLocation block = row.tileEntity.getBlockType() == null ? null
-                : row.tileEntity.getBlockType().getRegistryName();
-            row.block = block == null ? row.tileEntity.getClass().getSimpleName() : block.toString();
-            // After the wrappers are out, so this names the mod's renderer and not the wrapper.
-            TileEntitySpecialRenderer<?> renderer =
-                TileEntityRendererDispatcher.instance.getRenderer(row.tileEntity);
-            row.renderer = renderer == null ? null : renderer.getClass().getName();
-            rows.add(row);
-
+        for (Rendered row : rows) {
             totalNanos += row.nanosPerFrame;
-            double[] sums = byType.get(row.block);
+            double[] sums = byType.get(row.type);
             if (sums == null) {
-                byType.put(row.block, sums = new double[3]);
-                rendererOfType.put(row.block, row.renderer);
+                byType.put(row.type, sums = new double[3]);
+                rendererOfType.put(row.type, row.renderer);
             }
             sums[0]++;
             sums[1] += row.nanosPerFrame;
             sums[2] = Math.max(sums[2], row.nanosPerFrame);
         }
 
-        Collections.sort(rows, new Comparator<Row>() {
-            @Override
-            public int compare(Row a, Row b) {
-                return Double.compare(b.nanosPerFrame, a.nanosPerFrame);
-            }
-        });
         JsonArray costliest = new JsonArray();
         for (int i = 0; i < rows.size() && i < top; i++) {
             JsonObject json = new JsonObject();
-            json.addProperty("block", rows.get(i).block);
-            json.add("pos", GameJson.blockPos(rows.get(i).tileEntity.getPos()));
+            json.addProperty(typeLabel, rows.get(i).type);
+            json.add("pos", rows.get(i).pos);
             json.addProperty("microsPerFrame", DurationWindow.micros(rows.get(i).nanosPerFrame));
             costliest.add(json);
         }
@@ -429,7 +496,7 @@ public final class ClientPerformanceTools {
         for (int i = 0; i < types.size() && i < top; i++) {
             double[] sums = byType.get(types.get(i));
             JsonObject json = new JsonObject();
-            json.addProperty("block", types.get(i));
+            json.addProperty(typeLabel, types.get(i));
             json.addProperty("renderer", rendererOfType.get(types.get(i)));
             json.addProperty("count", (int) sums[0]);
             json.addProperty("totalMicrosPerFrame", DurationWindow.micros(sums[1]));
@@ -446,7 +513,7 @@ public final class ClientPerformanceTools {
     }
 
     /**
-     * Times a renderer and otherwise stays out of its way.
+     * Times a tile entity renderer and otherwise stays out of its way.
      *
      * <p>Every public method is forwarded. The protected helpers ({@code bindTexture},
      * {@code getWorld}) are not, and do not need to be: they are only ever called by a renderer on
@@ -463,39 +530,24 @@ public final class ClientPerformanceTools {
         @Override
         public void render(TileEntity te, double x, double y, double z, float partialTicks, int destroyStage,
                            float alpha) {
-            long started = start();
+            long started = startTiming();
             try {
                 delegate.render(te, x, y, z, partialTicks, destroyStage, alpha);
             } finally {
-                finish(te, started);
+                record(tileEntityTimes, te, stopTiming(started));
             }
         }
 
         @Override
         public void renderTileEntityFast(TileEntity te, double x, double y, double z, float partialTicks,
                                          int destroyStage, float partial, BufferBuilder buffer) {
+            // No glFinish: nothing has been drawn. A fast renderer only appends vertices.
             long started = System.nanoTime();
             try {
                 delegate.renderTileEntityFast(te, x, y, z, partialTicks, destroyStage, partial, buffer);
             } finally {
-                // No glFinish: nothing has been drawn. A fast renderer only appends vertices.
-                recordRender(te, System.nanoTime() - started);
+                record(tileEntityTimes, te, System.nanoTime() - started);
             }
-        }
-
-        private static long start() {
-            if (finishGl) {
-                // Drain what is already queued, so it is not billed to this block.
-                GL11.glFinish();
-            }
-            return System.nanoTime();
-        }
-
-        private static void finish(TileEntity te, long started) {
-            if (finishGl) {
-                GL11.glFinish();
-            }
-            recordRender(te, System.nanoTime() - started);
         }
 
         @Override
@@ -511,6 +563,82 @@ public final class ClientPerformanceTools {
         @Override
         public FontRenderer getFontRenderer() {
             return delegate.getFontRenderer();
+        }
+    }
+
+    /**
+     * The entity twin of {@link TimingRenderer}.
+     *
+     * <p>{@code RenderManager} reaches a renderer through exactly the public methods forwarded here.
+     * {@code getEntityTexture} is abstract and so has to exist, but nothing can call it: it is
+     * protected, and only a renderer's own {@code doRender} ever asks — which here is the delegate's,
+     * asking itself.
+     */
+    private static final class TimingEntityRenderer extends Render<Entity> {
+
+        final Render<Entity> delegate;
+
+        TimingEntityRenderer(Render<Entity> delegate) {
+            super(delegate.getRenderManager());
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void doRender(Entity entity, double x, double y, double z, float entityYaw, float partialTicks) {
+            long started = startTiming();
+            try {
+                delegate.doRender(entity, x, y, z, entityYaw, partialTicks);
+            } finally {
+                record(entityTimes, entity, stopTiming(started));
+            }
+        }
+
+        @Override
+        public void renderMultipass(Entity entity, double x, double y, double z, float entityYaw,
+                                    float partialTicks) {
+            long started = startTiming();
+            try {
+                delegate.renderMultipass(entity, x, y, z, entityYaw, partialTicks);
+            } finally {
+                record(entityTimes, entity, stopTiming(started));
+            }
+        }
+
+        @Override
+        public void doRenderShadowAndFire(Entity entity, double x, double y, double z, float yaw,
+                                          float partialTicks) {
+            // Part of what the entity costs to draw, and on a field of mobs not a small part.
+            long started = startTiming();
+            try {
+                delegate.doRenderShadowAndFire(entity, x, y, z, yaw, partialTicks);
+            } finally {
+                record(entityTimes, entity, stopTiming(started));
+            }
+        }
+
+        @Override
+        public boolean shouldRender(Entity entity, ICamera camera, double camX, double camY, double camZ) {
+            return delegate.shouldRender(entity, camera, camX, camY, camZ);
+        }
+
+        @Override
+        public boolean isMultipass() {
+            return delegate.isMultipass();
+        }
+
+        @Override
+        public void setRenderOutlines(boolean renderOutlines) {
+            delegate.setRenderOutlines(renderOutlines);
+        }
+
+        @Override
+        public void bindTexture(ResourceLocation location) {
+            delegate.bindTexture(location);
+        }
+
+        @Override
+        protected ResourceLocation getEntityTexture(Entity entity) {
+            return null;
         }
     }
 }
