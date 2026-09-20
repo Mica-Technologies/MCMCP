@@ -63,12 +63,17 @@ python -m pip install -r docs/requirements.txt && mkdocs serve   # wiki preview
 
 Full detail in `docs/dev/architecture.md`. The parts that are not obvious from the file listing:
 
-### Two package boundaries are load-bearing
+### Three package boundaries are load-bearing
 
 **`protocol/` imports no Minecraft class.** That is what makes the wire format unit-testable without a
 running game. `McpDispatcher` takes a session and a parsed `JsonObject` and returns a `JsonObject` or
 null; it knows nothing about HTTP, headers or sockets. Keep it that way — it is also what would let a
 second transport be added without touching the protocol.
+
+**`perf/` imports no Minecraft class either**, for the same reason: the profiling arithmetic
+(percentiles, the call tree, the slow-tick filter, the heap histogram parser) is what can be wrong
+without anything failing. `perf/TickClock` is how the sampler in common code reads the client's frame
+clock without naming a client class.
 
 **`client/` is client-only, in full.** Everything in it references `Minecraft`. A dedicated server
 that class-loads any of it dies at startup with Forge's "for invalid side SERVER". **Nothing in
@@ -184,6 +189,16 @@ frequently model-generated and arrive with the wrong primitive type.
 - Synthetic input goes through `KeyBinding.setKeyBindState` + `KeyBinding.onTick`. Both are needed:
   `setKeyBindState` drives `isKeyDown()` for movement, `onTick` drives `isPressed()` for click-style
   bindings.
+- **Never set `Profiler.profilingEnabled = true` yourself.** `endSection` is a no-op while it is
+  false, so enabling it with sections open makes the next `endSection` pop an empty list and throw on
+  the game thread — and every point a mod can run is inside an open section. Server:
+  `MinecraftServer.enableProfiling()`, honoured at the top of the next tick. Client: force
+  `gameSettings.showDebugInfo` + `showDebugProfilerChart`; `runGameLoop` rewrites the flag from them
+  every frame at section depth 0, so nothing else holds. Setting it to `false` mid-tick is safe.
+- **Forge's `TimeTracker` is static and hooked in base `World`**, so the client world feeds it too in
+  singleplayer — filter on `!world.isRemote`. `ForgeTimings.getAverageTimings()` divides by a fixed
+  99 regardless of how many slots were written; average `getRawTimingData()`'s non-zero slots.
+- **`Minecraft.profiler`, not `mcProfiler`**, in this mapping.
 - Game directory comes from `Loader.instance().getConfigDir().getParentFile()` — stable on both sides,
   unlike the client-only `Minecraft.gameDir`.
 - **`EntityPlayerSP.sendChatMessage` is not how chat is sent.** It only sends the packet. The real
@@ -272,9 +287,9 @@ the link; one that does not pays a few dozen bytes.
 
 ### Testing
 
-Anything in `protocol/`, `mcp/` or `json/` gets a unit test. Anything needing a world does not — put
-the assertion in `.github/scripts/server-smoke-test.sh`, which boots a real dedicated server and
-drives an actual MCP handshake against it. That script is also what catches a client class leaking
+Anything in `protocol/`, `mcp/`, `json/` or `perf/` gets a unit test. Anything needing a world does
+not — put the assertion in `.github/scripts/server-smoke-test.sh`, which boots a real dedicated server
+and drives an actual MCP handshake against it. That script is also what catches a client class leaking
 into common code.
 
 Test names are sentences describing the guarantee, not the method under test.

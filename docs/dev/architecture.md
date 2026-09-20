@@ -14,7 +14,8 @@ com.micatechnologies.minecraft.mcmcp
 ├── protocol/                 JSON-RPC, MCP methods, sessions, dispatch   ← no Minecraft imports
 ├── mcp/                      Tool/resource/prompt model and registry
 ├── transport/                Streamable HTTP; endpoint composition
-├── game/                     Game-thread bridges, side enum, paths
+├── game/                     Game-thread bridges, side enum, paths, server tick recorder
+├── perf/                     Profiling arithmetic: windows, call tree, GC log   ← no Minecraft imports
 │
 ├── tools/                    Common + server tools, game-state serialisation
 ├── resources/                Common + server resources
@@ -24,6 +25,7 @@ com.micatechnologies.minecraft.mcmcp
     ├── ClientInputScheduler
     ├── ClientInputLock
     ├── ClientChatRecorder
+    ├── ClientFrameRecorder
     └── tools/                Client tools, resources, prompts
 ```
 
@@ -173,6 +175,84 @@ needs to know, not transport faults.
 `McpDispatcher.handleToolsCall` enforces this: a `JsonRpcException` thrown by a handler is converted
 into a tool error, *except* for cancellation and timeout, which the client's plumbing genuinely needs
 to see.
+
+## Performance tooling
+
+Ten tools answer one loop: an agent builds a block, places a few hundred, and needs to know what that
+cost — and when it cost too much, which block, where, and in which method. The
+[tool reference](../reference/tools.md#performance) says what each reports; this is why they are
+built the way they are.
+
+### No ASM, no mixin
+
+MCMCP ships as one plain mod jar, and a profiler that added bytecode hooks would be one more coremod
+in a pack whose problem may well be a coremod. Every instrument here is a hook the game already has:
+
+| Need | Hook |
+| --- | --- |
+| Cost of each tile entity and entity update | Forge's `TimeTracker`, patched into `World.updateEntities` for `/forge track` |
+| Cost of each phase of a tick or frame | vanilla `Profiler` sections, the data behind `/debug` and the F3 pie chart |
+| Cost of each TESR and entity renderer | the public renderer maps, wrapped for the length of one profile |
+| Which method | `ThreadMXBean.getThreadInfo` on one thread, in a loop |
+| GC pauses, heap contents | JMX notifications and HotSpot's `DiagnosticCommand` MBean, reached by name |
+
+The price is that some things cannot be attributed to a single block at all, and the tools say so
+rather than guess: a baked-model block has no per-frame call to time, and `Block.updateTick` /
+`randomTick` have no hook. Those show up per phase in the section profiles and per method in the
+sampler, and the way to measure one is `client_frame_stats` or `server_tick_stats` before and after.
+
+### The instruments are not safe to switch on carelessly
+
+**`Profiler.profilingEnabled` must never be set to `true` directly.** `startSection` and
+`endSection` do nothing while it is false, so enabling it while sections are open makes the next
+`endSection` pop a stack that nothing pushed — an exception on the game thread. Every point a mod can
+run is inside an open section. The server is asked through `MinecraftServer.enableProfiling()`, which
+it honours at the top of the next tick; the client is asked by forcing `showDebugInfo` and
+`showDebugProfilerChart`, which `runGameLoop` reads at the one point where no section is open — and
+which is why `client_profile_sections` visibly shows F3 and the pie chart while it runs. Disabling
+mid-tick is safe, and is what `/debug stop` does.
+
+**`TimeTracker` is static and its call site is in base `World`**, so in singleplayer the client world
+feeds the same tracker from the client thread. Results are filtered on `!world.isRemote`. Its
+`getAverageTimings()` divides by a fixed 99 whether or not the ring is full, so the tools average the
+raw ring's written slots themselves.
+
+**The renderer wrappers live only for the profile window.** While they are in, a mod that fetches its
+own renderer out of the map per frame and casts it would fail the cast. Vanilla never does — its only
+such cast is for players, whose renderers live in a separate map — but keeping the exposure to seconds
+is what keeps it theoretical. Removal walks the maps rather than a saved list, because both
+dispatchers cache superclass hits under new keys.
+
+**Every windowed tool sleeps on its own HTTP worker**, touching the game thread twice — to switch the
+instrument on, and to read it — and switches it off in a `finally`. A cancelled call that left
+Forge's tracker running would tax every tick until someone noticed.
+
+### What is measured, and what it is not
+
+Render timing is `System.nanoTime()` around the call, which measures the CPU submitting draw calls,
+not the GPU executing them. `gl_finish` drains the pipeline before and after each call instead; on 27
+ender chests that read 1,243 µs a frame against 78. It is an option rather than the default because
+it serialises the pipeline and lowers the frame rate it is measuring.
+
+Frame statistics report `renderWork` (`RenderTickEvent` START to END) beside the frame interval,
+because under a frame cap or vsync the interval does not move until the cap is breached.
+
+The sampler reports shares of samples, never durations, and drops samples in which the thread was
+parked. `only_over_ms` holds samples back per tick and keeps them only if the tick's *measured*
+duration reached the threshold — from `TickClock`, not from counting samples, so a sampler
+descheduled for half a slow tick does not judge it fast.
+
+### `perf/` imports no Minecraft class
+
+For the reason `protocol/` does not. The arithmetic that turns samples into a percentile, a stack
+into a tree, or a histogram line into a row is exactly the part that can be wrong without anything
+failing, and it is only unit-testable if it can be constructed without a game. `TickClock` is the
+seam that lets the sampler, in common code, ask either side whether a tick just ended without naming
+a client class: the server's tick recorder feeds one instance and the client's frame recorder the
+other.
+
+Trees go over the wire as indented text, not JSON — nesting is most of what a tree is, and JSON
+charges for every level — and anything large goes to `mcmcp/dumps/` with its path returned.
 
 ## Configuration snapshots
 
