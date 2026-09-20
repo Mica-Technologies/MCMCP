@@ -18,9 +18,10 @@ access, and it is off by default.
 
 ## What it exposes
 
-**51 tools.** World queries and bulk region read/write for survey-then-build workflows; player state
+**59 tools.** World queries and bulk region read/write for survey-then-build workflows; player state
 and inventory; command execution with captured output; camera, movement and interaction on the
-client; screenshots, GUI inspection, chat capture and log tailing for debugging.
+client; screenshots, GUI inspection, chat capture and log tailing for debugging; tick, frame and
+per-block profiling.
 
 Also GUI control — reading a screen's buttons and text fields and driving them — so menus, mod config
 screens and anything whose real interface is a screen are reachable, not just blocks and entities.

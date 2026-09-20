@@ -34,6 +34,7 @@ public final class CommonTools {
         registerModList();
         registerReadLog();
         RegistryDumpTools.register();
+        PerformanceTools.register();
 
         ServerWorldTools.register();
         ServerBuildTools.register();

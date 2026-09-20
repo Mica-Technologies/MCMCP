@@ -167,6 +167,29 @@ On the server endpoint, `server_world_info` reports mean tick time and derived T
 apart, so anything above 50 ms per tick means the server is behind and every scheduled MCP task is
 waiting on it. Check it before running a large scan.
 
+### Finding what a change cost
+
+Measure, change, measure again. `server_tick_stats` gives the tick's distribution rather than a
+mean, and `client_frame_stats` with `sample_seconds` measures a fresh window of frames — compare its
+`renderWork`, not `fps`, because under a frame cap FPS does not move until the cap is breached.
+`game_health` with `sample_seconds` adds the game thread's allocation rate, which is how
+garbage-heavy code shows up before it becomes a GC pause.
+
+### Finding the block to blame
+
+| Symptom | Tool | Names |
+| --- | --- | --- |
+| Slow tick | `server_profile_ticking` | the tile entity or entity, with its position |
+| Slow tick, no tile entity to blame | `server_profile_sections` | the phase — scheduled ticks, random ticks, spawning |
+| Slow frame | `client_profile_rendering` | the block whose TESR is expensive, with its position |
+| Slow frame, no TESR to blame | `client_profile_sections` | the phase — `terrain`, `updatechunks`, `entities` |
+| Any of the above, and now *why* | `game_cpu_sample` | the method, and the mod package it belongs to |
+| Hitches at intervals | `game_health` | garbage collection |
+
+In singleplayer the tick tools are on the **server** endpoint and the frame tools on the **client**
+endpoint; one game serves both. See the [tool reference](../reference/tools.md#performance) for what
+each can and cannot see.
+
 ## Development launches
 
 `addon.gradle` starts both endpoints automatically in `runClient` and `runServer`:

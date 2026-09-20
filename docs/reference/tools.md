@@ -1,6 +1,6 @@
 # Tools
 
-51 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+59 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -93,6 +93,60 @@ Returns text only: a header line — `# <path> — N lines matching "<filter>"` 
 There is deliberately no structured form. A client may show `structuredContent` in place of the text
 when both are present, so a structured payload carrying only the counts hid the lines themselves, and
 one carrying the lines as well doubled the cost of every log read.
+
+### `game_health`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `sample_seconds` | integer 0–30 | Default 0. Also measure a window of this length. |
+
+Heap and memory pools, garbage collection per collector (count, total and mean pause, share of
+uptime), process and system CPU load, thread counts and free disk.
+
+Look here when ticks or frames hitch *at intervals* rather than staying uniformly slow. That pattern
+is usually garbage collection, and no amount of profiling blocks will find it.
+
+With `sample_seconds`, a `window` object reports what happened during exactly that window: GC
+collections and pause time, and the game thread's CPU share and **allocation rate** in MB/s. The
+allocation rate is how garbage-heavy code shows up before it becomes a GC pause — measure it before
+and after a change. The per-thread figures come from HotSpot's extension of `ThreadMXBean` and are
+simply absent on a JVM that lacks it.
+
+### `game_cpu_sample`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `duration_seconds` | integer 1–30 | Default 10. |
+| `interval_ms` | integer 1–100 | Default 4. |
+| `thread` | string | Thread name, exact or substring. Default: this side's game thread. |
+| `include_idle` | boolean | Default false. Keep samples where the thread was parked. |
+| `min_percent` | number 0.1–50 | Default 2. Prune tree branches below this share. |
+| `max_lines` | integer 10–300 | Default 60. Cap on tree lines returned. |
+| `top` | integer 1–50 | Default 15. Rows in `hottestFrames` and `byPackage`. |
+
+A sampling profiler: dumps one thread's stack every few milliseconds and reports where the samples
+landed. This is the tool that names a *method*. Reach for it once
+[`server_profile_ticking`](#server_profile_ticking) or a section profile has said which block or
+phase is slow and the question has become why.
+
+Every figure is a share of samples, not a measured duration — a method in 30% of samples was
+running, or waiting on something it called, about 30% of the time. Samples in which the thread was
+parked (the server sleeping out its 50 ms, the client's frame limiter) are dropped and reported as
+`idlePercent`, so the percentages describe the work rather than the waiting.
+
+- `hottestFrames` — methods by samples in which they were the *executing* frame.
+- `byPackage` — each sample credited to the nearest package on the stack that is not vanilla, Forge,
+  the JDK or a bundled library. A vanilla `getBlockState` called from a mod's tile entity counts
+  towards the mod here and towards vanilla in `hottestFrames`. The two answer different questions.
+- The call tree, as indented text after the JSON, hottest branch first. Runs of frames with nothing
+  branching off are folded onto one line: `a > (3) > b` is `a`, three frames elided, then `b`.
+
+The full unpruned tree is written to `mcmcp/dumps/cpu-sample-<side>-<time>.json` and its path
+returned as `file`. Blocks for the duration, so reproduce the load during the window.
 
 ## Server endpoint
 
@@ -206,6 +260,103 @@ chunk count, entity count and spawn point.
 
 Worth checking before an expensive scan: ticks are 50 ms apart, so a mean above 50 ms means the
 server is already behind and every scheduled task is queued behind it.
+
+### Performance
+
+The ladder for a slow tick: [`server_tick_stats`](#server_tick_stats) says whether there is a
+problem, [`server_profile_ticking`](#server_profile_ticking) names the block,
+[`server_profile_sections`](#server_profile_sections) names the phase, and
+[`game_cpu_sample`](#game_cpu_sample) names the method. None of them uses ASM or a mixin — they
+read hooks Forge and vanilla already have.
+
+#### `server_tick_stats`
+
+:material-eye: Read-only · no arguments
+
+TPS and tick duration over the last 5 seconds, 1 minute and 5 minutes: mean, min, median, p95, p99
+and max in milliseconds, plus `ticksOver50Ms`. A window is omitted when the server has not been up
+long enough for it to differ from the one before it.
+
+```json
+{"last5s": {"samples": 100, "meanMs": 5.4, "minMs": 3.98, "medianMs": 4.9, "p95Ms": 9.1,
+            "p99Ms": 31.6, "maxMs": 74.4, "tps": 20.0, "ticksOver50Ms": 1}}
+```
+
+`server_world_info` reports only a mean over 100 ticks, which cannot tell a server that is uniformly
+slow from one that hitches once a minute. A high mean is steady load; a low median with a high max
+is a hitch. Measure before and after a change to see what it cost.
+
+#### `server_profile_ticking`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `duration_seconds` | integer 1–30 | Default 5, which already fills the per-object history. |
+| `top` | integer 1–50 | Default 15. Rows per list. |
+| `dimension` | integer | Only this dimension. Default: all loaded. |
+
+Times every ticking tile entity and entity and reports the most expensive. **This is the tool that
+names the block behind a slow tick.** Costs are microseconds per tick; the whole tick has 50,000.
+
+```json
+{"tileEntities": {
+   "tracked": 74, "totalMicrosPerTick": 44.3,
+   "costliest": [{"block": "minecraft:hopper", "pos": {"x": -212, "y": 75, "z": 196}, "dim": 0,
+                  "meanMicros": 5.5, "maxMicros": 37.8}],
+   "byType": [{"block": "minecraft:hopper", "class": "net.minecraft.tileentity.TileEntityHopper",
+               "count": 36, "totalMicros": 25.4, "worstMicros": 5.5}]},
+ "entities": {"tracked": 334, "totalMicrosPerTick": 1528.9, "costliest": [], "byType": []},
+ "chunks": [{"dim": 0, "chunkX": -13, "chunkZ": 12, "totalMicros": 35.4,
+             "tileEntities": 35, "entities": 4}],
+ "ticksObserved": 101, "meanTickMs": 3.0}
+```
+
+`costliest` answers "which one"; `byType` answers "which kind" — forty cheap blocks of one type
+outweigh one expensive one, and only `byType` shows it; `chunks` answers "where".
+
+It uses the hooks Forge put in `World.updateEntities` for `/forge track`, so it needs no bytecode
+changes — and it resets any `/forge track` in progress. Means are taken over the updates that
+actually happened; Forge's own average divides by a fixed 99 and under-reports anything that ticked
+for less than five seconds.
+
+!!! note "What it cannot see"
+
+    Only `update()` is timed. Work a block does anywhere else — neighbour updates, scheduled and
+    random ticks, event handlers, packet handling — is not attributed here. If the tick is slow and
+    this report does not add up to it, [`server_profile_sections`](#server_profile_sections) shows
+    which phase holds the rest, and [`game_cpu_sample`](#game_cpu_sample) finds it by method.
+    Players are not tracked, and a passenger's cost is charged to its vehicle.
+
+#### `server_profile_sections`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `duration_seconds` | integer 1–30 | Default 5. |
+| `min_percent` | number 0.1–50 | Default 1. Hide sections below this share of the tick. |
+| `max_depth` | integer 1–12 | Default 8. |
+
+Runs the vanilla section profiler — what `/debug start` records — and returns the tick by phase as
+an indented text tree: share of the tick, and approximate milliseconds per tick.
+
+```text
+# percent of tick, ~ms per tick (mean tick 5.4 ms)
+levels 98.2% 5.3ms
+ world 98.0% 5.29ms
+  tick 96.3% 5.2ms
+   entities 64.2% 3.46ms
+   tickBlocks 28.6% 1.55ms
+    pollingChunks 28.5% 1.54ms
+     tickBlocks 21.2% 1.14ms
+      randomTick 10.3% 0.56ms
+```
+
+This is where scheduled and random block ticks show up (`tickPending`, `tickBlocks`), and block
+entities are broken down by registry key under `blockEntities`. `unspecified` is time spent in a
+section but in none of its sub-sections. The profiler reports shares only; the milliseconds are the
+share multiplied by the measured mean tick. If `/debug` was already recording, it is left running.
 
 ### Building
 
@@ -651,6 +802,82 @@ the game, which is what makes it useful for iterating on shaders.
 Starts the reload and does not wait for it: a full reload takes seconds and grows with the pack, so
 blocking would report a timeout for a reload that is going fine. The game thread is busy throughout,
 so the next tool call queues behind it and returns once the reload has finished.
+
+### Performance
+
+A block draws one of two ways, and only one can be timed per block. A **tile entity renderer** is
+called once per block per frame through a public map, so it can be wrapped and attributed to a
+position — [`client_profile_rendering`](#client_profile_rendering). A **baked model** is compiled
+into its chunk's vertex buffer and drawn with everything else in the chunk; there is no per-block
+call to time. Its cost appears as `terrain` and `updatechunks` in
+[`client_profile_sections`](#client_profile_sections), and the way to measure one is the blunt one:
+[`client_frame_stats`](#client_frame_stats) before and after placing a few hundred.
+
+#### `client_frame_stats`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `sample_seconds` | integer 0–30 | Default 0: report history. Otherwise measure a fresh window. |
+
+FPS, the 1% low, and the frame-time distribution, for the last 5 seconds and last minute — or, with
+`sample_seconds`, for exactly that window from now. Hold the camera still on the scene under test.
+
+```json
+{"sampled": {"fps": 120.1, "low1PercentFps": 87.7, "framesOver50Ms": 0,
+   "frame":      {"samples": 360, "meanMs": 8.33, "medianMs": 8.33, "p95Ms": 9.8, "maxMs": 11.87},
+   "renderWork": {"samples": 360, "meanMs": 1.37, "medianMs": 1.34, "p95Ms": 1.67, "maxMs": 4.39}},
+ "settings": {"fpsLimit": 120, "vsync": true, "renderDistanceChunks": 12}}
+```
+
+!!! tip "Compare `renderWork`, not `fps`"
+
+    `frame` is the interval the player sees, and it includes the frame limiter's wait. In the
+    example the client is capped at 120, so `frame` reads 8.33 ms whether drawing took one
+    millisecond or seven — a change that tripled render cost would not move it. `renderWork` is
+    the CPU time spent drawing each frame and moves regardless. It is the number to compare before
+    and after a change.
+
+`low1PercentFps` is the mean of the slowest 1% of frames, as a rate: an average of 140 with a 1% low
+of 20 is a game that hitches.
+
+#### `client_profile_sections`
+
+:material-eye: Read-only
+
+Same arguments and output as [`server_profile_sections`](#server_profile_sections), for the frame:
+client tick, `terrain`, `updatechunks` (chunk rebuilds), `entities`, `blockentities`, `particles`,
+`gui` and so on, as share of the frame and approximate milliseconds per frame.
+
+The client only profiles while the F3 pie chart is on screen, and re-decides every frame — so this
+turns F3 and the chart on for the duration and restores them afterwards. They will appear in any
+screenshot taken meanwhile, and drawing F3 inflates the `gui` section.
+
+#### `client_profile_rendering`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `duration_seconds` | integer 1–30 | Default 5. |
+| `top` | integer 1–50 | Default 15. Rows per list. |
+| `gl_finish` | boolean | Default false. Wait for the GPU around each renderer call. |
+
+Times every tile entity renderer call and reports the most expensive blocks in view, with position,
+and totals by block type with the renderer's class. **This is the tool that names the block behind
+a slow frame.** Costs are microseconds per frame; at 60 FPS a whole frame has 16,667.
+
+Only blocks that are actually being rendered are measured, so face the scene under test. By default
+the times are CPU time submitting draw calls, which understates a renderer whose cost is on the GPU;
+`gl_finish` drains the GPU before and after every call, which is more truthful for heavy geometry
+and lowers FPS while it runs. A `FastTESR`'s time covers filling the shared vertex buffer, not the
+batch's draw.
+
+Works by swapping each registered renderer for a timing wrapper for the length of the profile and
+putting the originals back afterwards. A mod that fetches its own renderer out of the dispatcher's
+map and casts it would fail during that window; that is rare, and is why the wrappers are never left
+in. One client profile runs at a time.
 
 ### GUI control
 
