@@ -186,6 +186,7 @@ garbage-heavy code shows up before it becomes a GC pause.
 | Slow frame, no TESR to blame | `client_profile_sections` | the phase — `terrain`, `updatechunks`, `entities` |
 | Any of the above, and now *why* | `game_cpu_sample` | the method, and the mod package it belongs to |
 | Hitches at intervals | `server_tick_stats` / `client_frame_stats` → `ofThoseDuringGc`, then `game_health` | whether it is garbage collection |
+| Memory climbing, or GC getting worse over a session | `game_heap_histogram` | the classes and the package filling the heap |
 | An occasional hitch that is *not* GC | `game_cpu_sample` with `only_over_ms` | the method, from the slow ticks alone |
 
 In singleplayer the tick tools are on the **server** endpoint and the frame tools on the **client**

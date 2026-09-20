@@ -238,7 +238,8 @@ TOOLS_BODY="$(curl -fsS --max-time 10 \
 # Spot-check one tool from each registration path: a common one and a server-only one. If either
 # is missing, registration ran but something filtered it out.
 for expected in '"mcmcp_endpoint_info"' '"game_dump_registries"' '"server_get_blocks"' '"server_stop"' \
-                '"server_profile_ticking"' '"server_census"' '"game_cpu_sample"'; do
+                '"server_profile_ticking"' '"server_census"' '"game_cpu_sample"' \
+                '"game_heap_histogram"'; do
   case "$TOOLS_BODY" in
     *"$expected"*) echo "    found ${expected}" ;;
     *) mcp_failure "tools/list is missing ${expected}: ${TOOLS_BODY}" ;;

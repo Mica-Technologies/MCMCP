@@ -15,6 +15,7 @@ import com.micatechnologies.minecraft.mcmcp.perf.CallTree;
 import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
 import com.micatechnologies.minecraft.mcmcp.perf.GameThreads;
 import com.micatechnologies.minecraft.mcmcp.perf.GcPauseLog;
+import com.micatechnologies.minecraft.mcmcp.perf.HeapHistogram;
 import com.micatechnologies.minecraft.mcmcp.perf.SlowTickFilter;
 import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import java.io.File;
@@ -90,6 +91,7 @@ public final class PerformanceTools {
         GcPauseLog.install();
         ServerTickRecorder.register();
         registerHealth();
+        registerHeapHistogram();
         registerCpuSample();
         registerTickStats();
         registerProfileTicking();
@@ -441,6 +443,89 @@ public final class PerformanceTools {
                 return ToolResult.text(Json.write(result) + "\n\n" + tree.render(minPercent, maxLines));
             })
             .build());
+    }
+
+    // ------------------------------------------------------------------
+    // Heap histogram
+    // ------------------------------------------------------------------
+
+    private static void registerHeapHistogram() {
+        McpRegistry.registerTool(McpTool.named("game_heap_histogram")
+            .title("Heap class histogram")
+            .description("Report which classes fill the heap: the largest by bytes with instance "
+                + "counts, and bytes rolled up by package. Use it to find a leak — take one, exercise "
+                + "the suspect, take another, and compare — or to see what a mod's objects cost. "
+                + "'filter' narrows the class list to one mod's package.\n\n"
+                + "By default counts everything on the heap including garbage not yet collected, "
+                + "which costs no pause but makes two readings only roughly comparable. live_only "
+                + "counts reachable objects only, which is what a leak hunt needs, and forces a "
+                + "full garbage collection first: the whole game pauses, typically 100-300 ms. The "
+                + "full table is written to a file whose path is returned.")
+            .schema(JsonSchema.object()
+                .integer("top", "Rows per list. Default 20.", 1, 50)
+                .string("filter", "Only classes whose name contains this, e.g. 'com.mymod'.")
+                .bool("live_only", "Count reachable objects only. Forces a full GC pause. Default false.")
+                .build())
+            .readOnly()
+            .closedWorld()
+            .offGameThread()
+            .handler(context -> {
+                int top = context.getBoundedInt("top", 20, 1, 50);
+                String filter = context.getString("filter", null);
+                boolean liveOnly = context.getBoolean("live_only", false);
+
+                String raw;
+                try {
+                    raw = HeapHistogram.capture(liveOnly);
+                } catch (Exception | LinkageError e) {
+                    return ToolResult.error("This JVM does not offer a class histogram (it needs HotSpot's "
+                        + "DiagnosticCommand MBean): " + e);
+                }
+                HeapHistogram histogram = HeapHistogram.parse(raw);
+                if (histogram.classCount() == 0) {
+                    return ToolResult.error("The JVM returned a histogram this build could not parse. Its "
+                        + "first lines: " + raw.substring(0, Math.min(300, raw.length())));
+                }
+
+                JsonObject result = new JsonObject();
+                result.addProperty("liveOnly", liveOnly);
+                result.addProperty("classes", histogram.classCount());
+                result.addProperty("totalInstances", histogram.totalInstances());
+                result.addProperty("totalMb", megabytes(histogram.totalBytes()));
+                result.add("largest", heapRows(histogram.largest(top, filter), "class"));
+                result.add("byPackage", heapRows(histogram.largestPackages(top), "package"));
+
+                File directory = new File(McmcpPaths.gameDirectory(), DUMP_DIRECTORY);
+                File target = new File(directory, "heap-histogram-" + context.getSide().id() + "-"
+                    + System.currentTimeMillis() + ".txt");
+                try {
+                    if (!directory.isDirectory() && !directory.mkdirs()) {
+                        throw new IOException("could not create " + directory.getAbsolutePath());
+                    }
+                    // The JVM's own text, untouched: it is the format every heap tool and every
+                    // search result about one already speaks.
+                    Files.write(target.toPath(), raw.getBytes(StandardCharsets.UTF_8));
+                    result.addProperty("file", target.getAbsolutePath());
+                } catch (IOException e) {
+                    result.addProperty("fileError", e.getMessage());
+                }
+                return ToolResult.structured(result);
+            })
+            .build());
+    }
+
+    private static JsonArray heapRows(List<HeapHistogram.Row> rows, String label) {
+        JsonArray array = new JsonArray();
+        for (HeapHistogram.Row row : rows) {
+            JsonObject json = new JsonObject();
+            json.addProperty(label, row.className);
+            json.addProperty("instances", row.instances);
+            // Kilobytes, not megabytes. The rows a mod developer filters down to are their own
+            // classes, which are small; in megabytes every one of them read 0.0.
+            json.addProperty("kb", round1(row.bytes / 1024.0D));
+            array.add(json);
+        }
+        return array;
     }
 
     // ------------------------------------------------------------------

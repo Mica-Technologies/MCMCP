@@ -1,6 +1,6 @@
 # Tools
 
-60 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+61 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -114,6 +114,47 @@ collections and pause time, and the game thread's CPU share and **allocation rat
 allocation rate is how garbage-heavy code shows up before it becomes a GC pause — measure it before
 and after a change. The per-thread figures come from HotSpot's extension of `ThreadMXBean` and are
 simply absent on a JVM that lacks it.
+
+### `game_heap_histogram`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `top` | integer 1–50 | Default 20. Rows per list. |
+| `filter` | string | Only classes whose name contains this, e.g. `com.mymod`. |
+| `live_only` | boolean | Default false. Count reachable objects only — **forces a full GC pause**. |
+
+Which classes fill the heap: the largest by bytes with instance counts, and bytes rolled up by
+package. A mod's own classes are rarely what fills a heap — its share is the sum of many small ones —
+so the roll-up is usually the more telling half.
+
+```json
+{"liveOnly": false, "classes": 5126, "totalInstances": 4342333, "totalMb": 554.2,
+ "largest": [{"class": "int[]", "instances": 108998, "kb": 260280.3},
+             {"class": "byte[]", "instances": 99813, "kb": 116817.9}],
+ "byPackage": [{"package": "java.lang", "instances": 420813, "kb": 13588.5}],
+ "file": ".../mcmcp/dumps/heap-histogram-client-1789913000000.txt"}
+```
+
+To find a leak: take one, exercise the suspect — open and close the GUI fifty times, place and break
+the block — take another, and compare the suspect package. Use `live_only` for that, since it is the
+objects being *kept* that matter.
+
+!!! warning "`live_only` pauses the game"
+
+    By default every object on the heap is counted, garbage included, which pauses nothing but makes
+    two readings only roughly comparable. `live_only` counts reachable objects only, and the JVM can
+    only know which those are by running a full collection first: the whole game stops, typically
+    for 100–300 ms on a modded heap. Harmless in a dev environment; think before doing it on a
+    server with players on it.
+
+Rows are in kilobytes, because the rows worth filtering down to — a mod's own classes — are small.
+Arrays of primitives (`byte[]`, `int[]`) lead `largest` on any heap and are left out of `byPackage`,
+where they would only repeat themselves: a `byte[]` belongs to whoever holds it, and a histogram does
+not know who that is.
+The JVM's full table is written, untouched, to `mcmcp/dumps/`. Needs a HotSpot JVM; on anything else
+the tool reports that rather than failing.
 
 ### `game_cpu_sample`
 
