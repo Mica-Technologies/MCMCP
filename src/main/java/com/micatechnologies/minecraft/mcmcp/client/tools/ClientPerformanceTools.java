@@ -9,6 +9,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
+import com.micatechnologies.minecraft.mcmcp.perf.GcPauseLog;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import com.micatechnologies.minecraft.mcmcp.tools.PerformanceTools;
 import java.util.ArrayList;
@@ -132,7 +133,15 @@ public final class ClientPerformanceTools {
         // stutter feels: an average of 140 with a 1% low of 20 is a game that hitches.
         double slowest = frames.slowestMeanNanos(1.0D);
         json.addProperty("low1PercentFps", slowest <= 0.0D ? 0.0D : Math.round(1.0e10D / slowest) / 10.0D);
-        json.addProperty("framesOver50Ms", frames.countOver(50_000_000L));
+        int slowFrames = frames.countOver(50_000_000L);
+        json.addProperty("framesOver50Ms", slowFrames);
+        if (slowFrames > 0) {
+            // As server_tick_stats does: a hitch that coincides with a collection is a heap
+            // question, not a renderer one.
+            json.addProperty("ofThoseDuringGc", ClientFrameRecorder.intervals().countOverlapping(
+                sinceNanos, 50_000_000L, GcPauseLog.intervalsSince(sinceNanos - 1_000_000_000L),
+                PerformanceTools.GC_SLACK_NANOS));
+        }
         json.add("frame", frames.toJson());
         json.add("renderWork", ClientFrameRecorder.renderWork().summariseSince(sinceNanos).toJson());
         return json;

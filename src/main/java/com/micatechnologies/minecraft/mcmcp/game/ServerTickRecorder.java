@@ -1,6 +1,7 @@
 package com.micatechnologies.minecraft.mcmcp.game;
 
 import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
+import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.eventhandler.EventPriority;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -71,6 +72,7 @@ public final class ServerTickRecorder {
                 long now = System.nanoTime();
                 TICKS.record(now, now - tickStartedNanos);
                 tickCount++;
+                TickClock.SERVER.completed(now - tickStartedNanos);
             }
         }
     }

@@ -185,7 +185,8 @@ garbage-heavy code shows up before it becomes a GC pause.
 | Slow frame | `client_profile_rendering` | the block (TESR) or entity whose renderer is expensive, with its position |
 | Slow frame, no TESR to blame | `client_profile_sections` | the phase — `terrain`, `updatechunks`, `entities` |
 | Any of the above, and now *why* | `game_cpu_sample` | the method, and the mod package it belongs to |
-| Hitches at intervals | `game_health` | garbage collection |
+| Hitches at intervals | `server_tick_stats` / `client_frame_stats` → `ofThoseDuringGc`, then `game_health` | whether it is garbage collection |
+| An occasional hitch that is *not* GC | `game_cpu_sample` with `only_over_ms` | the method, from the slow ticks alone |
 
 In singleplayer the tick tools are on the **server** endpoint and the frame tools on the **client**
 endpoint; one game serves both. See the [tool reference](../reference/tools.md#performance) for what

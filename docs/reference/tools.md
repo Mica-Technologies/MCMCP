@@ -103,7 +103,8 @@ one carrying the lines as well doubled the cost of every log read.
 | `sample_seconds` | integer 0–30 | Default 0. Also measure a window of this length. |
 
 Heap and memory pools, garbage collection per collector (count, total and mean pause, share of
-uptime), process and system CPU load, thread counts and free disk.
+uptime) and the five most recent collections with how long ago and how long, process and system CPU
+load, thread counts and free disk.
 
 Look here when ticks or frames hitch *at intervals* rather than staying uniformly slow. That pattern
 is usually garbage collection, and no amount of profiling blocks will find it.
@@ -124,6 +125,7 @@ simply absent on a JVM that lacks it.
 | `interval_ms` | integer 1–100 | Default 4. |
 | `thread` | string | Thread name, exact or substring. Default: this side's game thread. |
 | `include_idle` | boolean | Default false. Keep samples where the thread was parked. |
+| `only_over_ms` | integer 0–10000 | Default 0: keep all. Keep only samples from ticks (client: frames) at least this long. Game thread only. |
 | `min_percent` | number 0.1–50 | Default 2. Prune tree branches below this share. |
 | `max_lines` | integer 10–300 | Default 60. Cap on tree lines returned. |
 | `top` | integer 1–50 | Default 15. Rows in `hottestFrames` and `byPackage`. |
@@ -147,6 +149,16 @@ parked (the server sleeping out its 50 ms, the client's frame limiter) are dropp
 
 The full unpruned tree is written to `mcmcp/dumps/cpu-sample-<side>-<time>.json` and its path
 returned as `file`. Blocks for the duration, so reproduce the load during the window.
+
+!!! tip "Profiling a hitch: `only_over_ms`"
+
+    A server that hitches once a minute spends 99.9% of its time not hitching, so an ordinary
+    profile of it is a profile of a healthy server. With `only_over_ms`, samples are held back per
+    tick — per frame on the client — and kept only if that tick's *measured* duration reached the
+    threshold. Thirty seconds with `only_over_ms: 50` yields a tree made of nothing but the slow
+    ticks. The result reports `ticksSeen` and `ticksKept` (`framesSeen`, `framesKept`) in place of
+    `idlePercent`; `ticksKept: 0` means no tick in the window was slow enough, not that the tool
+    failed. It applies only to the game thread, since ticks and frames are that thread's.
 
 ## Server endpoint
 
@@ -274,7 +286,11 @@ read hooks Forge and vanilla already have.
 :material-eye: Read-only · no arguments
 
 TPS and tick duration over the last 5 seconds, 1 minute and 5 minutes: mean, min, median, p95, p99
-and max in milliseconds, plus `ticksOver50Ms`. A window is omitted when the server has not been up
+and max in milliseconds, plus `ticksOver50Ms` — and, when that is not zero, `ofThoseDuringGc`: how
+many of the slow ticks were under way during a garbage collection. "Seven slow ticks" is a block to
+go hunting for; "seven slow ticks, six of them during a collection" is a heap setting. It is a
+coincidence in time, reported because it is very probably the explanation, not because it must be.
+A window is omitted when the server has not been up
 long enough for it to differ from the one before it. `dimensions` splits the last 100 ticks by
 dimension — mean and worst — which is the only thing that says *which world* a slow tick belongs to
 without running a profile.
@@ -868,7 +884,9 @@ FPS, the 1% low, and the frame-time distribution, for the last 5 seconds and las
     and after a change.
 
 `low1PercentFps` is the mean of the slowest 1% of frames, as a rate: an average of 140 with a 1% low
-of 20 is a game that hitches.
+of 20 is a game that hitches. When `framesOver50Ms` is not zero, `ofThoseDuringGc` says how many of
+those frames coincided with a garbage collection, as [`server_tick_stats`](#server_tick_stats) does
+for ticks.
 
 #### `client_profile_sections`
 

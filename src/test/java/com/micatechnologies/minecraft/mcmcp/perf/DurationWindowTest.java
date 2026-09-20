@@ -2,6 +2,8 @@ package com.micatechnologies.minecraft.mcmcp.perf;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import java.util.Arrays;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /** The ring that tick and frame statistics are computed from. */
@@ -88,6 +90,32 @@ class DurationWindowTest {
         DurationWindow.Summary summary = window.summarise(2 * SECOND, 300 * SECOND);
 
         assertEquals(20.0D, summary.ratePerSecond(), 1.0e-9D);
+    }
+
+    @Test
+    void onlySlowEventsThatCoincideWithAnIntervalAreCountedAsOverlapping() {
+        DurationWindow window = new DurationWindow(16);
+        window.record(1 * SECOND, 80 * MILLI);          // slow, during the collection below
+        window.record(2 * SECOND, 80 * MILLI);          // slow, nowhere near one
+        window.record(3 * SECOND, 10 * MILLI);          // during one, but not slow
+        List<long[]> collections = Arrays.asList(
+            new long[] {SECOND - 60 * MILLI, SECOND - 20 * MILLI},
+            new long[] {3 * SECOND - 5 * MILLI, 3 * SECOND});
+
+        assertEquals(1, window.countOverlapping(0L, 50 * MILLI, collections, 0L));
+    }
+
+    @Test
+    void slackCatchesAnIntervalThatEndedJustBeforeTheEventBegan() {
+        // The GC log is in whole milliseconds; a collection reported as ending a millisecond before
+        // the tick it stalled began is the same event seen through a coarser clock.
+        DurationWindow window = new DurationWindow(16);
+        window.record(SECOND, 80 * MILLI);
+        List<long[]> collections = Arrays.asList(
+            new long[] {SECOND - 200 * MILLI, SECOND - 81 * MILLI});
+
+        assertEquals(0, window.countOverlapping(0L, 50 * MILLI, collections, 0L));
+        assertEquals(1, window.countOverlapping(0L, 50 * MILLI, collections, 3 * MILLI));
     }
 
     @Test

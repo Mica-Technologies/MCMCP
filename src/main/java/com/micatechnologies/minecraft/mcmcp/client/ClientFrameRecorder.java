@@ -1,6 +1,7 @@
 package com.micatechnologies.minecraft.mcmcp.client;
 
 import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
+import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.eventhandler.EventPriority;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -79,6 +80,7 @@ public final class ClientFrameRecorder {
             RENDER_WORK.record(now, now - renderStartedNanos);
             if (lastFrameEndedNanos != 0L) {
                 INTERVALS.record(now, now - lastFrameEndedNanos);
+                TickClock.CLIENT_FRAMES.completed(now - lastFrameEndedNanos);
             }
             lastFrameEndedNanos = now;
         }

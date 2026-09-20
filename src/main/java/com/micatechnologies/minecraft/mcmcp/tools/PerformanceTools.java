@@ -14,6 +14,9 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.perf.CallTree;
 import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
 import com.micatechnologies.minecraft.mcmcp.perf.GameThreads;
+import com.micatechnologies.minecraft.mcmcp.perf.GcPauseLog;
+import com.micatechnologies.minecraft.mcmcp.perf.SlowTickFilter;
+import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import java.io.File;
 import java.io.IOException;
 import java.lang.management.GarbageCollectorMXBean;
@@ -77,7 +80,14 @@ public final class PerformanceTools {
     private PerformanceTools() {
     }
 
+    /**
+     * How far a slow tick or frame is widened before it is checked against the GC log, whose times
+     * are whole milliseconds since JVM start converted onto the nanoTime axis.
+     */
+    public static final long GC_SLACK_NANOS = 3_000_000L;
+
     public static void register() {
+        GcPauseLog.install();
         ServerTickRecorder.register();
         registerHealth();
         registerCpuSample();
@@ -169,6 +179,20 @@ public final class PerformanceTools {
                 gc.add("collectors", collectors);
                 gc.addProperty("percentOfUptime",
                     uptimeMillis <= 0L ? 0.0D : round1(gcMillisTotal * 100.0D / uptimeMillis));
+                // The last few collections, newest first: a total cannot show that the pauses are
+                // getting longer, or that the last one was four seconds ago and 300 ms long.
+                long nowNanos = System.nanoTime();
+                List<GcPauseLog.Pause> pauses = GcPauseLog.since(nowNanos - 600_000_000_000L);
+                JsonArray recent = new JsonArray();
+                for (int i = pauses.size() - 1; i >= 0 && recent.size() < 5; i--) {
+                    GcPauseLog.Pause pause = pauses.get(i);
+                    JsonObject entry = new JsonObject();
+                    entry.addProperty("secondsAgo", round1((nowNanos - pause.endNanos) / 1.0e9D));
+                    entry.addProperty("ms", Math.round((pause.endNanos - pause.startNanos) / 1.0e6D));
+                    entry.addProperty("kind", pause.action);
+                    recent.add(entry);
+                }
+                gc.add("recent", recent);
                 json.add("gc", gc);
 
                 JsonObject cpu = new JsonObject();
@@ -312,6 +336,10 @@ public final class PerformanceTools {
                 .integer("interval_ms", "Milliseconds between samples. Default 4.", 1, 100)
                 .string("thread", "Thread name, exact or substring. Default: the game thread.")
                 .bool("include_idle", "Keep samples where the thread was parked. Default false.")
+                .integer("only_over_ms", "Keep only samples from server ticks (on the client: "
+                    + "frames) that took at least this long, to profile an occasional hitch rather "
+                    + "than the healthy time around it. Game thread only. Default 0: keep all.",
+                    0, 10000)
                 .number("min_percent", "Prune tree branches below this share. Default 2.", 0.1D, 50.0D)
                 .integer("max_lines", "Cap on tree lines returned. Default 60.", 10, 300)
                 .integer("top", "Rows in hottestFrames and byPackage. Default 15.", 1, 50)
@@ -326,8 +354,16 @@ public final class PerformanceTools {
                 double minPercent = Math.max(0.1D, Math.min(50.0D, context.getDouble("min_percent", 2.0D)));
                 int maxLines = context.getBoundedInt("max_lines", 60, 10, 300);
                 int top = context.getBoundedInt("top", 15, 1, 50);
-                String threadName = context.getString("thread",
-                    context.getSide().isClient() ? GameThreads.CLIENT : GameThreads.SERVER);
+                int onlyOverMillis = context.getBoundedInt("only_over_ms", 0, 0, 10000);
+                String gameThreadName = context.getSide().isClient() ? GameThreads.CLIENT : GameThreads.SERVER;
+                String threadName = context.getString("thread", gameThreadName);
+                if (onlyOverMillis > 0 && !gameThreadName.equals(threadName)) {
+                    // Ticks and frames belong to the game thread. Filtering some other thread's
+                    // samples by them would produce a tree that looks meaningful and is not.
+                    return ToolResult.error("only_over_ms filters by this side's ticks or frames, so it "
+                        + "only applies to the game thread ('" + gameThreadName + "'). Drop 'thread' or "
+                        + "drop 'only_over_ms'.");
+                }
 
                 long threadId = GameThreads.find(threadName);
                 if (threadId < 0L) {
@@ -337,6 +373,9 @@ public final class PerformanceTools {
 
                 ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
                 CallTree tree = new CallTree();
+                TickClock clock = context.getSide().isClient() ? TickClock.CLIENT_FRAMES : TickClock.SERVER;
+                SlowTickFilter slowTicks = onlyOverMillis == 0 ? null
+                    : new SlowTickFilter(tree, onlyOverMillis * 1_000_000L, !includeIdle);
                 String resolvedName = threadName;
                 long attempts = 0L;
                 long deadline = System.nanoTime() + durationSeconds * 1_000_000_000L;
@@ -348,7 +387,11 @@ public final class PerformanceTools {
                     }
                     resolvedName = info.getThreadName();
                     attempts++;
-                    tree.add(info.getStackTrace(), !includeIdle);
+                    if (slowTicks == null) {
+                        tree.add(info.getStackTrace(), !includeIdle);
+                    } else {
+                        slowTicks.sample(info.getStackTrace(), clock.count(), clock.lastNanos());
+                    }
                     Thread.sleep(intervalMillis);
                 }
                 if (attempts == 0L) {
@@ -359,7 +402,17 @@ public final class PerformanceTools {
                 result.addProperty("thread", resolvedName);
                 result.addProperty("durationSeconds", durationSeconds);
                 result.addProperty("samples", tree.samples());
-                result.addProperty("idlePercent", Math.round(tree.idleSamples() * 1000.0D / attempts) / 10.0D);
+                if (slowTicks == null) {
+                    result.addProperty("idlePercent", Math.round(tree.idleSamples() * 1000.0D / attempts) / 10.0D);
+                } else {
+                    // Not idlePercent: with most samples discarded unseen, a share of attempts would
+                    // describe the filter, not the thread.
+                    result.addProperty("onlyOverMs", onlyOverMillis);
+                    result.addProperty(context.getSide().isClient() ? "framesSeen" : "ticksSeen",
+                        slowTicks.ticksSeen());
+                    result.addProperty(context.getSide().isClient() ? "framesKept" : "ticksKept",
+                        slowTicks.ticksKept());
+                }
                 result.add("hottestFrames", tree.hottestFrames(top));
                 result.add("byPackage", tree.byOwner(top));
 
@@ -463,7 +516,15 @@ public final class PerformanceTools {
         // Capped at 20: the server sleeps out the rest of a fast tick, and an interval a hair under
         // 50 ms is scheduler jitter, not a server running fast.
         json.addProperty("tps", Math.min(20.0D, Math.round(summary.ratePerSecond() * 100.0D) / 100.0D));
-        json.addProperty("ticksOver50Ms", summary.countOver(50_000_000L));
+        int slowTicks = summary.countOver(50_000_000L);
+        json.addProperty("ticksOver50Ms", slowTicks);
+        if (slowTicks > 0) {
+            // Only when there is something to explain. How many of the slow ticks coincided with a
+            // garbage collection is the difference between hunting a block and tuning a heap.
+            long since = nowNanos - seconds * 1_000_000_000L;
+            json.addProperty("ofThoseDuringGc", ServerTickRecorder.ticks().countOverlapping(
+                since, 50_000_000L, GcPauseLog.intervalsSince(since - 1_000_000_000L), GC_SLACK_NANOS));
+        }
         return json;
     }
 

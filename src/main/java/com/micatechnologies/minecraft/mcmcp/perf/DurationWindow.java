@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.perf;
 
 import com.google.gson.JsonObject;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * A fixed-size ring of timed events — server ticks, rendered frames — that can be summarised over
@@ -71,6 +72,38 @@ public final class DurationWindow {
         durations = Arrays.copyOf(durations, count);
         Arrays.sort(durations);
         return new Summary(durations, count == 0 ? 0L : last - first);
+    }
+
+    /**
+     * Of the events since {@code sinceNanos} that took longer than {@code thresholdNanos}, how many
+     * were under way during any of {@code intervals} — each a {@code [start, end]} pair on the same
+     * clock. {@code slackNanos} widens every event on both sides, to absorb the millisecond
+     * resolution that interval sources such as the GC log report in.
+     *
+     * <p>An overlap is a coincidence in time and no more. It is reported because a slow tick that
+     * coincides with a collection is very probably explained by it, not because it must be.
+     */
+    public synchronized int countOverlapping(long sinceNanos, long thresholdNanos, List<long[]> intervals,
+                                             long slackNanos) {
+        int overlapping = 0;
+        for (int i = 1; i <= size; i++) {
+            int index = (next - i + endNanos.length) % endNanos.length;
+            if (endNanos[index] - sinceNanos < 0) {
+                break;
+            }
+            if (durationNanos[index] <= thresholdNanos) {
+                continue;
+            }
+            long eventStart = endNanos[index] - durationNanos[index] - slackNanos;
+            long eventEnd = endNanos[index] + slackNanos;
+            for (long[] interval : intervals) {
+                if (interval[0] - eventEnd <= 0 && eventStart - interval[1] <= 0) {
+                    overlapping++;
+                    break;
+                }
+            }
+        }
+        return overlapping;
     }
 
     /** The distribution of one window's samples. Immutable. */
