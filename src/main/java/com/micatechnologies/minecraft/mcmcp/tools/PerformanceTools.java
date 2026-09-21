@@ -12,6 +12,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.perf.CallTree;
+import com.micatechnologies.minecraft.mcmcp.perf.DirectMemory;
 import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
 import com.micatechnologies.minecraft.mcmcp.perf.GameThreads;
 import com.micatechnologies.minecraft.mcmcp.perf.GcPauseLog;
@@ -119,7 +120,8 @@ public final class PerformanceTools {
     private static void registerHealth() {
         McpRegistry.registerTool(McpTool.named("game_health")
             .title("JVM health")
-            .description("Report the JVM's health: heap and memory pools, garbage collection per "
+            .description("Report the JVM's health: heap, memory pools and direct buffers against "
+                + "their limit, garbage collection per "
                 + "collector, process and system CPU load, threads, and free disk. Look here when "
                 + "ticks or frames hitch at intervals rather than staying uniformly slow — that "
                 + "pattern is usually garbage collection, not a block.\n\n"
@@ -161,6 +163,7 @@ public final class PerformanceTools {
                     pools.add(entry);
                 }
                 memory.add("pools", pools);
+                memory.add("offHeap", DirectMemory.toJson());
                 json.add("memory", memory);
 
                 long uptimeMillis = ManagementFactory.getRuntimeMXBean().getUptime();
