@@ -12,6 +12,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.text.ITextComponent;
 import net.minecraft.util.text.TextComponentString;
+import net.minecraft.util.text.TextFormatting;
 import net.minecraft.world.World;
 
 /**
@@ -33,6 +34,7 @@ public class CapturingCommandSender implements ICommandSender {
 
     private final ICommandSender delegate;
     private final List<String> output = new ArrayList<>();
+    private final List<String> errors = new ArrayList<>();
 
     public CapturingCommandSender(ICommandSender delegate) {
         this.delegate = delegate;
@@ -62,6 +64,17 @@ public class CapturingCommandSender implements ICommandSender {
         // getUnformattedText strips the colour codes and click events that make sense in a chat
         // window and are noise in a tool result.
         output.add(component.getUnformattedText());
+        // Red is how the command handler reports a CommandException, whether the command's usage was
+        // wrong or it declined to act. It is the only thing that tells a failure apart from a command
+        // that ran and returned 0.
+        if (component.getStyle().getColor() == TextFormatting.RED) {
+            errors.add(component.getUnformattedText());
+        }
+    }
+
+    /** The lines the command handler sent as errors (in red). */
+    public List<String> getErrors() {
+        return Collections.unmodifiableList(errors);
     }
 
     /**

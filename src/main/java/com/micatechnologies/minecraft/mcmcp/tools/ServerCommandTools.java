@@ -50,7 +50,14 @@ public final class ServerCommandTools {
                 + "By default the command runs with full server authority (console level). Pass "
                 + "'asPlayer' to run it as that player instead, with their permission level and their "
                 + "position as the command's origin — which is what you want for anything using "
-                + "relative coordinates or @s.")
+                + "relative coordinates or @s.\n\n"
+                + "'succeeded' is Minecraft's own verdict: false when the command returned 0. "
+                + "'error' is set only when it failed with an error message, which includes a "
+                + "no-op — /blockdata writing a value that is already set fails with 'The data tag "
+                + "did not change'. /setblock with a block state replaces the tile entity and loses "
+                + "its data; change tile-entity data with /blockdata, or server_set_block's nbt. "
+                + "SNBT has no \\n escape: for a line break inside a string, put a literal line feed "
+                + "in the command.")
             .schema(JsonSchema.object()
                 .string("command", "The command to run, e.g. 'time set day' or '/give Steve stone 64'.")
                 .string("asPlayer", "Username to run the command as. Omit to run with console "
@@ -105,6 +112,9 @@ public final class ServerCommandTools {
                         // error code — the reason, when there is one, is in the captured output.
                         json.addProperty("result", returnValue);
                         json.addProperty("succeeded", returnValue != 0);
+                        if (!sender.getErrors().isEmpty()) {
+                            json.addProperty("error", String.join("\n", sender.getErrors()));
+                        }
 
                         JsonArray lines = new JsonArray();
                         for (String line : sender.getOutput()) {
