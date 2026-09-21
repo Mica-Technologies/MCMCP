@@ -5,6 +5,7 @@ import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
+import com.micatechnologies.minecraft.mcmcp.client.ScreenSampler;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
@@ -64,6 +65,7 @@ public final class ClientDebugTools {
     public static void register() {
         ClientChatRecorder.register();
         registerScreenshot();
+        registerScreenStats();
         registerGuiState();
         registerReadChat();
         registerRuntimeInfo();
@@ -186,6 +188,141 @@ public final class ClientDebugTools {
                 return result;
             })
             .build());
+    }
+
+    // ------------------------------------------------------------------
+    // Screen statistics
+    // ------------------------------------------------------------------
+
+    /** Longest a screen sample may run: well inside the orchestrator's two-minute call timeout. */
+    private static final long SCREEN_STATS_MAX_MILLIS = 60_000L;
+
+    private static void registerScreenStats() {
+        ScreenSampler.register();
+        McpRegistry.registerTool(McpTool.named("client_screen_stats")
+            .title("Sample screen brightness")
+            .description("Read the rendered frame many times in a row — every frame, or on an "
+                + "interval — and return each read's mean brightness (luminance, 0-255) and, "
+                + "optionally, mean red, green and blue, without saving or sending any image. Use it "
+                + "to catch a short visual effect a screenshot would miss: a strobe, a flicker, a "
+                + "light that should blink. Crop to the part of the screen the effect is in, or it "
+                + "is diluted by everything else in view.\n\n"
+                + "'changed' counts reads that differ from the first by more than threshold. The "
+                + "crop is in window pixels from the top-left, as in a screenshot. Blocks for "
+                + "count x interval, at most 60 seconds.")
+            .schema(JsonSchema.object()
+                .integer("count", "How many reads. Default 20.", 1, 600)
+                .integer("interval_ms", "Time between reads. 0 (default) reads every rendered frame.",
+                    0, 5000)
+                .integer("x", "Crop: left edge in window pixels. Default 0.", 0, 16384)
+                .integer("y", "Crop: top edge in window pixels. Default 0.", 0, 16384)
+                .integer("width", "Crop width in pixels. Default: to the right edge.", 1, 16384)
+                .integer("height", "Crop height in pixels. Default: to the bottom edge.", 1, 16384)
+                .number("threshold", "Luminance difference from the first read that counts as "
+                    + "changed. Default 8.", 0.0D, 255.0D)
+                .bool("per_channel", "Also return mean red, green and blue per read. Default false.")
+                .build())
+            .clientOnly()
+            .readOnly()
+            .closedWorld()
+            .offGameThread()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowScreenshots()) {
+                    return ToolResult.error("Reading the screen is disabled by "
+                        + "permissions.allowScreenshots in the MCMCP config.");
+                }
+                int count = context.getBoundedInt("count", 20, 1, 600);
+                int intervalMillis = context.getBoundedInt("interval_ms", 0, 0, 5000);
+                if ((long) count * intervalMillis > SCREEN_STATS_MAX_MILLIS) {
+                    return ToolResult.error("count x interval_ms is " + (long) count * intervalMillis
+                        + " ms, over the " + SCREEN_STATS_MAX_MILLIS + " ms one call may take. Lower "
+                        + "one of them.");
+                }
+                double threshold = Math.max(0.0D, Math.min(255.0D, context.getDouble("threshold", 8.0D)));
+                boolean perChannel = context.getBoolean("per_channel", false);
+
+                java.util.concurrent.CompletableFuture<ScreenSampler.Result> future = ScreenSampler.start(
+                    context.getBoundedInt("x", 0, 0, 16384), context.getBoundedInt("y", 0, 0, 16384),
+                    context.getBoundedInt("width", 0, 0, 16384), context.getBoundedInt("height", 0, 0, 16384),
+                    count, intervalMillis * 1_000_000L);
+                if (future == null) {
+                    return ToolResult.error("Another client_screen_stats call is already sampling; wait "
+                        + "for it.");
+                }
+
+                ScreenSampler.Result sampled;
+                long deadline = System.currentTimeMillis() + SCREEN_STATS_MAX_MILLIS + 5_000L;
+                try {
+                    while (true) {
+                        context.getCancellation().throwIfCancelled();
+                        try {
+                            sampled = future.get(100L, java.util.concurrent.TimeUnit.MILLISECONDS);
+                            break;
+                        } catch (java.util.concurrent.TimeoutException notYet) {
+                            if (System.currentTimeMillis() > deadline) {
+                                return ToolResult.error("The screen was not sampled " + count + " times in "
+                                    + "time. The game may not be rendering: minimised, paused or loading.");
+                            }
+                        }
+                    }
+                } catch (java.util.concurrent.ExecutionException e) {
+                    return ToolResult.error("Reading the screen failed: " + e.getCause());
+                } finally {
+                    ScreenSampler.cancel();
+                }
+
+                List<ScreenSampler.Sample> samples = sampled.samples;
+                long firstNanos = samples.get(0).nanos;
+                double first = samples.get(0).luminance;
+                double min = Double.MAX_VALUE;
+                double max = -Double.MAX_VALUE;
+                double sum = 0.0D;
+                double maxDelta = 0.0D;
+                int changed = 0;
+                com.google.gson.JsonArray reads = new com.google.gson.JsonArray();
+                for (ScreenSampler.Sample sample : samples) {
+                    min = Math.min(min, sample.luminance);
+                    max = Math.max(max, sample.luminance);
+                    sum += sample.luminance;
+                    double delta = Math.abs(sample.luminance - first);
+                    maxDelta = Math.max(maxDelta, delta);
+                    if (delta > threshold) {
+                        changed++;
+                    }
+                    JsonObject read = new JsonObject();
+                    read.addProperty("ms", Math.round((sample.nanos - firstNanos) / 1.0e6D));
+                    read.addProperty("lum", round1(sample.luminance));
+                    if (perChannel) {
+                        read.addProperty("r", round1(sample.red));
+                        read.addProperty("g", round1(sample.green));
+                        read.addProperty("b", round1(sample.blue));
+                    }
+                    reads.add(read);
+                }
+
+                JsonObject region = new JsonObject();
+                region.addProperty("x", sampled.x);
+                region.addProperty("y", sampled.y);
+                region.addProperty("width", sampled.width);
+                region.addProperty("height", sampled.height);
+
+                JsonObject json = new JsonObject();
+                json.add("region", region);
+                json.addProperty("reads", samples.size());
+                json.addProperty("spanMs", Math.round((samples.get(samples.size() - 1).nanos - firstNanos) / 1.0e6D));
+                json.addProperty("minLum", round1(min));
+                json.addProperty("maxLum", round1(max));
+                json.addProperty("meanLum", round1(sum / samples.size()));
+                json.addProperty("maxDeltaFromFirst", round1(maxDelta));
+                json.addProperty("changed", changed);
+                json.add("samples", reads);
+                return ToolResult.structured(json);
+            })
+            .build());
+    }
+
+    private static double round1(double value) {
+        return Math.round(value * 10.0D) / 10.0D;
     }
 
     /**
@@ -343,7 +480,8 @@ public final class ClientDebugTools {
     private static void registerRuntimeInfo() {
         McpRegistry.registerTool(McpTool.named("client_runtime_info")
             .title("Client runtime info")
-            .description("Report client performance and environment: frame rate, heap usage, render "
+            .description("Report client performance and environment: frame rate, heap and off-heap "
+                + "(direct buffer) memory against their limits, render "
                 + "distance, graphics settings and the game directory. Roughly what the F3 debug "
                 + "overlay shows. Check frame rate here if the client seems to be struggling.\n\n"
                 + "Also reports this game's process id and start time. Two clients launched from one "
@@ -386,6 +524,9 @@ public final class ClientDebugTools {
                         memory.addProperty("usedMegabytes", (totalMemory - freeMemory) / 1_048_576L);
                         memory.addProperty("usedPercentOfMax",
                             Math.round((totalMemory - freeMemory) * 1000.0D / maxMemory) / 10.0D);
+                        // Off-heap: what ran out when a dense chunk rebuild killed a client with the
+                        // heap half empty. See DirectMemory.
+                        memory.add("offHeap", com.micatechnologies.minecraft.mcmcp.perf.DirectMemory.toJson());
                         json.add("memory", memory);
                         return json;
                     }
