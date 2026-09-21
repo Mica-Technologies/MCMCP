@@ -19,14 +19,15 @@
 //! which game it is in, and a human focus change is visible on the very next call.
 
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 use tracing::{debug, warn};
 
 use crate::catalogue::{self, ALL_INSTANCES, Aggregate, Contribution, INSTANCE_ARGUMENT};
 use crate::events::{Actor, Event, EventKind, EventLog, Level};
-use crate::instance::{self, Instance, UpstreamEvent};
+use crate::instance::{self, Catalogue, Instance, InstanceInfo, UpstreamEvent};
 use crate::jsonrpc;
 use crate::orchestrator_tools;
 use crate::policy::{Decision, Policy};
@@ -93,6 +94,54 @@ pub struct Router {
     /// loses work. This is the same channel-shaped seam the approval flow uses, for the same
     /// reason: the GUI answers it without being a special case inside this code.
     gate: Mutex<Option<tokio::sync::mpsc::Sender<GateRequest>>>,
+    /// Every endpoint's last ready catalogue, kept after the endpoint goes away.
+    ///
+    /// A singleplayer game is two endpoints, and the server one comes and goes with the world: open a
+    /// world and ~20 `server_*` tools arrive, leave it and they are withdrawn. Every one of those was
+    /// a `list_changed`, which re-bills the whole catalogue into the client's prompt, and an agent
+    /// creating a world per test scenario paid it twice per scenario. So an endpoint that has gone
+    /// keeps contributing its tools while another endpoint of the same game is still connected; a
+    /// call to one of them is answered with why it cannot run instead.
+    retained: Mutex<BTreeMap<String, Retained>>,
+    /// The process each endpoint was when a routed call last reached it.
+    ///
+    /// A relaunch from the same directory keeps the instance id, so without this a model carries on
+    /// against a fresh JVM — different world, nothing it set up — with every result still naming the
+    /// same instance.
+    last_process: Mutex<HashMap<String, ProcessIdentity>>,
+    /// Per game: the session this orchestrator last saw, for reporting how it ended.
+    sessions: Mutex<HashMap<String, GameSession>>,
+}
+
+/// A game process as the link describes it: pid and start time.
+type ProcessIdentity = (Option<i64>, Option<String>);
+
+/// An endpoint's catalogue as it was when it was last ready.
+#[derive(Clone)]
+struct Retained {
+    game: String,
+    label: String,
+    catalogue: Arc<Catalogue>,
+}
+
+/// One run of one game, as far as this orchestrator saw it.
+struct GameSession {
+    info: InstanceInfo,
+    endpoints: BTreeSet<String>,
+    connected_at: SystemTime,
+    ended_at: Option<SystemTime>,
+}
+
+impl GameSession {
+    /// The earliest a file from this session can be dated.
+    ///
+    /// A few seconds before the link came up rather than exactly then: Windows stamps file times from
+    /// a clock that ticks coarsely, so a report written just after connecting can carry an earlier
+    /// time. Nothing from a previous run can land in that window — a JVM takes far longer than that
+    /// to start and link.
+    fn since(&self) -> SystemTime {
+        self.connected_at - std::time::Duration::from_secs(5)
+    }
 }
 
 /// A call waiting on a human.
@@ -122,6 +171,9 @@ impl Router {
             events: EventLog::in_memory(),
             policy: Arc::new(Mutex::new(Policy::default())),
             gate: Mutex::new(None),
+            retained: Mutex::new(BTreeMap::new()),
+            last_process: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -345,6 +397,10 @@ impl Router {
     /// not rewrite 45 tool schemas.
     fn addressable(&self) -> Vec<String> {
         let mut ids = self.registry.ids();
+        // Endpoints seen this run. The store covers approved games across runs, but an endpoint
+        // whose catalogue is still being offered must stay a valid target in the enum too, or a world
+        // closing would rewrite every schema anyway.
+        ids.extend(self.retained.lock().expect("retained lock").keys().cloned());
         if let Ok(store) = self.store.lock() {
             for known in store.all() {
                 if known.revoked {
@@ -422,7 +478,7 @@ impl Router {
             return Aggregate::default();
         }
 
-        let contributions: Vec<Contribution> = instances
+        let mut contributions: Vec<Contribution> = instances
             .iter()
             .map(|instance| {
                 let info = instance.info();
@@ -433,6 +489,44 @@ impl Router {
                 }
             })
             .collect();
+
+        // Endpoints that have gone, but whose game has not. Only while a sibling is still here: a
+        // game that has closed entirely falls back to the cached surface above when it was the
+        // last one, and otherwise its tools genuinely should leave with it.
+        {
+            let mut retained = self.retained.lock().expect("retained lock");
+            for instance in &instances {
+                let info = instance.info();
+                retained.insert(
+                    info.id,
+                    Retained {
+                        game: info.approval_id,
+                        label: info.label,
+                        catalogue: instance.catalogue(),
+                    },
+                );
+            }
+            let connected = self.registry.all();
+            let live_games: BTreeSet<String> = connected
+                .iter()
+                .map(|instance| instance.info().approval_id)
+                .collect();
+            for (id, kept) in retained.iter() {
+                let present = connected
+                    .iter()
+                    .any(|instance| instance.id() == *id && instance.is_ready());
+                if !present && live_games.contains(&kept.game) {
+                    contributions.push(Contribution {
+                        id: id.clone(),
+                        label: kept.label.clone(),
+                        catalogue: Arc::clone(&kept.catalogue),
+                    });
+                }
+            }
+        }
+        // Sorted so the same set of endpoints aggregates identically whether an endpoint is live or
+        // retained — which is what lets a world closing and reopening announce nothing.
+        contributions.sort_by(|a, b| a.id.cmp(&b.id));
 
         let aggregate = catalogue::aggregate(
             &contributions,
@@ -487,6 +581,15 @@ impl Router {
             .and_then(|value| value.as_str().map(str::to_string));
 
         if ORCHESTRATOR_TOOLS.contains(&name) {
+            // Put `instance` back: it was taken off above for routing, but `mcmcp_read_logs`
+            // declares it as its own argument, and stripping it silently read every game's log
+            // when one was asked for. Tools that do not declare it simply do not look at it.
+            if let Some(requested) = &requested_instance {
+                arguments.insert(INSTANCE_ARGUMENT.to_string(), json!(requested));
+            }
+            if let Some(refusal) = self.unknown_orchestrator_argument(name, &arguments) {
+                return Ok(refusal);
+            }
             return Ok(self.call_orchestrator_tool(name, &arguments).await);
         }
 
@@ -494,7 +597,7 @@ impl Router {
             return Ok(self.fan_out(name, &arguments).await);
         }
 
-        let instance = match self.registry.resolve(requested_instance.as_deref()) {
+        let mut instance = match self.registry.resolve(requested_instance.as_deref()) {
             FocusResolution::Resolved(id) => match self.registry.get(&id) {
                 Some(instance) => instance,
                 // Disconnected between resolving and fetching. Rare, and a tool error rather than a
@@ -517,8 +620,13 @@ impl Router {
             }
             FocusResolution::Unknown(name) => {
                 let connected = self.registry.ids();
+                let crashed = self
+                    .game_for_endpoint(&name)
+                    .and_then(|game| self.last_exit_crash(&game))
+                    .map(|report| format!(" It crashed: {}.", report.summary()))
+                    .unwrap_or_default();
                 return Ok(tool_error(&format!(
-                    "There is no connected instance called '{name}'. Connected right now: {}.",
+                    "There is no connected instance called '{name}'. Connected right now: {}.{crashed}",
                     if connected.is_empty() {
                         "nothing".to_string()
                     } else {
@@ -528,7 +636,35 @@ impl Router {
             }
         };
 
+        // Focus names the endpoint, but a singleplayer game is two of them, and "the focused
+        // instance has no server_run_command" is a true answer to a question nobody meant to ask
+        // when the other half of the same game has it. With no instance named and exactly one
+        // sibling offering the tool, that sibling is the only reading of the call; it goes there,
+        // and the result says so. An explicitly named instance is never second-guessed.
+        let mut rerouted_from: Option<String> = None;
+        if requested_instance.is_none() && !instance.catalogue().has_tool(name) {
+            let game = instance.info().approval_id;
+            let siblings: Vec<Arc<Instance>> = self
+                .registry
+                .all()
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.id() != instance.id()
+                        && candidate.info().approval_id == game
+                        && candidate.is_ready()
+                        && candidate.catalogue().has_tool(name)
+                })
+                .collect();
+            if let [sibling] = siblings.as_slice() {
+                rerouted_from = Some(instance.id());
+                instance = Arc::clone(sibling);
+            }
+        }
+
         if !instance.catalogue().has_tool(name) {
+            if let Some(message) = self.offline_sibling_message(&instance, name) {
+                return Ok(tool_error(&message));
+            }
             let owners: Vec<String> = self
                 .registry
                 .all()
@@ -566,6 +702,19 @@ impl Router {
                 requested_instance.is_some(),
             )
         };
+        // Rerouted calls stay subject to "destructive calls must name their instance": following a
+        // focus that pointed somewhere else is exactly what that rule exists to stop. The refusal
+        // names the instance to pass, since the focus it mentions is not where the call would go.
+        let decision = match (decision, &rerouted_from) {
+            (Decision::Deny { reason }, Some(focused)) => Decision::Deny {
+                reason: format!(
+                    "{reason} The focused instance {focused} has no '{name}'; pass instance='{}' \
+                     to run it on the other half of that game.",
+                    instance.id()
+                ),
+            },
+            (decision, _) => decision,
+        };
         if let Some(refusal) = self.apply_gate(decision, &instance.id(), name, &arguments).await {
             return Ok(refusal);
         }
@@ -581,6 +730,19 @@ impl Router {
         forwarded.insert("arguments".into(), Value::Object(arguments));
         if let Some(meta) = params.get("_meta") {
             forwarded.insert("_meta".into(), meta.clone());
+        }
+
+        // Notes for the model, placed under the banner. Worked out before the call so a restart is
+        // reported even when the call itself fails.
+        let mut notes = Vec::new();
+        if let Some(focused) = &rerouted_from {
+            notes.push(format!(
+                "(Routed to {}: the focused instance {focused} has no {name}.)",
+                instance.id()
+            ));
+        }
+        if let Some(warning) = self.process_change_warning(&instance.info()) {
+            notes.push(warning);
         }
 
         let started = std::time::Instant::now();
@@ -622,6 +784,10 @@ impl Router {
                 // Stamped before it is measured, deliberately: the event should record what the
                 // client was actually sent, and the stamp is part of that.
                 annotate_result(&mut result, &info.id, &info.label, declares_output_schema);
+                stamp_process(&mut result, info.pid, info.started_at.as_deref());
+                for note in notes.iter().rev() {
+                    insert_after_banner(&mut result, note);
+                }
                 self.record_event(Event::new(
                     Actor::Model,
                     if is_error { Level::Warn } else { Level::Info },
@@ -637,10 +803,11 @@ impl Router {
                 Ok(result)
             }
             Err(error) => {
-                let result = tool_error(&format!(
-                    "instance '{}' did not complete that call: {error}",
-                    instance.id()
-                ));
+                let mut message = format!("instance '{}' did not complete that call: {error}", instance.id());
+                for note in notes.iter().rev() {
+                    message = format!("{note}\n{message}");
+                }
+                let result = tool_error(&message);
                 self.record_event(Event::new(
                     Actor::Model,
                     Level::Error,
@@ -656,6 +823,173 @@ impl Router {
                 Ok(result)
             }
         }
+    }
+
+    /// Why a tool the focused game once offered cannot run right now, if that is the situation.
+    ///
+    /// The case this names is a singleplayer client with no world open: its server endpoint only
+    /// exists while a world does, so `server_*` tools stay listed (see `retained`) but have nowhere
+    /// to go. "Not available on this instance" would be true and useless; what the model needs is
+    /// which endpoint owns the tool and how to bring it back.
+    fn offline_sibling_message(&self, focused: &Instance, name: &str) -> Option<String> {
+        let focused_info = focused.info();
+        let owners: Vec<String> = self
+            .retained
+            .lock()
+            .expect("retained lock")
+            .iter()
+            .filter(|(id, kept)| {
+                kept.game == focused_info.approval_id
+                    && **id != focused_info.id
+                    && kept.catalogue.has_tool(name)
+                    && !self.registry.get(id).is_some_and(|live| live.is_ready())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let owner = owners.first()?;
+        let mut message = format!("The tool '{name}' belongs to {owner}, which is not running right now.");
+        let server_suffix = format!("{}server", instance::ENDPOINT_SEPARATOR);
+        if owner.ends_with(&server_suffix) && focused_info.side.as_str() == "client" {
+            message.push_str(
+                " A singleplayer world's server endpoint only exists while a world is open: open \
+                 one with client_world_load or client_world_create, then client_wait with \
+                 waitFor=worldLoaded.",
+            );
+        }
+        Some(message)
+    }
+
+    /// A warning when this endpoint is a different process than the last call reached.
+    ///
+    /// Recorded per endpoint and compared on every routed call, so the very next result after a
+    /// relaunch says so — the same instance id is otherwise all a model ever sees.
+    fn process_change_warning(&self, info: &InstanceInfo) -> Option<String> {
+        let current = (info.pid, info.started_at.clone());
+        let previous = self
+            .last_process
+            .lock()
+            .expect("last process lock")
+            .insert(info.id.clone(), current.clone())?;
+        if previous == current {
+            return None;
+        }
+        let pid = |pid: Option<i64>| pid.map_or_else(|| "?".to_string(), |pid| pid.to_string());
+        Some(format!(
+            "Warning: {} is a different game process than on your last call (pid {} → {}, started \
+             {}). World state, open screens and anything you set up earlier may be gone.",
+            info.id,
+            pid(previous.0),
+            pid(current.0),
+            current.1.as_deref().unwrap_or("at an unknown time"),
+        ))
+    }
+
+    /// Tracks the start of a game's session, so its end can be reported later.
+    fn session_connected(&self, info: &InstanceInfo) {
+        let mut sessions = self.sessions.lock().expect("sessions lock");
+        let session = sessions
+            .entry(info.approval_id.clone())
+            .or_insert_with(|| GameSession {
+                info: info.clone(),
+                endpoints: BTreeSet::new(),
+                connected_at: SystemTime::now(),
+                ended_at: None,
+            });
+        // A new process, or a game that had gone entirely, is a new session: a crash report from
+        // the previous one must not be attributed to this one's end.
+        if session.ended_at.is_some() || session.info.pid != info.pid {
+            session.connected_at = SystemTime::now();
+            session.ended_at = None;
+            session.endpoints.clear();
+        }
+        session.info = info.clone();
+        session.endpoints.insert(info.id.clone());
+    }
+
+    /// Marks a game's session over once its last endpoint has gone.
+    fn session_disconnected(&self, endpoint: &str) {
+        let live_games: BTreeSet<String> = self
+            .registry
+            .all()
+            .iter()
+            .map(|instance| instance.info().approval_id)
+            .collect();
+        let mut sessions = self.sessions.lock().expect("sessions lock");
+        for (game, session) in sessions.iter_mut() {
+            if session.endpoints.contains(endpoint) && !live_games.contains(game) {
+                session.ended_at.get_or_insert_with(SystemTime::now);
+            }
+        }
+    }
+
+    /// How a game that is no longer running ended, if this orchestrator saw it go.
+    fn last_exit(&self, game: &str) -> Option<Value> {
+        let sessions = self.sessions.lock().expect("sessions lock");
+        let session = sessions.get(game)?;
+        let ended_at = session.ended_at?;
+        let directory = session.info.game_directory.as_deref().map(std::path::Path::new);
+        let crash_report =
+            directory.and_then(|directory| crate::crash::newest_crash_report(directory, session.since()));
+        let jvm_error_log =
+            directory.and_then(|directory| crate::crash::jvm_error_log(directory, session.info.pid));
+        Some(json!({
+            "endedSecondsAgo": ended_at.elapsed().map(|age| age.as_secs()).unwrap_or(0),
+            "pid": session.info.pid,
+            "crashReport": crash_report.map(|report| report.to_json()),
+            "jvmErrorLog": jvm_error_log.map(|path| path.to_string_lossy().to_string()),
+        }))
+    }
+
+    /// The game an endpoint id belongs to, whether or not it is still connected.
+    fn game_for_endpoint(&self, endpoint: &str) -> Option<String> {
+        let from_session = self
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .iter()
+            .find(|(_, session)| session.endpoints.contains(endpoint))
+            .map(|(game, _)| game.clone());
+        from_session.or_else(|| self.approval_id_for(endpoint))
+    }
+
+    /// The crash report a departed game left, for an error about calling it.
+    fn last_exit_crash(&self, game: &str) -> Option<crate::crash::CrashReport> {
+        let sessions = self.sessions.lock().expect("sessions lock");
+        let session = sessions.get(game)?;
+        session.ended_at?;
+        let directory = session.info.game_directory.as_deref()?;
+        crate::crash::newest_crash_report(std::path::Path::new(directory), session.since())
+    }
+
+    /// Refuses an argument an orchestrator tool does not declare.
+    ///
+    /// The mod's rule, applied to the tools answered here: a misspelled argument that is silently
+    /// ignored runs the call with a default nobody asked for, and the result reads as success.
+    /// `instance` is always tolerated — the server instructions promise it on every tool.
+    fn unknown_orchestrator_argument(&self, name: &str, arguments: &Map<String, Value>) -> Option<Value> {
+        let definitions = orchestrator_tools::definitions(&[]);
+        let definition = definitions
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))?;
+        let valid: Vec<String> = definition
+            .pointer("/inputSchema/properties")
+            .and_then(Value::as_object)
+            .map(|properties| properties.keys().cloned().collect())
+            .unwrap_or_default();
+        let unknown = arguments
+            .keys()
+            .find(|key| key.as_str() != INSTANCE_ARGUMENT && !valid.contains(key))?;
+        let suggestion = closest_name(unknown, &valid)
+            .map(|close| format!(" (did you mean '{close}'?)"))
+            .unwrap_or_default();
+        let listed = if valid.is_empty() {
+            "none".to_string()
+        } else {
+            valid.join(", ")
+        };
+        Some(tool_error(&format!(
+            "Unknown argument '{unknown}' for {name}{suggestion}. Valid arguments: {listed}."
+        )))
     }
 
     /// Runs one read-only tool on every connected instance and returns all the answers together.
@@ -844,6 +1178,7 @@ impl Router {
                             "label": game.label,
                             "connected": false,
                             "gameDirectory": game.game_directory,
+                            "lastExit": self.last_exit(&game.id),
                             "endpoints": game
                                 .endpoints
                                 .iter()
@@ -1329,6 +1664,7 @@ impl Router {
             UpstreamEvent::Connected { instance } => {
                 if let Some(handle) = self.registry.get(&instance) {
                     let info = handle.info();
+                    self.session_connected(&info);
                     self.record_event(Event::new(
                         Actor::System,
                         Level::Info,
@@ -1361,6 +1697,7 @@ impl Router {
                 ));
             }
             UpstreamEvent::Disconnected { instance } => {
+                self.session_disconnected(&instance);
                 self.record_event(Event::new(
                     Actor::System,
                     Level::Info,
@@ -1640,6 +1977,83 @@ pub fn annotate_result(result: &mut Value, instance_id: &str, label: &str, decla
             result.insert("content".into(), json!([{ "type": "text", "text": banner }]));
         }
     }
+}
+
+/// Adds the process identity to the `_meta` instance stamp.
+///
+/// In `_meta` rather than the banner: it is for a client or a script to compare, and the banner is
+/// paid for in a model's context on every call. The human-readable signal is the warning line a
+/// process change adds.
+pub fn stamp_process(result: &mut Value, pid: Option<i64>, started_at: Option<&str>) {
+    if let Some(stamp) = result
+        .pointer_mut("/_meta/mcmcp~1instance")
+        .and_then(Value::as_object_mut)
+    {
+        stamp.insert("pid".into(), json!(pid));
+        stamp.insert("startedAt".into(), json!(started_at));
+    }
+}
+
+/// Puts a line directly under the instance banner of a stamped result.
+///
+/// Under it rather than above, so the first thing in every result is still which instance produced
+/// it.
+pub fn insert_after_banner(result: &mut Value, line: &str) {
+    let Some(item) = result
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+        .and_then(|content| {
+            content
+                .iter_mut()
+                .find(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+        })
+    else {
+        return;
+    };
+    let existing = item.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+    item["text"] = json!(match existing.split_once('\n') {
+        Some((banner, rest)) => format!("{banner}\n{line}\n{rest}"),
+        None => format!("{existing}\n{line}"),
+    });
+}
+
+/// The valid name an unknown one was most likely meant to be.
+///
+/// Case, underscores and hyphens are ignored first — `world_type` for `worldType` is the mistake
+/// that happens — then a small edit distance catches typos. Nothing is suggested past that: a wrong
+/// suggestion is worse than none.
+pub fn closest_name<'a>(unknown: &str, valid: &'a [String]) -> Option<&'a str> {
+    let fold = |text: &str| {
+        text.chars()
+            .filter(|c| *c != '_' && *c != '-')
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let target = fold(unknown);
+    if let Some(exact) = valid.iter().find(|name| fold(name) == target) {
+        return Some(exact);
+    }
+    valid
+        .iter()
+        .map(|name| (edit_distance(&fold(name), &target), name))
+        .filter(|(distance, name)| *distance <= 2.max(name.len() / 4))
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, name)| name.as_str())
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1).min(row[j] + 1).min(previous + usize::from(ca != *cb));
+            previous = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// One instance's answer to a fanned-out call, or why it has none.
@@ -1965,6 +2379,358 @@ mod tests {
             announced.is_empty(),
             "nothing about the surface moved, but it announced: {announced:?}"
         );
+    }
+
+    /// One endpoint of a game, answering every tools/call it receives with where it ran.
+    fn endpoint(
+        id: &str,
+        game: &str,
+        side: Side,
+        tools: &[&str],
+        pid: i64,
+        game_directory: Option<&str>,
+    ) -> Arc<Instance> {
+        let (sender, mut outbound) = tokio::sync::mpsc::channel::<Value>(8);
+        let instance = Arc::new(Instance::new(
+            InstanceInfo {
+                id: id.into(),
+                approval_id: game.into(),
+                label: game.into(),
+                side,
+                game_directory: game_directory.map(str::to_string),
+                mod_version: "test".into(),
+                minecraft_version: "1.12.2".into(),
+                endpoint_url: None,
+                pid: Some(pid),
+                started_at: Some(format!("start-{pid}")),
+            },
+            sender,
+        ));
+        instance.set_catalogue(Catalogue {
+            tools: tools
+                .iter()
+                .map(|name| {
+                    let destructive = name.starts_with("server_");
+                    json!({
+                        "name": name,
+                        "description": name,
+                        "annotations": { "readOnlyHint": !destructive, "destructiveHint": destructive },
+                    })
+                })
+                .collect(),
+            ..Catalogue::default()
+        });
+        let answering = Arc::clone(&instance);
+        let ran_on = id.to_string();
+        tokio::spawn(async move {
+            while let Some(request) = outbound.recv().await {
+                if let Some(request_id) = jsonrpc::id_of(&request) {
+                    answering.complete(json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "content": [{ "type": "text", "text": format!("ran on {ran_on}") }],
+                            "isError": false,
+                        },
+                    }));
+                }
+            }
+        });
+        instance
+    }
+
+    async fn router_of(endpoints: &[Arc<Instance>]) -> Arc<Router> {
+        let registry = Arc::new(Registry::new());
+        let router = Arc::new(Router::new(
+            Arc::clone(&registry),
+            Arc::new(Mutex::new(ApprovalStore::load("unused-in-tests.json").unwrap())),
+        ));
+        for endpoint in endpoints {
+            registry.insert(Arc::clone(endpoint));
+            router
+                .handle_upstream(UpstreamEvent::Connected {
+                    instance: endpoint.id(),
+                })
+                .await;
+        }
+        router
+    }
+
+    async fn call(router: &Router, arguments: Value) -> Value {
+        let name = arguments["name"].clone();
+        let mut arguments = arguments;
+        arguments.as_object_mut().unwrap().remove("name");
+        router
+            .handle(json!({
+                "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": { "name": name, "arguments": arguments },
+            }))
+            .await
+            .expect("a response")["result"]
+            .clone()
+    }
+
+    fn text_of(result: &Value) -> String {
+        result["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn announced(downstream: &mut tokio::sync::broadcast::Receiver<Value>) -> Vec<String> {
+        let mut announced = Vec::new();
+        while let Ok(message) = downstream.try_recv() {
+            if let Some(method) = jsonrpc::method_of(&message)
+                && method.ends_with("list_changed")
+            {
+                announced.push(method.to_string());
+            }
+        }
+        announced
+    }
+
+    #[tokio::test]
+    async fn leaving_and_reopening_a_world_neither_withdraws_the_server_tools_nor_announces_a_change() {
+        let client = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
+        let server = endpoint("g.server", "g", Side::Server, &["server_run_command"], 1, None);
+        let router = router_of(&[Arc::clone(&client), Arc::clone(&server)]).await;
+        let mut downstream = router.subscribe_downstream();
+
+        router.registry.remove("g.server", &server);
+        router
+            .handle_upstream(UpstreamEvent::Disconnected {
+                instance: "g.server".into(),
+            })
+            .await;
+        let listed = router
+            .handle(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+            .await
+            .unwrap();
+        assert!(tool_names(&listed).contains(&"server_run_command".to_string()));
+
+        let reopened = endpoint("g.server", "g", Side::Server, &["server_run_command"], 1, None);
+        router.registry.insert(Arc::clone(&reopened));
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "g.server".into(),
+            })
+            .await;
+
+        let announced = announced(&mut downstream);
+        assert!(
+            announced.is_empty(),
+            "a world closing and reopening announced {announced:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_game_that_closes_entirely_takes_its_tools_with_it_while_another_game_stays() {
+        let alpha = endpoint("a.client", "a", Side::Client, &["client_look"], 1, None);
+        let beta = endpoint("b.server", "b", Side::Server, &["beta_only"], 2, None);
+        let router = router_of(&[Arc::clone(&alpha), Arc::clone(&beta)]).await;
+
+        router.registry.remove("b.server", &beta);
+        router
+            .handle_upstream(UpstreamEvent::Disconnected {
+                instance: "b.server".into(),
+            })
+            .await;
+        let listed = router
+            .handle(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+            .await
+            .unwrap();
+        assert!(!tool_names(&listed).contains(&"beta_only".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_server_tool_called_with_the_client_focused_runs_on_the_same_games_server() {
+        let client = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
+        let server = endpoint("g.server", "g", Side::Server, &["server_get_blocks"], 1, None);
+        let router = router_of(&[client, server]).await;
+        assert!(router.registry.set_focus("g.client"));
+
+        let result = call(&router, json!({"name": "server_get_blocks"})).await;
+        let text = text_of(&result);
+        assert_eq!(result["isError"], json!(false), "{text}");
+        assert!(text.contains("ran on g.server"), "{text}");
+        assert!(text.contains("(Routed to g.server"), "{text}");
+        assert!(
+            text.starts_with('['),
+            "the instance banner must stay first: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicitly_named_instance_is_never_rerouted() {
+        let client = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
+        let server = endpoint("g.server", "g", Side::Server, &["server_get_blocks"], 1, None);
+        let router = router_of(&[client, server]).await;
+
+        let result = call(
+            &router,
+            json!({"name": "server_get_blocks", "instance": "g.client"}),
+        )
+        .await;
+        assert_eq!(result["isError"], json!(true));
+        assert!(text_of(&result).contains("not available on instance 'g.client'"));
+    }
+
+    #[tokio::test]
+    async fn another_games_endpoint_is_not_treated_as_a_sibling() {
+        let alpha = endpoint("a.client", "a", Side::Client, &["client_look"], 1, None);
+        let beta = endpoint("b.server", "b", Side::Server, &["server_get_blocks"], 2, None);
+        let router = router_of(&[alpha, beta]).await;
+        assert!(router.registry.set_focus("a.client"));
+
+        let result = call(&router, json!({"name": "server_get_blocks"})).await;
+        assert_eq!(result["isError"], json!(true));
+        assert!(!text_of(&result).contains("ran on"));
+    }
+
+    #[tokio::test]
+    async fn a_server_tool_with_no_world_open_says_how_to_open_one() {
+        let client = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
+        let server = endpoint("g.server", "g", Side::Server, &["server_get_blocks"], 1, None);
+        let router = router_of(&[client, Arc::clone(&server)]).await;
+        router.registry.remove("g.server", &server);
+        router
+            .handle_upstream(UpstreamEvent::Disconnected {
+                instance: "g.server".into(),
+            })
+            .await;
+
+        let result = call(&router, json!({"name": "server_get_blocks"})).await;
+        let text = text_of(&result);
+        assert_eq!(result["isError"], json!(true));
+        assert!(
+            text.contains("belongs to g.server, which is not running"),
+            "{text}"
+        );
+        assert!(text.contains("client_world_load"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_rerouted_destructive_call_still_needs_its_instance_named_and_says_which() {
+        let client = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
+        let server = endpoint("g.server", "g", Side::Server, &["server_set_block"], 1, None);
+        let registry = Arc::new(Registry::new());
+        let policy = Policy {
+            require_explicit_instance_for_destructive: true,
+            ..Policy::default()
+        };
+        let router = Arc::new(
+            Router::new(
+                Arc::clone(&registry),
+                Arc::new(Mutex::new(ApprovalStore::load("unused-in-tests.json").unwrap())),
+            )
+            .with_policy(Arc::new(Mutex::new(policy))),
+        );
+        registry.insert(client);
+        registry.insert(server);
+        assert!(registry.set_focus("g.client"));
+
+        let result = call(&router, json!({"name": "server_set_block"})).await;
+        let text = text_of(&result);
+        assert_eq!(result["isError"], json!(true), "{text}");
+        assert!(text.contains("pass instance='g.server'"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_relaunched_game_process_is_called_out_on_the_next_result() {
+        let first = endpoint("g.client", "g", Side::Client, &["client_look"], 100, None);
+        let router = router_of(&[first]).await;
+        let quiet = call(&router, json!({"name": "client_look"})).await;
+        assert!(!text_of(&quiet).contains("Warning"));
+        assert_eq!(quiet["_meta"]["mcmcp/instance"]["pid"], json!(100));
+
+        let relaunched = endpoint("g.client", "g", Side::Client, &["client_look"], 200, None);
+        router.registry.insert(relaunched);
+        let warned = call(&router, json!({"name": "client_look"})).await;
+        let text = text_of(&warned);
+        assert!(text.contains("different game process"), "{text}");
+        assert!(text.contains("pid 100 → 200"), "{text}");
+        assert!(
+            text.starts_with('['),
+            "the instance banner must stay first: {text}"
+        );
+
+        let settled = call(&router, json!({"name": "client_look"})).await;
+        assert!(
+            !text_of(&settled).contains("Warning"),
+            "warned twice for one relaunch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_game_that_crashed_reports_the_crash_once_it_has_gone() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("mcmcp-router-crash-{unique}"));
+        std::fs::create_dir_all(directory.join("crash-reports")).unwrap();
+        let client = endpoint(
+            "g.client",
+            "g",
+            Side::Client,
+            &["client_look"],
+            77,
+            directory.to_str(),
+        );
+        let router = router_of(&[Arc::clone(&client)]).await;
+        std::fs::write(
+            directory.join("crash-reports/crash-now-client.txt"),
+            "Description: Unexpected error\n\njava.lang.OutOfMemoryError: Direct buffer memory\n",
+        )
+        .unwrap();
+        assert!(router.last_exit("g").is_none(), "a running game has no last exit");
+
+        router.registry.remove("g.client", &client);
+        router
+            .handle_upstream(UpstreamEvent::Disconnected {
+                instance: "g.client".into(),
+            })
+            .await;
+
+        let exit = router.last_exit("g").expect("the game was seen leaving");
+        assert_eq!(exit["pid"], json!(77));
+        assert_eq!(exit["crashReport"]["description"], json!("Unexpected error"));
+
+        let result = call(&router, json!({"name": "client_look", "instance": "g.client"})).await;
+        let text = text_of(&result);
+        assert!(text.contains("It crashed: Unexpected error"), "{text}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn an_orchestrator_tool_refuses_a_misspelled_argument_and_names_the_right_one() {
+        let router = router_of(&[]).await;
+        let result = call(&router, json!({"name": "mcmcp_focus", "tarGet_": "x"})).await;
+        let text = text_of(&result);
+        assert_eq!(result["isError"], json!(true));
+        assert!(text.contains("did you mean 'target'?"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_orchestrator_tool_tolerates_the_instance_argument_every_tool_is_promised() {
+        let router = router_of(&[]).await;
+        let result = call(
+            &router,
+            json!({"name": "mcmcp_instances", "instance": "g.client"}),
+        )
+        .await;
+        assert_eq!(result["isError"], json!(false), "{}", text_of(&result));
+    }
+
+    #[test]
+    fn a_snake_case_spelling_of_a_camel_case_argument_is_recognised() {
+        let valid = vec!["worldType".to_string(), "name".to_string()];
+        assert_eq!(closest_name("world_type", &valid), Some("worldType"));
+        assert_eq!(closest_name("nmae", &valid), Some("name"));
+        assert_eq!(closest_name("seed", &valid), None);
     }
 
     #[tokio::test]

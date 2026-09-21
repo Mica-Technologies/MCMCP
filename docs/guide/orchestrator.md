@@ -24,7 +24,7 @@ in-game says so — the only sign is a line in `logs/latest.log`.
 You can fix that by hand. Give each instance a different port, add a separate entry per instance to
 your MCP client's config, and keep track of which port is which game. It works, and it costs a config
 edit for every instance you add, plus one tool catalogue per instance in every request your model
-makes — the same 61 tools, three times over, distinguished only by a prefix.
+makes — the same 62 tools, three times over, distinguished only by a prefix.
 
 The orchestrator replaces that with one connection out of each game to one place.
 
@@ -105,6 +105,18 @@ Read-only tools also accept `instance: "*"`, which runs them on every connected 
 returns the answers together — the fastest way to compare a mod against a control. Tools that change
 anything do not offer it, and are refused if asked.
 
+### A call the focused endpoint cannot take goes to the other half of its game
+
+With the client focused, `server_run_command` has nowhere to run on the client — but the same game's
+server endpoint has it, and that is the only thing the call can have meant. So when `instance` is
+omitted and exactly one other endpoint of the **same game** offers the tool, the call goes there and
+the result says so on the line under the banner: `(Routed to atm9-3f2a1c.server: the focused instance
+atm9-3f2a1c.client has no server_run_command.)`. A call that names its instance is never redirected,
+and an endpoint of a different game never counts as a sibling.
+
+Destructive calls stay under the gating setting that requires them to name their instance. A refusal
+from it says which `instance` to pass.
+
 ### `connected` is not the same as `ready`
 
 `mcmcp_instances` reports both, and the difference matters when a game is misbehaving. An instance is
@@ -134,6 +146,13 @@ This is also why the `instance` enum covers games seen recently rather than only
 relaunch that rewrote every tool's schema would be a change, and would announce itself. A game that
 brings tools the others lack still announces, because then the surface really is different.
 
+Opening and closing a singleplayer world is the same situation. The server endpoint only exists
+while a world is open, so its twenty-odd `server_*` tools used to be withdrawn and re-announced on
+every world change. They now stay listed while the game's client is still connected. Calling one
+with no world open answers with which endpoint owns it and how to bring it back — open a world with
+`client_world_load` or `client_world_create`, then `client_wait` with `waitFor=worldLoaded` — rather
+than a bare "not available". When the whole game closes, its tools leave with it.
+
 ### Two launches of the same game
 
 Every row also carries `pid` and `startedAt`. They are the only fields that differ between two games
@@ -148,6 +167,21 @@ endpoint answers normally — from the previous build, with nothing to say so.
 Compare `startedAt` against when you last built. [`client_quit`](../reference/tools.md#client_quit)
 is how to avoid getting there in the first place, and the pid is what you kill when a client has
 stopped responding and cannot be asked.
+
+**Run one game client per game directory.** Two clients launched from one directory fight over its
+ports, and to the orchestrator they are the same instance id arriving with a new pid. When the
+process behind an instance changes between two of your calls, the next result carries a warning line
+under its banner — `Warning: atm9-3f2a1c.client is a different game process than on your last call
+(pid 1234 → 5678, …)` — because the world, open screens and anything set up earlier may all be gone.
+Every result's `_meta` entry also carries the `pid` and `startedAt` it came from.
+
+### How a game ended
+
+A game this orchestrator saw stop carries `lastExit` in its `knownButNotRunning` entry: how long ago,
+its pid, and any `crashReport` (path, `description` and the exception line) Minecraft wrote to its
+`crash-reports` folder during that session, plus the JVM's `hs_err_pid<pid>.log` as `jvmErrorLog` if
+the process died underneath the game. A call that names the gone instance repeats the crash in its
+error. Only games that stopped while this orchestrator was running have a `lastExit`.
 
 ## Telling several games apart
 

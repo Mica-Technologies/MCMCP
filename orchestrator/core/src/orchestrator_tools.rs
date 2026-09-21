@@ -78,7 +78,7 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                 '<game>.server', and its 'game' field says which game it belongs to. A singleplayer \
                 world is two entries sharing one game: the client has the camera, the input and the \
                 screenshots, and the server has authoritative world state and commands. Two entries \
-                with the same 'game' are one running game, not two.",
+                with the same 'game' are one running game, not two. A game this orchestrator saw                 stop carries 'lastExit', naming any crash report or JVM error log it left.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true },
         })),

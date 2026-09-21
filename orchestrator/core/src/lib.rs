@@ -18,6 +18,7 @@
 
 pub mod catalogue;
 pub mod control;
+pub mod crash;
 pub mod events;
 pub mod instance;
 pub mod jsonrpc;
