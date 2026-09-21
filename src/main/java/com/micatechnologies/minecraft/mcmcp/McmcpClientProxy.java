@@ -88,4 +88,10 @@ public class McmcpClientProxy implements McmcpProxy {
     public String creativeTabLabel(net.minecraft.creativetab.CreativeTabs tab) {
         return tab.getTabLabel();
     }
+
+    @Override
+    @Nullable
+    public com.google.gson.JsonObject describeTileEntityRendering(net.minecraft.tileentity.TileEntity tileEntity) {
+        return com.micatechnologies.minecraft.mcmcp.client.TileEntityRenderers.describe(tileEntity);
+    }
 }

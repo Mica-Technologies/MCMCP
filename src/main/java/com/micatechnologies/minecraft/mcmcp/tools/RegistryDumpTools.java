@@ -76,6 +76,9 @@ public final class RegistryDumpTools {
                 + "creative tab and translated display name. Use this to prove that a build change "
                 + "did not alter what a mod registers: dump before, dump after, diff the two files. "
                 + "Registry order is the creative-inventory display order, so it is preserved. "
+                + "Each tile-entity block also names the tile entity class it creates and, when "
+                + "dumped from the client, its special renderer (TESR) class or 'none' — the way to "
+                + "find which blocks are drawn by a TESR without placing them. "
                 + "Returns the file path, a SHA-256 of its contents and per-registry counts; read "
                 + "the file itself for the entries.")
             .schema(JsonSchema.object()
@@ -180,6 +183,11 @@ public final class RegistryDumpTools {
         }
         dump.add("mods", mods);
 
+        // Renderers are only asked about on the client endpoint. The integrated server shares this
+        // JVM and its proxy, but the dispatcher lookup writes to a map the client thread reads.
+        boolean includeRendering = "client".equals(side);
+        int blocksWithTileEntity = 0;
+        int blocksWithRenderer = 0;
         JsonArray blocks = new JsonArray();
         for (Block block : ForgeRegistries.BLOCKS) {
             ResourceLocation id = block.getRegistryName();
@@ -191,7 +199,14 @@ public final class RegistryDumpTools {
             entry.addProperty("class", block.getClass().getName());
             entry.addProperty("translationKey", block.getTranslationKey());
             addCreativeTab(entry, block.getCreativeTab());
-            entry.addProperty("hasTileEntity", block.hasTileEntity(block.getDefaultState()));
+            boolean hasTileEntity = block.hasTileEntity(block.getDefaultState());
+            entry.addProperty("hasTileEntity", hasTileEntity);
+            if (hasTileEntity) {
+                blocksWithTileEntity++;
+                if (describeTileEntity(block, entry, includeRendering)) {
+                    blocksWithRenderer++;
+                }
+            }
             Item itemBlock = Item.getItemFromBlock(block);
             entry.addProperty("hasItem", itemBlock != net.minecraft.init.Items.AIR);
             if (displayNames) {
@@ -268,12 +283,56 @@ public final class RegistryDumpTools {
         counts.addProperty("blocks", blocks.size());
         counts.addProperty("items", items.size());
         counts.addProperty("tileEntities", tileEntities.size());
+        counts.addProperty("blocksWithTileEntity", blocksWithTileEntity);
+        if (includeRendering) {
+            counts.addProperty("blocksWithRenderer", blocksWithRenderer);
+        }
         counts.addProperty("tileEntityRegistryReadable", tileRegistry != null);
         counts.addProperty("soundEvents", sounds.size());
         counts.addProperty("recipes", recipes.size());
         counts.addProperty("entities", entities.size());
         dump.add("counts", counts);
         return dump;
+    }
+
+    /**
+     * Adds which tile entity {@code block} creates and, on the client, what draws it. The dump
+     * listed tile entity keys and classes, and flagged blocks that have one, but never joined the
+     * two — so "which of these blocks has a special renderer" had no answer short of placing each.
+     *
+     * @return whether a special renderer draws it
+     */
+    private static boolean describeTileEntity(Block block, JsonObject entry, boolean includeRendering) {
+        TileEntity tileEntity;
+        try {
+            // No world: this is a registry question, and most blocks create their tile entity
+            // without looking at one. Those that do throw, and are recorded as such.
+            tileEntity = block.createTileEntity(null, block.getDefaultState());
+        } catch (RuntimeException | LinkageError e) {
+            entry.addProperty("tileEntityClass", "error: " + e.getClass().getSimpleName());
+            return false;
+        }
+        if (tileEntity == null) {
+            entry.addProperty("tileEntityClass", "none");
+            return false;
+        }
+        entry.addProperty("tileEntityClass", tileEntity.getClass().getName());
+        ResourceLocation key = TileEntity.getKey(tileEntity.getClass());
+        if (key != null) {
+            entry.addProperty("tileEntityKey", key.toString());
+        }
+        if (!includeRendering) {
+            return false;
+        }
+        JsonObject rendering = Mcmcp.proxy.describeTileEntityRendering(tileEntity);
+        if (rendering == null) {
+            return false;
+        }
+        for (java.util.Map.Entry<String, com.google.gson.JsonElement> field : rendering.entrySet()) {
+            entry.add(field.getKey(), field.getValue());
+        }
+        return rendering.has("renderer") && !"none".equals(rendering.get("renderer").getAsString())
+            && !rendering.get("renderer").getAsString().startsWith("error:");
     }
 
     private static void addCreativeTab(JsonObject entry, @Nullable CreativeTabs tab) {

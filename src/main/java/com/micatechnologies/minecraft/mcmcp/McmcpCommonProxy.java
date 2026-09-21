@@ -47,4 +47,10 @@ public class McmcpCommonProxy implements McmcpProxy {
     public String creativeTabLabel(net.minecraft.creativetab.CreativeTabs tab) {
         return null;
     }
+
+    @Override
+    @Nullable
+    public com.google.gson.JsonObject describeTileEntityRendering(net.minecraft.tileentity.TileEntity tileEntity) {
+        return null;
+    }
 }

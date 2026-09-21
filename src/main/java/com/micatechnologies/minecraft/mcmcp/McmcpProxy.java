@@ -59,4 +59,14 @@ public interface McmcpProxy {
      */
     @Nullable
     String creativeTabLabel(net.minecraft.creativetab.CreativeTabs tab);
+
+    /**
+     * How the client draws {@code tileEntity}: its special renderer's class, or {@code "none"}, and
+     * what that renderer and tile entity say about culling. Null on a side with no renderers.
+     *
+     * <p>Only to be called on the client thread. The dispatcher caches a lookup by writing to its
+     * map, so a lookup from the integrated server's thread would race the client drawing a frame.
+     */
+    @Nullable
+    com.google.gson.JsonObject describeTileEntityRendering(net.minecraft.tileentity.TileEntity tileEntity);
 }
