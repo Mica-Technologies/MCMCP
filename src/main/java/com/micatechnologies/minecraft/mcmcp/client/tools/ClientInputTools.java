@@ -444,10 +444,17 @@ public final class ClientInputTools {
                             ? "The input lock is held, so this is not the mouse: something in the "
                                 + "game is setting the rotation, most likely the server correcting "
                                 + "the player."
-                            : "Something is turning the camera between frames, almost always mouse "
-                                + "movement reaching this window, and looking again will not help "
-                                + "while it is. Take client_input_lock, which keeps the mouse out, "
-                                + "then call client_look again."));
+                            : !result.get("windowFocused").getAsBoolean()
+                            ? "The game window is not focused. Call client_view with "
+                                + "pauseOnLostFocus=false and grabInputFocus=true, then client_look "
+                                + "again. If a teleport was just issued, it may also have landed "
+                                + "after this turn and reset the camera: server_teleport_player "
+                                + "waits for the client to accept it, /tp does not."
+                            : "Something is turning the camera between frames: usually mouse "
+                                + "movement reaching this window, or a teleport issued just before "
+                                + "that landed after this turn (server_teleport_player waits for it; "
+                                + "/tp does not). For the mouse, take client_input_lock, which keeps "
+                                + "it out, then call client_look again."));
                 }
                 return ToolResult.structured(result);
             })

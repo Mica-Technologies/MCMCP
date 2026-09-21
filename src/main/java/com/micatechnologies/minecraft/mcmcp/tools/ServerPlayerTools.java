@@ -8,8 +8,13 @@ import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.concurrent.Callable;
+import javax.annotation.Nullable;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.network.NetHandlerPlayServer;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.WorldServer;
 
@@ -161,6 +166,53 @@ public final class ServerPlayerTools {
             .build());
     }
 
+    /** How long server_teleport_player waits for the client to accept a teleport. */
+    private static final long TELEPORT_CONFIRM_TIMEOUT_MILLIS = 2000L;
+
+    /** NetHandlerPlayServer's pending-teleport target, found by type; see {@link #isTeleportPending}. */
+    private static volatile Field teleportTargetField;
+    private static volatile boolean teleportTargetFieldSearched;
+
+    /**
+     * Whether the server is still waiting for {@code player}'s client to accept a teleport, or null
+     * if that cannot be told.
+     *
+     * <p>The server holds the destination in a private {@code Vec3d} until the client confirms, and
+     * ignores the player's movement packets meanwhile. It is found by type rather than name, for the
+     * reason the tile entity registry is in RegistryDumpTools: a name literal is rewritten by the
+     * reobfuscator and then fails in a development client. It is the handler's only {@code Vec3d}
+     * field in 1.12.2; if that stops being true this reports null and the tool stops waiting.
+     */
+    @Nullable
+    static Boolean isTeleportPending(EntityPlayerMP player) {
+        if (!teleportTargetFieldSearched) {
+            Field found = null;
+            for (Field field : NetHandlerPlayServer.class.getDeclaredFields()) {
+                if (!Modifier.isStatic(field.getModifiers()) && field.getType() == Vec3d.class) {
+                    if (found != null) {
+                        found = null;
+                        break;
+                    }
+                    found = field;
+                }
+            }
+            if (found != null) {
+                found.setAccessible(true);
+            }
+            teleportTargetField = found;
+            teleportTargetFieldSearched = true;
+        }
+        Field field = teleportTargetField;
+        if (field == null || player.connection == null) {
+            return null;
+        }
+        try {
+            return field.get(player.connection) != null;
+        } catch (IllegalAccessException e) {
+            return null;
+        }
+    }
+
     /**
      * Teleports a player.
      *
@@ -172,8 +224,14 @@ public final class ServerPlayerTools {
     private static void registerTeleportPlayer() {
         McpRegistry.registerTool(McpTool.named("server_teleport_player")
             .title("Teleport player")
-            .description("Move a player to a position, optionally facing a given direction. Disabled "
-                + "unless permissions.allowWorldEdits is enabled in the MCMCP config.")
+            .description("Move a player to a position, optionally facing a given direction. Returns "
+                + "once the player's client has accepted the teleport, so a client_look or "
+                + "screenshot made next sees the new position and facing; 'confirmed' is false if it "
+                + "did not within two seconds. Prefer this to /tp through server_run_command for "
+                + "setting a camera.\n\n"
+                + "A player in the air falls unless flying: set fly=true to hold a pose (creative or "
+                + "spectator only). Disabled unless permissions.allowWorldEdits is enabled in the "
+                + "MCMCP config.")
             .schema(JsonSchema.object()
                 .string("player", "Username of a connected player.")
                 .number("x", "Destination X coordinate.")
@@ -183,6 +241,9 @@ public final class ServerPlayerTools {
                     -360.0D, 360.0D)
                 .number("pitch", "Facing, in degrees down from horizontal. Defaults to unchanged.",
                     -90.0D, 90.0D)
+                .bool("fly", "Start flying, so the player stays at y instead of falling. true "
+                    + "needs a game mode that allows flight; false lands them. Defaults to "
+                    + "unchanged.")
                 .required("player", "x", "y", "z")
                 .build())
             .serverOnly()
@@ -197,6 +258,8 @@ public final class ServerPlayerTools {
                 final double x = context.requireDouble("x");
                 final double y = context.requireDouble("y");
                 final double z = context.requireDouble("z");
+                final boolean changeFlying = context.has("fly");
+                final boolean fly = context.getBoolean("fly", false);
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -206,18 +269,59 @@ public final class ServerPlayerTools {
                         float pitch = (float) context.getDouble("pitch", player.rotationPitch);
                         JsonObject before = GameJson.vec(player.posX, player.posY, player.posZ);
 
+                        JsonObject json = new JsonObject();
+                        if (changeFlying) {
+                            // Before the move, so the player is already flying when they arrive
+                            // and does not start to fall in the tick between.
+                            if (fly && !player.capabilities.allowFlying) {
+                                json.addProperty("flying", false);
+                                json.addProperty("flyingRefused", "This player's game mode does not "
+                                    + "allow flight, so they will fall. Use creative or spectator.");
+                            } else {
+                                player.capabilities.isFlying = fly;
+                                player.sendPlayerAbilities();
+                                json.addProperty("flying", fly);
+                            }
+                        }
+
                         // Through the connection rather than setPosition: this sends the position
                         // packet the client needs to actually move. A bare setPosition desyncs the
                         // player, who then gets rubber-banded back by the movement check.
                         player.connection.setPlayerLocation(x, y, z, yaw, pitch);
 
-                        JsonObject json = new JsonObject();
                         json.addProperty("player", player.getName());
                         json.add("from", before);
                         json.add("to", GameJson.vec(x, y, z));
+                        json.addProperty("yaw", yaw);
+                        json.addProperty("pitch", pitch);
                         return json;
                     }
                 });
+
+                // Wait for the client to accept it. The teleport is a packet; until the client has
+                // applied it, the client still has the old position and rotation, and a client_look
+                // made in that window was overwritten by the teleport landing a moment later — the
+                // guard then reported that the camera had not stayed put. On the worker, a tick at
+                // a time: waiting on the game thread would stop the tick that processes the reply.
+                boolean confirmed = false;
+                long deadline = System.currentTimeMillis() + TELEPORT_CONFIRM_TIMEOUT_MILLIS;
+                while (System.currentTimeMillis() < deadline) {
+                    Boolean pending = context.onGameThread(new Callable<Boolean>() {
+                        @Override
+                        public Boolean call() {
+                            return isTeleportPending(requirePlayer(username));
+                        }
+                    });
+                    if (pending == null) {
+                        break;
+                    }
+                    if (!pending) {
+                        confirmed = true;
+                        break;
+                    }
+                    PerformanceTools.sleepCancellable(context, 25L);
+                }
+                result.addProperty("confirmed", confirmed);
                 return ToolResult.structured(result);
             })
             .build());
