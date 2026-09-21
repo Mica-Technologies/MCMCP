@@ -33,6 +33,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityList;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.ResourceLocation;
+import net.minecraft.util.math.BlockPos;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import org.lwjgl.opengl.GL11;
@@ -250,10 +251,13 @@ public final class ClientPerformanceTools {
     // Per-block and per-entity render cost
     // ------------------------------------------------------------------
 
-    /** Nanoseconds and calls per object for the profile in progress. Client thread only. */
-    private static Map<TileEntity, long[]> tileEntityTimes;
-    private static Map<Entity, long[]> entityTimes;
+    /** Per-object timings for the profile in progress. Client thread only. */
+    private static Map<TileEntity, Timed> tileEntityTimes;
+    private static Map<Entity, Timed> entityTimes;
     private static boolean finishGl;
+
+    /** Most rows one list may return. Bounded because every row is paid for in a context window. */
+    private static final int MAX_ROWS = 1000;
 
     private static void registerProfileRendering() {
         McpRegistry.registerTool(McpTool.named("client_profile_rendering")
@@ -263,15 +267,34 @@ public final class ClientPerformanceTools {
                 + "position, plus totals by type with the renderer class. This is the tool that "
                 + "names the block or entity behind a slow frame. Costs are microseconds per "
                 + "frame; at 60 FPS a whole frame has 16,667.\n\n"
+                + "microsPerFrame averages over every profiled frame, so a block culled for part of "
+                + "the window reads low. framesDrawn (out of 'frames') and microsPerCall tell 'cheap' "
+                + "from 'not drawn'. Renderers that have barely run read high until the JIT has "
+                + "compiled them — set warmup_seconds when the scene was just built. "
+                + "timerOverheadMicrosPerCall is the wrapper's own cost per call, included in every "
+                + "figure.\n\n"
                 + "Only what is currently being rendered is measured — face the scene under test. "
                 + "Blocks drawn as baked models have no per-block cost to time; see "
                 + "client_profile_sections. Players are not covered. Times are CPU time submitting "
                 + "draw calls; set gl_finish to include GPU time, which is more truthful for heavy "
                 + "geometry and lowers FPS while measuring. A FastTESR's time covers filling the "
-                + "shared buffer, not its draw. Blocks for the duration.")
+                + "shared buffer, not its draw. Blocks for warmup plus duration.")
             .schema(JsonSchema.object()
                 .integer("duration_seconds", "How long to measure. Default 5.", 1, 30)
-                .integer("top", "Rows per list. Default 15.", 1, 50)
+                .integer("warmup_seconds", "Run the timers this long first and discard it, so "
+                    + "renderers are JIT-compiled before the measured window. Default 0.", 0, 15)
+                .integer("top", "Rows per list. Default 15. Every row is roughly 100 bytes of "
+                    + "response.", 1, MAX_ROWS)
+                .integer("offset", "Skip this many of the costliest rows, to page past 'top'. "
+                    + "Default 0.", 0, 100000)
+                .string("type", "Only rows for this block or entity id, e.g. 'minecraft:chest'.")
+                .integer("x", "With radius: only rows within radius blocks of this X.")
+                .integer("y", "With radius: only rows within radius blocks of this Y.")
+                .integer("z", "With radius: only rows within radius blocks of this Z.")
+                .integer("radius", "Distance on each axis from x, y and z, a box. Needs x, y and z.",
+                    0, 4096)
+                .number("min_micros", "Only rows costing at least this many microseconds per "
+                    + "frame. Default 0.", 0.0D, 1000000.0D)
                 .bool("gl_finish", "Wait for the GPU around each renderer call. Default false.")
                 .build())
             .clientOnly()
@@ -279,18 +302,38 @@ public final class ClientPerformanceTools {
             .closedWorld()
             .handler(context -> {
                 final int durationSeconds = context.getBoundedInt("duration_seconds", 5, 1, 30);
-                final int top = context.getBoundedInt("top", 15, 1, 50);
+                final int warmupSeconds = context.getBoundedInt("warmup_seconds", 0, 0, 15);
                 final boolean glFinish = context.getBoolean("gl_finish", false);
+                final RowFilter filter = RowFilter.from(context);
+                if (filter.error != null) {
+                    return ToolResult.error(filter.error);
+                }
 
                 if (!PROFILING.compareAndSet(false, true)) {
                     return ToolResult.error("Another client profile is already running; wait for it.");
                 }
                 try {
+                    context.onGameThread(new Callable<Void>() {
+                        @Override
+                        public Void call() {
+                            installTimingRenderers(glFinish);
+                            return null;
+                        }
+                    });
+
+                    if (warmupSeconds > 0) {
+                        // Timed and thrown away rather than simply waited out: the wrappers are part
+                        // of what gets compiled, and a warm-up without them would leave the first
+                        // measured frames paying for their compilation instead.
+                        PerformanceTools.sleepCancellable(context, warmupSeconds * 1000L);
+                    }
+
                     final long startedNanos = System.nanoTime();
                     final long framesBefore = context.onGameThread(new Callable<Long>() {
                         @Override
                         public Long call() {
-                            installTimingRenderers(glFinish);
+                            tileEntityTimes = new IdentityHashMap<TileEntity, Timed>();
+                            entityTimes = new IdentityHashMap<Entity, Timed>();
                             return ClientFrameClock.frames();
                         }
                     });
@@ -300,19 +343,24 @@ public final class ClientPerformanceTools {
                     JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                         @Override
                         public JsonObject call() {
-                            Map<TileEntity, long[]> tileEntities = tileEntityTimes;
-                            Map<Entity, long[]> entities = entityTimes;
+                            Map<TileEntity, Timed> tileEntities = tileEntityTimes;
+                            Map<Entity, Timed> entities = entityTimes;
                             removeTimingRenderers();
                             long frames = Math.max(1L, ClientFrameClock.frames() - framesBefore);
                             JsonObject json = new JsonObject();
-                            json.add("tileEntities", tileEntityReport(tileEntities, frames, top));
-                            json.add("entities", entityReport(entities, frames, top));
+                            json.add("tileEntities", tileEntityReport(tileEntities, frames, filter));
+                            json.add("entities", entityReport(entities, frames, filter));
                             json.addProperty("frames", frames);
+                            json.addProperty("timerOverheadMicrosPerCall",
+                                DurationWindow.micros(measureTimerOverheadNanos()));
                             return json;
                         }
                     });
                     result.addProperty("meanRenderWorkMs", DurationWindow.millis(
                         ClientFrameRecorder.renderWork().summariseSince(startedNanos).meanNanos()));
+                    if (warmupSeconds > 0) {
+                        result.addProperty("warmupSeconds", warmupSeconds);
+                    }
                     result.addProperty("glFinish", glFinish);
                     return ToolResult.structured(result);
                 } finally {
@@ -340,8 +388,8 @@ public final class ClientPerformanceTools {
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static void installTimingRenderers(boolean glFinish) {
-        tileEntityTimes = new IdentityHashMap<TileEntity, long[]>();
-        entityTimes = new IdentityHashMap<Entity, long[]>();
+        tileEntityTimes = new IdentityHashMap<TileEntity, Timed>();
+        entityTimes = new IdentityHashMap<Entity, Timed>();
         finishGl = glFinish;
         Map renderers = TileEntityRendererDispatcher.instance.renderers;
         for (Object object : renderers.entrySet()) {
@@ -386,16 +434,66 @@ public final class ClientPerformanceTools {
         entityTimes = null;
     }
 
-    private static <T> void record(Map<T, long[]> times, T object, long nanos) {
+    /**
+     * What one tile entity or entity cost while the profile ran. Client thread only.
+     *
+     * <p>{@code framesDrawn} is what makes a low average readable. {@code nanos / frames} alone
+     * cannot tell a block that is cheap on every frame from one that was culled for most of the
+     * window; counting the frames in which it was called at all can.
+     */
+    private static final class Timed {
+        final String renderer;
+        long nanos;
+        long calls;
+        double sumSquaredNanos;
+        long framesDrawn;
+        long lastFrame = -1L;
+
+        Timed(String renderer) {
+            this.renderer = renderer;
+        }
+    }
+
+    /**
+     * Records one call. {@code renderer} is the wrapped renderer's class, taken at the call rather
+     * than looked up afterwards: a lookup through the dispatcher once the wrappers are out found
+     * nothing for some tile entities, and the row went out with no renderer at all.
+     */
+    private static <T> void record(Map<T, Timed> times, T object, long nanos, String renderer) {
         if (times == null || object == null) {
             return;
         }
-        long[] entry = times.get(object);
-        if (entry == null) {
-            times.put(object, entry = new long[2]);
+        Timed timed = times.get(object);
+        if (timed == null) {
+            times.put(object, timed = new Timed(renderer));
         }
-        entry[0] += nanos;
-        entry[1]++;
+        timed.nanos += nanos;
+        timed.calls++;
+        timed.sumSquaredNanos += (double) nanos * nanos;
+        long frame = ClientFrameClock.frames();
+        if (frame != timed.lastFrame) {
+            timed.lastFrame = frame;
+            timed.framesDrawn++;
+        }
+    }
+
+    /**
+     * What one timed call costs with nothing inside it: the clock reads and the bookkeeping.
+     *
+     * <p>Every figure the profile reports includes this once per call. For a renderer costing two
+     * microseconds it is noise; for a hundred cheap calls a frame it is not, and it is only
+     * subtractable if it is reported.
+     */
+    private static double measureTimerOverheadNanos() {
+        Map<Object, Timed> scratch = new IdentityHashMap<Object, Timed>();
+        Object subject = new Object();
+        int iterations = 20000;
+        long started = System.nanoTime();
+        for (int i = 0; i < iterations; i++) {
+            long callStarted = System.nanoTime();
+            record(scratch, subject, System.nanoTime() - callStarted, "");
+        }
+        return (System.nanoTime() - started) / (double) iterations;
     }
 
     private static long startTiming() {
@@ -417,51 +515,109 @@ public final class ClientPerformanceTools {
     private static final class Rendered {
         String type;
         String renderer;
-        JsonObject pos;
+        BlockPos blockPos;
+        Timed timed;
         double nanosPerFrame;
     }
 
-    /** Client thread only, after the wrappers are out — so renderer lookups name the real class. */
-    private static JsonObject tileEntityReport(Map<TileEntity, long[]> times, long frames, int top) {
-        List<Rendered> rows = new ArrayList<Rendered>();
-        if (times != null) {
-            for (Map.Entry<TileEntity, long[]> entry : times.entrySet()) {
-                TileEntity tileEntity = entry.getKey();
-                Rendered row = new Rendered();
-                row.nanosPerFrame = entry.getValue()[0] / (double) frames;
-                ResourceLocation block = tileEntity.getBlockType() == null ? null
-                    : tileEntity.getBlockType().getRegistryName();
-                row.type = block == null ? tileEntity.getClass().getSimpleName() : block.toString();
-                TileEntitySpecialRenderer<?> renderer =
-                    TileEntityRendererDispatcher.instance.getRenderer(tileEntity);
-                row.renderer = renderer == null ? null : renderer.getClass().getName();
-                row.pos = GameJson.blockPos(tileEntity.getPos());
-                rows.add(row);
+    /**
+     * The row filters {@code client_profile_rendering} takes. Applied before anything is summed, so
+     * the type totals describe the same rows the costliest list does.
+     */
+    private static final class RowFilter {
+        String type;
+        BlockPos centre;
+        int radius;
+        double minNanosPerFrame;
+        int top;
+        int offset;
+        String error;
+
+        static RowFilter from(com.micatechnologies.minecraft.mcmcp.mcp.ToolContext context) {
+            RowFilter filter = new RowFilter();
+            filter.top = context.getBoundedInt("top", 15, 1, MAX_ROWS);
+            filter.offset = context.getBoundedInt("offset", 0, 0, 100000);
+            filter.type = context.getString("type", null);
+            filter.minNanosPerFrame = Math.max(0.0D, context.getDouble("min_micros", 0.0D)) * 1000.0D;
+            boolean anyCentre = context.has("x") || context.has("y") || context.has("z");
+            if (context.has("radius") || anyCentre) {
+                if (!context.has("radius") || !context.has("x") || !context.has("y") || !context.has("z")) {
+                    filter.error = "A region filter needs all of x, y, z and radius.";
+                    return filter;
+                }
+                filter.centre = new BlockPos(context.requireInt("x"), context.requireInt("y"),
+                    context.requireInt("z"));
+                filter.radius = context.getBoundedInt("radius", 0, 0, 4096);
             }
+            return filter;
         }
-        return renderedSection(rows, top, "block");
+
+        boolean isFiltering() {
+            return type != null || centre != null || minNanosPerFrame > 0.0D;
+        }
+
+        boolean accepts(Rendered row) {
+            if (type != null && !type.equals(row.type)) {
+                return false;
+            }
+            if (centre != null && (Math.abs(row.blockPos.getX() - centre.getX()) > radius
+                || Math.abs(row.blockPos.getY() - centre.getY()) > radius
+                || Math.abs(row.blockPos.getZ() - centre.getZ()) > radius)) {
+                return false;
+            }
+            return row.nanosPerFrame >= minNanosPerFrame;
+        }
     }
 
     /** Client thread only, after the wrappers are out. */
-    private static JsonObject entityReport(Map<Entity, long[]> times, long frames, int top) {
+    private static JsonObject tileEntityReport(Map<TileEntity, Timed> times, long frames, RowFilter filter) {
         List<Rendered> rows = new ArrayList<Rendered>();
         if (times != null) {
-            for (Map.Entry<Entity, long[]> entry : times.entrySet()) {
-                Entity entity = entry.getKey();
+            for (Map.Entry<TileEntity, Timed> entry : times.entrySet()) {
+                TileEntity tileEntity = entry.getKey();
                 Rendered row = new Rendered();
-                row.nanosPerFrame = entry.getValue()[0] / (double) frames;
-                ResourceLocation key = EntityList.getKey(entity);
-                row.type = key == null ? entity.getName() : key.toString();
-                Render<?> renderer = Minecraft.getMinecraft().getRenderManager().getEntityRenderObject(entity);
-                row.renderer = renderer == null ? null : renderer.getClass().getName();
-                row.pos = GameJson.blockPos(GameJson.blockPosOf(entity));
+                row.timed = entry.getValue();
+                row.nanosPerFrame = row.timed.nanos / (double) frames;
+                ResourceLocation block = tileEntity.getBlockType() == null ? null
+                    : tileEntity.getBlockType().getRegistryName();
+                row.type = block == null ? tileEntity.getClass().getSimpleName() : block.toString();
+                row.renderer = row.timed.renderer;
+                row.blockPos = tileEntity.getPos();
                 rows.add(row);
             }
         }
-        return renderedSection(rows, top, "entity");
+        return renderedSection(rows, frames, filter, "block");
     }
 
-    private static JsonObject renderedSection(List<Rendered> rows, int top, String typeLabel) {
+    /** Client thread only, after the wrappers are out. */
+    private static JsonObject entityReport(Map<Entity, Timed> times, long frames, RowFilter filter) {
+        List<Rendered> rows = new ArrayList<Rendered>();
+        if (times != null) {
+            for (Map.Entry<Entity, Timed> entry : times.entrySet()) {
+                Entity entity = entry.getKey();
+                Rendered row = new Rendered();
+                row.timed = entry.getValue();
+                row.nanosPerFrame = row.timed.nanos / (double) frames;
+                ResourceLocation key = EntityList.getKey(entity);
+                row.type = key == null ? entity.getName() : key.toString();
+                row.renderer = row.timed.renderer;
+                row.blockPos = GameJson.blockPosOf(entity);
+                rows.add(row);
+            }
+        }
+        return renderedSection(rows, frames, filter, "entity");
+    }
+
+    private static JsonObject renderedSection(List<Rendered> all, long frames, RowFilter filter,
+                                              String typeLabel) {
+        double totalNanos = 0.0D;
+        List<Rendered> rows = new ArrayList<Rendered>();
+        for (Rendered row : all) {
+            totalNanos += row.nanosPerFrame;
+            if (filter.accepts(row)) {
+                rows.add(row);
+            }
+        }
         Collections.sort(rows, new Comparator<Rendered>() {
             @Override
             public int compare(Rendered a, Rendered b) {
@@ -469,28 +625,32 @@ public final class ClientPerformanceTools {
             }
         });
 
-        double totalNanos = 0.0D;
-        // type -> {count, summed ns/frame, worst ns/frame}
+        // type -> {count, summed ns/frame, worst ns/frame, calls, summed ns, summed squared ns}
         final Map<String, double[]> byType = new HashMap<String, double[]>();
         Map<String, String> rendererOfType = new HashMap<String, String>();
         for (Rendered row : rows) {
-            totalNanos += row.nanosPerFrame;
             double[] sums = byType.get(row.type);
             if (sums == null) {
-                byType.put(row.type, sums = new double[3]);
+                byType.put(row.type, sums = new double[6]);
                 rendererOfType.put(row.type, row.renderer);
             }
             sums[0]++;
             sums[1] += row.nanosPerFrame;
             sums[2] = Math.max(sums[2], row.nanosPerFrame);
+            sums[3] += row.timed.calls;
+            sums[4] += row.timed.nanos;
+            sums[5] += row.timed.sumSquaredNanos;
         }
 
         JsonArray costliest = new JsonArray();
-        for (int i = 0; i < rows.size() && i < top; i++) {
+        for (int i = filter.offset; i < rows.size() && i < filter.offset + filter.top; i++) {
+            Rendered row = rows.get(i);
             JsonObject json = new JsonObject();
-            json.addProperty(typeLabel, rows.get(i).type);
-            json.add("pos", rows.get(i).pos);
-            json.addProperty("microsPerFrame", DurationWindow.micros(rows.get(i).nanosPerFrame));
+            json.addProperty(typeLabel, row.type);
+            json.add("pos", GameJson.blockPos(row.blockPos));
+            json.addProperty("microsPerFrame", DurationWindow.micros(row.nanosPerFrame));
+            json.addProperty("microsPerCall", DurationWindow.micros(row.timed.nanos / (double) row.timed.calls));
+            json.addProperty("framesDrawn", row.timed.framesDrawn);
             costliest.add(json);
         }
 
@@ -502,20 +662,33 @@ public final class ClientPerformanceTools {
             }
         });
         JsonArray typeRows = new JsonArray();
-        for (int i = 0; i < types.size() && i < top; i++) {
+        for (int i = 0; i < types.size() && i < filter.top; i++) {
             double[] sums = byType.get(types.get(i));
+            double meanNanosPerCall = sums[4] / sums[3];
+            double variance = Math.max(0.0D, sums[5] / sums[3] - meanNanosPerCall * meanNanosPerCall);
             JsonObject json = new JsonObject();
             json.addProperty(typeLabel, types.get(i));
-            json.addProperty("renderer", rendererOfType.get(types.get(i)));
+            // Always present, never null: Gson drops a null member outright, and a consumer reading
+            // entry["renderer"] then fails on one row in five hundred.
+            String renderer = rendererOfType.get(types.get(i));
+            json.addProperty("renderer", renderer == null ? "unknown" : renderer);
             json.addProperty("count", (int) sums[0]);
             json.addProperty("totalMicrosPerFrame", DurationWindow.micros(sums[1]));
             json.addProperty("worstMicrosPerFrame", DurationWindow.micros(sums[2]));
+            json.addProperty("microsPerCall", DurationWindow.micros(meanNanosPerCall));
+            json.addProperty("callStdDevMicros", DurationWindow.micros(Math.sqrt(variance)));
             typeRows.add(json);
         }
 
         JsonObject json = new JsonObject();
-        json.addProperty("rendered", rows.size());
+        json.addProperty("rendered", all.size());
         json.addProperty("totalMicrosPerFrame", DurationWindow.micros(totalNanos));
+        if (filter.isFiltering()) {
+            json.addProperty("matched", rows.size());
+        }
+        if (rows.size() > filter.offset + filter.top) {
+            json.addProperty("moreRows", rows.size() - filter.offset - filter.top);
+        }
         json.add("costliest", costliest);
         json.add("byType", typeRows);
         return json;
@@ -531,9 +704,11 @@ public final class ClientPerformanceTools {
     private static final class TimingRenderer extends TileEntitySpecialRenderer<TileEntity> {
 
         final TileEntitySpecialRenderer<TileEntity> delegate;
+        final String rendererName;
 
         TimingRenderer(TileEntitySpecialRenderer<TileEntity> delegate) {
             this.delegate = delegate;
+            this.rendererName = delegate.getClass().getName();
         }
 
         @Override
@@ -543,7 +718,7 @@ public final class ClientPerformanceTools {
             try {
                 delegate.render(te, x, y, z, partialTicks, destroyStage, alpha);
             } finally {
-                record(tileEntityTimes, te, stopTiming(started));
+                record(tileEntityTimes, te, stopTiming(started), rendererName);
             }
         }
 
@@ -555,7 +730,7 @@ public final class ClientPerformanceTools {
             try {
                 delegate.renderTileEntityFast(te, x, y, z, partialTicks, destroyStage, partial, buffer);
             } finally {
-                record(tileEntityTimes, te, System.nanoTime() - started);
+                record(tileEntityTimes, te, System.nanoTime() - started, rendererName);
             }
         }
 
@@ -586,10 +761,12 @@ public final class ClientPerformanceTools {
     private static final class TimingEntityRenderer extends Render<Entity> {
 
         final Render<Entity> delegate;
+        final String rendererName;
 
         TimingEntityRenderer(Render<Entity> delegate) {
             super(delegate.getRenderManager());
             this.delegate = delegate;
+            this.rendererName = delegate.getClass().getName();
         }
 
         @Override
@@ -598,7 +775,7 @@ public final class ClientPerformanceTools {
             try {
                 delegate.doRender(entity, x, y, z, entityYaw, partialTicks);
             } finally {
-                record(entityTimes, entity, stopTiming(started));
+                record(entityTimes, entity, stopTiming(started), rendererName);
             }
         }
 
@@ -609,7 +786,7 @@ public final class ClientPerformanceTools {
             try {
                 delegate.renderMultipass(entity, x, y, z, entityYaw, partialTicks);
             } finally {
-                record(entityTimes, entity, stopTiming(started));
+                record(entityTimes, entity, stopTiming(started), rendererName);
             }
         }
 
@@ -621,7 +798,7 @@ public final class ClientPerformanceTools {
             try {
                 delegate.doRenderShadowAndFire(entity, x, y, z, yaw, partialTicks);
             } finally {
-                record(entityTimes, entity, stopTiming(started));
+                record(entityTimes, entity, stopTiming(started), rendererName);
             }
         }
 
