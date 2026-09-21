@@ -14,8 +14,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import javax.annotation.Nullable;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
+import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
@@ -228,12 +230,25 @@ public final class ServerBuildTools {
     // Writing
     // ------------------------------------------------------------------
 
+    /**
+     * How many game-thread batches one call may be split into. {@code limits.maxBlockVolume} bounds
+     * one batch — how long a single task holds the tick loop — and this bounds the call, so clearing
+     * a scene is one call rather than fourteen single-layer ones, without a typo in a corner turning
+     * into a million-block write.
+     */
+    static final int MAX_BATCHES = 32;
+
     private static void registerSetBlocks() {
         McpRegistry.registerTool(McpTool.named("server_set_blocks")
             .title("Set blocks in bulk")
             .description("Place many blocks in one call, either by filling a cuboid region or by "
                 + "applying an explicit list of placements. This is how to build a structure: fill the "
                 + "bulk volumes first, then apply a list for the detail.\n\n"
+                + "A region or list larger than limits.maxBlockVolume is written in batches of that "
+                + "size, one per game tick, up to " + MAX_BATCHES + " batches — so a large area can be "
+                + "cleared (fill with minecraft:air) in one call. 'nbt' on a placement, or on a fill, "
+                + "merges tile-entity data into each block after it is placed, as /blockdata does; "
+                + "read it back with server_get_block nbt=true.\n\n"
                 + "Like server_set_block, this writes directly and does not fire block-place events, "
                 + "so other mods' protection and machinery hooks do not run. Disabled unless "
                 + "permissions.allowWorldEdits is enabled in the MCMCP config.")
@@ -242,6 +257,8 @@ public final class ServerBuildTools {
                     + "applies the explicit placements in the blocks argument.", "fill", "list")
                 .string("block", "Namespaced block id for fill mode, e.g. 'minecraft:stone'.")
                 .integer("metadata", "Block metadata for fill mode. Defaults to 0.", 0, 15)
+                .property("nbt", nbtSchema("Fill mode: tile-entity data merged into every block "
+                    + "filled."))
                 .integer("x", "Fill mode: X of one corner.")
                 .integer("y", "Fill mode: Y of one corner, 0-255.")
                 .integer("z", "Fill mode: Z of one corner.")
@@ -255,6 +272,8 @@ public final class ServerBuildTools {
                         .integer("z", "Block Z coordinate.")
                         .string("block", "Namespaced block id.")
                         .integer("metadata", "Block metadata. Defaults to 0.", 0, 15)
+                        .property("nbt", nbtSchema("Tile-entity data merged into this block after "
+                            + "it is placed."))
                         .required("x", "y", "z", "block")
                         .build())
                 .string("replaceOnly", "Only write where the existing block matches this namespaced "
@@ -272,6 +291,8 @@ public final class ServerBuildTools {
 
                 final int dimension = context.getInt("dimension", 0);
                 final String replaceOnlyId = context.getString("replaceOnly", null);
+                final int batchLimit = McmcpConfig.getMaxBlockVolume();
+                final long callLimit = (long) batchLimit * MAX_BATCHES;
 
                 final Block replaceOnly;
                 if (replaceOnlyId != null && !replaceOnlyId.isEmpty()) {
@@ -290,7 +311,11 @@ public final class ServerBuildTools {
 
                 final List<Placement> placements;
                 if ("list".equals(mode)) {
-                    placements = parsePlacements(context.getArguments());
+                    try {
+                        placements = parsePlacements(context.getArguments());
+                    } catch (IllegalArgumentException e) {
+                        return ToolResult.error(e.getMessage());
+                    }
                     if (placements == null) {
                         return ToolResult.error("List mode requires a 'blocks' array of objects with "
                             + "x, y, z and block.");
@@ -304,10 +329,11 @@ public final class ServerBuildTools {
                     if (placements.isEmpty()) {
                         return ToolResult.error("The 'blocks' array is empty; nothing to place.");
                     }
-                    if (placements.size() > McmcpConfig.getMaxBlockVolume()) {
-                        return ToolResult.error("That is " + placements.size() + " placements, over the "
-                            + "limit of " + McmcpConfig.getMaxBlockVolume()
-                            + " set by limits.maxBlockVolume. Split it across several calls.");
+                    if (placements.size() > callLimit) {
+                        return ToolResult.error("That is " + placements.size() + " placements, over "
+                            + "the limit of " + callLimit + " for one call (" + MAX_BATCHES
+                            + " batches of limits.maxBlockVolume, " + batchLimit + "). Split it across "
+                            + "several calls.");
                     }
                     for (Placement placement : placements) {
                         if (placement.block == null) {
@@ -321,27 +347,20 @@ public final class ServerBuildTools {
                         }
                     }
 
-                    JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    final Tally tally = new Tally();
+                    runInBatches(context, placements.size(), batchLimit, new Batch() {
                         @Override
-                        public JsonObject call() {
+                        public void run(int from, int to) {
                             WorldServer world = ServerWorldTools.requireWorld(dimension);
-                            int written = 0;
-                            int skipped = 0;
-                            for (Placement placement : placements) {
-                                if (replaceOnly != null
-                                    && world.getBlockState(placement.pos).getBlock() != replaceOnly) {
-                                    skipped++;
-                                    continue;
-                                }
-                                if (world.setBlockState(placement.pos,
-                                    placement.block.getStateFromMeta(placement.metadata), 3)) {
-                                    written++;
-                                }
+                            for (int i = from; i < to; i++) {
+                                Placement placement = placements.get(i);
+                                place(world, placement.pos,
+                                    placement.block.getStateFromMeta(placement.metadata),
+                                    placement.nbt, replaceOnly, tally);
                             }
-                            return summary(dimension, placements.size(), written, skipped, replaceOnlyId);
                         }
-                    });
-                    return ToolResult.structured(result);
+                    }, tally);
+                    return ToolResult.structured(tally.toJson(dimension, placements.size(), replaceOnlyId));
                 }
 
                 // Fill mode.
@@ -352,6 +371,12 @@ public final class ServerBuildTools {
                 final Block fillBlock = BlockIds.resolve(blockId);
                 if (fillBlock == null) {
                     return ToolResult.error(BlockIds.describeUnknown(blockId, "fill with"));
+                }
+                final NBTTagCompound fillNbt;
+                try {
+                    fillNbt = context.has("nbt") ? TileEntityNbt.parse(context.getArguments().get("nbt")) : null;
+                } catch (IllegalArgumentException e) {
+                    return ToolResult.error(e.getMessage());
                 }
 
                 final int metadata = context.getBoundedInt("metadata", 0, 0, 15);
@@ -365,65 +390,152 @@ public final class ServerBuildTools {
                 final int maxY = Math.min(255, Math.max(y1, context.getInt("toY", y1)));
                 final int maxZ = Math.max(z1, context.getInt("toZ", z1));
 
-                final long volume = (long) (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
-                if (volume > McmcpConfig.getMaxBlockVolume()) {
+                final int sizeX = maxX - minX + 1;
+                final int sizeZ = maxZ - minZ + 1;
+                final long volume = (long) sizeX * (maxY - minY + 1) * sizeZ;
+                if (volume > callLimit) {
                     return ToolResult.error("That region is " + volume + " blocks, over the limit of "
-                        + McmcpConfig.getMaxBlockVolume() + " set by limits.maxBlockVolume. Fill it in "
-                        + "several smaller regions.");
+                        + callLimit + " for one call (" + MAX_BATCHES + " batches of "
+                        + "limits.maxBlockVolume, " + batchLimit + "). Fill it in several calls.");
                 }
 
-                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                final IBlockState state = fillBlock.getStateFromMeta(metadata);
+                final Tally tally = new Tally();
+                runInBatches(context, (int) volume, batchLimit, new Batch() {
                     @Override
-                    public JsonObject call() {
+                    public void run(int from, int to) {
                         WorldServer world = ServerWorldTools.requireWorld(dimension);
-                        IBlockState state = fillBlock.getStateFromMeta(metadata);
-                        int written = 0;
-                        int skipped = 0;
-                        for (int y = minY; y <= maxY; y++) {
-                            for (int z = minZ; z <= maxZ; z++) {
-                                for (int x = minX; x <= maxX; x++) {
-                                    BlockPos pos = new BlockPos(x, y, z);
-                                    if (replaceOnly != null
-                                        && world.getBlockState(pos).getBlock() != replaceOnly) {
-                                        skipped++;
-                                        continue;
-                                    }
-                                    if (world.setBlockState(pos, state, 3)) {
-                                        written++;
-                                    }
-                                }
-                            }
+                        // Linear index, x fastest then z then y, the order server_get_blocks uses:
+                        // layer by layer from the bottom, so a batch boundary never leaves a column
+                        // half-filled above an unfilled one.
+                        for (int i = from; i < to; i++) {
+                            int x = minX + i % sizeX;
+                            int z = minZ + (i / sizeX) % sizeZ;
+                            int y = minY + i / (sizeX * sizeZ);
+                            place(world, new BlockPos(x, y, z), state, fillNbt, replaceOnly, tally);
                         }
-                        JsonObject json = summary(dimension, (int) volume, written, skipped, replaceOnlyId);
-                        json.addProperty("block", blockId);
-                        json.add("from", GameJson.blockPos(new BlockPos(minX, minY, minZ)));
-                        json.add("to", GameJson.blockPos(new BlockPos(maxX, maxY, maxZ)));
-                        return json;
                     }
-                });
-                return ToolResult.structured(result);
+                }, tally);
+                JsonObject json = tally.toJson(dimension, (int) volume, replaceOnlyId);
+                json.addProperty("block", blockId);
+                json.add("from", GameJson.blockPos(new BlockPos(minX, minY, minZ)));
+                json.add("to", GameJson.blockPos(new BlockPos(maxX, maxY, maxZ)));
+                return ToolResult.structured(json);
             })
             .build());
     }
 
-    private static JsonObject summary(int dimension, int attempted, int written, int skipped,
-                                      String replaceOnlyId) {
-        JsonObject json = new JsonObject();
-        json.addProperty("dimension", dimension);
-        json.addProperty("attempted", attempted);
-        json.addProperty("written", written);
-        json.addProperty("skipped", skipped);
-        if (replaceOnlyId != null && !replaceOnlyId.isEmpty()) {
-            json.addProperty("replaceOnly", replaceOnlyId);
-        }
-        // written < attempted - skipped means the world rejected some writes: usually the same block
-        // was already there, occasionally an unloaded chunk. Reporting it separately from `skipped`
-        // is what lets a model tell "my filter excluded these" from "the world refused these".
-        json.addProperty("unchanged", attempted - skipped - written);
-        return json;
+    /** An {@code nbt} property: an SNBT string or a JSON object. */
+    static JsonObject nbtSchema(String description) {
+        JsonObject schema = new JsonObject();
+        JsonArray types = new JsonArray();
+        types.add("string");
+        types.add("object");
+        schema.add("type", types);
+        schema.addProperty("description", description + " An SNBT string such as "
+            + "'{CustomName:\"Panel A\",Mode:2b}', or a JSON object; use the SNBT string when a "
+            + "field must be a byte, short, long or float. For a line break inside a string, put a "
+            + "literal line feed in it — SNBT has no \\n escape.");
+        return schema;
     }
 
-    /** Parses list mode's {@code blocks} array; null if the argument is missing or the wrong shape. */
+    /** Places one block and merges its tile-entity data. Game thread only. */
+    private static void place(WorldServer world, BlockPos pos, IBlockState state,
+                              @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, Tally tally) {
+        if (replaceOnly != null && world.getBlockState(pos).getBlock() != replaceOnly) {
+            tally.skipped++;
+            return;
+        }
+        if (world.setBlockState(pos, state, 3)) {
+            tally.written++;
+        }
+        if (nbt != null) {
+            TileEntityNbt.Outcome outcome = TileEntityNbt.merge(world, pos, nbt);
+            tally.nbt[outcome.ordinal()]++;
+            if (outcome == TileEntityNbt.Outcome.NO_TILE_ENTITY && tally.noTileEntityAt.size() < 5) {
+                tally.noTileEntityAt.add(GameJson.blockPos(pos));
+            }
+        }
+    }
+
+    /** One game-thread task's share of a bulk write, over indices {@code [from, to)}. */
+    private interface Batch {
+        void run(int from, int to);
+    }
+
+    /**
+     * Runs {@code total} writes in game-thread tasks of at most {@code batchSize} each, one after
+     * another. Each is its own task, so the tick loop runs between them and a large clear costs
+     * several short stalls instead of one long one.
+     */
+    private static void runInBatches(final com.micatechnologies.minecraft.mcmcp.mcp.ToolContext context,
+                                     int total, int batchSize, final Batch batch, Tally tally) {
+        for (int from = 0; from < total; from += batchSize) {
+            final int start = from;
+            final int end = Math.min(total, from + batchSize);
+            context.onGameThread(new Callable<Void>() {
+                @Override
+                public Void call() {
+                    batch.run(start, end);
+                    return null;
+                }
+            });
+            tally.batches++;
+            if (total > batchSize) {
+                context.reportProgress(end, total, "Wrote " + end + " of " + total + " blocks");
+            }
+        }
+    }
+
+    /** What a bulk write did. Written on the game thread, read after the last batch. */
+    private static final class Tally {
+        int written;
+        int skipped;
+        int batches;
+        /** Indexed by {@link TileEntityNbt.Outcome#ordinal()}. */
+        final int[] nbt = new int[TileEntityNbt.Outcome.values().length];
+        final JsonArray noTileEntityAt = new JsonArray();
+
+        JsonObject toJson(int dimension, int attempted, @Nullable String replaceOnlyId) {
+            JsonObject json = new JsonObject();
+            json.addProperty("dimension", dimension);
+            json.addProperty("attempted", attempted);
+            json.addProperty("written", written);
+            json.addProperty("skipped", skipped);
+            if (replaceOnlyId != null && !replaceOnlyId.isEmpty()) {
+                json.addProperty("replaceOnly", replaceOnlyId);
+            }
+            // written < attempted - skipped means the world rejected some writes: usually the same
+            // block was already there, occasionally an unloaded chunk. Reporting it separately from
+            // `skipped` is what lets a model tell "my filter excluded these" from "the world refused
+            // these".
+            json.addProperty("unchanged", attempted - skipped - written);
+            if (batches > 1) {
+                json.addProperty("batches", batches);
+            }
+            int nbtTotal = 0;
+            for (int count : nbt) {
+                nbtTotal += count;
+            }
+            if (nbtTotal > 0) {
+                JsonObject nbtJson = new JsonObject();
+                nbtJson.addProperty("applied", nbt[TileEntityNbt.Outcome.APPLIED.ordinal()]);
+                nbtJson.addProperty("unchanged", nbt[TileEntityNbt.Outcome.UNCHANGED.ordinal()]);
+                nbtJson.addProperty("noTileEntity", nbt[TileEntityNbt.Outcome.NO_TILE_ENTITY.ordinal()]);
+                if (noTileEntityAt.size() > 0) {
+                    nbtJson.add("noTileEntityAt", noTileEntityAt);
+                }
+                json.add("nbt", nbtJson);
+            }
+            return json;
+        }
+    }
+
+    /**
+     * Parses list mode's {@code blocks} array; null if the argument is missing or the wrong shape.
+     *
+     * @throws IllegalArgumentException when a placement's {@code nbt} does not parse
+     */
     private static List<Placement> parsePlacements(JsonObject arguments) {
         JsonArray array = Json.getArray(arguments, "blocks");
         if (array == null) {
@@ -439,12 +551,19 @@ public final class ServerBuildTools {
             if (id == null || id.isEmpty()) {
                 continue;
             }
-            placements.add(new Placement(
-                new BlockPos(Json.getInt(item, "x", 0), Json.getInt(item, "y", 0),
-                    Json.getInt(item, "z", 0)),
-                id,
-                BlockIds.resolve(id),
-                Math.max(0, Math.min(15, Json.getInt(item, "metadata", 0)))));
+            BlockPos pos = new BlockPos(Json.getInt(item, "x", 0), Json.getInt(item, "y", 0),
+                Json.getInt(item, "z", 0));
+            NBTTagCompound nbt = null;
+            if (item.has("nbt") && !item.get("nbt").isJsonNull()) {
+                try {
+                    nbt = TileEntityNbt.parse(item.get("nbt"));
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("The placement at x=" + pos.getX() + ", y="
+                        + pos.getY() + ", z=" + pos.getZ() + ": " + e.getMessage());
+                }
+            }
+            placements.add(new Placement(pos, id, BlockIds.resolve(id),
+                Math.max(0, Math.min(15, Json.getInt(item, "metadata", 0))), nbt));
         }
         return placements;
     }
@@ -455,12 +574,15 @@ public final class ServerBuildTools {
         final String blockId;
         final Block block;
         final int metadata;
+        @Nullable
+        final NBTTagCompound nbt;
 
-        Placement(BlockPos pos, String blockId, Block block, int metadata) {
+        Placement(BlockPos pos, String blockId, Block block, int metadata, @Nullable NBTTagCompound nbt) {
             this.pos = pos;
             this.blockId = blockId;
             this.block = block;
             this.metadata = metadata;
+            this.nbt = nbt;
         }
     }
 

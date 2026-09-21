@@ -352,6 +352,8 @@ public final class ServerWorldTools {
                 .integer("y", "Block Y coordinate, 0-255.")
                 .integer("z", "Block Z coordinate.")
                 .integer("metadata", "Block metadata / state value. Defaults to 0.", 0, 15)
+                .property("nbt", ServerBuildTools.nbtSchema("Tile-entity data merged into the block "
+                    + "after it is placed, as /blockdata does."))
                 .integer("dimension", "Dimension id. Defaults to 0.")
                 .required("block", "x", "y", "z")
                 .build())
@@ -379,6 +381,12 @@ public final class ServerWorldTools {
                 if (y < 0 || y > 255) {
                     return ToolResult.error("y must be between 0 and 255; got " + y + ".");
                 }
+                final net.minecraft.nbt.NBTTagCompound nbt;
+                try {
+                    nbt = context.has("nbt") ? TileEntityNbt.parse(context.getArguments().get("nbt")) : null;
+                } catch (IllegalArgumentException e) {
+                    return ToolResult.error(e.getMessage());
+                }
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -394,6 +402,10 @@ public final class ServerWorldTools {
 
                         JsonObject json = new JsonObject();
                         json.addProperty("changed", changed);
+                        if (nbt != null) {
+                            json.addProperty("nbt", TileEntityNbt.merge(world, pos, nbt).name()
+                                .toLowerCase(java.util.Locale.ROOT));
+                        }
                         json.add("previous", previous);
                         json.add("current", GameJson.block(world, pos));
                         return json;
