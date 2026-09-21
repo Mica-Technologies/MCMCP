@@ -1,11 +1,15 @@
 # Tools
 
-61 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+62 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
 `openWorldHint`). Clients use these — many auto-approve read-only tools and require confirmation for
 destructive ones — so they are set honestly rather than defensively.
+
+**An argument a tool does not declare is refused**, with the closest valid name — `world_type`
+gets "did you mean 'worldType'?" — and nothing is done. Ignoring it used to run the tool on a
+default the caller never chose, and the result read as success.
 
 !!! tip "Try them live"
 
@@ -71,6 +75,13 @@ namespace to a JSON file in the game directory, in registry order, with each blo
 class, creative tab (index on both sides, label on the client) and display name. The response
 carries the path, a SHA-256 of the file and per-registry counts; the entries are in the file.
 
+Each block with a tile entity also names the tile entity it creates (`tileEntityClass`,
+`tileEntityKey`). Dumped from the **client** endpoint it adds what draws it: `renderer` is the
+special renderer (TESR) class or `"none"`, with `globalRenderer` and `maxRenderDistance` where the
+renderer answers them. `counts.blocksWithRenderer` is the number drawn by a TESR — the question that
+otherwise took placing every tile-entity block and profiling it. The tile entity is made fresh for
+the question, not taken from a world, so anything decided from world state is not reflected.
+
 This exists for refactors that must not change what a mod registers — splitting a mod into
 modules, rewriting registration, reordering tabs. Dump before, dump after, diff. Registry order
 is what the creative inventory renders, so take both dumps in the same state: at the main menu the
@@ -102,7 +113,8 @@ one carrying the lines as well doubled the cost of every log read.
 | --- | --- | --- |
 | `sample_seconds` | integer 0–30 | Default 0. Also measure a window of this length. |
 
-Heap and memory pools, garbage collection per collector (count, total and mean pause, share of
+Heap and memory pools, off-heap direct buffers against their ceiling (`memory.offHeap`, as
+described under [`client_runtime_info`](#client_runtime_info)), garbage collection per collector (count, total and mean pause, share of
 uptime) and the five most recent collections with how long ago and how long, process and system CPU
 load, thread counts and free disk.
 
@@ -464,8 +476,10 @@ player data. Saving blocks the server thread for its duration, which is noticeab
 
 :material-alert: Destructive · requires `permissions.allowWorldEdits`
 
-One block. `block`, `x`, `y`, `z` required; optional `metadata`, `dimension`. Returns the previous and
-current state.
+One block. `block`, `x`, `y`, `z` required; optional `metadata`, `nbt`, `dimension`. Returns the
+previous and current state. `nbt` is merged into the tile entity after placing, as for
+`server_set_blocks`, and the result says whether it was `applied`, `unchanged` or found
+`no_tile_entity`.
 
 #### `server_set_blocks`
 
@@ -476,7 +490,8 @@ current state.
 | `mode` | `fill` \| `list` | Inferred from whether `blocks` is present. |
 | `block`, `metadata` | string, integer | Fill mode. |
 | `x`,`y`,`z`,`toX`,`toY`,`toZ` | integer | Fill mode region. |
-| `blocks` | array | List mode: `{x, y, z, block, metadata}` objects. |
+| `nbt` | string \| object | Fill mode: tile-entity data merged into every block filled. |
+| `blocks` | array | List mode: `{x, y, z, block, metadata, nbt}` objects. |
 | `replaceOnly` | string | Only write where the existing block matches this id. |
 | `dimension` | integer | Default 0. |
 
@@ -489,8 +504,18 @@ The response separates `skipped` (excluded by `replaceOnly`) from `unchanged` (t
 write — usually the same block was already there). That distinction is what tells you whether a
 filter or the world stopped you.
 
-Bounded by `limits.maxBlockVolume`, because the whole operation runs in a single game-thread task: the
-volume bound is directly a bound on how long one call can stall the tick loop.
+**Tile-entity data.** `nbt` on a placement (or on a fill) is merged into the tile entity after the
+block is placed, exactly as `/blockdata` merges: name only the fields you care about. Give it as an
+SNBT string (`'{CustomName:"Panel A",Mode:2b}'`) or a JSON object; JSON has one kind of number, so
+use the SNBT string when a field must be a byte, short, long or float. SNBT has no `\n` escape — a
+line break inside a string is a literal line feed. The response's `nbt` object counts `applied`,
+`unchanged` and `noTileEntity`, with the first few positions that had none. Read it back with
+`server_get_block` `nbt: true`.
+
+**Size.** `limits.maxBlockVolume` bounds one game-thread task, because that is how long one task
+holds the tick loop. A larger region or list is written in batches of that size, one task after
+another with ticks between, up to 32 batches per call — so clearing a scene is one call rather than
+one per layer. `batches` in the response says how many it took.
 
 !!! warning "Direct writes bypass hooks"
 
@@ -526,10 +551,19 @@ Main inventory, hotbar, armour and both hands. Empty slots are omitted and repor
 
 :material-alert: Destructive · requires `permissions.allowWorldEdits`
 
-`player`, `x`, `y`, `z` required; optional `yaw`, `pitch`.
+`player`, `x`, `y`, `z` required; optional `yaw`, `pitch`, `fly`.
 
 Goes through the player's connection so the client actually moves. A bare `setPosition` desyncs the
 player and gets them rubber-banded back by the movement check.
+
+**Returns once the client has accepted the teleport** (`confirmed: true`, or false after two
+seconds). Until it has, the client still holds the old position and facing, and a `client_look`
+made in that window is overwritten when the teleport lands. That is why this, not `/tp` through
+`server_run_command`, is the way to set a camera for a screenshot or a benchmark.
+
+`fly: true` puts the player into flight before moving them, so a pose in mid-air holds instead of
+falling to the ground a second later; it needs a game mode that allows flight, and the result says
+if it was refused. `fly: false` lands them.
 
 Gated on `allowWorldEdits` rather than `allowPlayerControl`: the latter governs driving your own
 input on the client endpoint, which is bounded by what you could do anyway. Moving someone else is a
@@ -554,6 +588,19 @@ of range are the same integer.
 that player's position.
 
 Refuses names in `permissions.blockedCommands`.
+
+`succeeded` is Minecraft's own verdict — false whenever the command returned 0. `error` is present
+only when it failed with an error message (the red text a player would see). That includes no-ops:
+`/blockdata` setting a value that is already set fails with `The data tag did not change`, which a
+loop should treat as "already done".
+
+Two vanilla behaviours worth knowing when scripting tile-entity state:
+
+- `/setblock` with a block state **replaces the tile entity**, so data set on it before is lost.
+  Change tile-entity data with `/blockdata`, or with `nbt` on `server_set_block(s)`.
+- SNBT rejects the two-character escape `\n` ("Invalid escape of 'n'"). A **literal line feed**
+  inside a quoted string in `command` is accepted and stored as a newline — the only way to set a
+  newline-separated text field with `/blockdata`.
 
 #### `server_broadcast`
 
@@ -822,6 +869,34 @@ and `approximateImageTokens`, so the cost of the size chosen is visible in the r
 
 Captures the last rendered frame, so open GUIs, chat and the F3 overlay all appear.
 
+#### `client_screen_stats`
+
+:material-eye: Read-only · requires `permissions.allowScreenshots`
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `count` | integer 1–600 | Default 20. How many reads. |
+| `interval_ms` | integer 0–5000 | Default 0: every rendered frame. |
+| `x`, `y`, `width`, `height` | integer | Crop, in window pixels from the top-left, as in a screenshot. Default: the whole window. |
+| `threshold` | number 0–255 | Default 8. Luminance difference from the first read that counts as changed. |
+| `per_channel` | boolean | Default false. Also return mean red, green and blue per read. |
+
+Reads the rendered frame repeatedly and returns each read's mean brightness — no image is saved or
+sent. This is for effects too short for a screenshot to catch reliably: a strobe lit for 75 ms of
+every second, a flicker, a light that should blink. Screenshots taken back to back land 100–250 ms
+apart, so whether a burst hits the flash is luck; this reads at the frame rate.
+
+```json
+{"region": {"x": 600, "y": 300, "width": 200, "height": 200}, "reads": 60, "spanMs": 995,
+ "minLum": 31.2, "maxLum": 188.4, "meanLum": 44.0, "maxDeltaFromFirst": 157.2, "changed": 5,
+ "samples": [{"ms": 0, "lum": 31.2}, {"ms": 16, "lum": 31.4}]}
+```
+
+**Crop to the effect.** Averaged over the whole window, a small light is diluted by everything else
+in view and may not cross the threshold at all. Luminance uses Rec. 709 weights on the stored
+values — a relative brightness for spotting change, not a photometric measurement. Regions larger
+than 250,000 pixels are averaged on a grid. One call may take at most 60 seconds.
+
 #### `client_gui_state`
 
 :material-eye: Read-only · no arguments
@@ -854,6 +929,13 @@ reason given under [`game_read_log`](#game_read_log).
 
 Frame rate, heap usage, render distance, graphics settings, and the game and screenshot directories.
 Roughly what F3 shows.
+
+`memory.offHeap` reports **direct buffer** memory: `directUsedMb`, `directBuffers`, `directMaxMb`
+and `directUsedPercentOfMax`. Minecraft's vertex buffers, LWJGL's scratch buffers and Netty's pools
+live outside the heap, in a pool with its own ceiling. A client drawing a very dense chunk section
+has died with `OutOfMemoryError: Direct buffer memory` while its heap had room to spare, so watch
+this figure in stress tests, not only the heap. `directMaxFrom` says where the ceiling came from:
+`-XX:MaxDirectMemorySize` when it was set, otherwise HotSpot's default, the maximum heap size.
 
 Also `process`, with this game's `pid`, `startedAt` and `uptimeSeconds`:
 
@@ -948,7 +1030,12 @@ screenshot taken meanwhile, and drawing F3 inflates the `gui` section.
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `duration_seconds` | integer 1–30 | Default 5. |
-| `top` | integer 1–50 | Default 15. Rows per list. |
+| `warmup_seconds` | integer 0–15 | Default 0. Run the timers this long first and discard it. |
+| `top` | integer 1–1000 | Default 15. Rows per list; each is roughly 100 bytes of response. |
+| `offset` | integer | Default 0. Skip this many of the costliest rows, to page. |
+| `type` | string | Only rows for this block or entity id. |
+| `x`, `y`, `z`, `radius` | integer | Only rows within `radius` blocks of the point on each axis (a box). All four together. |
+| `min_micros` | number | Only rows costing at least this many µs per frame. |
 | `gl_finish` | boolean | Default false. Wait for the GPU around each renderer call. |
 
 Times every tile entity renderer and entity renderer call and reports the most expensive blocks and
@@ -959,13 +1046,32 @@ whole frame has 16,667.
 ```json
 {"tileEntities": {"rendered": 27, "totalMicrosPerFrame": 78.1,
    "costliest": [{"block": "minecraft:ender_chest", "pos": {"x": -208, "y": 76, "z": 200},
-                  "microsPerFrame": 4.6}],
+                  "microsPerFrame": 4.6, "microsPerCall": 4.6, "framesDrawn": 361}],
    "byType": [{"block": "minecraft:ender_chest",
                "renderer": "net.minecraft.client.renderer.tileentity.TileEntityEnderChestRenderer",
-               "count": 27, "totalMicrosPerFrame": 78.1, "worstMicrosPerFrame": 4.6}]},
+               "count": 27, "totalMicrosPerFrame": 78.1, "worstMicrosPerFrame": 4.6,
+               "microsPerCall": 2.9, "callStdDevMicros": 0.8}]},
  "entities": {"rendered": 0, "totalMicrosPerFrame": 0.0, "costliest": [], "byType": []},
- "frames": 361, "meanRenderWorkMs": 1.5, "glFinish": false}
+ "frames": 361, "timerOverheadMicrosPerCall": 0.05, "meanRenderWorkMs": 1.5, "glFinish": false}
 ```
+
+**Reading a low number.** `microsPerFrame` averages over every profiled frame, so a block that was
+culled or out of view for part of the window reads low. `framesDrawn` (out of `frames`) and
+`microsPerCall` tell "cheap on every frame" from "hardly drawn". `callStdDevMicros` per type says how
+settled a figure is. `timerOverheadMicrosPerCall` is the wrapper's own cost, included once in every
+call's figure — negligible for a two-microsecond renderer, not for a hundred cheap calls a frame.
+
+**Warm up a freshly built scene.** Renderers that have barely run are measured before the JIT has
+compiled them: a first window read up to twice the settled figure for mid-cost renderers.
+`warmup_seconds` runs the timers that long first and discards it, in the same call.
+
+**Filters and paging.** `type`, the `x`/`y`/`z`/`radius` box and `min_micros` apply before anything
+is summed, so `byType` describes the same rows as `costliest`; `matched` says how many rows passed.
+`rendered` and `totalMicrosPerFrame` stay whole-scene. `moreRows` says how many are left past
+`offset + top`.
+
+Every `byType` row has a `renderer`, taken from the wrapper at the call — `"unknown"` only if even
+that was unavailable.
 
 An entity's time includes its shadow and fire overlay. Players are not covered: their renderers live
 in a separate private map.
