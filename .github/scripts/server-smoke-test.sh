@@ -312,6 +312,27 @@ case "$PROFILE_BODY" in
   *) mcp_failure "server_profile_ticking did not report ticksObserved: ${PROFILE_BODY}" ;;
 esac
 
+# A misspelled argument must be refused, naming the real one, rather than ignored. Ignoring it ran
+# the tool on a default nobody chose and reported success, which is the failure this guards.
+echo "==> tools/call with a misspelled argument"
+MISSPELT_BODY="$(curl -fsS --max-time 10 \
+  -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Mcp-Session-Id: ${SESSION_ID}" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"server_profile_ticking","arguments":{"durationSeconds":1}}}' 2>&1)" \
+  || mcp_failure "misspelled-argument request failed: ${MISSPELT_BODY}"
+
+case "$MISSPELT_BODY" in
+  *'"isError":true'*) ;;
+  *) mcp_failure "a misspelled argument was not refused: ${MISSPELT_BODY}" ;;
+esac
+case "$MISSPELT_BODY" in
+  *"did you mean 'duration_seconds'"*) echo "    refused, naming duration_seconds" ;;
+  *) mcp_failure "the refusal did not name the real argument: ${MISSPELT_BODY}" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Orchestrator link
 # ---------------------------------------------------------------------------

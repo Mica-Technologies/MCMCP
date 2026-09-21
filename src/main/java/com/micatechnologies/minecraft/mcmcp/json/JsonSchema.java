@@ -70,11 +70,12 @@ public final class JsonSchema {
     }
 
     /**
-     * Rejects arguments not named in the schema.
+     * Publishes {@code additionalProperties: false}, so a client that validates can refuse an
+     * undeclared argument before sending it.
      *
-     * <p>Off by default, matching JSON Schema. Worth turning on for destructive tools, where a
-     * silently ignored misspelled argument ({@code "blocks"} vs {@code "block"}) means the tool
-     * runs with a default the caller never intended.
+     * <p>The dispatcher refuses undeclared top-level arguments for every tool regardless — see
+     * {@link ArgumentNames} — so this changes only what a client can check on its own side, and is
+     * not needed for the guarantee.
      */
     public JsonSchema strict() {
         root.addProperty("additionalProperties", false);

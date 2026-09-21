@@ -7,6 +7,7 @@ import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
+import com.micatechnologies.minecraft.mcmcp.json.ArgumentNames;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpPrompt;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -243,9 +244,18 @@ public class McpDispatcher {
                 "No tool named '" + name + "' is available on the " + side.id() + " endpoint");
         }
 
+        // Refused before the handler runs, as a tool error the model reads. An argument the schema
+        // does not name is almost always a misspelling of one it does, and ignoring it runs the tool
+        // on a default the caller never chose — see ArgumentNames.
+        JsonObject arguments = Json.getObjectOrEmpty(params, "arguments");
+        String unknownArguments = ArgumentNames.describeUnknown(name, tool.getInputSchema(), arguments);
+        if (unknownArguments != null) {
+            return ToolResult.error(unknownArguments).toJson(session.getProtocolVersion());
+        }
+
         ToolContext context = new ToolContext(
             session,
-            Json.getObjectOrEmpty(params, "arguments"),
+            arguments,
             gameThread,
             cancellation,
             gameThreadTimeoutMillis,

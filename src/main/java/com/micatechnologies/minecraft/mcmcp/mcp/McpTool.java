@@ -89,6 +89,10 @@ public final class McpTool {
         return description;
     }
 
+    public JsonObject getInputSchema() {
+        return inputSchema;
+    }
+
     public boolean isAvailableOn(McmcpSide side) {
         return sides.contains(side);
     }
