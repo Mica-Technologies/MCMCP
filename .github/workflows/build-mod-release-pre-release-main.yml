@@ -1,3 +1,22 @@
+# Mica Technologies mod release workflow, adapted from the canonical copy in dev-configurations
+# (minecraft-mod-workflows/template/).
+#
+# Fork deltas — the structural differences from the template, and why:
+#   - A second job, `orchestrator_binaries`, builds the orchestrator on four platforms and attaches
+#     its archives and installers to the same release. The mod and orchestrator speak one wire
+#     protocol, so they ship from one commit.
+#   - The release is published as soon as the jar is on it, not after every file is: fail-fast is
+#     off on the orchestrator matrix so that one platform failing still lets the others publish,
+#     and holding the release as a draft until all of them finish would undo that. Every upload
+#     is still verified (upload-release-assets.sh), so a lost file turns its job red.
+#   - `Publish Which Tag Was Used` exposes the tag as a job output for the orchestrator jobs,
+#     which cannot recompute it (the pre-release form contains a timestamp).
+#   - `check-mod-version.sh` is an extra shape guard against an orchestrator tag being taken
+#     as the mod version.
+#   - The installers need the `day*10+N` app version scheme (orchestrator-version.sh), because a
+#     same-day `+N` would otherwise produce the same installer version twice.
+#
+# The name below is load-bearing: cleanup-mod-pre-releases.yml triggers on it by name.
 name: Build Mod Release/Pre-Release (Main Branch)
 
 on:
@@ -11,6 +30,11 @@ on:
         description: 'Create a full release'
         required: false
         default: 'false'
+
+# Pushes the release tag and creates/publishes the release entry. Stated explicitly because
+# repos created since 2023 default GITHUB_TOKEN to read-only.
+permissions:
+  contents: write
 
 jobs:
   assemble_release:
@@ -203,7 +227,7 @@ jobs:
 
       - name: Create Release Entry
         if: ${{ github.event.inputs.release == 'true' && github.event.inputs.release }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -218,15 +242,15 @@ jobs:
             SHA-256: `${{ env.SHA256_HASH }}`
             MD5: `${{ env.MD5_HASH }}`
             CRC-32: `${{ env.CRC32_HASH }}`
-          draft: false
+          # Created as an empty draft: the action's own uploader is what loses assets. The jar is
+          # attached and verified by the upload step below, and only then is the release published.
+          draft: true
           prerelease: false
           generate_release_notes: true
-          files: |
-            ${{ env.MOD_ARCHIVE_BASE_NAME }}-${{ env.MOD_VERSION }}.jar
 
       - name: Create Pre-Release Entry
         if: ${{ github.event.inputs.release == 'false' || !github.event.inputs.release }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -246,11 +270,36 @@ jobs:
             guaranteed to be stable or permanently available for download/usage.
             Pre-release versions of ${{ env.MOD_NAME }} may be removed or unavailable after
             90 days from their initial release.
-          draft: false
+          # As above: an empty draft, filled and published by the steps below.
+          draft: true
           prerelease: true
           generate_release_notes: true
-          files: |
-            ${{ env.MOD_ARCHIVE_BASE_NAME }}-${{ env.MOD_VERSION }}.jar
+
+      # One file at a time, with retries, then read back from the API. See the script for why the
+      # action's own `files:` is not used.
+      - name: Upload the mod jar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash .github/scripts/upload-release-assets.sh "${{ steps.publish_tag.outputs.tag }}" \
+            "${{ env.MOD_ARCHIVE_BASE_NAME }}-${{ env.MOD_VERSION }}.jar"
+
+      # Published before the orchestrator jobs run, on purpose: they attach to a public release so
+      # that one platform failing does not hold back the jar and the other platforms.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.publish_tag.outputs.tag }}"
+          gh release edit "$tag" --repo "${{ github.repository }}" --draft=false
+
+          isDraft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft --jq '.isDraft')
+          if [ "$isDraft" != "false" ]; then
+            echo "::error::$tag is still a draft"
+            exit 1
+          fi
+          echo "==> published $tag"
 
   # ------------------------------------------------------------------------------------------
   # Orchestrator binaries
@@ -373,13 +422,13 @@ jobs:
       # continue-on-error gone a failure there ends the job. Publishing the binary first means such
       # a failure costs only that platform's installers, not its binary as well — while the job
       # still goes red so somebody notices.
+      #
+      # `shell: bash` because the Windows leg would otherwise run this under pwsh.
       - name: Attach the headless binary to the release
-        uses: softprops/action-gh-release@v2
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ needs.assemble_release.outputs.tag }}
-          files: ${{ env.ASSET }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/upload-release-assets.sh "${{ needs.assemble_release.outputs.tag }}" "${{ env.ASSET }}"
 
       # The app cannot serve MCP over stdio, so an MCP client spawns the shim instead — and the
       # app's own Settings panel hands out a configuration pointing at it *next to the app*.
@@ -425,14 +474,12 @@ jobs:
             exit 1
           fi
 
+      # Installers are UNSIGNED. A deliberate deferral for a personal tool — a certificate costs
+      # money annually — which means Windows SmartScreen and macOS Gatekeeper will both complain.
+      # Nothing here precludes signing later: tauri-bundler takes signing configuration, so it
+      # becomes a config addition and a secret rather than a rewrite.
       - name: Attach the installers to the release
-        uses: softprops/action-gh-release@v2
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ needs.assemble_release.outputs.tag }}
-          # Installers are UNSIGNED. A deliberate deferral for a personal tool — a certificate costs
-          # money annually — which means Windows SmartScreen and macOS Gatekeeper will both
-          # complain. Nothing here precludes signing later: tauri-bundler takes signing
-          # configuration, so it becomes a config addition and a secret rather than a rewrite.
-          files: dist/*
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/upload-release-assets.sh "${{ needs.assemble_release.outputs.tag }}" dist/*
