@@ -121,7 +121,7 @@ public final class ServerPlayerTools {
                         JsonObject json = GameJson.player(player);
                         WorldServer world = (WorldServer) player.world;
                         json.add("world", GameJson.world(world));
-                        String biome = GameJson.biomeName(world, GameJson.blockPosOf(player));
+                        String biome = GameJson.biomeId(world, GameJson.blockPosOf(player));
                         if (biome != null) {
                             json.addProperty("biome", biome);
                         }

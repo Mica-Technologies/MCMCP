@@ -85,7 +85,12 @@ format with no socket; only a running server covers the rest.
 8. `tools/list` does **not** contain `client_screenshot`. A client-only tool on the server endpoint
    means the side filter is broken, which would hand a model a tool that can never work.
 9. `tools/call mcmcp_endpoint_info` returns `isError: false` and reports the server side.
-10. `DELETE` cleans up the session.
+10. `server_get_block` at the overworld spawn point reports a `minecraft:` biome id, and
+    `game_dump_registries` for `minecraft` succeeds. These guard against a different failure than
+    check 1. A client-only *method* on a vanilla class (`Biome.getBiomeName`, `CreativeTabs.getIndex`)
+    is stripped from a dedicated server, but nothing fails until it is called, and then it throws
+    `NoSuchMethodError`. Loading the mod cannot catch that; calling the tool does.
+11. `DELETE` cleans up the session.
 
 Every failure path dumps matching failure lines, recent `MCMCP` log lines and the log tail. The server
 log is uploaded as an artifact.

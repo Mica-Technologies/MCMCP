@@ -463,13 +463,25 @@ public final class GameJson {
         return json;
     }
 
+    /**
+     * The registry id of the biome at a position, such as {@code minecraft:plains}.
+     *
+     * <p>Not the display name: {@code Biome.getBiomeName} is {@code @SideOnly(CLIENT)} and stripped
+     * from a dedicated server, so calling it there throws {@code NoSuchMethodError} — on the first
+     * call, not at load, which is why the smoke test's class-loading check could not see it. The id
+     * is common code, reads the same on both endpoints, and stays unambiguous when two mods both
+     * name a biome "Forest".
+     */
     @Nullable
-    public static String biomeName(World world, BlockPos pos) {
+    public static String biomeId(World world, BlockPos pos) {
         if (!isLoaded(world, pos)) {
             return null;
         }
         Biome biome = world.getBiome(pos);
-        return biome == null ? null : biome.getBiomeName();
+        if (biome == null || biome.getRegistryName() == null) {
+            return null;
+        }
+        return biome.getRegistryName().toString();
     }
 
     // ------------------------------------------------------------------

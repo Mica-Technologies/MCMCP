@@ -342,9 +342,20 @@ public final class RegistryDumpTools {
         }
         // The label ("tabhvac") is what a human recognises, but CreativeTabs.getTabLabel is
         // client-only and stripped from a dedicated server, so it is reached through the proxy.
-        // The index is common to both sides and is stable for a given mod set and load order.
-        entry.addProperty("creativeTabIndex", tab.getIndex());
+        // getIndex is client-only too, but CREATIVE_TAB_ARRAY is common and every tab sits at
+        // its own index in it, so the position is the same number on both sides.
+        entry.addProperty("creativeTabIndex", creativeTabIndex(tab));
         entry.addProperty("creativeTab", Mcmcp.proxy.creativeTabLabel(tab));
+    }
+
+    private static int creativeTabIndex(CreativeTabs tab) {
+        CreativeTabs[] tabs = CreativeTabs.CREATIVE_TAB_ARRAY;
+        for (int i = 0; i < tabs.length; i++) {
+            if (tabs[i] == tab) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static String displayNameOf(String key) {

@@ -333,6 +333,67 @@ case "$MISSPELT_BODY" in
   *) mcp_failure "the refusal did not name the real argument: ${MISSPELT_BODY}" ;;
 esac
 
+# A @SideOnly(CLIENT) method on a vanilla class is stripped from a dedicated server, but unlike a
+# client class it does not fail at load: it throws NoSuchMethodError on the first call. Nothing
+# above calls into those paths, so Biome.getBiomeName and CreativeTabs.getIndex shipped broken
+# (issue #25). These calls reach the biome lookup and the creative tab of every vanilla item.
+echo "==> tools/call server_world_info (for the spawn point)"
+WORLD_BODY="$(curl -fsS --max-time 10 \
+  -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Mcp-Session-Id: ${SESSION_ID}" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"server_world_info","arguments":{}}}' 2>&1)" \
+  || mcp_failure "server_world_info request failed: ${WORLD_BODY}"
+
+# Spawn chunks stay loaded on a dedicated server, so the spawn point is a position that is sure to
+# reach the biome lookup rather than stop at loaded=false.
+SPAWN="$(printf '%s' "$WORLD_BODY" | "$PYTHON_BIN" -c '
+import json, sys
+body = json.load(sys.stdin)
+for dim in body["result"]["structuredContent"]["dimensions"]:
+    if dim.get("dimension") == 0:
+        p = dim["spawnPoint"]
+        print(p["x"], p["y"], p["z"])
+        break
+' 2>&1)" || mcp_failure "could not read the overworld spawn point from server_world_info: ${WORLD_BODY}"
+read -r SPAWN_X SPAWN_Y SPAWN_Z <<< "$SPAWN"
+
+echo "==> tools/call server_get_block at spawn (${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z})"
+BLOCK_BODY="$(curl -fsS --max-time 10 \
+  -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Mcp-Session-Id: ${SESSION_ID}" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"server_get_block\",\"arguments\":{\"x\":${SPAWN_X},\"y\":${SPAWN_Y},\"z\":${SPAWN_Z}}}}" 2>&1)" \
+  || mcp_failure "server_get_block request failed: ${BLOCK_BODY}"
+
+case "$BLOCK_BODY" in
+  *'"isError":false'*) ;;
+  *) mcp_failure "server_get_block did not return a successful result: ${BLOCK_BODY}" ;;
+esac
+case "$BLOCK_BODY" in
+  *'"biome":"minecraft:'*) echo "    call succeeded, biome reported" ;;
+  *) mcp_failure "server_get_block did not report a biome id at spawn: ${BLOCK_BODY}" ;;
+esac
+
+echo "==> tools/call game_dump_registries for minecraft"
+DUMP_BODY="$(curl -fsS --max-time 30 \
+  -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Mcp-Session-Id: ${SESSION_ID}" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -d '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"game_dump_registries","arguments":{"namespace":"minecraft","display_names":false}}}' 2>&1)" \
+  || mcp_failure "game_dump_registries request failed: ${DUMP_BODY}"
+
+case "$DUMP_BODY" in
+  *'"isError":false'*) echo "    call succeeded" ;;
+  *) mcp_failure "game_dump_registries did not return a successful result: ${DUMP_BODY}" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Orchestrator link
 # ---------------------------------------------------------------------------

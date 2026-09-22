@@ -106,7 +106,7 @@ public final class ServerWorldTools {
                             json.add("blockEntity", GameJson.blockEntity(world, pos));
                         }
                         json.addProperty("dimension", dimension);
-                        String biome = GameJson.biomeName(world, pos);
+                        String biome = GameJson.biomeId(world, pos);
                         if (biome != null) {
                             json.addProperty("biome", biome);
                         }

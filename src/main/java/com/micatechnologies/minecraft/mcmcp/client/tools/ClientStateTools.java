@@ -120,7 +120,7 @@ public final class ClientStateTools {
 
                         JsonObject json = GameJson.player(mc.player);
                         json.add("world", GameJson.world(world));
-                        String biome = GameJson.biomeName(world, GameJson.blockPosOf(mc.player));
+                        String biome = GameJson.biomeId(world, GameJson.blockPosOf(mc.player));
                         if (biome != null) {
                             json.addProperty("biome", biome);
                         }
@@ -210,7 +210,7 @@ public final class ClientStateTools {
                         if (nbt && json.get("loaded").getAsBoolean()) {
                             json.add("blockEntity", GameJson.blockEntity(mc.world, pos));
                         }
-                        String biome = GameJson.biomeName(mc.world, pos);
+                        String biome = GameJson.biomeId(mc.world, pos);
                         if (biome != null) {
                             json.addProperty("biome", biome);
                         }

@@ -48,7 +48,7 @@ public final class ClientPrompts {
                         json.addProperty("inWorld", true);
                         json.add("player", GameJson.player(mc.player));
                         json.add("world", GameJson.world(mc.world));
-                        String biome = GameJson.biomeName(mc.world, mc.player.getPosition());
+                        String biome = GameJson.biomeId(mc.world, GameJson.blockPosOf(mc.player));
                         if (biome != null) {
                             json.addProperty("biome", biome);
                         }

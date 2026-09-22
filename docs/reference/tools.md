@@ -240,6 +240,11 @@ accident.
 
 Block id, metadata, state properties, light levels, hardness and biome at one position.
 
+`biome` is the biome's registry id (`minecraft:plains`), not its display name, on every tool that
+reports one. The display name is client-only in 1.12.2, so a dedicated server has no method to read
+it. The id reads the same on both endpoints, and two mods' biomes that are both called "Forest" still
+have different ids.
+
 `nbt: true` adds `blockEntity` — the tile entity's saved tag, as
 `{"source": "server", "nbt": {...}}`, or `{"present": false}` when the block has none. Off by default,
 because a machine's tag can run to kilobytes. NBT's number widths are dropped (`3b` reads as `3`);
@@ -1138,6 +1143,25 @@ a tail. Setting the string is the operation actually wanted.
 
 The widget can still refuse part of the input to a length cap or character filter, so the reply
 carries `textBefore`, the resulting `text`, and `fullyAccepted`.
+
+Vanilla's `GuiTextField` is the exception to "found by shape": it is recognised by type and called
+directly. In a released jar its methods have SRG names (`func_146179_b`), so a lookup of `getText`
+finds them only in a dev client. Mod widgets keep their own method names and are still matched by
+shape.
+
+**The screen is told the text changed.** Setting a field bypasses the screen, and screens that
+enable a button as you type do it in their key handler. Vanilla's Direct Connect is one: "Join
+Server" stayed disabled after the address was set. So the field is focused (any other field is
+unfocused) and sent one End keystroke. The field accepts End, the screen's handler runs, and the
+caret moves to the end of the text. The reply reports `nudgedVia` (`keyPressed`, `keyTyped`, or
+`none` when the field would not take focus), plus `buttonsChanged` listing each button that became
+enabled or disabled.
+
+!!! tip "Pre-filled fields"
+
+    Some fields open already filled. Direct Connect shows the last address used. `client_gui_key`
+    adds to that text, which gives `localhost:25565localhost:25565`. `client_gui_text` with the
+    default `clear: true` replaces it.
 
 !!! note "The graph walk stops at `java.*` and `net.minecraft.*`"
 

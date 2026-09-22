@@ -62,9 +62,11 @@ import net.minecraftforge.fml.relauncher.SideOnly;
  * a released jar is reobfuscated — a lookup by one name alone works in exactly one of the two
  * environments, and which one it fails in is whichever you did not test.
  *
- * <p>Text fields are the exception: they are found by scanning a screen's fields for the
- * {@link GuiTextField} <em>type</em> rather than by name, which needs no mapping and works on a mod's
- * own screen where no name could have been known in advance.
+ * <p>Text fields are the exception. Vanilla's {@link GuiTextField} is recognised by <em>type</em> and
+ * called directly, which needs no mapping. A mod's own field is recognised by the shape of its
+ * {@code getText}/{@code setText} pair; those names are the mod's, not Minecraft's, so reobfuscation
+ * never renames them. Matching vanilla by that shape too was the trap: it worked in a dev client and
+ * found nothing in a released one.
  */
 @SideOnly(Side.CLIENT)
 public final class ClientGuiTools {
@@ -78,6 +80,14 @@ public final class ClientGuiTools {
 
     /** LWJGL key code for Return, for screens that submit a text field on Enter. */
     private static final int KEY_RETURN = 28;
+
+    /**
+     * LWJGL key code for End: the keystroke {@code client_gui_text} sends after setting a field. A
+     * focused vanilla field accepts it, so the screen's {@code keyTyped} goes on to its "the text
+     * changed" branch; it moves the caret to where the text ends, which is where a person would have
+     * left it anyway. A character 0 would have been refused by the field, and the branch never run.
+     */
+    private static final int KEY_END = 207;
 
     private ClientGuiTools() {
     }
@@ -246,31 +256,66 @@ public final class ClientGuiTools {
     private static final class TextWidget {
 
         final Object target;
+        /**
+         * Set for vanilla's own field, which is called directly rather than by reflection. Its
+         * methods are {@code func_146179_b} and so on in a released jar, so a lookup of
+         * {@code "getText"} finds nothing there — only a dev client, where names are MCP, would
+         * ever see a vanilla field. A direct call is renamed by reobfuscation along with the rest.
+         */
+        @Nullable
+        final GuiTextField vanilla;
+        @Nullable
         final Method getter;
+        @Nullable
         final Method setter;
         @Nullable
         final Method focusGetter;
+        @Nullable
+        final Method focusSetter;
         final String type;
 
-        TextWidget(Object target, Method getter, Method setter, @Nullable Method focusGetter) {
+        TextWidget(GuiTextField vanilla) {
+            this(vanilla, vanilla, null, null, null, null);
+        }
+
+        TextWidget(Object target, Method getter, Method setter, @Nullable Method focusGetter,
+                   @Nullable Method focusSetter) {
+            this(target, null, getter, setter, focusGetter, focusSetter);
+        }
+
+        private TextWidget(Object target, @Nullable GuiTextField vanilla, @Nullable Method getter,
+                           @Nullable Method setter, @Nullable Method focusGetter,
+                           @Nullable Method focusSetter) {
             this.target = target;
+            this.vanilla = vanilla;
             this.getter = getter;
             this.setter = setter;
             this.focusGetter = focusGetter;
+            this.focusSetter = focusSetter;
             this.type = target.getClass().getSimpleName();
         }
 
         String read() throws Exception {
+            if (vanilla != null) {
+                return vanilla.getText();
+            }
             Object value = getter.invoke(target);
             return value == null ? "" : value.toString();
         }
 
         void write(String value) throws Exception {
+            if (vanilla != null) {
+                vanilla.setText(value);
+                return;
+            }
             setter.invoke(target, value);
         }
 
         @Nullable
         Boolean focused() {
+            if (vanilla != null) {
+                return vanilla.isFocused();
+            }
             if (focusGetter == null) {
                 return null;
             }
@@ -280,6 +325,23 @@ public final class ClientGuiTools {
             }
             catch (Exception ignored) {
                 return null;
+            }
+        }
+
+        /** Best effort; a widget with no {@code setFocused(boolean)} is left as it is. */
+        void focus(boolean focused) {
+            if (vanilla != null) {
+                vanilla.setFocused(focused);
+                return;
+            }
+            if (focusSetter == null) {
+                return;
+            }
+            try {
+                focusSetter.invoke(target, focused);
+            }
+            catch (Exception ignored) {
+                // Not every framework's setter is safe to call from outside; the nudge copes.
             }
         }
     }
@@ -323,11 +385,16 @@ public final class ClientGuiTools {
         }
 
         if (!isRoot) {
+            if (node instanceof GuiTextField) {
+                found.add(new TextWidget((GuiTextField) node));
+                return;
+            }
             Method getter = findAccessible(node.getClass(), "getText");
             Method setter = findAccessible(node.getClass(), "setText", String.class);
             if (getter != null && setter != null && getter.getReturnType() == String.class) {
                 found.add(new TextWidget(node, getter, setter,
-                    findAccessible(node.getClass(), "isFocused")));
+                    findAccessible(node.getClass(), "isFocused"),
+                    findAccessible(node.getClass(), "setFocused", boolean.class)));
                 // A text widget is a leaf for this purpose; its internals hold nothing else wanted.
                 return;
             }
@@ -901,6 +968,45 @@ public final class ClientGuiTools {
     // Typing
     // ------------------------------------------------------------------
 
+    /**
+     * Tells the screen its field changed, by focusing the field and sending one End keystroke.
+     *
+     * <p>Setting a field's text directly bypasses the screen. Screens that decide whether a button is
+     * enabled do it in {@code keyTyped}, after the field reports having taken a key — vanilla's
+     * Direct Connect enables "Join Server" that way — so the button kept the state it had for the
+     * empty field, and a click or Enter afterwards did nothing (issue #26). The field is focused
+     * first, and every other field unfocused, because an unfocused vanilla field refuses keys and a
+     * focused neighbour would take the keystroke instead.
+     *
+     * @return the path the keystroke took, or {@code "none"} when the field would not take focus
+     *         and the keystroke would have gone somewhere else
+     */
+    private static String nudge(GuiScreen screen, List<TextWidget> fields, TextWidget field)
+        throws Exception {
+        if (!Boolean.TRUE.equals(field.focused())) {
+            for (TextWidget other : fields) {
+                if (other != field) {
+                    other.focus(false);
+                }
+            }
+            field.focus(true);
+        }
+        if (Boolean.FALSE.equals(field.focused())) {
+            return "none";
+        }
+        Method keyPressed = screenMethod(screen, "keyPressed", int.class);
+        if (keyPressed != null) {
+            keyPressed.invoke(screen, KEY_END);
+            return "keyPressed";
+        }
+        Method keyTyped = keyTypedMethod();
+        if (keyTyped != null) {
+            keyTyped.invoke(screen, '\0', KEY_END);
+            return "keyTyped";
+        }
+        return "none";
+    }
+
     private static void registerGuiText() {
         McpRegistry.registerTool(McpTool.named("client_gui_text")
             .title("Type into a GUI text field")
@@ -914,6 +1020,9 @@ public final class ClientGuiTools {
                 + "becomes 'insert halfway through' on a field a click has already put a caret into. "
                 + "The widget may still refuse part of what you asked for — a length cap or a "
                 + "character filter — so check 'fullyAccepted' and the returned text.\n\n"
+                + "Afterwards the field is focused and sent one End keystroke, so a screen that "
+                + "enables its buttons as you type sees the change. 'buttonsChanged' lists any "
+                + "button that became enabled or disabled.\n\n"
                 + "If a screen visibly has a field this cannot find, fall back to "
                 + "client_gui_click_at plus client_gui_key.")
             .schema(JsonSchema.object()
@@ -969,8 +1078,31 @@ public final class ClientGuiTools {
                         // of times either overshoots into the previous value or leaves a tail.
                         // Setting the string is the operation actually wanted, and it is what the
                         // widget's own setter is for.
+                        Map<GuiButton, Boolean> enabledBefore = new IdentityHashMap<>();
+                        for (GuiButton button : buttonsOf(screen)) {
+                            enabledBefore.put(button, button.enabled);
+                        }
+
                         field.write(clear ? text : before + text);
                         String resulting = field.read();
+                        String nudgedVia = nudge(screen, fields, field);
+
+                        // Which buttons the new text switched on or off. A button that stays
+                        // disabled is the likeliest reason a following click "does nothing", and
+                        // saying so here saves the model a client_gui_widgets call to find out.
+                        JsonArray buttonsChanged = new JsonArray();
+                        List<GuiButton> buttonsNow = buttonsOf(screen);
+                        for (int i = 0; i < buttonsNow.size(); i++) {
+                            GuiButton button = buttonsNow.get(i);
+                            Boolean was = enabledBefore.get(button);
+                            if (was != null && was != button.enabled) {
+                                JsonObject change = new JsonObject();
+                                change.addProperty("index", i);
+                                change.addProperty("label", button.displayString);
+                                change.addProperty("enabled", button.enabled);
+                                buttonsChanged.add(change);
+                            }
+                        }
 
                         if (submit) {
                             Method keyTyped = keyTypedMethod();
@@ -997,6 +1129,10 @@ public final class ClientGuiTools {
                         // character filter. Comparing rather than assuming is the point.
                         json.addProperty("fullyAccepted",
                             clear ? resulting.equals(text) : resulting.equals(before + text));
+                        json.addProperty("nudgedVia", nudgedVia);
+                        if (buttonsChanged.size() > 0) {
+                            json.add("buttonsChanged", buttonsChanged);
+                        }
                         json.addProperty("submitted", submit);
                         json.addProperty("screenBefore", screenBefore);
                         return json;

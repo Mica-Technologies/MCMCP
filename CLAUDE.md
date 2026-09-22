@@ -172,6 +172,15 @@ frequently model-generated and arrive with the wrong primitive type.
 
 ### 1.12.2 API notes
 
+- **A `@SideOnly(CLIENT)` method on a common class fails only when called.** FML strips it from a
+  dedicated server, and calling it throws `NoSuchMethodError`. Unlike a client-only class, it does
+  not fail at load, so the smoke test's load check cannot see it. `Biome.getBiomeName`,
+  `CreativeTabs.getIndex` and `CreativeTabs.getTabLabel` have all been caught this way. Check the
+  annotation in the decompiled source before calling a vanilla method from common code.
+- **Call vanilla methods directly, not by reflective name.** A released jar has SRG names at runtime,
+  so `getDeclaredMethod("getText")` on a `GuiTextField` works in a dev client and finds nothing in
+  production. When reflection is unavoidable (for a protected member), look up both names, as
+  `ClientGuiTools` does.
 - `Minecraft.running` is package-private with no accessor. `ClientThreadBridge` uses
   `getFramebuffer() != null` as the liveness signal — non-null means `Minecraft.init()` completed.
 - **`EntityPlayerSP.getPosition()` rounds, it does not floor.** It is overridden as
