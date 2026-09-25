@@ -16,15 +16,16 @@ import javax.annotation.Nullable;
  * <p>Two kinds of frame travel over it, told apart by which field they carry:
  *
  * <ul>
- *   <li><b>Control frames</b> have {@code "type"}. Today that is the opening
- *       {@code hello}/{@code welcome}/{@code rejected} exchange.</li>
+ *   <li><b>Control frames</b> have {@code "type"}. The opening
+ *       {@code hello}/{@code welcome}/{@code rejected} exchange, and afterwards {@code status}.</li>
  *   <li><b>MCP frames</b> have {@code "jsonrpc"}. Everything after a {@code welcome} is ordinary
  *       JSON-RPC, handed to the same {@code McpDispatcher} the HTTP transport uses.</li>
  * </ul>
  *
  * <p>Keeping them distinguishable by field rather than by position is what leaves room for control
- * frames <em>after</em> the handshake — an orchestrator pushing a renamed label, say — without
- * another protocol version. Nothing sends one yet.
+ * frames <em>after</em> the handshake without another protocol version. The instance sends
+ * {@code status} when its game thread stops or starts finishing frames; a peer that predates it
+ * ignores it, as both sides ignore any control frame type they do not know.
  *
  * <h2>Version negotiation</h2>
  *
@@ -46,6 +47,7 @@ public final class LinkProtocol {
     public static final String TYPE_HELLO = "hello";
     public static final String TYPE_WELCOME = "welcome";
     public static final String TYPE_REJECTED = "rejected";
+    public static final String TYPE_STATUS = "status";
 
     // Shared control fields
     public static final String FIELD_LINK_PROTOCOL = "linkProtocol";
@@ -63,6 +65,12 @@ public final class LinkProtocol {
     public static final String FIELD_ENDPOINT_URL = "endpointUrl";
     public static final String FIELD_PID = "pid";
     public static final String FIELD_STARTED_AT = "startedAt";
+
+    // status fields
+    public static final String FIELD_GAME_THREAD = "gameThread";
+    public static final String FIELD_THREAD_NAME = "name";
+    public static final String FIELD_RESPONDING = "responding";
+    public static final String FIELD_SILENT_MILLIS = "silentMillis";
 
     // welcome fields
     public static final String FIELD_ORCHESTRATOR = "orchestrator";

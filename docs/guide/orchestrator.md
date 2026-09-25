@@ -130,6 +130,14 @@ orchestrator keeps retrying for as long as the link is up, so this normally reso
 seconds; one that stays that way has something wrong, and the reason is in `orchestrator.log` and in
 the event log as a failed-bootstrap entry.
 
+### `responding: false`
+
+A client whose game thread stops finishing frames for `limits.clientStallSeconds` tells the
+orchestrator so over its link, and `mcmcp_instances` then shows `responding: false` and
+`stalledSeconds` on that entry. Its link and its off-thread tools — `game_health` among them — still
+answer; anything that needs the game thread will time out until it recovers, when the field goes away
+again. `game_health` on that instance shows the stuck thread's stack.
+
 An instance that is not ready contributes nothing to the aggregated tool list — deliberately, and not
 merely by having nothing to add. The aggregate is cached, so letting an empty catalogue into it would
 replace the tool surface every other instance had.

@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp.client;
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
+import com.micatechnologies.minecraft.mcmcp.perf.StallDetector;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -96,7 +97,10 @@ public class ClientThreadBridge implements GameThreadBridge {
             return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
         }
         catch (TimeoutException e) {
-            throw new TimeoutException("Client thread did not run the task within " + timeoutMillis + " ms");
+            // Says whether the thread is merely busy or has stopped altogether. Without that, a model
+            // facing a hung client retries every call until each one times out the same way.
+            throw new TimeoutException("Client thread did not run the task within " + timeoutMillis + " ms."
+                + StallDetector.CLIENT_THREAD.describeIfStalled(System.nanoTime()));
         }
     }
 

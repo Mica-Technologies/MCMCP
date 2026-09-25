@@ -12,6 +12,8 @@ import com.micatechnologies.minecraft.mcmcp.link.LinkProtocol;
 import com.micatechnologies.minecraft.mcmcp.link.LinkProtocolException;
 import com.micatechnologies.minecraft.mcmcp.link.LinkSettings;
 import com.micatechnologies.minecraft.mcmcp.link.LinkState;
+import com.micatechnologies.minecraft.mcmcp.link.LinkStatus;
+import com.micatechnologies.minecraft.mcmcp.perf.StallDetector;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpc;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpDispatcher;
@@ -70,8 +72,12 @@ import javax.annotation.Nullable;
  */
 public class ReverseTransport implements McpTransport {
 
-    /** How long the writer waits for a queued message before looping to re-check liveness. */
-    private static final long WRITER_POLL_MILLIS = 5_000L;
+    /**
+     * How long the writer waits for a queued message before looping to re-check liveness and the
+     * game thread's status. Short because a stall is worth hearing about promptly, and a loop that
+     * finds nothing to do costs nothing.
+     */
+    private static final long WRITER_POLL_MILLIS = 1_000L;
 
     private final LinkSettings settings;
     private final McmcpIdentity identity;
@@ -428,8 +434,8 @@ public class ReverseTransport implements McpTransport {
             session.touch(System.currentTimeMillis());
 
             if (LinkFraming.isControlFrame(frame)) {
-                // Nothing sends a post-handshake control frame yet. Ignoring an unknown one rather
-                // than dropping the link is what lets a newer orchestrator talk to an older mod.
+                // The orchestrator sends no post-handshake control frame yet. Ignoring an unknown one
+                // rather than dropping the link is what lets a newer orchestrator talk to an older mod.
                 Mcmcp.LOGGER.debug("MCMCP orchestrator link ignored a control frame of type "
                     + frame.get(LinkProtocol.FIELD_TYPE));
                 continue;
@@ -499,16 +505,30 @@ public class ReverseTransport implements McpTransport {
      * <p>This is the link's equivalent of the SSE stream, and it exists for the same traffic:
      * resource-update notifications, catalogue changes, and log messages. The poll timeout is what
      * lets the thread notice the connection has gone even when nothing is queued.
+     *
+     * <p>It also sends the client's {@code status} frame when its game thread stalls or recovers.
+     * This thread, not the game thread, because the game thread is the one that has stopped.
      */
     private void startWriter(final McpSession session, final OutputStream out, final Socket connected) {
         Thread writer = new Thread(new Runnable() {
             @Override
             public void run() {
+                // Zero, so a link that comes up during a stall reports it at once. Anything the
+                // detector has ever changed is worth saying to a new connection.
+                long statusSent = 0L;
                 try {
                     while (running && !connected.isClosed()) {
                         JsonObject message = session.pollOutbound(WRITER_POLL_MILLIS);
                         if (message != null) {
                             LinkFraming.writeFrame(out, message);
+                        }
+                        if (side.isClient()) {
+                            StallDetector detector = StallDetector.CLIENT_THREAD;
+                            long version = detector.version();
+                            if (version != statusSent) {
+                                LinkFraming.writeFrame(out, LinkStatus.frame(detector, System.nanoTime()));
+                                statusSent = version;
+                            }
                         }
                     }
                 }

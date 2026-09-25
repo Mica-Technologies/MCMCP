@@ -27,11 +27,11 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::jsonrpc;
-use crate::link::protocol::{Hello, Side};
+use crate::link::protocol::{GameThreadStatus, Hello, Side};
 
 /// How long to wait for an instance to answer before giving up on one request.
 ///
@@ -199,6 +199,8 @@ pub struct Instance {
     closed: Notify,
     alive: std::sync::atomic::AtomicBool,
     ready: std::sync::atomic::AtomicBool,
+    /// When the game thread stopped finishing frames, as last reported; `None` while it runs.
+    stalled_since: Mutex<Option<Instant>>,
 }
 
 impl Instance {
@@ -212,6 +214,7 @@ impl Instance {
             closed: Notify::new(),
             alive: std::sync::atomic::AtomicBool::new(true),
             ready: std::sync::atomic::AtomicBool::new(false),
+            stalled_since: Mutex::new(None),
         }
     }
 
@@ -244,6 +247,32 @@ impl Instance {
     pub fn set_catalogue(&self, catalogue: Catalogue) {
         *self.catalogue.lock().expect("catalogue lock") = Arc::new(catalogue);
         self.ready.store(true, Ordering::SeqCst);
+    }
+
+    /// Records what the instance last said about its game thread.
+    pub fn set_game_thread(&self, status: &GameThreadStatus) {
+        let since = if status.responding {
+            None
+        } else {
+            let now = Instant::now();
+            Some(
+                now.checked_sub(Duration::from_millis(status.silent_millis))
+                    .unwrap_or(now),
+            )
+        };
+        *self.stalled_since.lock().expect("stall lock") = since;
+    }
+
+    /// How long the game thread has been stalled, or `None` if it is running.
+    ///
+    /// Distinct from [`Self::is_alive`]: a stalled instance's link is up and its off-thread tools
+    /// still answer. What it cannot do is anything that needs its game thread, and every such call
+    /// will time out rather than fail quickly — which is what a model needs to know before making one.
+    pub fn stalled_for(&self) -> Option<Duration> {
+        self.stalled_since
+            .lock()
+            .expect("stall lock")
+            .map(|since| since.elapsed())
     }
 
     pub fn is_alive(&self) -> bool {
@@ -545,6 +574,33 @@ mod tests {
             ..Catalogue::default()
         });
         assert!(instance.is_ready(), "a loaded catalogue is what ready means");
+    }
+
+    #[test]
+    fn a_stall_is_dated_from_when_the_thread_went_silent_and_cleared_by_recovery() {
+        let (outbound, _receiver) = mpsc::channel(1);
+        let instance = Instance::new(info(), outbound);
+        assert_eq!(instance.stalled_for(), None);
+
+        instance.set_game_thread(&GameThreadStatus {
+            name: "Client thread".into(),
+            responding: false,
+            silent_millis: 20_000,
+        });
+        let stalled = instance
+            .stalled_for()
+            .expect("a stalled thread reports a duration");
+        assert!(
+            stalled >= Duration::from_secs(20),
+            "counted from when it went silent, not from the frame"
+        );
+
+        instance.set_game_thread(&GameThreadStatus {
+            name: "Client thread".into(),
+            responding: true,
+            silent_millis: 0,
+        });
+        assert_eq!(instance.stalled_for(), None);
     }
 
     #[test]

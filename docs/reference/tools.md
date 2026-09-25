@@ -127,6 +127,13 @@ allocation rate is how garbage-heavy code shows up before it becomes a GC pause 
 and after a change. The per-thread figures come from HotSpot's extension of `ThreadMXBean` and are
 simply absent on a JVM that lacks it.
 
+On a client, `clientThread` says whether the game is still finishing frames: `responding`, and
+`lastProgressMsAgo`. Once it has gone `limits.clientStallSeconds` without one, `responding` is false
+and `stalled` carries the thread's state, what it is waiting on and its top frames, with `deadlocked`
+naming any threads the JVM finds deadlocked. A world load, a deadlock and a hang all stop frames
+alike; the stack is what tells them apart. This is answered off the game thread, so it works on a
+client that has stopped answering everything else.
+
 ### `game_heap_histogram`
 
 :material-eye: Read-only
@@ -826,6 +833,12 @@ Holds the human's own keyboard and mouse out of the game so a stray movement can
 model is doing. While locked, nothing from the physical keyboard or mouse reaches the game — no
 camera movement, no clicks, no keys, no pause menu, and no auto-pause when the window loses focus.
 MCMCP's own input tools are unaffected.
+
+The OS cursor is not captured while locked (except on macOS), so the human can use the rest of their
+desktop meanwhile — and a client that hangs mid-task cannot trap the cursor inside a frozen window.
+The game otherwise still believes it has the mouse, so held-attack mining through `client_interact`
+keeps working. Releasing the lock captures the cursor again if the game window is in front, and
+otherwise waits for a click in it.
 
 Three things release it, and a model cannot suppress any of them:
 

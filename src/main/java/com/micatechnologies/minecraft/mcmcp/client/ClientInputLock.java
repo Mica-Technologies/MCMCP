@@ -57,6 +57,20 @@ import org.lwjgl.opengl.Display;
  * {@link ClientInputScheduler} writes keybinding state directly and {@code MovementInputFromOptions}
  * reads it without consulting the event queue at all.
  *
+ * <h2>The cursor stays free</h2>
+ *
+ * While locked, the OS cursor is not captured. The game does not need it: the model's input is
+ * written into the game directly, and the human's is being thrown away. Captured, it is a trap —
+ * the capture is a clip rectangle that only the client thread lifts, so a client that hangs
+ * mid-task keeps the cursor inside a frozen window, where Escape twice cannot be read either.
+ * Free, the human can also just use the rest of their desktop while the agent works.
+ *
+ * <p>Only the OS capture is released, not {@code inGameHasFocus}. Vanilla gates held-attack block
+ * breaking on that flag, so clearing it would stop {@code client_interact} mining. Vanilla also
+ * re-captures whenever a screen closes, so the release is repeated every frame. Not on macOS, where
+ * {@code EntityRenderer} re-captures every frame the cursor is outside the window — the two would
+ * fight, and the cursor would be warped back into the game on every frame the human tried to leave.
+ *
  * <h2>Getting out</h2>
  *
  * This takes control of somebody's computer, so the way out has to work even when everything else
@@ -190,13 +204,15 @@ public final class ClientInputLock {
         }
 
         if (!wasLocked) {
+            freeCursor();
             // Whatever the human was physically holding is latched down in the keybinding state, and
             // the release event is about to be swallowed. Without this they rejoin walking forward.
             KeyBinding.unPressAllKeys();
             dismissLostFocusPause(mc);
             tell(TextFormatting.YELLOW + "MCMCP has taken your keyboard and mouse"
                 + (reason.isEmpty() ? "" : ": " + reason)
-                + TextFormatting.GRAY + " — press Escape twice to take them back.");
+                + TextFormatting.GRAY + " — press Escape twice to take them back."
+                + (Minecraft.IS_RUNNING_ON_MAC ? "" : " Your cursor stays free for other windows meanwhile."));
         }
     }
 
@@ -224,10 +240,45 @@ public final class ClientInputLock {
             // Anything held when the lock came off would otherwise stay latched: the press that
             // latched it was swallowed, so the game never saw the matching release.
             KeyBinding.unPressAllKeys();
+            recaptureCursor(Minecraft.getMinecraft());
             tell(TextFormatting.GREEN + "MCMCP gave your keyboard and mouse back"
                 + TextFormatting.GRAY + " (" + cause + ").");
         }
         return wasLocked;
+    }
+
+    /**
+     * Releases the OS cursor capture, leaving the game otherwise believing it has the mouse.
+     *
+     * <p>Only while the window is in front. LWJGL moves the cursor back to where it was captured
+     * when it lets go, which is harmless over the game and an unwelcome jump for somebody working in
+     * another window — and a window that is not in front has no clip to release anyway.
+     */
+    private static void freeCursor() {
+        if (Minecraft.IS_RUNNING_ON_MAC || !Mouse.isCreated() || !Mouse.isGrabbed() || !WindowFocus.isFocused()) {
+            return;
+        }
+        Mouse.setGrabbed(false);
+    }
+
+    /**
+     * Puts the capture back the way the lock found it.
+     *
+     * <p>If the human is not at the game window, the game is told it does not have the mouse instead,
+     * so that it waits for a click in the window — the way vanilla treats any return from another
+     * application — rather than capturing a cursor that is busy elsewhere.
+     */
+    private static void recaptureCursor(Minecraft mc) {
+        if (Minecraft.IS_RUNNING_ON_MAC || !Mouse.isCreated() || Mouse.isGrabbed() || !mc.inGameHasFocus) {
+            return;
+        }
+        if (WindowFocus.isFocused()) {
+            mc.mouseHelper.grabMouseCursor();
+        }
+        else {
+            // Not setIngameNotInFocus: that re-centres the cursor, which is somewhere else by now.
+            mc.inGameHasFocus = false;
+        }
     }
 
     /**
@@ -398,6 +449,8 @@ public final class ClientInputLock {
                 return;
             }
             try {
+                freeCursor();
+                // After, not before: letting go of the cursor can move it.
                 consumeLookDelta();
             }
             catch (Exception e) {

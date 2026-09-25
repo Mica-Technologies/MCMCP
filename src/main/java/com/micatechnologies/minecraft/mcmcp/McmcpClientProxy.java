@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp;
 
 import com.micatechnologies.minecraft.mcmcp.client.ClientThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.client.ClientIdentification;
+import com.micatechnologies.minecraft.mcmcp.client.ClientWatchdog;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientDebugTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientGuiTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientInputTools;
@@ -55,6 +56,9 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientPerformanceTools.register();
         ClientResources.register();
         ClientPrompts.register();
+        // Not a tool, and not optional: it is the way out of a hung game, which nothing on the client
+        // thread can be.
+        ClientWatchdog.start();
     }
 
     @Override

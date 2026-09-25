@@ -117,6 +117,7 @@ public class McmcpConfig {
     private static int maxBlockVolume = 32768;
     private static int maxInputTicks = 200;
     private static int maxInputLockSeconds = 1800;
+    private static int clientStallSeconds = 15;
     private static int maxLogLines = 500;
 
     private McmcpConfig() {
@@ -346,6 +347,14 @@ public class McmcpConfig {
                 + "cannot leave the machine locked; this is the ceiling on how long that takes. "
                 + "Pressing Escape twice releases it immediately whatever this is set to.");
 
+        clientStallSeconds = configuration.getInt("clientStallSeconds", CATEGORY_LIMITS, 15, 5, 600,
+            "How long the client thread may go without finishing a frame or tick before MCMCP treats it "
+                + "as stalled: it releases the mouse cursor if the game had captured it and reports the stall "
+                + "through game_health and the orchestrator. A stall that lasts a minute also logs the "
+                + "thread's stack.\n"
+                + "A world load stops frames too, which is why this is not shorter. Releasing the cursor "
+                + "during a load is harmless; the game has not captured it under a loading screen.");
+
         maxLogLines = configuration.getInt("maxLogLines", CATEGORY_LIMITS, 500, 10, 5000,
             "Most log lines returnable in one call.");
 
@@ -495,6 +504,10 @@ public class McmcpConfig {
 
     public static int getMaxInputLockSeconds() {
         return maxInputLockSeconds;
+    }
+
+    public static int getClientStallSeconds() {
+        return clientStallSeconds;
     }
 
     public static int getMaxLogLines() {

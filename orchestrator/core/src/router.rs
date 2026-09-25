@@ -1152,6 +1152,12 @@ impl Router {
                         // `tools: 0`, and calls against it failed with "no connected instance
                         // offers it", which is exactly backwards.
                         summary["ready"] = json!(instance.is_ready());
+                        // Only when stalled: it is the exception, and every byte here is re-read by
+                        // every model that lists instances.
+                        if let Some(stalled) = instance.stalled_for() {
+                            summary["responding"] = json!(false);
+                            summary["stalledSeconds"] = json!(stalled.as_secs());
+                        }
                         summary
                     })
                     .collect();

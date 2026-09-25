@@ -18,6 +18,7 @@ import com.micatechnologies.minecraft.mcmcp.perf.GameThreads;
 import com.micatechnologies.minecraft.mcmcp.perf.GcPauseLog;
 import com.micatechnologies.minecraft.mcmcp.perf.HeapHistogram;
 import com.micatechnologies.minecraft.mcmcp.perf.SlowTickFilter;
+import com.micatechnologies.minecraft.mcmcp.perf.StallDetector;
 import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import java.io.File;
 import java.io.IOException;
@@ -36,6 +37,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import javax.annotation.Nullable;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityList;
 import net.minecraft.profiler.Profiler;
@@ -125,6 +127,9 @@ public final class PerformanceTools {
                 + "collector, process and system CPU load, threads, and free disk. Look here when "
                 + "ticks or frames hitch at intervals rather than staying uniformly slow — that "
                 + "pattern is usually garbage collection, not a block.\n\n"
+                + "On a client, 'clientThread' says whether the game is still finishing frames. When it "
+                + "is not, 'stalled' carries the thread's state and stack: a world load, a deadlock and "
+                + "a hang all look alike until you read it.\n\n"
                 + "With sample_seconds, also measures that window: GC pauses, and the game thread's "
                 + "CPU share and allocation rate. A high allocation rate is how garbage-heavy code "
                 + "shows up before it becomes a GC pause; compare it before and after a change.")
@@ -219,9 +224,42 @@ public final class PerformanceTools {
                 json.add("disk", disk);
 
                 json.addProperty("uptimeSeconds", uptimeMillis / 1000L);
+
+                if (context.getSide().isClient()) {
+                    JsonObject clientThread = clientThreadHealth();
+                    if (clientThread != null) {
+                        json.add("clientThread", clientThread);
+                    }
+                }
                 return ToolResult.structured(json);
             })
             .build());
+    }
+
+    /**
+     * Whether the client thread is finishing frames, read from the watchdog rather than asked of the
+     * thread itself, which is the one that may not answer. Null until the first frame.
+     */
+    @Nullable
+    private static JsonObject clientThreadHealth() {
+        StallDetector detector = StallDetector.CLIENT_THREAD;
+        if (!detector.isArmed()) {
+            return null;
+        }
+        JsonObject json = new JsonObject();
+        json.addProperty("responding", !detector.isStalled());
+        json.addProperty("lastProgressMsAgo", detector.silentMillis(System.nanoTime()));
+        if (detector.isStalled()) {
+            ThreadInfo info = GameThreads.snapshot(GameThreads.find(GameThreads.CLIENT));
+            if (info != null) {
+                json.add("stalled", GameThreads.toJson(info, 16));
+            }
+            List<String> deadlocked = GameThreads.deadlocked();
+            if (!deadlocked.isEmpty()) {
+                json.add("deadlocked", Json.arrayOfStrings(deadlocked));
+            }
+        }
+        return json;
     }
 
     /**

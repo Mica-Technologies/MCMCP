@@ -403,8 +403,18 @@ where
     let label = instance.info().label;
     while let Some(frame) = framing::read_frame(reader).await? {
         if protocol::is_control_frame(&frame) {
-            // Nothing sends a post-handshake control frame yet. Ignoring an unknown one rather than
-            // dropping the link is what lets a newer mod talk to an older orchestrator.
+            if let Some(status) = protocol::parse_status(&frame) {
+                if status.responding {
+                    info!(instance = %id, %label, thread = %status.name, "game thread is running again");
+                } else {
+                    warn!(instance = %id, %label, thread = %status.name, silent_ms = status.silent_millis,
+                        "game thread has stopped finishing frames");
+                }
+                instance.set_game_thread(&status);
+                continue;
+            }
+            // Ignoring an unknown one rather than dropping the link is what lets a newer mod talk to
+            // an older orchestrator.
             debug!(instance = %id, %label, "ignored a post-handshake control frame");
             continue;
         }

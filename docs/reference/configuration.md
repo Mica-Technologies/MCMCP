@@ -349,6 +349,18 @@ stall the tick loop. A 64×64×64 region is 262,144 block writes and will visibl
 Longest a single input tool may hold a key down, in ticks (20 = 1 second). Bounds how far one call can
 move the player before the model gets to look again.
 
+### `clientStallSeconds`
+
+`integer` 5–600 · default `15`
+
+How long the client thread may go without finishing a frame or tick before MCMCP treats it as
+stalled. When it does, a watchdog thread releases the mouse cursor if the game had captured it (on
+Windows), reports the stall through `game_health`, tool timeouts and the orchestrator's `mcmcp_instances`, and — if it lasts a minute — logs
+the client thread's full stack, the integrated server's, and any deadlock.
+
+A world load stops frames too, which is why this is not shorter. Releasing the cursor during one is
+harmless: the game has not captured it under a loading screen.
+
 ### `maxInputLockSeconds`
 
 `integer` 5–7200 · default `1800`
@@ -417,6 +429,7 @@ orchestrator {
 }
 
 limits {
+    I:clientStallSeconds=15
     I:gameThreadTimeoutMillis=5000
     I:maxBlockVolume=32768
     I:maxInputLockSeconds=1800

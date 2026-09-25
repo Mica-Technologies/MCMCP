@@ -18,6 +18,8 @@ pub const VERSION: i64 = 1;
 pub const TYPE_HELLO: &str = "hello";
 pub const TYPE_WELCOME: &str = "welcome";
 pub const TYPE_REJECTED: &str = "rejected";
+/// Sent by an instance after the handshake when its game thread stops or starts finishing frames.
+pub const TYPE_STATUS: &str = "status";
 
 /// Retryable. The instance reached us and a human has been asked to approve it.
 pub const REASON_PENDING_APPROVAL: &str = "pending-approval";
@@ -159,6 +161,28 @@ pub fn rejected(reason: &str, message: &str) -> Value {
     })
 }
 
+/// What a `status` frame says about an instance's game thread.
+///
+/// Pushed by the instance rather than asked for: the point is to be believed about an instance that
+/// may not be answering requests. `silent_millis` is how long the thread had been silent when the
+/// frame was sent, so the stall's start can be placed without the two clocks agreeing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GameThreadStatus {
+    #[serde(default)]
+    pub name: String,
+    pub responding: bool,
+    #[serde(rename = "silentMillis", default)]
+    pub silent_millis: u64,
+}
+
+/// Reads a `status` frame, or `None` for any other frame or one this build cannot read.
+pub fn parse_status(frame: &Value) -> Option<GameThreadStatus> {
+    if frame.get("type").and_then(Value::as_str) != Some(TYPE_STATUS) {
+        return None;
+    }
+    serde_json::from_value(frame.get("gameThread")?.clone()).ok()
+}
+
 /// Whether a frame is a link control frame rather than an MCP message.
 pub fn is_control_frame(frame: &Value) -> bool {
     frame.get("type").is_some()
@@ -185,6 +209,31 @@ mod tests {
             "modVersion": "2026.08.24",
             "minecraftVersion": "1.12.2",
         })
+    }
+
+    #[test]
+    fn reads_the_status_frame_the_mod_actually_sends() {
+        // Byte for byte what LinkStatusTest asserts the mod writes. Change one, change the other.
+        let frame: Value = serde_json::from_str(
+            r#"{"type":"status","linkProtocol":1,"gameThread":{"name":"Client thread","responding":false,"silentMillis":11000}}"#,
+        )
+        .unwrap();
+
+        assert!(is_control_frame(&frame));
+        assert_eq!(
+            parse_status(&frame),
+            Some(GameThreadStatus {
+                name: "Client thread".into(),
+                responding: false,
+                silent_millis: 11_000,
+            })
+        );
+    }
+
+    #[test]
+    fn a_control_frame_that_is_not_a_status_is_not_read_as_one() {
+        assert_eq!(parse_status(&hello_json()), None);
+        assert_eq!(parse_status(&json!({"type": "status"})), None);
     }
 
     #[test]
