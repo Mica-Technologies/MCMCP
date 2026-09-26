@@ -18,6 +18,7 @@ use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::Router;
 use mcmcp_orchestrator_core::store::ApprovalStore;
 use mcmcp_orchestrator_core::{catalogue, control, link, paths, stdio};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -187,7 +188,23 @@ async fn main() -> Result<()> {
             strict_approval,
             no_stdio,
         } => serve(cli.link_port, !strict_approval, no_stdio).await,
-        Command::Shim { mcp_port, no_launch } => shim(mcp_port, !no_launch).await,
+        Command::Shim { mcp_port, no_launch } => {
+            let result = shim(mcp_port, !no_launch).await;
+            // Exit here rather than returning. Returning drops the runtime, and the drop waits for
+            // the stdin pump's blocking read, which tokio cannot cancel. An MCP client between calls
+            // writes nothing, so a shim whose app had gone kept running, looking connected to its
+            // client and holding the installed binary locked against an upgrade.
+            let code = match result {
+                Ok(()) => 0,
+                Err(error) => {
+                    warn!(error = %format!("{error:#}"), "the shim stopped");
+                    // Not eprintln!: that panics if the client has already closed stderr.
+                    let _ = writeln!(std::io::stderr(), "Error: {error:?}");
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
         Command::Instances => list_instances(),
         Command::Approve { instance } => approve(&instance),
         Command::Revoke { instance } => revoke(&instance),
@@ -268,8 +285,11 @@ async fn shim(mcp_port: u16, may_launch: bool) -> Result<()> {
         None => anyhow::bail!("the orchestrator closed the connection without answering"),
     }
 
-    // Two pumps, in opposite directions, each ending when its source does.
-    let to_app = tokio::spawn(async move {
+    // Two pumps, in opposite directions. The shim lives exactly as long as the shorter of them:
+    // the app going away leaves nothing to relay to, and the client closing stdin is how MCP says
+    // it is done. Waiting for the app to close after that meant waiting for every call still in
+    // flight, for a client no longer reading the answers.
+    let mut to_app = tokio::spawn(async move {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if line.trim().is_empty() {
@@ -284,14 +304,22 @@ async fn shim(mcp_port: u16, may_launch: bool) -> Result<()> {
         }
     });
 
-    let mut stdout = tokio::io::stdout();
-    let mut lines = from_app.lines();
-    while let Some(line) = lines.next_line().await? {
-        stdout.write_all(line.as_bytes()).await?;
-        stdout.write_all(b"\n").await?;
-        stdout.flush().await?;
-    }
+    let from_app = async move {
+        let mut stdout = tokio::io::stdout();
+        let mut lines = from_app.lines();
+        while let Some(line) = lines.next_line().await? {
+            stdout.write_all(line.as_bytes()).await?;
+            stdout.write_all(b"\n").await?;
+            stdout.flush().await?;
+        }
+        info!("the orchestrator app closed the connection");
+        anyhow::Ok(())
+    };
 
+    tokio::select! {
+        result = from_app => result?,
+        _ = &mut to_app => info!("the MCP client closed its input"),
+    }
     to_app.abort();
     Ok(())
 }

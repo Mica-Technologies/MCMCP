@@ -479,7 +479,8 @@ Something usually has to close first, and the installer asks before closing anyt
 - **the app**, if its window is open;
 - **the shim**, `mcmcp-orchestrator.exe`, which is the one that actually catches people out. An MCP
   client spawns it on your behalf, so it is frequently running without anybody having started it
-  knowingly, and it holds the file the installer is about to replace.
+  knowingly, and it holds the file the installer is about to replace. Every shim exits when the app
+  does, so closing the app first releases them all.
 
 Answering *cancel* to either prompt cancels the install rather than closing your session anyway. A
 closed shim is restarted by its MCP client on the next call, so the cost of letting it go is one
