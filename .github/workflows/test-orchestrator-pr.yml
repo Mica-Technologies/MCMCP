@@ -153,8 +153,12 @@ jobs:
         working-directory: .
         run: bash .github/scripts/orchestrator-version.sh --self-test
 
+      # The headless binary alone, never the workspace. The app's build script writes a text
+      # placeholder as its sidecar, and tauri-build copies every sidecar into target/debug with the
+      # triple stripped: the same path as this binary. In a workspace build, whichever finishes last
+      # wins, and a change to the dependency graph was enough to let the placeholder win.
       - name: Build the orchestrator
-        run: cargo build
+        run: cargo build -p mcmcp-orchestrator
 
       # The one test where the two implementations of the link protocol meet. Everything else
       # checks one side against a fixture; a renamed field or a one-sided version bump breaks
