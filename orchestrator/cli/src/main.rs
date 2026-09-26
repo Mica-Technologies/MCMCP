@@ -23,8 +23,6 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[derive(Parser)]
 #[command(
@@ -180,18 +178,9 @@ async fn main() -> Result<()> {
     }
     let _ = paths::ensure_state_directory();
 
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_env("MCMCP_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
-        .with_ansi(false);
     // stderr, always — stdout belongs to MCP — and a file beside it, so a run launched detached
     // still leaves its warnings somewhere readable.
-    match paths::open_log_file() {
-        Ok(file) => builder.with_writer(std::io::stderr.and(file)).init(),
-        Err(error) => {
-            builder.with_writer(std::io::stderr).init();
-            tracing::warn!(%error, "could not open the diagnostic log; logging to stderr only");
-        }
-    }
+    mcmcp_orchestrator_core::logging::init();
 
     match cli.command {
         Command::Serve {
@@ -329,7 +318,22 @@ fn launch_app() -> Result<()> {
         "mcmcp-orchestrator-app".into()
     };
     info!(app = %program.display(), "starting the orchestrator app");
-    std::process::Command::new(&program).spawn().with_context(|| {
+    // Detached, with no stdio. The app outlives this shim, and a spawn that inherits handles leaves
+    // it holding this shim's stdout (a Claude Code session's MCP pipe) and stderr (a pipe that breaks
+    // the moment that session closes). The app logs to its own file and has no use for either.
+    let mut command = std::process::Command::new(&program);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    command.spawn().with_context(|| {
         format!(
             "could not start {}. Install the MCMCP Orchestrator app, or start it yourself and run \
              this again.",

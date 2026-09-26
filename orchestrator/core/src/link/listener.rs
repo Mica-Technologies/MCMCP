@@ -265,6 +265,16 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
     let instance_id = instance.id();
 
     context.registry.insert(Arc::clone(&instance));
+    // Listed from here on, so every way out of this function has to unlist it, a panic included.
+    // That is why this is a guard and not a tail of statements: a task that panicked between the
+    // insert and the cleanup left a game listed forever, with no tools and no socket behind it.
+    let mut registration = Registration {
+        instance: Arc::clone(&instance),
+        registry: Arc::clone(&context.registry),
+        events: context.events.clone(),
+        label: label.clone(),
+        tasks: vec![writer.abort_handle()],
+    };
     info!(instance = %instance_id, %label, side = hello.side.as_str(), "instance linked");
 
     // Spawned, not awaited: initialize and the catalogue fetch send requests whose answers only
@@ -276,19 +286,34 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
         let name = label.clone();
         tokio::spawn(async move { bootstrap(instance, events, id, name).await })
     };
+    registration.tasks.push(bootstrap.abort_handle());
 
-    let result = read_loop(&mut reader, &instance, &context).await;
+    read_loop(&mut reader, &instance, &context).await
+}
 
-    bootstrap.abort();
-    instance.mark_closed();
-    context.registry.remove(&instance_id, &instance);
-    writer.abort();
-    let _ = context.events.send(UpstreamEvent::Disconnected {
-        instance: instance_id.clone(),
-    });
-    info!(instance = %instance_id, %label, "instance unlinked");
+/// Unlists a linked instance when its connection task ends, however it ends.
+struct Registration {
+    instance: Arc<Instance>,
+    registry: Arc<Registry>,
+    events: mpsc::UnboundedSender<UpstreamEvent>,
+    label: String,
+    /// The writer and the bootstrap, which must not outlive the link they serve.
+    tasks: Vec<tokio::task::AbortHandle>,
+}
 
-    result
+impl Drop for Registration {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        self.instance.mark_closed();
+        let id = self.instance.id();
+        self.registry.remove(&id, &self.instance);
+        let _ = self
+            .events
+            .send(UpstreamEvent::Disconnected { instance: id.clone() });
+        info!(instance = %id, label = %self.label, "instance unlinked");
+    }
 }
 
 /// How long to wait before each successive bootstrap attempt.
@@ -504,6 +529,61 @@ mod tests {
         assert_eq!(summary.instance_id, "modb-dev");
         assert_eq!(summary.label, "modB dev");
         assert_eq!(summary.game_directory.as_deref(), Some("E:\\instances\\modB"));
+    }
+
+    #[tokio::test]
+    async fn a_connection_task_that_panics_still_unlists_its_instance() {
+        // The bug: cleanup was a tail of statements after the read loop. A task that panicked
+        // before reaching it (a failed log write did it to every link) left the game listed as
+        // connected with no tools, long after the game itself had exited.
+        let registry = Arc::new(Registry::new());
+        let (sender, _outbound) = mpsc::channel(1);
+        let instance = Arc::new(Instance::new(
+            InstanceInfo {
+                id: "alpha.client".into(),
+                approval_id: "alpha".into(),
+                label: "alpha".into(),
+                side: protocol::Side::Client,
+                game_directory: None,
+                mod_version: "test".into(),
+                minecraft_version: "1.12.2".into(),
+                endpoint_url: None,
+                pid: None,
+                started_at: None,
+            },
+            sender,
+        ));
+        let (events, mut received) = mpsc::unbounded_channel();
+        registry.insert(Arc::clone(&instance));
+
+        let task = {
+            let registry = Arc::clone(&registry);
+            let instance = Arc::clone(&instance);
+            tokio::spawn(async move {
+                let _registration = Registration {
+                    instance,
+                    registry,
+                    events,
+                    label: "alpha".into(),
+                    tasks: Vec::new(),
+                };
+                panic!("something between linked and unlinked went wrong");
+            })
+        };
+        assert!(task.await.unwrap_err().is_panic());
+
+        assert!(
+            registry.get("alpha.client").is_none(),
+            "the panicked link must not stay listed"
+        );
+        assert!(
+            !instance.is_alive(),
+            "anything waiting on it is failed, not left to time out"
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Ok(UpstreamEvent::Disconnected { instance }) if instance == "alpha.client"
+        ));
     }
 
     #[tokio::test(start_paused = true)]

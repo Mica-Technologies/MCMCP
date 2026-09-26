@@ -433,8 +433,10 @@ each game's own config.
 The two logs answer different questions. `events.jsonl` is what happened *to instances* — links,
 tool calls, approvals — as a closed set of kinds the app can filter. `orchestrator.log` is the
 program's own `tracing` output, and it exists because the desktop app has no terminal: without it,
-everything the orchestrator said about its own workings went to a stderr nobody could read. It is
-appended to across runs and rotated to `orchestrator.log.1` once it passes 8 MB.
+everything the orchestrator said about its own workings went to a stderr nobody could read. A panic
+in any orchestrator thread is recorded there as well, and a stderr that has gone away never stops a
+line from reaching the file. It is appended to across runs and rotated to `orchestrator.log.1` once
+it passes 8 MB.
 
 A tool call records how long it took **and how large its answer was**:
 
