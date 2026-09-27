@@ -5,8 +5,8 @@ import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
-import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Callable;
 import net.minecraft.client.Minecraft;
@@ -117,54 +117,64 @@ public final class ClientSyncTools {
                 }
 
                 // Only chat that arrives from here on counts. Matching against the backlog would
-                // return instantly on a line from minutes ago, which is the opposite of waiting.
-                final int chatBaseline = ClientChatRecorder.size();
-
-                long start = System.currentTimeMillis();
-                while (System.currentTimeMillis() - start < budgetMillis) {
-                    if (context.getCancellation().isCancelled()) {
-                        JsonObject json = new JsonObject();
-                        json.addProperty("conditionMet", false);
-                        json.addProperty("cancelled", true);
-                        json.addProperty("waitedMillis", System.currentTimeMillis() - start);
-                        return ToolResult.text("Wait cancelled.").withStructured(json);
-                    }
-
-                    JsonObject state = context.onGameThread(new Callable<JsonObject>() {
-                        @Override
-                        public JsonObject call() {
-                            return snapshot();
-                        }
-                    });
-
-                    if (isSatisfied(waitFor, state, screenName, chatContains, chatBaseline)) {
-                        state.addProperty("conditionMet", true);
-                        state.addProperty("waitedMillis", System.currentTimeMillis() - start);
-                        state.addProperty("waitFor", waitFor);
-                        return ToolResult.text("Condition '" + waitFor + "' met after "
-                            + (System.currentTimeMillis() - start) + "ms."
-                            + ("worldLoaded".equals(waitFor) && state.has("pausesOnLostFocus")
-                                ? ClientStateTools.LOST_FOCUS_PAUSE_WARNING : ""))
-                            .withStructured(state);
-                    }
-
-                    Thread.sleep(POLL_INTERVAL_MILLIS);
+                // return instantly on a line from minutes ago, which is the opposite of waiting. A
+                // capture rather than a count of the buffer: the buffer stops growing once full, and
+                // a wait keyed on its size then never saw another line.
+                try (ClientChatRecorder.Capture chat = "chat".equals(waitFor)
+                    ? ClientChatRecorder.capture() : null) {
+                    return waitForCondition(context, waitFor, ticks, budgetMillis, screenName,
+                        chatContains, chat);
                 }
-
-                JsonObject timedOut = context.onGameThread(new Callable<JsonObject>() {
-                    @Override
-                    public JsonObject call() {
-                        return snapshot();
-                    }
-                });
-                timedOut.addProperty("conditionMet", false);
-                timedOut.addProperty("waitedMillis", System.currentTimeMillis() - start);
-                timedOut.addProperty("waitFor", waitFor);
-                return ToolResult.text("Timed out after " + ticks + " tick(s) waiting for '"
-                    + waitFor + "'. The state above is what it looks like now.")
-                    .withStructured(timedOut);
             })
             .build());
+    }
+
+    private static ToolResult waitForCondition(ToolContext context,
+        String waitFor, int ticks, long budgetMillis, String screenName, String chatContains,
+        ClientChatRecorder.Capture chat) throws Exception {
+        long start = System.currentTimeMillis();
+        while (System.currentTimeMillis() - start < budgetMillis) {
+            if (context.getCancellation().isCancelled()) {
+                JsonObject json = new JsonObject();
+                json.addProperty("conditionMet", false);
+                json.addProperty("cancelled", true);
+                json.addProperty("waitedMillis", System.currentTimeMillis() - start);
+                return ToolResult.text("Wait cancelled.").withStructured(json);
+            }
+
+            JsonObject state = context.onGameThread(new Callable<JsonObject>() {
+                @Override
+                public JsonObject call() {
+                    return snapshot();
+                }
+            });
+
+            if (isSatisfied(waitFor, state, screenName, chatContains, chat)) {
+                state.addProperty("conditionMet", true);
+                state.addProperty("waitedMillis", System.currentTimeMillis() - start);
+                state.addProperty("waitFor", waitFor);
+                return ToolResult.text("Condition '" + waitFor + "' met after "
+                    + (System.currentTimeMillis() - start) + "ms."
+                    + ("worldLoaded".equals(waitFor) && state.has("pausesOnLostFocus")
+                        ? ClientStateTools.LOST_FOCUS_PAUSE_WARNING : ""))
+                    .withStructured(state);
+            }
+
+            Thread.sleep(POLL_INTERVAL_MILLIS);
+        }
+
+        JsonObject timedOut = context.onGameThread(new Callable<JsonObject>() {
+            @Override
+            public JsonObject call() {
+                return snapshot();
+            }
+        });
+        timedOut.addProperty("conditionMet", false);
+        timedOut.addProperty("waitedMillis", System.currentTimeMillis() - start);
+        timedOut.addProperty("waitFor", waitFor);
+        return ToolResult.text("Timed out after " + ticks + " tick(s) waiting for '"
+            + waitFor + "'. The state above is what it looks like now.")
+            .withStructured(timedOut);
     }
 
     /** Client state relevant to every supported condition, read in one hop to the game thread. */
@@ -187,7 +197,7 @@ public final class ClientSyncTools {
     }
 
     private static boolean isSatisfied(String waitFor, JsonObject state, String screenName,
-        String chatContains, int chatBaseline) {
+        String chatContains, ClientChatRecorder.Capture chat) {
 
         if ("worldLoaded".equals(waitFor)) {
             // Three conditions, all learned the hard way. The world exists briefly before the player
@@ -216,14 +226,8 @@ public final class ClientSyncTools {
                 .contains(screenName.toLowerCase(Locale.ROOT));
         }
         if ("chat".equals(waitFor)) {
-            int current = ClientChatRecorder.size();
-            if (current <= chatBaseline) {
-                return false;
-            }
             String needle = chatContains.toLowerCase(Locale.ROOT);
-            List<ClientChatRecorder.Entry> recent =
-                ClientChatRecorder.recent(Math.min(300, current - chatBaseline));
-            for (ClientChatRecorder.Entry entry : recent) {
+            for (ClientChatRecorder.Entry entry; (entry = chat.poll()) != null; ) {
                 if (entry.getText().toLowerCase(Locale.ROOT).contains(needle)) {
                     return true;
                 }

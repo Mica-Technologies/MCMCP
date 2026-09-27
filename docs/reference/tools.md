@@ -1,6 +1,6 @@
 # Tools
 
-62 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+66 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -674,7 +674,7 @@ adjust, check again — and a full state response each time is wasteful.
 
 #### `client_get_block`
 
-:material-eye: Read-only · `x`, `y`, `z` required · optional `relative`, `nbt`
+:material-eye: Read-only · `x`, `y`, `z` required · optional `relative`, `nbt`, `nbt_source`
 
 `relative: true` treats the coordinates as offsets from the player's block position.
 
@@ -683,6 +683,14 @@ with `"source": "client-synced"`, and that is the part to read. A client is sent
 syncs so the block can be *drawn*, so a key missing here means "not synced", not "not set". It is
 still the only NBT there is on a server you do not run, and it replaces sending `/blockdata` and
 reading the reply out of chat.
+
+`nbt_source: "server"` gets the server's whole tag instead, on a server you do not run, provided the
+player is an operator. It sends `/blockdata x y z {}` as the player. Merging an empty tag changes
+nothing, and vanilla answers "The data tag did not change: {…}" with the entire tag as the message's
+argument. The tool reads that argument from the translated message itself, so the result is
+structured and arrives whole however long it is. Scraping it out of chat was how a fire-alarm panel's
+479-device `apps` string came back as some 500 wrapped lines mixed in with server broadcasts. The
+result's `source` is `server-blockdata`.
 
 Positions outside the loaded view distance report `loaded: false` and nothing else. The client
 genuinely does not know what is there and will not be told until it gets closer.
@@ -695,6 +703,32 @@ genuinely does not know what is there and will not be told until it gets closer.
 Carries the same `actualState` and `boundingBox` fields as
 [`server_get_block`](#server_get_block) — and on the client is where `actualState` is most directly
 the truth, since this is the side that draws the block.
+
+#### `client_get_blocks`
+
+:material-eye: Read-only · `x`, `y`, `z` required · optional `toX`, `toY`, `toZ`, `relative`, `mode`,
+`blocks`, `exclude`, `tile_entities`, `per_layer`, `limit`
+
+A region read over the chunks the client already holds, so it works on any server, including one
+without MCMCP. Before this tool the only client-side read was `client_get_block`, one position per
+call. Surveying one city parcel before clearing it took about 22,000 of those calls.
+
+| `mode` | Returns |
+|---|---|
+| `summary` (default) | `counts` per block id, most common first; `per_layer: true` adds the same per `y` |
+| `positions` | Each matching block's `[x,y,z]`, grouped by id, capped at `limit` (default 256, max 4096); the counts stay exact |
+| `heightmap` | `heights[z][x]`: the highest matching `y` in each column, `-1` where there is none, at most 128 × 128 columns |
+
+`blocks` and `exclude` take patterns. A whole id matches every metadata (`minecraft:wool`) unless it
+names one (`minecraft:wool:14`). A bare path matches it in any namespace (`barrier`). `*` asks for a
+substring (`*alarm*`). Plain substring matching was avoided on purpose, because `air` is a substring
+of `oak_stairs`. `positions` and `heightmap` exclude air unless `exclude` is given.
+`tile_entities: true` keeps only blocks the client holds a tile entity for.
+
+Chunks outside the view distance are listed in `unloadedChunks` and skipped, never counted as air;
+in a heightmap their columns are `null`. One read covers up to `limits.maxBlockVolume` × 8 blocks:
+a client read of chunks already in memory is cheap, and the size of the answer is bounded by the mode
+rather than the volume.
 
 #### `client_nearby_entities`
 
@@ -747,6 +781,44 @@ window.
     `/malisis` among them — never ran at all. It went to the server, which answered "Unknown
     command", which reads exactly like the mod having failed to register it. Mods that rewrite or
     cancel chat through `ClientChatEvent` were bypassed for the same reason.
+
+#### `client_run_commands`
+
+:material-alert: Destructive · Requires `permissions.allowChat` and `permissions.allowCommands` ·
+`commands` required · optional `delay_ms`, `reply_timeout_ms`, `stop_on_error`, `check_loaded`,
+`all_results`
+
+Up to 1,000 commands in order, each sent the way `client_send_chat` sends one, with the server's
+replies returned per command. Use it for scripted building instead of `client_send_chat` in a loop.
+With that loop, a failed `/fill` in the middle of a batch was one red line among server
+announcements, and the 300-line chat buffer could not hold a long batch's results.
+
+**How replies are matched.** A server runs one player's commands in order and answers each before
+reading the next. The tool sends one command, collects the system lines that arrive until they stop
+(up to `reply_timeout_ms` for the first, then a short quiet window), and only then sends the next.
+Player chat is ignored. A server broadcast that lands inside a command's window is counted as that
+command's reply, and nothing can prevent that.
+
+| `status` | Meaning |
+|---|---|
+| `ok` | Replied, and not in red |
+| `error` | A reply was red, which is how vanilla, WorldEdit, FAWE and ForgeEssentials all report failure. Colour is the one signal that is the same across mods and client languages |
+| `no_reply` | Nothing within `reply_timeout_ms`. Normal when the `sendCommandFeedback` gamerule is off; lower the timeout there |
+| `client` | A client-side command handled it; no server reply is coming |
+| `refused` | MCMCP's config refused it, or it does not start with `/` |
+| `unloaded` | `check_loaded` found a chunk it touches not loaded on this client, so it was not sent |
+
+`results` lists only the commands that were not `ok`, with their text and replies, unless
+`all_results` is true. `counts` totals every status. One call stops after about 90 seconds, or at the
+first failure with `stop_on_error`, and returns `nextIndex`: call again with the commands from there.
+
+`check_loaded` understands `/fill`, `/setblock`, `/clone` and `/blockdata`, with absolute and `~`
+coordinates. The server may have chunks loaded that the client does not, so it errs towards
+skipping.
+
+!!! warning "Command spam kicks non-operators"
+    Vanilla kicks a player who is not an operator for sending more than about one message a tick,
+    sustained. Operators are exempt. For anyone else, set `delay_ms`.
 
 #### `client_look`
 
@@ -857,6 +929,20 @@ Requires `permissions.allowInventoryChanges` · `slot` 0–8
 
 Do this before using an item or placing a block. Returns what is now held.
 
+#### `client_fly`
+
+Requires `permissions.allowPlayerControl` · optional `enabled` (default `true`)
+
+Starts or stops creative flight, as double-tapping jump does, and stops the player in place. Teleport
+to a ceiling, a facade or a sign out of reach from the ground, then fly, and the player hovers there
+instead of falling. Before this, reaching a nine-block ceiling meant placing a barrier under every
+spot the player stood on and removing it afterwards.
+
+This works on servers that block `/fly`. The server honours the abilities packet whenever the player
+is *allowed* to fly, and that permission comes from the game mode (creative or spectator), not from
+a plugin command. A survival player is refused without anything being sent. Flight ends by itself
+when the player lands.
+
 ### Debugging
 
 #### `client_screenshot`
@@ -886,6 +972,15 @@ The result reports `capturedWidth`/`capturedHeight`, the `inlineWidth`/`inlineHe
 and `approximateImageTokens`, so the cost of the size chosen is visible in the response.
 
 Captures the last rendered frame, so open GUIs, chat and the F3 overlay all appear.
+
+**A missing file is an error, never "saved".** `ScreenShotHelper.saveScreenshot` never throws. Every
+failure it hits, and a mod cancelling Forge's `ScreenshotEvent`, comes back only as the chat message
+it returns. The tool used to discard that message and report "Screenshot saved" for files that did
+not exist. Now, if the file is missing afterwards, the tool writes the frame itself, straight from
+the framebuffer, and the result's `fallback` says why the game's own save failed. If that fails too,
+the call is an error carrying both reasons. If a mod's handler moved the file elsewhere, the result
+gives the real path and `redirected: true`, and has no resource link, because the link resolves only
+under `screenshots/`.
 
 #### `client_screen_stats`
 
@@ -1315,6 +1410,21 @@ Load an existing world, leaving any current one first.
 Requires `permissions.allowPlayerControl` · no arguments
 
 Back to the main menu, saving on the way out.
+
+#### `client_rejoin`
+
+Requires `permissions.allowPlayerControl` · optional `radius` (0–4, default 2), `timeout_seconds`
+(default 60)
+
+Disconnects from the current multiplayer server, connects to it again, and returns once the player
+is back and every chunk within `radius` of them has arrived. The server then resends every chunk and
+tile entity, which is how to see a change the client is still drawing stale, such as a panel edited
+with `/blockdata`. Before this tool, the client-side way was to teleport some 600 blocks away, wait
+for the chunks to unload, and come back, which took about 45 seconds each time.
+
+It refreshes only what the client is sent. The server never unloads the chunk, so server-side state
+that a mod rebuilds on chunk unload stays as it was. Multiplayer only; a singleplayer world is left
+and loaded again with `client_world_leave` and `client_world_load`.
 
 !!! warning "Loading returns before the world is ready"
 

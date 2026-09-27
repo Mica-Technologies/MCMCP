@@ -188,6 +188,11 @@ public final class ClientStateTools {
                     + "it, or present=false when there is none. A client is sent only what the "
                     + "server syncs for drawing the block, so a missing key means not synced, not "
                     + "unset; server_get_block has the whole tag. Off by default.")
+                .enumeration("nbt_source", "With nbt: 'client' (default) reads the copy this "
+                        + "client holds. 'server' runs /blockdata x y z {} as the player, which "
+                        + "changes nothing and answers with the server's whole tag; needs operator "
+                        + "permission on the server.",
+                    "client", "server")
                 .required("x", "y", "z")
                 .build())
             .clientOnly()
@@ -198,6 +203,7 @@ public final class ClientStateTools {
                 final int z = context.requireInt("z");
                 final boolean relative = context.getBoolean("relative", false);
                 final boolean nbt = context.getBoolean("nbt", false);
+                final boolean fromServer = "server".equals(context.getString("nbt_source", "client"));
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -207,7 +213,7 @@ public final class ClientStateTools {
                         BlockPos pos = new BlockPos(origin.getX() + x, origin.getY() + y,
                             origin.getZ() + z);
                         JsonObject json = GameJson.block(mc.world, pos);
-                        if (nbt && json.get("loaded").getAsBoolean()) {
+                        if (nbt && !fromServer && json.get("loaded").getAsBoolean()) {
                             json.add("blockEntity", GameJson.blockEntity(mc.world, pos));
                         }
                         String biome = GameJson.biomeId(mc.world, pos);
@@ -219,6 +225,12 @@ public final class ClientStateTools {
                         return json;
                     }
                 });
+                if (nbt && fromServer) {
+                    JsonObject at = result.getAsJsonObject("position");
+                    result.add("blockEntity", ClientCommandTools.serverBlockEntity(context,
+                        new BlockPos(at.get("x").getAsInt(), at.get("y").getAsInt(),
+                            at.get("z").getAsInt())));
+                }
                 return ToolResult.structured(result);
             })
             .build());

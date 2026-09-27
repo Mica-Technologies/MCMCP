@@ -6,6 +6,13 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
+import javax.annotation.Nullable;
+import net.minecraft.util.text.ITextComponent;
+import net.minecraft.util.text.TextComponentTranslation;
+import net.minecraft.util.text.TextFormatting;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -30,6 +37,9 @@ import net.minecraftforge.fml.relauncher.SideOnly;
  * <p>Capacity is fixed and small. This runs inside the game process for the whole session, and chat
  * on a busy server is unbounded; keeping the last few hundred lines answers every question a model
  * asks of it, and keeping more would only cost memory.
+ *
+ * <p>Code that needs every line from a moment onwards — however many arrive — opens a
+ * {@link Capture} instead of reading the buffer, which cannot say what fell off its front.
  */
 @SideOnly(Side.CLIENT)
 public final class ClientChatRecorder {
@@ -40,6 +50,8 @@ public final class ClientChatRecorder {
     public static final String RESOURCE_URI = McmcpConstants.RESOURCE_SCHEME + "://client/chat/recent";
 
     private static final Deque<Entry> ENTRIES = new ArrayDeque<>(CAPACITY);
+
+    private static final List<Capture> CAPTURES = new CopyOnWriteArrayList<>();
 
     private static boolean registered;
 
@@ -64,6 +76,17 @@ public final class ClientChatRecorder {
         return snapshot.subList(from, snapshot.size());
     }
 
+    /**
+     * Starts collecting every line received from now until {@link Capture#close}. Always close it:
+     * an open capture keeps every line it is sent.
+     */
+    public static Capture capture() {
+        register();
+        Capture capture = new Capture();
+        CAPTURES.add(capture);
+        return capture;
+    }
+
     public static void clear() {
         synchronized (ENTRIES) {
             ENTRIES.clear();
@@ -85,9 +108,18 @@ public final class ClientChatRecorder {
             }
             // Unformatted: colour codes and click events are chat-window furniture, and stripping
             // them here means every consumer does not have to.
+            ITextComponent message = event.getMessage();
             Entry entry = new Entry(System.currentTimeMillis(),
-                event.getMessage().getUnformattedText(),
-                String.valueOf(event.getType()));
+                message.getUnformattedText(),
+                String.valueOf(event.getType()),
+                isErrorStyled(message),
+                message instanceof TextComponentTranslation
+                    ? ((TextComponentTranslation) message).getKey() : null,
+                message instanceof TextComponentTranslation
+                    ? argumentTexts((TextComponentTranslation) message) : new String[0]);
+            for (Capture capture : CAPTURES) {
+                capture.lines.add(entry);
+            }
 
             synchronized (ENTRIES) {
                 if (ENTRIES.size() >= CAPACITY) {
@@ -102,17 +134,127 @@ public final class ClientChatRecorder {
         }
     }
 
-    /** One captured chat line. */
+    /**
+     * Whether a line is drawn the way a failed command is.
+     *
+     * <p>Vanilla's {@code CommandHandler} colours every failure red — unknown command, no
+     * permission, wrong usage, and each {@code CommandException} a command throws — and WorldEdit,
+     * FAWE and ForgeEssentials all print their errors red too. So colour is the one signal that is
+     * the same across mods and across the client's language, where matching message text is
+     * neither. Judged on the first visible run of text, so a reply that merely highlights a word in
+     * red is not an error.
+     */
+    static boolean isErrorStyled(ITextComponent message) {
+        for (ITextComponent part : message) {
+            String own = part.getUnformattedComponentText();
+            if (own.isEmpty()) {
+                continue;
+            }
+            TextFormatting color = part.getStyle().getColor();
+            TextFormatting legacy = leadingLegacyColor(own);
+            if (legacy != null) {
+                color = legacy;
+            }
+            return color == TextFormatting.RED || color == TextFormatting.DARK_RED;
+        }
+        return false;
+    }
+
+    /**
+     * The last {@code §} colour code before the first visible character, as plugins still send.
+     * Only red is told apart: any other colour reads as {@code WHITE}, which is all the caller needs.
+     */
+    @Nullable
+    static TextFormatting leadingLegacyColor(String text) {
+        TextFormatting color = null;
+        int i = 0;
+        while (i + 1 < text.length() && text.charAt(i) == '§') {
+            char code = Character.toLowerCase(text.charAt(i + 1));
+            if (code == 'c') {
+                color = TextFormatting.RED;
+            } else if (code == '4') {
+                color = TextFormatting.DARK_RED;
+            } else if (code == 'r') {
+                color = null;
+            } else if (Character.digit(code, 16) >= 0) {
+                color = TextFormatting.WHITE;
+            }
+            i += 2;
+        }
+        return color;
+    }
+
+    private static String[] argumentTexts(TextComponentTranslation message) {
+        Object[] args = message.getFormatArgs();
+        String[] texts = new String[args.length];
+        for (int i = 0; i < args.length; i++) {
+            texts[i] = args[i] instanceof ITextComponent
+                ? ((ITextComponent) args[i]).getUnformattedText()
+                : String.valueOf(args[i]);
+        }
+        return texts;
+    }
+
+    /** Every line received while it is open. See {@link #capture}. */
+    public static final class Capture implements AutoCloseable {
+
+        private final Queue<Entry> lines = new ConcurrentLinkedQueue<>();
+
+        private Capture() {
+        }
+
+        /** The oldest line not yet taken, or null. */
+        @Nullable
+        public Entry poll() {
+            return lines.poll();
+        }
+
+        @Override
+        public void close() {
+            CAPTURES.remove(this);
+        }
+    }
+
+    /**
+     * One captured chat line.
+     *
+     * <p>Plain strings only, built on the client thread inside the chat event, so no Minecraft object
+     * reaches the MCP worker that reads it.
+     */
     public static final class Entry {
 
         private final long timestampMillis;
         private final String text;
         private final String type;
+        private final boolean error;
+        @Nullable
+        private final String translationKey;
+        private final String[] arguments;
 
-        Entry(long timestampMillis, String text, String type) {
+        Entry(long timestampMillis, String text, String type, boolean error,
+            @Nullable String translationKey, String[] arguments) {
             this.timestampMillis = timestampMillis;
             this.text = text;
             this.type = type;
+            this.error = error;
+            this.translationKey = translationKey;
+            this.arguments = arguments;
+        }
+
+        /** Coloured the way a failed command is; see {@link #isErrorStyled}. */
+        public boolean isError() {
+            return error;
+        }
+
+        /** The language key, when the server sent a translatable message — vanilla replies are. */
+        @Nullable
+        public String getTranslationKey() {
+            return translationKey;
+        }
+
+        /** A translatable message's arguments, as text. Empty for any other message. */
+        public String[] getArguments() {
+            return arguments.clone();
         }
 
         public long getTimestampMillis() {

@@ -6,6 +6,7 @@ import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
 import com.micatechnologies.minecraft.mcmcp.client.ScreenSampler;
+import com.micatechnologies.minecraft.mcmcp.client.ScreenshotOutcome;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
@@ -24,6 +25,7 @@ import javax.imageio.ImageIO;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.util.ScreenShotHelper;
+import net.minecraft.util.text.ITextComponent;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -77,6 +79,7 @@ public final class ClientDebugTools {
     // ------------------------------------------------------------------
 
     private static void registerScreenshot() {
+        ScreenshotOutcome.register();
         McpRegistry.registerTool(McpTool.named("client_screenshot")
             .title("Take screenshot")
             .description("Capture the game window and save it as a PNG under the game's screenshots "
@@ -124,42 +127,61 @@ public final class ClientDebugTools {
 
                 // The whole capture happens on the client thread: ScreenShotHelper reads pixels back
                 // out of the framebuffer, which needs the GL context that only that thread holds.
-                String savedPath = context.onGameThread(new Callable<String>() {
+                JsonObject capture = context.onGameThread(new Callable<JsonObject>() {
                     @Override
-                    public String call() {
-                        Minecraft mc = Minecraft.getMinecraft();
-                        File gameDirectory = McmcpPaths.gameDirectory();
-                        ScreenShotHelper.saveScreenshot(gameDirectory, fileName,
-                            mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
-                        return new File(new File(gameDirectory, "screenshots"), fileName)
-                            .getAbsolutePath();
+                    public JsonObject call() {
+                        return captureScreenshot(fileName);
                     }
                 });
 
+                final String savedPath = capture.get("path").getAsString();
                 File file = new File(savedPath);
+                if (!file.isFile()) {
+                    // Never "saved" when nothing was written. The text used to say so regardless,
+                    // and only exists=false in the structured half disagreed — a model reading the
+                    // text believed it had a frame (#29).
+                    return ToolResult.error("No screenshot was written to " + savedPath + ". "
+                        + capture.get("reason").getAsString());
+                }
+
+                // The resource template resolves names under screenshots/, which a redirected file
+                // is not in.
+                boolean linkable = !capture.has("redirected");
+
                 JsonObject structured = new JsonObject();
                 structured.addProperty("path", savedPath);
-                structured.addProperty("name", fileName);
-                structured.addProperty("exists", file.isFile());
-                structured.addProperty("bytes", file.isFile() ? file.length() : 0L);
-                structured.addProperty("resourceUri",
-                    McmcpConstants.RESOURCE_SCHEME + "://client/screenshot/" + fileName);
+                structured.addProperty("name", file.getName());
+                structured.addProperty("exists", true);
+                structured.addProperty("bytes", file.length());
+                if (capture.has("fallback")) {
+                    structured.add("fallback", capture.get("fallback"));
+                }
+                if (capture.has("redirected")) {
+                    structured.addProperty("redirected", true);
+                }
+                if (linkable) {
+                    structured.addProperty("resourceUri",
+                        McmcpConstants.RESOURCE_SCHEME + "://client/screenshot/" + fileName);
+                }
 
-                ToolResult result = ToolResult.text("Screenshot saved to " + savedPath)
-                    .withContent(McpContent.resourceLink(
+                ToolResult result = ToolResult.text("Screenshot saved to " + savedPath
+                        + (capture.has("fallback")
+                            ? " (written by MCMCP directly: " + capture.get("fallback").getAsString()
+                                + ")"
+                            : "")
+                        + (capture.has("redirected")
+                            ? " (a mod's ScreenshotEvent handler moved it there)"
+                            : ""))
+                    .withStructured(structured);
+                if (linkable) {
+                    result.withContent(McpContent.resourceLink(
                         structured.get("resourceUri").getAsString(),
                         fileName,
                         "Screenshot captured from the Minecraft client.",
-                        "image/png"))
-                    .withStructured(structured);
+                        "image/png"));
+                }
 
                 if (inline) {
-                    if (!file.isFile()) {
-                        return ToolResult.error("The screenshot was requested but no file appeared at "
-                            + savedPath + ". ScreenShotHelper writes asynchronously on some drivers; "
-                            + "retry, or read the resource link instead.");
-                    }
-
                     // Read the frame back off disk rather than capturing it a second time. Three
                     // things fall out of that and all of them matter: the framebuffer is not read
                     // twice, no image object crosses back off the game thread, and the inline copy
@@ -188,6 +210,83 @@ public final class ClientDebugTools {
                 return result;
             })
             .build());
+    }
+
+    /**
+     * Saves the last rendered frame as {@code screenshots/<fileName>}. Client thread only.
+     *
+     * <p>Goes through {@code ScreenShotHelper.saveScreenshot} first, because that is what fires
+     * Forge's {@code ScreenshotEvent} and a mod may legitimately act on it. But that method never
+     * throws: every failure, and a mod cancelling the save, comes back only as the chat component it
+     * returns — which this used to discard, and so reported "saved" for a file that did not exist.
+     * When the file is missing afterwards this writes the frame itself, straight from the
+     * framebuffer, so neither a cancelling handler nor a broken helper can block a capture; the
+     * reason the helper failed is kept either way.
+     *
+     * @return {@code path}, plus {@code fallback} (why the direct write was needed),
+     *         {@code redirected} (a handler aimed the save elsewhere) or {@code reason} (why there is
+     *         no file at all)
+     */
+    private static JsonObject captureScreenshot(String fileName) {
+        Minecraft mc = Minecraft.getMinecraft();
+        File gameDirectory = McmcpPaths.gameDirectory();
+        File target = canonical(new File(new File(gameDirectory, "screenshots"), fileName));
+
+        ScreenshotOutcome.reset();
+        ITextComponent reply = ScreenShotHelper.saveScreenshot(gameDirectory, fileName,
+            mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
+
+        JsonObject json = new JsonObject();
+        File written = ScreenshotOutcome.getFile();
+        if (!ScreenshotOutcome.wasCancelled() && written != null && written.isFile()
+            && !canonical(written).equals(target)) {
+            json.addProperty("path", written.getAbsolutePath());
+            json.addProperty("redirected", true);
+            return json;
+        }
+        json.addProperty("path", target.getAbsolutePath());
+        if (target.isFile()) {
+            return json;
+        }
+
+        String why;
+        if (ScreenshotOutcome.wasCancelled()) {
+            String message = ScreenshotOutcome.getCancelMessage();
+            why = "a mod cancelled the save" + (message == null ? "" : " (\"" + message + "\")");
+        } else if (!ScreenshotOutcome.wasSeen()) {
+            why = "the capture failed before it could be saved"
+                + (reply == null ? "" : " (\"" + reply.getUnformattedText() + "\")");
+        } else {
+            why = "the game reported \"" + (reply == null ? "nothing" : reply.getUnformattedText())
+                + "\"";
+        }
+
+        try {
+            BufferedImage image = ScreenShotHelper.createScreenshot(mc.displayWidth,
+                mc.displayHeight, mc.getFramebuffer());
+            target.getParentFile().mkdirs();
+            ImageIO.write(image, "png", target);
+        } catch (Exception | LinkageError e) {
+            json.addProperty("reason", "Saving it through the game failed: " + why + ". Writing "
+                + "the frame directly failed too: " + e + ".");
+            return json;
+        }
+        if (!target.isFile()) {
+            json.addProperty("reason", "Saving it through the game failed: " + why + ", and the "
+                + "direct write produced no file either.");
+            return json;
+        }
+        json.addProperty("fallback", why);
+        return json;
+    }
+
+    /** Forge canonicalises the file it hands the event, so compare like with like. */
+    private static File canonical(File file) {
+        try {
+            return file.getCanonicalFile();
+        } catch (java.io.IOException e) {
+            return file.getAbsoluteFile();
+        }
     }
 
     // ------------------------------------------------------------------

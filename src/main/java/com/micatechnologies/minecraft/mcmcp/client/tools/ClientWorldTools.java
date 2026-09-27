@@ -9,19 +9,26 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import java.util.List;
 import java.util.Locale;
 import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiDisconnected;
+import net.minecraft.client.gui.GuiDownloadTerrain;
 import net.minecraft.client.gui.GuiMainMenu;
+import net.minecraft.client.gui.GuiMultiplayer;
+import net.minecraft.client.multiplayer.ServerData;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.server.integrated.IntegratedServer;
 import net.minecraft.world.GameType;
 import net.minecraft.world.WorldSettings;
 import net.minecraft.world.WorldType;
 import net.minecraft.world.storage.ISaveFormat;
 import net.minecraft.world.storage.WorldSummary;
+import net.minecraftforge.fml.client.FMLClientHandler;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -76,6 +83,7 @@ public final class ClientWorldTools {
         registerWorldCreate();
         registerWorldLoad();
         registerWorldLeave();
+        registerRejoin();
     }
 
     private static ISaveFormat saveLoader() {
@@ -530,5 +538,149 @@ public final class ClientWorldTools {
         }
 
         return result;
+    }
+
+    // ------------------------------------------------------------------
+    // Rejoining
+    // ------------------------------------------------------------------
+
+    /** Longest a rejoin waits for the world to come back, inside the orchestrator's call timeout. */
+    private static final int MAX_REJOIN_SECONDS = 90;
+
+    /**
+     * Disconnect and connect again to the same server, so it resends every chunk and tile entity.
+     *
+     * <p>A client keeps drawing a tile entity as it was last sent until its chunk is sent again, so
+     * after a {@code /blockdata} the only client-side way to see the result used to be to teleport
+     * some 600 blocks away, wait for the chunks to drop, and come back — about 45 seconds each time
+     * (#34). A reconnect is the same resend, and waiting on "the chunks are back" rather than on a
+     * guessed delay is what makes it quicker.
+     */
+    private static void registerRejoin() {
+        McpRegistry.registerTool(McpTool.named("client_rejoin")
+            .title("Reconnect to the server")
+            .description("Disconnect from the current multiplayer server and connect to it again, "
+                + "then wait until the player is back in the world and the chunks around them have "
+                + "arrived. Use it to see a change the client is still drawing stale, such as a tile "
+                + "entity edited with /blockdata: rejoining makes the server resend every chunk.\n\n"
+                + "Takes a few seconds. It refreshes only what the client is sent; server-side state "
+                + "that a mod rebuilds when a chunk unloads does not change, because the server "
+                + "does not unload the chunk. Multiplayer only.")
+            .schema(JsonSchema.object()
+                .integer("radius", "Chunks around the player that must have arrived before this "
+                    + "returns. Default 2.", 0, 4)
+                .integer("timeout_seconds", "Give up waiting after this long. Default 60.", 5,
+                    MAX_REJOIN_SECONDS)
+                .build())
+            .clientOnly()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("World control is disabled by "
+                        + "permissions.allowPlayerControl in the MCMCP config.");
+                }
+                final int radius = context.getBoundedInt("radius", 2, 0, 4);
+                final int timeoutSeconds = context.getBoundedInt("timeout_seconds", 60, 5,
+                    MAX_REJOIN_SECONDS);
+
+                // Strings only: a ServerData is a game object and must not leave the client thread.
+                final String[] server = context.onGameThread(new Callable<String[]>() {
+                    @Override
+                    public String[] call() {
+                        Minecraft mc = ClientStateTools.requireInWorld();
+                        ServerData data = mc.getCurrentServerData();
+                        if (mc.isSingleplayer() || data == null) {
+                            return null;
+                        }
+                        return new String[]{data.serverName, data.serverIP,
+                            String.valueOf(data.isOnLAN())};
+                    }
+                });
+                if (server == null) {
+                    return ToolResult.error("client_rejoin reconnects to a multiplayer server, and "
+                        + "this client is in a singleplayer world. Leave and load it again with "
+                        + "client_world_leave and client_world_load.");
+                }
+
+                long start = System.currentTimeMillis();
+                leaveLoadedWorld(context);
+                // From the client tick, as the multiplayer screen's Join button runs it.
+                ClientDeferredTasks.runNextTick(new Runnable() {
+                    @Override
+                    public void run() {
+                        FMLClientHandler.instance().connectToServer(
+                            new GuiMultiplayer(new GuiMainMenu()),
+                            new ServerData(server[0], server[1], Boolean.parseBoolean(server[2])));
+                    }
+                }).get(10, TimeUnit.SECONDS);
+
+                long deadline = start + timeoutSeconds * 1000L;
+                JsonObject state;
+                while (true) {
+                    context.getCancellation().throwIfCancelled();
+                    state = context.onGameThread(new Callable<JsonObject>() {
+                        @Override
+                        public JsonObject call() {
+                            return rejoinState(radius);
+                        }
+                    });
+                    if (state.get("ready").getAsBoolean() || state.has("disconnected")
+                        || System.currentTimeMillis() > deadline) {
+                        break;
+                    }
+                    Thread.sleep(100L);
+                }
+
+                state.addProperty("server", server[1]);
+                state.addProperty("elapsedMillis", System.currentTimeMillis() - start);
+                if (state.has("disconnected")) {
+                    return ToolResult.error("Reconnecting to " + server[1] + " failed: the client is "
+                        + "on the disconnected screen. Read why with client_gui_text.");
+                }
+                if (!state.get("ready").getAsBoolean()) {
+                    return ToolResult.error("The reconnect to " + server[1] + " started, but the "
+                        + "world was not back within " + timeoutSeconds + "s; still waiting for "
+                        + state.get("waitingFor").getAsString() + ". Check with client_gui_state.");
+                }
+                return ToolResult.text("Rejoined " + server[1] + " in "
+                    + state.get("elapsedMillis").getAsLong() + "ms; chunks within " + radius
+                    + " of the player have been resent.").withStructured(state);
+            })
+            .build());
+    }
+
+    /** Whether the rejoin has landed, and if not, what it is still waiting for. Client thread. */
+    private static JsonObject rejoinState(int radius) {
+        Minecraft mc = Minecraft.getMinecraft();
+        JsonObject json = new JsonObject();
+        String waitingFor = null;
+        // Tested by type, never by class name: names are obfuscated in a released jar.
+        if (mc.currentScreen instanceof GuiDisconnected) {
+            json.addProperty("disconnected", true);
+            waitingFor = "the connection";
+        } else if (mc.world == null || mc.player == null) {
+            waitingFor = "the world to load";
+        } else if (mc.currentScreen instanceof GuiDownloadTerrain) {
+            waitingFor = "the terrain screen to close";
+        } else {
+            BlockPos at = GameJson.blockPosOf(mc.player);
+            int missing = 0;
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (!GameJson.isLoaded(mc.world, at.add(dx * 16, 0, dz * 16))) {
+                        missing++;
+                    }
+                }
+            }
+            if (missing > 0) {
+                waitingFor = missing + " chunk(s) around the player";
+            } else {
+                json.add("position", GameJson.blockPos(at));
+            }
+        }
+        json.addProperty("ready", waitingFor == null);
+        if (waitingFor != null) {
+            json.addProperty("waitingFor", waitingFor);
+        }
+        return json;
     }
 }

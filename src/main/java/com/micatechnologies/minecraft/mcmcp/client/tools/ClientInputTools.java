@@ -25,6 +25,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.util.math.MathHelper;
 import net.minecraftforge.client.ClientCommandHandler;
@@ -71,6 +72,7 @@ public final class ClientInputTools {
         registerKeyPress();
         registerInteract();
         registerSelectHotbarSlot();
+        registerFly();
         registerInputLock();
     }
 
@@ -228,45 +230,17 @@ public final class ClientInputTools {
                 .build())
             .clientOnly()
             .handler(context -> {
-                if (!McmcpConfig.isAllowChat()) {
-                    return ToolResult.error("Chat is disabled by permissions.allowChat in the MCMCP "
-                        + "config.");
-                }
                 final String message = context.requireString("message");
                 final boolean isCommand = message.startsWith("/");
-
-                if (isCommand && !McmcpConfig.isAllowCommands()) {
-                    return ToolResult.error("Command execution is disabled by "
-                        + "permissions.allowCommands in the MCMCP config.");
-                }
-                if (isCommand && McmcpConfig.isCommandBlocked(message)) {
-                    return ToolResult.error("That command is on the blocked list in "
-                        + "permissions.blockedCommands.");
-                }
-                if (message.length() > 256) {
-                    return ToolResult.error("Chat messages are limited to 256 characters; that one is "
-                        + message.length() + ". Longer messages are rejected by the server, not "
-                        + "truncated.");
+                String refusal = chatRefusal(message);
+                if (refusal != null) {
+                    return ToolResult.error(refusal);
                 }
 
                 Boolean handledOnClient = context.onGameThread(new Callable<Boolean>() {
                     @Override
                     public Boolean call() {
-                        Minecraft mc = ClientStateTools.requireInWorld();
-                        // Mirrors GuiScreen.sendChatMessage(msg, true), which is what pressing Enter in
-                        // the chat box runs. Each step matters: the event lets mods rewrite or cancel
-                        // the message, the history makes it reachable with the up arrow, and the client
-                        // command handler is the only place a client-side command ever runs.
-                        String outgoing = ForgeEventFactory.onClientSendMessage(message);
-                        if (outgoing.isEmpty()) {
-                            return Boolean.TRUE;
-                        }
-                        mc.ingameGUI.getChatGUI().addToSentMessages(outgoing);
-                        if (ClientCommandHandler.instance.executeCommand(mc.player, outgoing) != 0) {
-                            return Boolean.TRUE;
-                        }
-                        mc.player.sendChatMessage(outgoing);
-                        return Boolean.FALSE;
+                        return sendAsPlayer(message);
                     }
                 });
 
@@ -283,6 +257,52 @@ public final class ClientInputTools {
                     .withStructured(json);
             })
             .build());
+    }
+
+    /**
+     * Why MCMCP's own config refuses to send {@code message}, or null when it may be sent. Checked
+     * per call, so a config reload applies at once.
+     */
+    static String chatRefusal(String message) {
+        boolean isCommand = message.startsWith("/");
+        if (!McmcpConfig.isAllowChat()) {
+            return "Chat is disabled by permissions.allowChat in the MCMCP config.";
+        }
+        if (isCommand && !McmcpConfig.isAllowCommands()) {
+            return "Command execution is disabled by permissions.allowCommands in the MCMCP config.";
+        }
+        if (isCommand && McmcpConfig.isCommandBlocked(message)) {
+            return "That command is on the blocked list in permissions.blockedCommands.";
+        }
+        if (message.length() > 256) {
+            return "Chat messages are limited to 256 characters; that one is " + message.length()
+                + ". Longer messages are rejected by the server, not truncated.";
+        }
+        return null;
+    }
+
+    /**
+     * Sends {@code message} as if typed into the chat box. Client thread only.
+     *
+     * @return true when nothing went to the server: a mod cancelled it, or a client-side command
+     *         handled it
+     */
+    static boolean sendAsPlayer(String message) {
+        Minecraft mc = ClientStateTools.requireInWorld();
+        // Mirrors GuiScreen.sendChatMessage(msg, true), which is what pressing Enter in the chat box
+        // runs. Each step matters: the event lets mods rewrite or cancel the message, the history
+        // makes it reachable with the up arrow, and the client command handler is the only place a
+        // client-side command ever runs.
+        String outgoing = ForgeEventFactory.onClientSendMessage(message);
+        if (outgoing.isEmpty()) {
+            return true;
+        }
+        mc.ingameGUI.getChatGUI().addToSentMessages(outgoing);
+        if (ClientCommandHandler.instance.executeCommand(mc.player, outgoing) != 0) {
+            return true;
+        }
+        mc.player.sendChatMessage(outgoing);
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -827,6 +847,72 @@ public final class ClientInputTools {
                         return json;
                     }
                 });
+                return ToolResult.structured(result);
+            })
+            .build());
+    }
+
+    /**
+     * Creative flight, switched the way a double-tap of jump switches it.
+     *
+     * <p>Only ever for a player the server already lets fly: the abilities packet this sends is
+     * honoured by the server only while {@code allowFlying} is set, and it is set by game mode, not
+     * by a plugin's {@code /fly} — which is why this works on a server that blocks {@code /fly} and
+     * refuses a survival player without asking the server anything.
+     */
+    private static void registerFly() {
+        McpRegistry.registerTool(McpTool.named("client_fly")
+            .title("Fly or stop flying")
+            .description("Start or stop creative flight, as double-tapping jump does, and stop in "
+                + "place. Use it to hover at a ceiling, a facade or a sign that is out of reach from "
+                + "the ground: teleport there, then fly, and the player stays at that height instead "
+                + "of falling.\n\n"
+                + "Works only where the player may already fly: creative or spectator. Flight ends "
+                + "by itself when the player lands.")
+            .schema(JsonSchema.object()
+                .bool("enabled", "true to fly, false to drop. Defaults to true.")
+                .build())
+            .clientOnly()
+            .idempotent()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("Player control is disabled by "
+                        + "permissions.allowPlayerControl in the MCMCP config.");
+                }
+                final boolean enabled = context.getBoolean("enabled", true);
+
+                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() {
+                        Minecraft mc = ClientStateTools.requireInWorld();
+                        EntityPlayerSP player = mc.player;
+                        JsonObject json = new JsonObject();
+                        if (enabled && !player.capabilities.allowFlying) {
+                            json.addProperty("refused", "This player may not fly in game mode "
+                                + mc.playerController.getCurrentGameType().getName()
+                                + "; only creative and spectator can. Change game mode first.");
+                            return json;
+                        }
+                        if (player.capabilities.isFlying != enabled) {
+                            player.capabilities.isFlying = enabled;
+                            player.sendPlayerAbilities();
+                        }
+                        if (enabled) {
+                            // Hold still. Momentum from a fall or a jump carries on into flight,
+                            // and the point is to stay where the caller put the player.
+                            player.motionX = 0.0D;
+                            player.motionY = 0.0D;
+                            player.motionZ = 0.0D;
+                        }
+                        json.addProperty("flying", player.capabilities.isFlying);
+                        json.add("position", GameJson.vec(player.posX, player.posY, player.posZ));
+                        json.addProperty("onGround", player.onGround);
+                        return json;
+                    }
+                });
+                if (result.has("refused")) {
+                    return ToolResult.error(result.get("refused").getAsString());
+                }
                 return ToolResult.structured(result);
             })
             .build());

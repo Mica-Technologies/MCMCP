@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp;
 import com.micatechnologies.minecraft.mcmcp.client.ClientThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.client.ClientIdentification;
 import com.micatechnologies.minecraft.mcmcp.client.ClientWatchdog;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientCommandTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientDebugTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientGuiTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientInputTools;
@@ -11,6 +12,7 @@ import com.micatechnologies.minecraft.mcmcp.client.tools.ClientPerformanceTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientPrompts;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientResources;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientStateTools;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientSurveyTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientSyncTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientWorldTools;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
@@ -47,6 +49,8 @@ public class McmcpClientProxy implements McmcpProxy {
     public void registerSideSpecific() {
         ClientIdentification.register();
         ClientStateTools.register();
+        ClientSurveyTools.register();
+        ClientCommandTools.register();
         ClientDebugTools.register();
         ClientInputTools.register();
         ClientGuiTools.register();
