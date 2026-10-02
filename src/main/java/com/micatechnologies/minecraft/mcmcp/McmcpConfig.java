@@ -119,6 +119,8 @@ public class McmcpConfig {
     private static int maxInputLockSeconds = 1800;
     private static int clientStallSeconds = 15;
     private static int maxLogLines = 500;
+    private static int keepAwakeSeconds = 300;
+    private static int keepAwakeFps = 60;
 
     private McmcpConfig() {
     }
@@ -355,6 +357,19 @@ public class McmcpConfig {
                 + "A world load stops frames too, which is why this is not shorter. Releasing the cursor "
                 + "during a load is harmless; the game has not captured it under a loading screen.");
 
+        keepAwakeSeconds = configuration.getInt("keepAwakeSeconds", CATEGORY_LIMITS, 300, 0, 3600,
+            "How long after a client tool call MCMCP keeps the client's frame rate up while its window "
+                + "is in the background, in seconds; also for as long as client_input_lock is held. "
+                + "0 turns this off.\n"
+                + "A mod such as FPS Reducer drops an unfocused client to a few frames a second, and "
+                + "everything an agent does goes through those frames: chunks arrive and render slowly, "
+                + "and surveys read whole regions as unloaded.");
+
+        keepAwakeFps = configuration.getInt("keepAwakeFps", CATEGORY_LIMITS, 60, 10, 260,
+            "The frame limit MCMCP holds the client at while keeping it awake. Only ever raises the "
+                + "limit, never lowers it, and gives the previous value back afterwards. 260 is "
+                + "unlimited.");
+
         maxLogLines = configuration.getInt("maxLogLines", CATEGORY_LIMITS, 500, 10, 5000,
             "Most log lines returnable in one call.");
 
@@ -508,6 +523,14 @@ public class McmcpConfig {
 
     public static int getClientStallSeconds() {
         return clientStallSeconds;
+    }
+
+    public static int getKeepAwakeSeconds() {
+        return keepAwakeSeconds;
+    }
+
+    public static int getKeepAwakeFps() {
+        return keepAwakeFps;
     }
 
     public static int getMaxLogLines() {

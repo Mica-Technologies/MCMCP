@@ -663,6 +663,12 @@ answer is worth most.
 The usual first call. Position, orientation, health, hunger, held item, block underfoot, biome, world
 time and weather, what the crosshair is on, and render distance.
 
+`window` says whether the client is running at a rate an agent can rely on: `focused`, the measured
+`fps`, the `frameLimit`, whether MCMCP is keeping the client awake (`keepAwake`, and
+`keepAwakeReplacedLimit` when it is overriding a lower limit), and `throttled`. A throttled client
+loads and draws chunks slowly. Without this, a slow chunk and an empty one look the same from a
+survey. See [`keepAwakeSeconds`](configuration.md#keepawakeseconds).
+
 #### `client_looking_at`
 
 :material-eye: Read-only · no arguments
@@ -718,6 +724,7 @@ call. Surveying one city parcel before clearing it took about 22,000 of those ca
 | `summary` (default) | `counts` per block id, most common first; `per_layer: true` adds the same per `y` |
 | `positions` | Each matching block's `[x,y,z]`, grouped by id, capped at `limit` (default 256, max 4096); the counts stay exact |
 | `heightmap` | `heights[z][x]`: the highest matching `y` in each column, `-1` where there is none, at most 128 × 128 columns |
+| `surface` | The heightmap plus `blocks[z][x]`, which block is on top, as an index into `palette`. Limited by columns, not volume, so it can cover the whole 0–255 range |
 
 `blocks` and `exclude` take patterns. A whole id matches every metadata (`minecraft:wool`) unless it
 names one (`minecraft:wool:14`). A bare path matches it in any namespace (`barrier`). `*` asks for a
@@ -729,6 +736,31 @@ Chunks outside the view distance are listed in `unloadedChunks` and skipped, nev
 in a heightmap their columns are `null`. One read covers up to `limits.maxBlockVolume` × 8 blocks:
 a client read of chunks already in memory is cheap, and the size of the answer is bounded by the mode
 rather than the volume.
+
+#### `client_render_map`
+
+:material-eye: Read-only · requires `permissions.allowScreenshots` · optional `x`, `z`, `radius`,
+`toX`, `toZ`, `scale`, `y_max`, `highlight`, `grid`, `max_dimension`, `inline`
+
+A top-down image of the chunks the client holds, drawn as a vanilla map would draw it. Each column
+is coloured by its top block's map colour and shaded by height against the column to its north.
+Water is shaded by depth. Coordinates are labelled on a grid. Unloaded chunks are hatched grey and
+listed, and the player is a red cross. It works at any time of day and on any server.
+
+| Argument | Notes |
+| --- | --- |
+| `x`, `z`, `radius` | Centre (default: the player) and blocks to each edge (default 128, max 1024) |
+| `toX`, `toZ` | A box from (`x`, `z`) instead of a radius |
+| `y_max` | Ignore everything above this height: set it under a roof or a deck to get a floor plan |
+| `highlight` | Block patterns, as in `client_get_blocks`, painted magenta |
+| `scale` | Blocks per pixel; by default the smallest that fits `max_dimension` |
+| `grid` | Blocks between labelled grid lines; by default about eight lines; `0` for none |
+| `max_dimension` | Long edge of the image, default 1024, at most 1568 |
+| `inline` | Default `true`. The PNG is also saved under `screenshots/` with a resource link |
+
+A small area is drawn several pixels to a block (up to 8) so it is readable. The result's `layout`
+says how pixels map back to blocks, and `topBlocks` names the commonest top blocks. Blocks that
+vanilla maps look through, such as glass, torches and flowers, are looked through here too.
 
 #### `client_nearby_entities`
 
@@ -947,9 +979,24 @@ when the player lands.
 
 #### `client_screenshot`
 
-Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`
+Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
+
+**A view without moving the player.** `from: [x, y, z]` renders the frame from that eye position,
+aimed at `look_at: [x, y, z]` or by `yaw`/`pitch`, without the HUD or hand. Nothing changes on the
+server, so other players see nothing. The client can only draw chunks it holds, so the camera must be
+within its render distance. A position outside it is refused. The tool waits up to `settle_ms`
+(default 5000) for the chunk meshes around the new viewpoint to be built. `view.meshesSettled` in
+the result says whether they were.
+
+**`fullbright: true`** lights everything for this one frame, for night and interiors, without
+touching world time. **`fov`** sets the field of view (10–130) for the frame.
+
+All of these are put back in the same client-thread task that reads the frame, so the player never
+sees a frame from the detached camera. If the call dies first, they are put back within a minute
+anyway.
 
 **Not inline by default.** An inline frame costs a model roughly `width × height / 750` tokens, spent
 whether or not it ends up looking at the picture. Pass `inline: true` when it needs to see the frame.
@@ -1358,10 +1405,17 @@ somebody's real client, so it resets on restart.
 
 #### `client_wait`
 
-:material-eye: Read-only · optional `ticks`, `waitFor`, `screenName`, `chatContains`
+:material-eye: Read-only · optional `ticks`, `waitFor`, `screenName`, `chatContains`, `x`, `z`,
+`radius`
 
 Let game time pass, for a fixed duration or until the game reaches a state:
-`worldLoaded`, `worldUnloaded`, `screenOpen`, `screenClosed`, `chat`.
+`worldLoaded`, `worldUnloaded`, `screenOpen`, `screenClosed`, `chat`, `chunksLoaded`,
+`chunksRendered`.
+
+`chunksLoaded` waits until the client holds every chunk within `radius` (default 64) of (`x`, `z`),
+which defaults to the player. `chunksRendered` also waits until their meshes are built, which is what
+a screenshot needs. Use one after a teleport, before surveying. On a timeout, `chunks.missingChunks`
+lists what never arrived, and `beyondRenderDistance` says when some of the area could never load.
 
 Prefer a condition over a fixed delay. A fixed sleep is a guess that fails intermittently when too
 short and wastes every run when too long; a condition returns the moment it holds and reports

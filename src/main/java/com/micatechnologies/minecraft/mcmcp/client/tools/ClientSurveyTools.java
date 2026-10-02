@@ -74,7 +74,10 @@ public final class ClientSurveyTools {
                 + "mode 'summary' (default): how many of each block, optionally per layer. "
                 + "'positions': where each matching block is, as [x,y,z], grouped by block and "
                 + "capped at 'limit'. 'heightmap': the y of the highest matching block in every "
-                + "column, as rows of z holding x from the low corner; -1 where there is none.\n\n"
+                + "column, as rows of z holding x from the low corner; -1 where there is none. "
+                + "'surface': the same, plus which block is on top, as indices into a palette — "
+                + "what is on the ground, not only how high. surface is limited by columns, not "
+                + "volume, so it can cover the whole height range.\n\n"
                 + "Filter with 'blocks' and 'exclude'. A pattern is a whole id ('minecraft:wool' "
                 + "matches every colour, 'minecraft:wool:14' one), a bare path ('barrier' in any "
                 + "namespace), or use * for a substring ('*alarm*'). 'positions' and 'heightmap' "
@@ -91,7 +94,7 @@ public final class ClientSurveyTools {
                 .bool("relative", "Treat all six coordinates as offsets from the player's block "
                     + "position.")
                 .enumeration("mode", "What to return. Defaults to 'summary'.",
-                    "summary", "positions", "heightmap")
+                    "summary", "positions", "heightmap", "surface")
                 .stringArray("blocks", "Only count blocks matching one of these patterns.")
                 .stringArray("exclude", "Leave out blocks matching any of these patterns.")
                 .bool("tile_entities", "Only count blocks that have a tile entity on this client.")
@@ -111,9 +114,9 @@ public final class ClientSurveyTools {
                 final int z2 = context.getInt("toZ", z1);
                 final boolean relative = context.getBoolean("relative", false);
                 final String mode = context.getString("mode", "summary");
-                if (!Arrays.asList("summary", "positions", "heightmap").contains(mode)) {
-                    return ToolResult.error("Unknown mode '" + mode + "'; use summary, positions or "
-                        + "heightmap.");
+                if (!Arrays.asList("summary", "positions", "heightmap", "surface").contains(mode)) {
+                    return ToolResult.error("Unknown mode '" + mode + "'; use summary, positions, "
+                        + "heightmap or surface.");
                 }
                 final BlockPatterns include = BlockPatterns.of(
                     Json.getStringList(context.getArguments(), "blocks"));
@@ -127,14 +130,17 @@ public final class ClientSurveyTools {
                 final long maxVolume = (long) McmcpConfig.getMaxBlockVolume() * VOLUME_FACTOR;
                 long volume = (long) (Math.abs(x2 - x1) + 1) * (Math.abs(z2 - z1) + 1)
                     * (Math.min(255, Math.max(y1, y2)) - Math.max(0, Math.min(y1, y2)) + 1);
-                if (volume > maxVolume) {
+                // surface stops at the first match down each column, so its cost is set by the
+                // column count below, and charging it for the whole height range would make the
+                // one question it answers — what is on top of a district — need dozens of reads.
+                if (volume > maxVolume && !"surface".equals(mode)) {
                     return ToolResult.error("That region is " + volume + " blocks; one read covers at "
                         + "most " + maxVolume + " (limits.maxBlockVolume x " + VOLUME_FACTOR + "). "
                         + "Split it.");
                 }
                 long columns = (long) (Math.abs(x2 - x1) + 1) * (Math.abs(z2 - z1) + 1);
-                if ("heightmap".equals(mode) && columns > MAX_COLUMNS) {
-                    return ToolResult.error("A heightmap covers at most " + MAX_COLUMNS + " columns "
+                if (("heightmap".equals(mode) || "surface".equals(mode)) && columns > MAX_COLUMNS) {
+                    return ToolResult.error("A " + mode + " covers at most " + MAX_COLUMNS + " columns "
                         + "(128 x 128); that one is " + columns + ". Split it.");
                 }
 
@@ -147,8 +153,8 @@ public final class ClientSurveyTools {
                             origin.getX() + x1, origin.getY() + y1, origin.getZ() + z1,
                             origin.getX() + x2, origin.getY() + y2, origin.getZ() + z2);
                         Survey survey = new Survey(mc.world, include, exclude, tileEntitiesOnly);
-                        if ("heightmap".equals(mode)) {
-                            return survey.heightmap(region);
+                        if ("heightmap".equals(mode) || "surface".equals(mode)) {
+                            return survey.heightmap(region, "surface".equals(mode));
                         }
                         return survey.scan(region, mode, perLayer, limit);
                     }
@@ -326,44 +332,77 @@ public final class ClientSurveyTools {
             return json;
         }
 
-        JsonObject heightmap(Region region) {
+        /**
+         * The highest matching block per column; with {@code withBlocks}, also which block it is,
+         * as an index into a palette so a repeated id costs a few bytes rather than its full name.
+         */
+        JsonObject heightmap(Region region, boolean withBlocks) {
             Map<Long, Chunk> chunks = new LinkedHashMap<>();
             BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
             JsonArray rows = new JsonArray();
+            JsonArray blockRows = new JsonArray();
+            Map<String, Integer> paletteIndex = new LinkedHashMap<>();
             int highest = -1;
             int lowest = Integer.MAX_VALUE;
 
             for (int z = region.minZ; z <= region.maxZ; z++) {
                 JsonArray row = new JsonArray();
+                JsonArray blockRow = new JsonArray();
                 for (int x = region.minX; x <= region.maxX; x++) {
                     Chunk chunk = chunkAt(x, z, chunks);
                     if (chunk == null) {
                         row.add(JsonNull.INSTANCE);
+                        blockRow.add(JsonNull.INSTANCE);
                         continue;
                     }
                     int top = -1;
+                    String topId = null;
                     for (int y = region.maxY; y >= region.minY; y--) {
                         pos.setPos(x, y, z);
-                        if (matching(chunk, pos) != null) {
+                        String id = matching(chunk, pos);
+                        if (id != null) {
                             top = y;
+                            topId = id;
                             break;
                         }
                     }
                     row.add(top);
+                    if (topId == null) {
+                        blockRow.add(-1);
+                    }
+                    else {
+                        Integer index = paletteIndex.get(topId);
+                        if (index == null) {
+                            index = paletteIndex.size();
+                            paletteIndex.put(topId, index);
+                        }
+                        blockRow.add(index);
+                    }
                     if (top >= 0) {
                         highest = Math.max(highest, top);
                         lowest = Math.min(lowest, top);
                     }
                 }
                 rows.add(row);
+                blockRows.add(blockRow);
             }
 
             JsonObject json = region.describe();
-            json.addProperty("layout", "heights[z - from.z][x - from.x]; -1 = nothing matching, "
-                + "null = chunk not loaded");
+            json.addProperty("layout", withBlocks
+                ? "heights[z - from.z][x - from.x] and blocks[...] (an index into palette) for the "
+                    + "same column; -1 = nothing matching, null = chunk not loaded"
+                : "heights[z - from.z][x - from.x]; -1 = nothing matching, null = chunk not loaded");
             if (highest >= 0) {
                 json.addProperty("highest", highest);
                 json.addProperty("lowest", lowest);
+            }
+            if (withBlocks) {
+                JsonArray palette = new JsonArray();
+                for (String id : paletteIndex.keySet()) {
+                    palette.add(id);
+                }
+                json.add("palette", palette);
+                json.add("blocks", blockRows);
             }
             json.add("heights", rows);
             if (unloadedChunks.size() > 0) {

@@ -1,30 +1,41 @@
 package com.micatechnologies.minecraft.mcmcp.client.tools;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
+import com.micatechnologies.minecraft.mcmcp.client.ClientCamera;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
+import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
 import com.micatechnologies.minecraft.mcmcp.client.ScreenSampler;
 import com.micatechnologies.minecraft.mcmcp.client.ScreenshotOutcome;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpContent;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import com.micatechnologies.minecraft.mcmcp.tools.ScreenshotImages;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.concurrent.Callable;
+import javax.annotation.Nullable;
 import javax.imageio.ImageIO;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.util.ScreenShotHelper;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.text.ITextComponent;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
@@ -66,6 +77,7 @@ public final class ClientDebugTools {
 
     public static void register() {
         ClientChatRecorder.register();
+        ClientCamera.register();
         registerScreenshot();
         registerScreenStats();
         registerGuiState();
@@ -92,7 +104,13 @@ public final class ClientDebugTools {
                 + "otherwise: it caps the long edge of the inline copy only, and the file on disk is "
                 + "always saved at full resolution.\n\n"
                 + "Captures the most recently rendered frame, so anything drawn over the game — an "
-                + "open GUI, a chat window, a debug overlay — appears in it.")
+                + "open GUI, a chat window, a debug overlay — appears in it.\n\n"
+                + "To see a place without moving the player, pass 'from' (and 'look_at', or "
+                + "'yaw'/'pitch'): the frame is rendered from there, without HUD, and nothing changes "
+                + "for the server or other players. It can only draw chunks this client holds, so "
+                + "stay within the render distance. 'fullbright' lights everything for this one "
+                + "frame — for night and interiors, without touching world time. Both are put back "
+                + "before the call returns.")
             .schema(JsonSchema.object()
                 .string("name", "File name for the screenshot, without a path. '.png' is appended if "
                     + "missing. Defaults to a timestamped name.")
@@ -105,12 +123,44 @@ public final class ClientDebugTools {
                         + "detail. Above 1568 nothing is gained — the image is downscaled to that "
                         + "before it reaches you either way. Ignored unless inline is true.",
                     ScreenshotImages.MIN_MAX_DIMENSION, ScreenshotImages.PROVIDER_CEILING)
+                .array("from", "Camera eye position [x, y, z] for a view without moving the player.",
+                    NUMBER)
+                .array("look_at", "With 'from': the point [x, y, z] to aim the camera at.", NUMBER)
+                .number("yaw", "With 'from', instead of look_at: degrees clockwise from south. "
+                    + "Defaults to the player's.", -360.0D, 360.0D)
+                .number("pitch", "With 'from', instead of look_at: degrees down from horizontal; 90 "
+                    + "looks straight down. Defaults to the player's.", -90.0D, 90.0D)
+                .number("fov", "Field of view in degrees for this frame; wide for aerials.",
+                    MIN_FOV, MAX_FOV)
+                .bool("fullbright", "Light everything fully for this frame. Default false.")
+                .integer("settle_ms", "With 'from': most time to let chunk meshes build at the new "
+                    + "viewpoint before capturing. Default 5000.", 0, MAX_SETTLE_MILLIS)
                 .build())
             .clientOnly()
             .handler(context -> {
                 if (!McmcpConfig.isAllowScreenshots()) {
                     return ToolResult.error("Screenshots are disabled by permissions.allowScreenshots "
                         + "in the MCMCP config.");
+                }
+
+                final double[] from = vector(context.getArguments(), "from");
+                final double[] lookAt = vector(context.getArguments(), "look_at");
+                if ((context.has("from") && from == null) || (context.has("look_at") && lookAt == null)) {
+                    return ToolResult.error("'from' and 'look_at' are each three numbers: [x, y, z].");
+                }
+                if (from == null && (lookAt != null || context.has("yaw") || context.has("pitch")
+                    || context.has("settle_ms"))) {
+                    return ToolResult.error("'look_at', 'yaw', 'pitch' and 'settle_ms' aim a detached "
+                        + "camera, so they need 'from'. Nothing was captured.");
+                }
+                final boolean fullbright = context.getBoolean("fullbright", false);
+                final float fov = context.has("fov")
+                    ? (float) Math.max(MIN_FOV, Math.min(MAX_FOV, context.getDouble("fov", 70.0D)))
+                    : Float.NaN;
+                final boolean overriding = from != null || fullbright || !Float.isNaN(fov);
+                if (from != null && !ClientCamera.canDetach()) {
+                    return ToolResult.error("A detached camera is not available in this game: the "
+                        + "render view field could not be found. Nothing was captured.");
                 }
 
                 final String requestedName = context.getString("name", null);
@@ -127,12 +177,61 @@ public final class ClientDebugTools {
 
                 // The whole capture happens on the client thread: ScreenShotHelper reads pixels back
                 // out of the framebuffer, which needs the GL context that only that thread holds.
-                JsonObject capture = context.onGameThread(new Callable<JsonObject>() {
-                    @Override
-                    public JsonObject call() {
-                        return captureScreenshot(fileName);
+                final JsonObject view;
+                final JsonObject capture;
+                if (!overriding) {
+                    view = null;
+                    capture = context.onGameThread(new Callable<JsonObject>() {
+                        @Override
+                        public JsonObject call() {
+                            return captureScreenshot(fileName);
+                        }
+                    });
+                }
+                else {
+                    final double yawArgument = context.getDouble("yaw", Double.NaN);
+                    final double pitchArgument = context.getDouble("pitch", Double.NaN);
+                    view = context.onGameThread(new Callable<JsonObject>() {
+                        @Override
+                        public JsonObject call() {
+                            return applyView(from, lookAt, yawArgument, pitchArgument, fov, fullbright);
+                        }
+                    });
+                    if (view.has("error")) {
+                        return ToolResult.error(view.get("error").getAsString() + " Nothing was "
+                            + "captured.");
                     }
-                });
+                    try {
+                        // A tick for the lightmap to pick up the new gamma, frames for the camera.
+                        ClientFrameClock.await(2, 1, 3000L);
+                        if (from != null) {
+                            settleChunkMeshes(context,
+                                context.getBoundedInt("settle_ms", 5000, 0, MAX_SETTLE_MILLIS), view);
+                        }
+                        capture = context.onGameThread(new Callable<JsonObject>() {
+                            @Override
+                            public JsonObject call() {
+                                // Restored in the same task that reads the frame, so the player
+                                // never sees a frame of the detached view after the capture.
+                                try {
+                                    return captureScreenshot(fileName);
+                                }
+                                finally {
+                                    ClientCamera.restore();
+                                }
+                            }
+                        });
+                    }
+                    finally {
+                        context.onGameThread(new Callable<Void>() {
+                            @Override
+                            public Void call() {
+                                ClientCamera.restore();
+                                return null;
+                            }
+                        });
+                    }
+                }
 
                 final String savedPath = capture.get("path").getAsString();
                 File file = new File(savedPath);
@@ -158,6 +257,9 @@ public final class ClientDebugTools {
                 }
                 if (capture.has("redirected")) {
                     structured.addProperty("redirected", true);
+                }
+                if (view != null) {
+                    structured.add("view", view);
                 }
                 if (linkable) {
                     structured.addProperty("resourceUri",
@@ -278,6 +380,112 @@ public final class ClientDebugTools {
         }
         json.addProperty("fallback", why);
         return json;
+    }
+
+    /** Item schema for the coordinate arrays. */
+    private static final JsonObject NUMBER = Json.obj("type", new JsonPrimitive("number"));
+
+    private static final double MIN_FOV = 10.0D;
+    private static final double MAX_FOV = 130.0D;
+    private static final int MAX_SETTLE_MILLIS = 20_000;
+
+    /** {@code [x, y, z]} from {@code arguments.name}, or null if absent or not three numbers. */
+    @Nullable
+    private static double[] vector(JsonObject arguments, String name) {
+        JsonElement element = arguments.get(name);
+        if (element == null || !element.isJsonArray() || element.getAsJsonArray().size() != 3) {
+            return null;
+        }
+        double[] values = new double[3];
+        for (int i = 0; i < 3; i++) {
+            JsonElement value = element.getAsJsonArray().get(i);
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
+                return null;
+            }
+            values[i] = value.getAsDouble();
+        }
+        return values;
+    }
+
+    /**
+     * Applies the camera and lighting override for one capture. Client thread only.
+     *
+     * @return a description of the view, or {@code error} when it cannot be drawn from there
+     */
+    private static JsonObject applyView(@Nullable double[] from, @Nullable double[] lookAt,
+        double yawArgument, double pitchArgument, float fov, boolean fullbright) {
+        Minecraft mc = ClientStateTools.requireInWorld();
+        JsonObject json = new JsonObject();
+        float yaw = mc.player.rotationYaw;
+        float pitch = mc.player.rotationPitch;
+        if (from != null) {
+            BlockPos eye = new BlockPos(from[0], from[1], from[2]);
+            if (!GameJson.isLoaded(mc.world, eye)) {
+                json.addProperty("error", "The camera position " + eye.getX() + ", " + eye.getY()
+                    + ", " + eye.getZ() + " is in a chunk this client does not hold. A detached "
+                    + "camera can only draw what the client has loaded, within "
+                    + mc.gameSettings.renderDistanceChunks * 16 + " blocks of the player.");
+                return json;
+            }
+            if (lookAt != null) {
+                double dx = lookAt[0] - from[0];
+                double dy = lookAt[1] - from[1];
+                double dz = lookAt[2] - from[2];
+                yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0D);
+                pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
+            }
+            else {
+                if (!Double.isNaN(yawArgument)) {
+                    yaw = (float) yawArgument;
+                }
+                if (!Double.isNaN(pitchArgument)) {
+                    pitch = (float) pitchArgument;
+                }
+            }
+            JsonArray position = new JsonArray();
+            position.add(from[0]);
+            position.add(from[1]);
+            position.add(from[2]);
+            json.add("from", position);
+            json.addProperty("yaw", Math.round(MathHelper.wrapDegrees(yaw) * 100.0F) / 100.0D);
+            json.addProperty("pitch", Math.round(pitch * 100.0F) / 100.0D);
+        }
+        ClientCamera.apply(from, yaw, pitch, fov, fullbright);
+        if (!Float.isNaN(fov)) {
+            json.addProperty("fov", fov);
+        }
+        if (fullbright) {
+            json.addProperty("fullbright", true);
+        }
+        return json;
+    }
+
+    /**
+     * Waits for the chunk meshes around a new viewpoint to be built, up to {@code settleMillis}.
+     *
+     * <p>Moving the render view re-centres the renderer's chunk grid, and the chunks it has not
+     * drawn from there are built over the following frames. Captured at once, a view from a new
+     * point shows holes where buildings are. Records in {@code view} whether it settled.
+     */
+    private static void settleChunkMeshes(ToolContext context, int settleMillis, JsonObject view)
+        throws Exception {
+        long deadline = System.currentTimeMillis() + settleMillis;
+        boolean settled = false;
+        while (true) {
+            settled = context.onGameThread(new Callable<Boolean>() {
+                @Override
+                public Boolean call() {
+                    return Minecraft.getMinecraft().renderGlobal.hasNoChunkUpdates();
+                }
+            });
+            if (settled || System.currentTimeMillis() >= deadline) {
+                break;
+            }
+            Thread.sleep(100L);
+        }
+        // One more frame after the last mesh lands, so it is in the frame that is read.
+        ClientFrameClock.await(2, 0, 2000L);
+        view.addProperty("meshesSettled", settled);
     }
 
     /** Forge canonicalises the file it hands the event, so compare like with like. */

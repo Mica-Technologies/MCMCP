@@ -3,6 +3,8 @@ package com.micatechnologies.minecraft.mcmcp.client.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
+import com.micatechnologies.minecraft.mcmcp.client.ClientKeepAwake;
+import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
@@ -107,7 +109,9 @@ public final class ClientStateTools {
             .title("Player state")
             .description("Read the controlled player's full state: position, orientation, health, "
                 + "hunger, held item, the block underfoot, the biome, and the world's time and weather. "
-                + "This is the usual first call for orienting yourself.")
+                + "This is the usual first call for orienting yourself. 'window' says whether the "
+                + "client is throttled (background frame cap): if so, chunks load slowly and a survey "
+                + "may read areas as unloaded.")
             .schema(JsonSchema.noArguments())
             .clientOnly()
             .readOnly()
@@ -127,12 +131,37 @@ public final class ClientStateTools {
                         json.add("standingOn", GameJson.block(world, GameJson.blockPosOf(mc.player).down()));
                         json.add("lookingAt", GameJson.rayTrace(world, mc.objectMouseOver));
                         json.addProperty("renderDistanceChunks", mc.gameSettings.renderDistanceChunks);
+                        json.add("window", windowState(mc));
                         return json;
                     }
                 });
                 return ToolResult.structured(result);
             })
             .build());
+    }
+
+    /** Below this many frames a second, chunk loading and every client-thread hop visibly lag. */
+    private static final int THROTTLED_FPS = 20;
+
+    /**
+     * Whether the game is running at a rate an agent can rely on. Client thread only.
+     *
+     * <p>Without it, "the chunk is slow because the window is in the background" and "the chunk is
+     * empty" look the same from a survey (#41). {@code throttled} is the one to act on: when it is
+     * true, wait longer or ask for the window to be focused.
+     */
+    static JsonObject windowState(Minecraft mc) {
+        JsonObject json = new JsonObject();
+        int fps = Minecraft.getDebugFPS();
+        json.addProperty("focused", WindowFocus.isFocused());
+        json.addProperty("fps", fps);
+        json.addProperty("frameLimit", mc.gameSettings.limitFramerate);
+        json.addProperty("keepAwake", ClientKeepAwake.isActive());
+        if (ClientKeepAwake.isHolding()) {
+            json.addProperty("keepAwakeReplacedLimit", ClientKeepAwake.replacedLimit());
+        }
+        json.addProperty("throttled", fps < THROTTLED_FPS || mc.gameSettings.limitFramerate < THROTTLED_FPS);
+        return json;
     }
 
     /**

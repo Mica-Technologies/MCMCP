@@ -1,17 +1,23 @@
 package com.micatechnologies.minecraft.mcmcp.client.tools;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import java.util.Locale;
 import java.util.concurrent.Callable;
+import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiDownloadTerrain;
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.chunk.Chunk;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -48,6 +54,12 @@ public final class ClientSyncTools {
 
     /** Hard ceiling on any wait, so a condition that never becomes true cannot hold a worker forever. */
     private static final int MAX_TIMEOUT_TICKS = 6000;
+
+    /** Widest chunk wait: 32 chunks either way is past any render distance a client runs. */
+    private static final int MAX_CHUNK_RADIUS = 512;
+
+    /** Missing chunks named in a result; the count beyond this stays exact. */
+    private static final int MAX_LISTED_CHUNKS = 32;
 
     /**
      * How often a long wait reports progress.
@@ -87,13 +99,25 @@ public final class ClientSyncTools {
                 + "reads the state from before.\n\n"
                 + "Prefer 'waitFor' over a fixed tick count wherever one fits — it returns as soon as "
                 + "the condition holds rather than always burning the full duration, and it tells you "
-                + "when it gave up instead of leaving you to infer it.")
+                + "when it gave up instead of leaving you to infer it.\n\n"
+                + "'chunksLoaded' waits until this client holds every chunk within 'radius' of (x, z) "
+                + "— the player by default — and 'chunksRendered' also until their meshes are built, "
+                + "which is what a screenshot needs. Use one after a teleport, before surveying. On a "
+                + "timeout the result lists the chunks still missing.")
             .schema(JsonSchema.object()
                 .integer("ticks", "How long to wait, in ticks (20 per second). With 'waitFor' this is "
                     + "the timeout; without it, the exact time to wait. Defaults to 20.",
                     1, MAX_TIMEOUT_TICKS)
                 .enumeration("waitFor", "A condition to wait for instead of a fixed delay.",
-                    "worldLoaded", "worldUnloaded", "screenOpen", "screenClosed", "chat")
+                    "worldLoaded", "worldUnloaded", "screenOpen", "screenClosed", "chat",
+                    "chunksLoaded", "chunksRendered")
+                .integer("x", "For the chunk conditions: block X of the area's centre. Defaults to "
+                    + "the player's.")
+                .integer("z", "For the chunk conditions: block Z of the area's centre. Defaults to "
+                    + "the player's.")
+                .integer("radius", "For the chunk conditions: blocks around the centre that must be "
+                    + "loaded. Default 64. Chunks past the render distance never load.", 0,
+                    MAX_CHUNK_RADIUS)
                 .string("screenName", "For waitFor 'screenOpen': the screen's simple class name, "
                     + "matched case-insensitively as a substring — 'main' matches GuiMainMenu. Omit to "
                     + "wait for any screen at all.")
@@ -109,6 +133,11 @@ public final class ClientSyncTools {
                 final String screenName = context.getString("screenName", null);
                 final String chatContains = context.getString("chatContains", null);
                 final long budgetMillis = ticks * 50L;
+                final ChunkArea area = waitFor != null && waitFor.startsWith("chunks")
+                    ? new ChunkArea(context.has("x") ? context.getInt("x", 0) : null,
+                        context.has("z") ? context.getInt("z", 0) : null,
+                        context.getBoundedInt("radius", 64, 0, MAX_CHUNK_RADIUS))
+                    : null;
 
                 if (waitFor == null) {
                     // A plain delay. Sleeping on the worker rather than blocking the client thread:
@@ -144,7 +173,7 @@ public final class ClientSyncTools {
                 // a wait keyed on its size then never saw another line.
                 try (ClientChatRecorder.Capture chat = "chat".equals(waitFor)
                     ? ClientChatRecorder.capture() : null) {
-                    return waitForCondition(context, waitFor, ticks, budgetMillis, screenName,
+                    return waitForCondition(context, waitFor, ticks, budgetMillis, screenName, area,
                         chatContains, chat);
                 }
             })
@@ -152,7 +181,8 @@ public final class ClientSyncTools {
     }
 
     private static ToolResult waitForCondition(ToolContext context,
-        String waitFor, int ticks, long budgetMillis, String screenName, String chatContains,
+        String waitFor, int ticks, long budgetMillis, String screenName, ChunkArea area,
+        String chatContains,
         ClientChatRecorder.Capture chat) throws Exception {
         long start = System.currentTimeMillis();
         long lastProgress = start;
@@ -169,7 +199,7 @@ public final class ClientSyncTools {
             JsonObject state = context.onGameThread(new Callable<JsonObject>() {
                 @Override
                 public JsonObject call() {
-                    return snapshot();
+                    return snapshot(area);
                 }
             });
 
@@ -190,7 +220,7 @@ public final class ClientSyncTools {
         JsonObject timedOut = context.onGameThread(new Callable<JsonObject>() {
             @Override
             public JsonObject call() {
-                return snapshot();
+                return snapshot(area);
             }
         });
         timedOut.addProperty("conditionMet", false);
@@ -202,7 +232,7 @@ public final class ClientSyncTools {
     }
 
     /** Client state relevant to every supported condition, read in one hop to the game thread. */
-    private static JsonObject snapshot() {
+    private static JsonObject snapshot(@Nullable ChunkArea area) {
         Minecraft mc = Minecraft.getMinecraft();
         GuiScreen screen = mc.currentScreen;
         JsonObject json = new JsonObject();
@@ -217,7 +247,79 @@ public final class ClientSyncTools {
         if (mc.world != null && ClientStateTools.pausesOnLostFocus(mc)) {
             json.addProperty("pausesOnLostFocus", true);
         }
+        if (area != null && mc.world != null && mc.player != null) {
+            json.add("chunks", area.describe(mc));
+            json.add("window", ClientStateTools.windowState(mc));
+        }
         return json;
+    }
+
+    /**
+     * The chunks a {@code chunksLoaded} wait covers. Resolved against the player each poll when no
+     * centre was given, so "around me" stays around the player if they move.
+     */
+    private static final class ChunkArea {
+
+        @Nullable
+        private final Integer x;
+        @Nullable
+        private final Integer z;
+        private final int radius;
+
+        ChunkArea(@Nullable Integer x, @Nullable Integer z, int radius) {
+            this.x = x;
+            this.z = z;
+            this.radius = radius;
+        }
+
+        /** Client thread only. */
+        JsonObject describe(Minecraft mc) {
+            BlockPos player = GameJson.blockPosOf(mc.player);
+            int centreX = x == null ? player.getX() : x;
+            int centreZ = z == null ? player.getZ() : z;
+            int minChunkX = (centreX - radius) >> 4;
+            int maxChunkX = (centreX + radius) >> 4;
+            int minChunkZ = (centreZ - radius) >> 4;
+            int maxChunkZ = (centreZ + radius) >> 4;
+
+            int total = 0;
+            int missing = 0;
+            JsonArray missingList = new JsonArray();
+            for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+                for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                    total++;
+                    Chunk chunk = mc.world.getChunkProvider().getLoadedChunk(chunkX, chunkZ);
+                    if (chunk == null || chunk.isEmpty()) {
+                        missing++;
+                        if (missingList.size() < MAX_LISTED_CHUNKS) {
+                            JsonArray pair = new JsonArray();
+                            pair.add(chunkX);
+                            pair.add(chunkZ);
+                            missingList.add(pair);
+                        }
+                    }
+                }
+            }
+
+            JsonObject json = new JsonObject();
+            json.addProperty("centreX", centreX);
+            json.addProperty("centreZ", centreZ);
+            json.addProperty("radius", radius);
+            json.addProperty("total", total);
+            json.addProperty("missing", missing);
+            if (missing > 0) {
+                json.add("missingChunks", missingList);
+            }
+            // The meshes, not the data: a chunk the client holds but has not built is in a survey
+            // and missing from a screenshot.
+            json.addProperty("renderQueueEmpty", mc.renderGlobal.hasNoChunkUpdates());
+            int renderReach = mc.gameSettings.renderDistanceChunks * 16;
+            if (Math.abs(centreX - player.getX()) + radius > renderReach
+                || Math.abs(centreZ - player.getZ()) + radius > renderReach) {
+                json.addProperty("beyondRenderDistance", true);
+            }
+            return json;
+        }
     }
 
     private static boolean isSatisfied(String waitFor, JsonObject state, String screenName,
@@ -232,6 +334,13 @@ public final class ClientSyncTools {
             return state.get("worldLoaded").getAsBoolean()
                 && state.get("playerPresent").getAsBoolean()
                 && state.get("terrainReady").getAsBoolean();
+        }
+        if ("chunksLoaded".equals(waitFor) || "chunksRendered".equals(waitFor)) {
+            JsonObject chunks = Json.getObject(state, "chunks");
+            if (chunks == null || chunks.get("missing").getAsInt() > 0) {
+                return false;
+            }
+            return "chunksLoaded".equals(waitFor) || chunks.get("renderQueueEmpty").getAsBoolean();
         }
         if ("worldUnloaded".equals(waitFor)) {
             return !state.get("worldLoaded").getAsBoolean();

@@ -5,6 +5,7 @@ import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputLock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
+import com.micatechnologies.minecraft.mcmcp.client.ClientKeepAwake;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -66,6 +67,7 @@ public final class ClientInputTools {
         ClientInputScheduler.register();
         ClientInputLock.register();
         ClientFrameClock.register();
+        ClientKeepAwake.register();
         registerSendChat();
         registerLook();
         registerMove();

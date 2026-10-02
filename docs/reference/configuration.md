@@ -375,6 +375,27 @@ Longest `client_input_lock` may hold the keyboard and mouse away from the player
 expires, so a model that stops answering cannot leave the machine locked; this is the ceiling on how
 long that takes. Pressing Escape twice releases it immediately whatever this is set to.
 
+### `keepAwakeSeconds`
+
+`integer` 0–3600 · default `300`
+
+How long after a client tool call MCMCP keeps the client's frame rate up, and for as long as
+`client_input_lock` is held. `0` turns this off.
+
+Agents usually drive a client while its window is in the background, and mods throttle exactly that.
+FPS Reducer, for one, drops an unfocused or idle client to 10 frames a second. Everything an agent
+does runs through those frames, so chunks arrive and render slowly, and surveys read whole regions
+as unloaded. While an agent is active, any frame limit below
+[`keepAwakeFps`](#keepawakefps) is raised to it. When the agent stops, the old limit is put back,
+unless something else (such as FPS Reducer restoring the player's own limit) changed it meanwhile.
+
+### `keepAwakeFps`
+
+`integer` 10–260 · default `60`
+
+The frame limit held while keeping the client awake. It only ever raises the limit, never lowers it.
+`260` is unlimited.
+
 ### `maxLogLines`
 
 `integer` 10–5000 · default `500`
@@ -437,6 +458,8 @@ orchestrator {
 limits {
     I:clientStallSeconds=15
     I:gameThreadTimeoutMillis=5000
+    I:keepAwakeFps=60
+    I:keepAwakeSeconds=300
     I:maxBlockVolume=32768
     I:maxInputLockSeconds=1800
     I:maxInputTicks=200

@@ -13,6 +13,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpPrompt;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpResource;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.util.List;
@@ -269,6 +270,8 @@ public class McpDispatcher {
         if (unknownArguments != null) {
             return ToolResult.error(unknownArguments).toJson(session.getProtocolVersion());
         }
+
+        ToolActivity.noteCall(side);
 
         ToolContext context = new ToolContext(
             session,
