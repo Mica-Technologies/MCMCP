@@ -33,12 +33,64 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use crate::jsonrpc;
 use crate::link::protocol::{GameThreadStatus, Hello, Side};
 
-/// How long to wait for an instance to answer before giving up on one request.
+/// How long to wait for an instance to answer before giving up on one request — or, for a call
+/// that is watched for progress, how long it may go with neither an answer nor a progress
+/// notification.
 ///
-/// Generous on purpose. The far end runs tool calls on Minecraft's game thread, and `client_wait`
-/// blocks until its condition comes true; a tight timeout here would abandon calls that were going
-/// to succeed. The floor on usefulness is that a *hung* instance must not wedge a session forever.
+/// Generous on purpose. The far end runs tool calls on Minecraft's game thread, and a tight
+/// timeout here would abandon calls that were going to succeed. The floor on usefulness is that a
+/// *hung* instance must not wedge a session forever.
+///
+/// It used to be a flat limit on every call, and `client_wait` accepts up to 300 s: a 240 s wait
+/// the game was serving perfectly well was abandoned at 120 s and reported as the instance failing.
+/// A watched call now resets this clock on every progress notification, which a long wait sends
+/// every few seconds, and only [`CALL_CEILING`] bounds it outright.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The most any one watched call may take, progress or not.
+///
+/// Comfortably above the longest thing the mod offers (`client_wait` at 300 s), so it never cuts
+/// off a call the mod considers legitimate; it exists so a tool that reports progress forever
+/// cannot hold a session forever either.
+pub const CALL_CEILING: Duration = Duration::from_secs(600);
+
+/// Prefix of the progress tokens the orchestrator mints for calls a client sent without one.
+pub const MINTED_PROGRESS_PREFIX: &str = "orch-progress-";
+
+/// An instance call the orchestrator stopped waiting for.
+///
+/// A type rather than a string so the router can word it as the orchestrator's limit. Worded as
+/// "the instance did not complete that call", it read as though the game had hung, when the game
+/// was usually fine and still working on it.
+#[derive(Debug)]
+pub struct CallTimedOut {
+    pub method: String,
+    pub waited: Duration,
+    /// True when [`CALL_CEILING`] was hit despite progress; false for a silent instance.
+    pub hit_ceiling: bool,
+}
+
+impl std::fmt::Display for CallTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.hit_ceiling {
+            write!(
+                f,
+                "{} reached the orchestrator's {}s ceiling on any one call",
+                self.method,
+                self.waited.as_secs()
+            )
+        } else {
+            write!(
+                f,
+                "{} had no answer and no progress for {}s, the orchestrator's per-call limit",
+                self.method,
+                REQUEST_TIMEOUT.as_secs()
+            )
+        }
+    }
+}
+
+impl std::error::Error for CallTimedOut {}
 
 /// The MCP protocol version the orchestrator negotiates with instances.
 pub const INSTANCE_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -201,6 +253,33 @@ pub struct Instance {
     ready: std::sync::atomic::AtomicBool,
     /// When the game thread stopped finishing frames, as last reported; `None` while it runs.
     stalled_since: Mutex<Option<Instant>>,
+    /// Calls being watched for progress, by progress token (its JSON text, since a token may be a
+    /// string or a number). The flag is whether the orchestrator minted the token itself — those
+    /// notifications are its own heartbeat and are not forwarded to a client that never asked.
+    progress_watches: Mutex<HashMap<String, (Arc<Notify>, bool)>>,
+}
+
+/// Unregisters a progress watch when the call it belongs to ends, however it ends.
+pub struct ProgressWatch {
+    instance: Arc<Instance>,
+    key: String,
+    notify: Arc<Notify>,
+}
+
+impl ProgressWatch {
+    pub fn notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.notify)
+    }
+}
+
+impl Drop for ProgressWatch {
+    fn drop(&mut self) {
+        self.instance
+            .progress_watches
+            .lock()
+            .expect("progress lock")
+            .remove(&self.key);
+    }
 }
 
 impl Instance {
@@ -215,6 +294,46 @@ impl Instance {
             alive: std::sync::atomic::AtomicBool::new(true),
             ready: std::sync::atomic::AtomicBool::new(false),
             stalled_since: Mutex::new(None),
+            progress_watches: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Starts treating progress under `token` as a sign of life for one call.
+    ///
+    /// `minted` says the orchestrator made the token up itself; see [`Self::note_progress`].
+    pub fn watch_progress(self: &Arc<Self>, token: &Value, minted: bool) -> ProgressWatch {
+        let key = token.to_string();
+        let notify = Arc::new(Notify::new());
+        self.progress_watches
+            .lock()
+            .expect("progress lock")
+            .insert(key.clone(), (Arc::clone(&notify), minted));
+        ProgressWatch {
+            instance: Arc::clone(self),
+            key,
+            notify,
+        }
+    }
+
+    /// Records a progress notification from this instance.
+    ///
+    /// Returns whether it should still go to the client: false only for a token the orchestrator
+    /// minted, which no client is waiting on. A token nobody is watching is the client's, and
+    /// passes through as before.
+    pub fn note_progress(&self, token: &Value) -> bool {
+        let watches = self.progress_watches.lock().expect("progress lock");
+        match watches.get(&token.to_string()) {
+            Some((notify, minted)) => {
+                // notify_one, not notify_waiters: it leaves a permit when the waiter is between
+                // polls, so a heartbeat arriving at that instant is not lost.
+                notify.notify_one();
+                !*minted
+            }
+            // A minted token outliving its call — a heartbeat that crossed the answer on the wire —
+            // is still the orchestrator's own and still has no client to go to.
+            None => !token
+                .as_str()
+                .is_some_and(|token| token.starts_with(MINTED_PROGRESS_PREFIX)),
         }
     }
 
@@ -364,21 +483,49 @@ impl Instance {
     }
 
     /// Waits for an answer sent under `request_id`, and unwraps it into a result or an error.
+    ///
+    /// With `progress`, the [`REQUEST_TIMEOUT`] clock restarts every time that notify fires, up to
+    /// [`CALL_CEILING`]; without it, the timeout is flat. A timeout is a [`CallTimedOut`].
     pub async fn await_response(
         &self,
         request_id: &str,
         method: &str,
-        receiver: oneshot::Receiver<Value>,
+        mut receiver: oneshot::Receiver<Value>,
+        progress: Option<Arc<Notify>>,
     ) -> Result<Value> {
-        let response = match tokio::time::timeout(REQUEST_TIMEOUT, receiver).await {
+        let started = Instant::now();
+        let ceiling = tokio::time::sleep(CALL_CEILING);
+        tokio::pin!(ceiling);
+        let outcome = loop {
+            let idle = tokio::time::sleep(REQUEST_TIMEOUT);
+            tokio::pin!(idle);
+            tokio::select! {
+                answer = &mut receiver => break Ok(answer),
+                // Progress: go round again, which restarts the idle clock.
+                _ = async {
+                    match &progress {
+                        Some(notify) => notify.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => continue,
+                _ = &mut idle => break Err(false),
+                _ = &mut ceiling, if progress.is_some() => break Err(true),
+            }
+        };
+        let response = match outcome {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 // The oneshot was dropped without a value: the reader task went away.
                 bail!("the link to this instance closed before it answered {method}");
             }
-            Err(_) => {
+            Err(hit_ceiling) => {
                 self.pending.lock().expect("pending lock").remove(request_id);
-                bail!("{method} timed out after {}s", REQUEST_TIMEOUT.as_secs());
+                return Err(CallTimedOut {
+                    method: method.to_string(),
+                    waited: started.elapsed(),
+                    hit_ceiling,
+                }
+                .into());
             }
         };
 
@@ -398,7 +545,7 @@ impl Instance {
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
         let request_id = self.mint_request_id();
         let receiver = self.send(request_id.clone(), method, params).await?;
-        self.await_response(&request_id, method, receiver).await
+        self.await_response(&request_id, method, receiver, None).await
     }
 
     /// Asks the instance to abandon a request it is still working on.
@@ -790,10 +937,110 @@ mod tests {
 
         instance.complete(jsonrpc::result(json!(request_id.clone()), json!({"ok": true})));
         let result = instance
-            .await_response(&request_id, "tools/call", receiver)
+            .await_response(&request_id, "tools/call", receiver, None)
             .await
             .unwrap();
         assert_eq!(result["ok"], true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_that_keeps_reporting_progress_outlives_the_request_timeout() {
+        let (sender, _outbound) = mpsc::channel(4);
+        let instance = Arc::new(Instance::new(info(), sender));
+        let token = json!("orch-progress-1");
+        let watch = instance.watch_progress(&token, true);
+
+        let request_id = instance.mint_request_id();
+        let receiver = instance
+            .send(request_id.clone(), "tools/call", None)
+            .await
+            .unwrap();
+        let waiter = {
+            let instance = Arc::clone(&instance);
+            let notify = watch.notify();
+            let request_id = request_id.clone();
+            tokio::spawn(async move {
+                instance
+                    .await_response(&request_id, "tools/call", receiver, Some(notify))
+                    .await
+            })
+        };
+
+        // A 240 s wait, heartbeating every 5 s: twice REQUEST_TIMEOUT, and never silent for long.
+        for _ in 0..48 {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            assert!(
+                !instance.note_progress(&token),
+                "a minted token's progress is not forwarded"
+            );
+        }
+        instance.complete(jsonrpc::result(json!(request_id), json!({"waited": 240})));
+        let result = waiter
+            .await
+            .unwrap()
+            .expect("the call should have been waited for");
+        assert_eq!(result["waited"], 240);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_call_times_out_as_the_orchestrators_limit() {
+        let (sender, _outbound) = mpsc::channel(4);
+        let instance = Arc::new(Instance::new(info(), sender));
+        let watch = instance.watch_progress(&json!(7), false);
+
+        let request_id = instance.mint_request_id();
+        let receiver = instance
+            .send(request_id.clone(), "tools/call", None)
+            .await
+            .unwrap();
+        let error = instance
+            .await_response(&request_id, "tools/call", receiver, Some(watch.notify()))
+            .await
+            .expect_err("nothing answered");
+        let timed_out = error.downcast_ref::<CallTimedOut>().expect("a CallTimedOut");
+        assert!(!timed_out.hit_ceiling);
+        assert!(timed_out.to_string().contains("orchestrator's per-call limit"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_cannot_hold_a_call_past_the_ceiling() {
+        let (sender, _outbound) = mpsc::channel(4);
+        let instance = Arc::new(Instance::new(info(), sender));
+        let token = json!("client-token");
+        let watch = instance.watch_progress(&token, false);
+
+        let request_id = instance.mint_request_id();
+        let receiver = instance
+            .send(request_id.clone(), "tools/call", None)
+            .await
+            .unwrap();
+        let waiter = {
+            let instance = Arc::clone(&instance);
+            let notify = watch.notify();
+            tokio::spawn(async move {
+                instance
+                    .await_response(&request_id, "tools/call", receiver, Some(notify))
+                    .await
+            })
+        };
+        for _ in 0..((CALL_CEILING.as_secs() / 10) + 2) {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            assert!(
+                instance.note_progress(&token),
+                "a client's own token is still forwarded"
+            );
+        }
+        let error = waiter.await.unwrap().expect_err("the ceiling should end it");
+        assert!(error.downcast_ref::<CallTimedOut>().unwrap().hit_ceiling);
+    }
+
+    #[test]
+    fn a_minted_token_is_never_forwarded_even_after_its_call_ended() {
+        let (sender, _outbound) = mpsc::channel(4);
+        let instance = Arc::new(Instance::new(info(), sender));
+        drop(instance.watch_progress(&json!("orch-progress-9"), true));
+        assert!(!instance.note_progress(&json!("orch-progress-9")));
+        assert!(instance.note_progress(&json!("someone-elses")));
     }
 
     #[tokio::test]

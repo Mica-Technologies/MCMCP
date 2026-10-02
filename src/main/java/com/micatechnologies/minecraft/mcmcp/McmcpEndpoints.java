@@ -4,6 +4,7 @@ import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.link.LinkSettings;
+import com.micatechnologies.minecraft.mcmcp.protocol.EndpointAddress;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpoint;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpointSettings;
 import com.micatechnologies.minecraft.mcmcp.transport.ReverseTransport;
@@ -38,9 +39,15 @@ public final class McmcpEndpoints {
         McpEndpointSettings settings = McmcpConfig.settingsFor(side);
         final McpEndpoint endpoint = new McpEndpoint(side, settings, gameThread);
 
-        if (McmcpConfig.isOrchestratorLinkEnabled()) {
-            attachOrchestratorLink(side, endpoint);
-        }
+        final ReverseTransport link = McmcpConfig.isOrchestratorLinkEnabled()
+            ? attachOrchestratorLink(side, endpoint) : null;
+        // Always set, link or not: a direct endpoint accepts 'instance' naming itself either way,
+        // and only the steering note depends on the link being up.
+        endpoint.getDispatcher().setAddress(new EndpointAddress(
+            McmcpConfig.identity().getInstanceId(),
+            side.id(),
+            () -> link == null ? null : link.getAssignedName(),
+            () -> link != null && link.isRunning()));
 
         try {
             endpoint.start();
@@ -58,7 +65,8 @@ public final class McmcpEndpoints {
         }
     }
 
-    private static void attachOrchestratorLink(McmcpSide side, final McpEndpoint endpoint) {
+    @Nullable
+    private static ReverseTransport attachOrchestratorLink(McmcpSide side, final McpEndpoint endpoint) {
         LinkSettings linkSettings = McmcpConfig.linkSettings();
         McmcpIdentity identity = McmcpConfig.identity();
 
@@ -68,10 +76,10 @@ public final class McmcpEndpoints {
             // handshake or accept an unauthenticated instance, and the second is worse.
             Mcmcp.LOGGER.error("MCMCP has no instance secret, so the orchestrator link cannot start. "
                 + "Clear identity.instanceSecret in the MCMCP config and restart to regenerate it.");
-            return;
+            return null;
         }
 
-        endpoint.addTransport(new ReverseTransport(
+        ReverseTransport link = new ReverseTransport(
             linkSettings,
             identity,
             side,
@@ -104,6 +112,8 @@ public final class McmcpEndpoints {
                     // the first time, and the stale answer would be worse than none.
                     return endpoint.httpUrlIfRunning();
                 }
-            }));
+            });
+        endpoint.addTransport(link);
+        return link;
     }
 }

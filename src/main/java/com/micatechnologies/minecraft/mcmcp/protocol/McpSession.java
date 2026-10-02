@@ -67,10 +67,27 @@ public class McpSession {
     /** In-flight inbound requests, keyed by the client's id, so {@code notifications/cancelled} can find them. */
     private final Map<String, CancellationToken> inflightRequests = new ConcurrentHashMap<>();
 
+    /**
+     * Whether this session is an orchestrator link rather than a direct HTTP client.
+     *
+     * <p>Final, and set at creation, because both readers act on it the moment the session exists:
+     * the session cap must never evict the link (every game it routes would vanish from the
+     * orchestrator), and the orchestrator-steering note must never be sent down it.
+     */
+    private final boolean orchestratorLink;
+
+    /** Set once this direct session has been told an orchestrator is available — see {@link #claimSteeringNote}. */
+    private final AtomicBoolean steeringNoteDelivered = new AtomicBoolean(false);
+
     public McpSession(String id, long nowMillis) {
+        this(id, nowMillis, false);
+    }
+
+    public McpSession(String id, long nowMillis, boolean orchestratorLink) {
         this.id = id;
         this.createdAtMillis = nowMillis;
         this.lastActivityMillis.set(nowMillis);
+        this.orchestratorLink = orchestratorLink;
     }
 
     public String getId() {
@@ -87,6 +104,31 @@ public class McpSession {
 
     public void touch(long nowMillis) {
         lastActivityMillis.set(nowMillis);
+    }
+
+    public boolean isOrchestratorLink() {
+        return orchestratorLink;
+    }
+
+    /**
+     * True exactly once per direct session: the first time it is asked, on a session that is not
+     * itself the orchestrator link.
+     *
+     * <p>The steering note is worth its tokens once and is noise every time after, so this is a
+     * claim rather than a check — two concurrent tool calls cannot both append it.
+     */
+    public boolean claimSteeringNote() {
+        return !orchestratorLink && steeringNoteDelivered.compareAndSet(false, true);
+    }
+
+    /**
+     * Whether a request is still running on this session.
+     *
+     * <p>A session waiting on a long {@code client_wait} has not been touched since the call
+     * arrived, so it looks idle; evicting it would throw away a result its client is waiting for.
+     */
+    public boolean hasInflightRequests() {
+        return !inflightRequests.isEmpty();
     }
 
     // ------------------------------------------------------------------

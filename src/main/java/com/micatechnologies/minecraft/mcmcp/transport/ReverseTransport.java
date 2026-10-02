@@ -291,7 +291,7 @@ public class ReverseTransport implements McpTransport {
                 return;
             }
 
-            session = sessions.create();
+            session = sessions.create(true);
             this.socket = connected;
             this.assignedName = result.getAssignedName();
             backoff.reset();

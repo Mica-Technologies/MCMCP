@@ -49,7 +49,27 @@ public final class ClientSyncTools {
     /** Hard ceiling on any wait, so a condition that never becomes true cannot hold a worker forever. */
     private static final int MAX_TIMEOUT_TICKS = 6000;
 
+    /**
+     * How often a long wait reports progress.
+     *
+     * <p>This is what lets a wait outlast the orchestrator's per-call limit: the orchestrator times a
+     * call out after a stretch with neither an answer nor progress, not after a fixed time, so a
+     * wait that reports regularly can run to its full {@link #MAX_TIMEOUT_TICKS}. Well inside that
+     * stretch, and rare enough to cost nothing.
+     */
+    private static final long PROGRESS_INTERVAL_MILLIS = 5_000L;
+
     private ClientSyncTools() {
+    }
+
+    /** Reports progress if {@link #PROGRESS_INTERVAL_MILLIS} has passed; returns when it last did. */
+    private static long heartbeat(ToolContext context, long start, long lastProgress, long budgetMillis) {
+        long now = System.currentTimeMillis();
+        if (now - lastProgress < PROGRESS_INTERVAL_MILLIS) {
+            return lastProgress;
+        }
+        context.reportProgress(now - start, budgetMillis, null);
+        return now;
     }
 
     public static void register() {
@@ -96,12 +116,14 @@ public final class ClientSyncTools {
                     // the very ticks being waited for.
                     long start = System.currentTimeMillis();
                     long remaining = budgetMillis;
+                    long lastProgress = start;
                     while (remaining > 0) {
                         if (context.getCancellation().isCancelled()) {
                             return ToolResult.text("Wait cancelled after "
                                 + (System.currentTimeMillis() - start) + "ms.");
                         }
                         Thread.sleep(Math.min(POLL_INTERVAL_MILLIS, remaining));
+                        lastProgress = heartbeat(context, start, lastProgress, budgetMillis);
                         remaining = budgetMillis - (System.currentTimeMillis() - start);
                     }
                     JsonObject json = new JsonObject();
@@ -133,7 +155,9 @@ public final class ClientSyncTools {
         String waitFor, int ticks, long budgetMillis, String screenName, String chatContains,
         ClientChatRecorder.Capture chat) throws Exception {
         long start = System.currentTimeMillis();
+        long lastProgress = start;
         while (System.currentTimeMillis() - start < budgetMillis) {
+            lastProgress = heartbeat(context, start, lastProgress, budgetMillis);
             if (context.getCancellation().isCancelled()) {
                 JsonObject json = new JsonObject();
                 json.addProperty("conditionMet", false);

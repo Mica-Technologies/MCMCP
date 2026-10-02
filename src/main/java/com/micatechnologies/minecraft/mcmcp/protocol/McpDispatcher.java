@@ -34,10 +34,14 @@ import javax.annotation.Nullable;
  */
 public class McpDispatcher {
 
+    /** The orchestrator's routing argument; see {@link #stripOwnInstance}. */
+    private static final String INSTANCE_ARGUMENT = "instance";
+
     private final McmcpSide side;
     private final GameThreadBridge gameThread;
     private final long gameThreadTimeoutMillis;
     private final String instructions;
+    private volatile EndpointAddress address = EndpointAddress.NONE;
 
     public McpDispatcher(McmcpSide side, GameThreadBridge gameThread, long gameThreadTimeoutMillis,
                          String instructions) {
@@ -49,6 +53,14 @@ public class McpDispatcher {
 
     public McmcpSide getSide() {
         return side;
+    }
+
+    /**
+     * Gives this dispatcher its orchestrator-facing identity. Set once during wiring, before any
+     * transport starts; until then {@link EndpointAddress#NONE} accepts only {@code instance: "*"}.
+     */
+    public void setAddress(EndpointAddress address) {
+        this.address = address;
     }
 
     /**
@@ -183,7 +195,8 @@ public class McpDispatcher {
         // a single tool description. Worth its context cost here: the client/server split and the
         // fact that block coordinates are integers while entity positions are not are both things
         // models get wrong on the first try otherwise.
-        result.addProperty("instructions", instructions);
+        String steering = session.isOrchestratorLink() ? null : address.steeringNote();
+        result.addProperty("instructions", steering == null ? instructions : instructions + "\n" + steering + "\n");
         return result;
     }
 
@@ -248,6 +261,10 @@ public class McpDispatcher {
         // does not name is almost always a misspelling of one it does, and ignoring it runs the tool
         // on a default the caller never chose — see ArgumentNames.
         JsonObject arguments = Json.getObjectOrEmpty(params, "arguments");
+        String instanceRefusal = stripOwnInstance(tool, arguments);
+        if (instanceRefusal != null) {
+            return ToolResult.error(instanceRefusal).toJson(session.getProtocolVersion());
+        }
         String unknownArguments = ArgumentNames.describeUnknown(name, tool.getInputSchema(), arguments);
         if (unknownArguments != null) {
             return ToolResult.error(unknownArguments).toJson(session.getProtocolVersion());
@@ -263,7 +280,7 @@ public class McpDispatcher {
 
         try {
             ToolResult result = tool.call(context);
-            return result.toJson(session.getProtocolVersion());
+            return withSteeringNote(session, result.toJson(session.getProtocolVersion()));
         }
         catch (JsonRpcException e) {
             // Cancellation and timeouts stay protocol errors — the client's plumbing needs to see
@@ -281,6 +298,52 @@ public class McpDispatcher {
             return ToolResult.error("Tool '" + name + "' failed: " + detail)
                 .toJson(session.getProtocolVersion());
         }
+    }
+
+    /**
+     * Removes an {@code instance} argument that names this endpoint, so a call written for the
+     * orchestrator runs unchanged against the game's own endpoint.
+     *
+     * <p>Left alone when the tool declares an {@code instance} of its own. The orchestrator strips
+     * the argument before forwarding, so on a link session it is never present.
+     *
+     * @return the refusal when {@code instance} names some other game, else null
+     */
+    @Nullable
+    private String stripOwnInstance(McpTool tool, JsonObject arguments) {
+        if (!arguments.has(INSTANCE_ARGUMENT)
+            || Json.getObjectOrEmpty(tool.getInputSchema(), "properties").has(INSTANCE_ARGUMENT)) {
+            return null;
+        }
+        JsonElement requested = arguments.get(INSTANCE_ARGUMENT);
+        String named = requested.isJsonPrimitive() ? requested.getAsString() : String.valueOf(requested);
+        if (!address.answersTo(named)) {
+            return address.describeMismatch(named);
+        }
+        arguments.remove(INSTANCE_ARGUMENT);
+        return null;
+    }
+
+    /**
+     * Appends the orchestrator reminder to the first tool result of a direct session while a link
+     * is up. Appended rather than prepended: scripts read {@code content[0]} or
+     * {@code structuredContent}, and neither moves.
+     */
+    private JsonObject withSteeringNote(McpSession session, JsonObject result) {
+        String note = address.steeringNote();
+        if (note == null || !session.claimSteeringNote()) {
+            return result;
+        }
+        JsonArray content = result.getAsJsonArray("content");
+        if (content == null) {
+            content = new JsonArray();
+            result.add("content", content);
+        }
+        JsonObject block = new JsonObject();
+        block.addProperty("type", "text");
+        block.addProperty("text", note);
+        content.add(block);
+        return result;
     }
 
     /**

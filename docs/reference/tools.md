@@ -1374,6 +1374,10 @@ screen and block reads report `loaded=false` for terrain that is merely late.
 `chat` only matches lines that arrive after the wait starts, so it cannot return instantly on
 something from minutes ago.
 
+`ticks` goes up to 6000 (5 minutes), including through the orchestrator. The wait reports progress
+every 5 seconds, and the orchestrator only gives up on a call after 120 seconds with no answer and no
+progress, so a long wait is not cut off.
+
 ### Worlds
 
 Singleplayer world management, by calling `launchIntegratedServer` directly rather than clicking

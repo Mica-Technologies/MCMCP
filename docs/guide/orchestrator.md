@@ -117,6 +117,26 @@ and an endpoint of a different game never counts as a sibling.
 Destructive calls stay under the gating setting that requires them to name their instance. A refusal
 from it says which `instance` to pass.
 
+### The same arguments work on a game's own endpoint
+
+A game's direct HTTP endpoint accepts `instance` too, so a script written against the orchestrator
+runs unchanged against it. If `instance` names that endpoint (`altotest-c1d0ee.client`, the bare
+game id, its label or `*`), it is ignored. If it names a different game, the call is refused and
+nothing is done.
+
+While a game's orchestrator link is up, its direct endpoint tells callers so. The `initialize`
+instructions mention it, and the first tool result of each direct session gets one extra text
+block at the end, naming the instance id to use through the orchestrator. The block is appended, so
+`content[0]` and `structuredContent` are unchanged for scripts that read them.
+
+### Long calls
+
+The orchestrator gives up on a call after 120 seconds with no answer **and no progress** from the
+game. Tools that can run longer, such as `client_wait` with up to 6000 ticks, report progress every
+few seconds, so they run to completion. No call runs longer than 10 minutes. If the orchestrator stops
+waiting, the result says that the limit is the orchestrator's and that the game was asked to cancel
+the call. It does not mean the game hung.
+
 ### `connected` is not the same as `ready`
 
 `mcmcp_instances` reports both, and the difference matters when a game is misbehaving. An instance is

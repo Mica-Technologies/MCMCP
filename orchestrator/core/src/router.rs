@@ -78,6 +78,8 @@ pub struct Router {
     /// the client, and the client must not be handed an id another instance is also using.
     awaiting_client: Mutex<HashMap<String, (String, Value)>>,
     next_client_request: AtomicU64,
+    /// Sequence for the progress tokens minted for calls that arrived without one.
+    next_progress_token: AtomicU64,
     /// What the attached client said it could do at `initialize`.
     ///
     /// Consulted before forwarding a sampling or elicitation request, so a client that never
@@ -165,6 +167,7 @@ impl Router {
             inflight: Mutex::new(HashMap::new()),
             awaiting_client: Mutex::new(HashMap::new()),
             next_client_request: AtomicU64::new(1),
+            next_progress_token: AtomicU64::new(1),
             client_capabilities: Mutex::new(json!({})),
             protocol_version: Mutex::new(LATEST_PROTOCOL_VERSION.to_string()),
             initialized: AtomicBool::new(false),
@@ -723,14 +726,30 @@ impl Router {
         // both happen to one value, and the clone is the honest cost of recording what was sent.
         let logged_arguments = Value::Object(arguments.clone());
 
-        // Forward params minus the instance argument. `_meta` goes along untouched, which is what
-        // carries the client's progress token through to the game.
+        // Forward params minus the instance argument. `_meta` goes along, which is what carries the
+        // client's progress token through to the game. A call that came without one gets a token
+        // the orchestrator minted, so a long call's progress can keep it alive past
+        // REQUEST_TIMEOUT; those notifications stop here rather than reaching a client that never
+        // asked for them.
+        let mut meta = params
+            .get("_meta")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let (progress_token, minted) = match meta.get("progressToken") {
+            Some(token) if !token.is_null() => (token.clone(), false),
+            _ => {
+                let sequence = self.next_progress_token.fetch_add(1, Ordering::Relaxed);
+                let token = json!(format!("{}{sequence}", instance::MINTED_PROGRESS_PREFIX));
+                meta.insert("progressToken".into(), token.clone());
+                (token, true)
+            }
+        };
         let mut forwarded = Map::new();
         forwarded.insert("name".into(), json!(name));
         forwarded.insert("arguments".into(), Value::Object(arguments));
-        if let Some(meta) = params.get("_meta") {
-            forwarded.insert("_meta".into(), meta.clone());
-        }
+        forwarded.insert("_meta".into(), Value::Object(meta));
+        let progress = instance.watch_progress(&progress_token, minted);
 
         // Notes for the model, placed under the banner. Worked out before the call so a restart is
         // reported even when the call itself fails.
@@ -766,8 +785,14 @@ impl Router {
         );
 
         let outcome = instance
-            .await_response(&instance_request_id, "tools/call", receiver)
+            .await_response(
+                &instance_request_id,
+                "tools/call",
+                receiver,
+                Some(progress.notify()),
+            )
             .await;
+        drop(progress);
         self.inflight.lock().expect("inflight lock").remove(&tracking_key);
 
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -803,7 +828,23 @@ impl Router {
                 Ok(result)
             }
             Err(error) => {
-                let mut message = format!("instance '{}' did not complete that call: {error}", instance.id());
+                let mut message = match error.downcast_ref::<instance::CallTimedOut>() {
+                    // The orchestrator's limit, said as such: the game is usually fine and may
+                    // still be running the call, so it is asked to stop rather than left to finish
+                    // an action nobody will hear about.
+                    Some(timed_out) => {
+                        instance
+                            .cancel(&instance_request_id, "the orchestrator stopped waiting for it")
+                            .await;
+                        format!(
+                            "The orchestrator stopped waiting for instance '{}': {timed_out}. That is a \
+                             limit in the orchestrator, not a sign the game hung, and the game was asked \
+                             to cancel the call. Check the game's state before retrying.",
+                            instance.id()
+                        )
+                    }
+                    None => format!("instance '{}' did not complete that call: {error}", instance.id()),
+                };
                 for note in notes.iter().rev() {
                     message = format!("{note}\n{message}");
                 }
@@ -1916,10 +1957,22 @@ impl Router {
                 self.notify_downstream(forwarded);
             }
 
-            // Progress tokens are the client's own — they ride through in `_meta` on the way down
-            // and come back unchanged, so there is nothing to translate.
+            // Every progress notification is a heartbeat for the call it belongs to. A client's own
+            // token rides through unchanged, so there is nothing to translate; one the orchestrator
+            // minted for its heartbeat stops here.
             "notifications/progress" => {
-                self.notify_downstream(message);
+                let token = message
+                    .get("params")
+                    .and_then(|params| params.get("progressToken"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let forward = match self.registry.get(instance_id) {
+                    Some(instance) => instance.note_progress(&token),
+                    None => true,
+                };
+                if forward {
+                    self.notify_downstream(message);
+                }
             }
 
             other => {
@@ -2328,6 +2381,65 @@ mod tests {
             names.iter().any(|name| name.contains("client_move")),
             "the cached surface must survive a link that is still coming up: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_call_without_a_progress_token_gets_one_whose_progress_stays_in_the_orchestrator() {
+        // The heartbeat that lets a 240 s client_wait outlive REQUEST_TIMEOUT. The client never
+        // asked for progress, so the notifications that keep the call alive must not reach it.
+        let (router, alpha, mut outbound) = router_with("alpha");
+        alpha.set_catalogue(Catalogue {
+            tools: vec![json!({
+                "name": "client_wait", "description": "wait",
+                "annotations": { "readOnlyHint": true },
+            })],
+            ..Catalogue::default()
+        });
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "alpha".into(),
+            })
+            .await;
+        let mut downstream = router.subscribe_downstream();
+        while downstream.try_recv().is_ok() {}
+
+        let answering = Arc::clone(&alpha);
+        let heartbeat_router = Arc::clone(&router);
+        let instance_side = tokio::spawn(async move {
+            let request = outbound.recv().await.expect("the call is forwarded");
+            let token = request["params"]["_meta"]["progressToken"].clone();
+            assert!(
+                token
+                    .as_str()
+                    .is_some_and(|token| token.starts_with("orch-progress-")),
+                "a minted token: {request}"
+            );
+            heartbeat_router
+                .handle_upstream(UpstreamEvent::Notification {
+                    instance: "alpha".into(),
+                    message: json!({
+                        "jsonrpc": "2.0", "method": "notifications/progress",
+                        "params": { "progressToken": token, "progress": 5000, "total": 240000 },
+                    }),
+                })
+                .await;
+            answering.complete(json!({
+                "jsonrpc": "2.0",
+                "id": jsonrpc::id_of(&request).unwrap(),
+                "result": { "content": [{ "type": "text", "text": "Waited." }], "isError": false },
+            }));
+        });
+
+        let result = call(&router, json!({"name": "client_wait", "ticks": 4800})).await;
+        instance_side.await.unwrap();
+        assert_eq!(result["isError"], false, "{result}");
+        while let Ok(message) = downstream.try_recv() {
+            assert_ne!(
+                jsonrpc::method_of(&message),
+                Some("notifications/progress"),
+                "the orchestrator's own heartbeat reached the client: {message}"
+            );
+        }
     }
 
     fn tool_names(response: &Value) -> Vec<String> {

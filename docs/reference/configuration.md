@@ -296,8 +296,14 @@ their game has not appeared in the roster.
 Concurrent MCP sessions per endpoint. Each permitted session reserves an HTTP worker thread so its
 event stream cannot starve request handling — the pool is sized `workerThreads + maxSessions`.
 
-At the limit, new sessions are refused rather than old ones evicted: each session is a live client
-that would otherwise silently stop working.
+At the limit, a new session evicts the longest-idle existing one, as long as that session has been
+idle for at least 60 seconds, has no request still running, and is not the orchestrator link. Scripts
+that are killed mid-run never send `DELETE`, and refusing new sessions until their abandoned ones
+timed out locked every script out for up to `sessionIdleTimeoutSeconds`. An evicted client that was
+still alive gets a 404 on its next request, and the MCP spec tells it to initialize again.
+
+Only when no session qualifies is the new one refused (HTTP 503). The refusal says how long until a
+slot frees up.
 
 ### `sessionIdleTimeoutSeconds`
 
