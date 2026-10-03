@@ -278,7 +278,8 @@ public final class ClientInputTools {
         }
         if (message.length() > 256) {
             return "Chat messages are limited to 256 characters; that one is " + message.length()
-                + ". Longer messages are rejected by the server, not truncated.";
+                + ". Longer messages are rejected by the server, not truncated."
+                + (isCommand ? " Run a longer command with client_command_block_run." : "");
         }
         return null;
     }

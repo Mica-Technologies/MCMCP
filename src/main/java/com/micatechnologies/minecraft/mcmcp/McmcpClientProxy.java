@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp;
 import com.micatechnologies.minecraft.mcmcp.client.ClientThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.client.ClientIdentification;
 import com.micatechnologies.minecraft.mcmcp.client.ClientWatchdog;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientCommandBlockTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientCommandTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientDebugTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientGuiTools;
@@ -53,6 +54,7 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientSurveyTools.register();
         ClientMapTools.register();
         ClientCommandTools.register();
+        ClientCommandBlockTools.register();
         ClientDebugTools.register();
         ClientInputTools.register();
         ClientGuiTools.register();

@@ -216,12 +216,18 @@ public final class ClientStateTools {
                 .bool("nbt", "Also return 'blockEntity': the tile entity's NBT as this client holds "
                     + "it, or present=false when there is none. A client is sent only what the "
                     + "server syncs for drawing the block, so a missing key means not synced, not "
-                    + "unset; server_get_block has the whole tag. Off by default.")
+                    + "unset; server_get_block has the whole tag. A Chisels & Bits block's voxel "
+                    + "blob comes decoded, as 'chisel': its bit counts by state and the box they "
+                    + "fill. Off by default.")
                 .enumeration("nbt_source", "With nbt: 'client' (default) reads the copy this "
                         + "client holds. 'server' runs /blockdata x y z {} as the player, which "
                         + "changes nothing and answers with the server's whole tag; needs operator "
                         + "permission on the server.",
                     "client", "server")
+                .bool("chisel_grid", "With nbt, on a Chisels & Bits block: also return chisel.grid, every bit as "
+                    + "16 layers (y 0 up) of 16 rows (z 0 = north first) of 16 characters (x 0 = "
+                    + "west first), with a legend; about 5 KB. The bit counts and bounds come "
+                    + "without it.")
                 .required("x", "y", "z")
                 .build())
             .clientOnly()
@@ -233,6 +239,7 @@ public final class ClientStateTools {
                 final boolean relative = context.getBoolean("relative", false);
                 final boolean nbt = context.getBoolean("nbt", false);
                 final boolean fromServer = "server".equals(context.getString("nbt_source", "client"));
+                final boolean chiselGrid = context.getBoolean("chisel_grid", false);
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -243,7 +250,7 @@ public final class ClientStateTools {
                             origin.getZ() + z);
                         JsonObject json = GameJson.block(mc.world, pos);
                         if (nbt && !fromServer && json.get("loaded").getAsBoolean()) {
-                            json.add("blockEntity", GameJson.blockEntity(mc.world, pos));
+                            json.add("blockEntity", GameJson.blockEntity(mc.world, pos, chiselGrid));
                         }
                         String biome = GameJson.biomeId(mc.world, pos);
                         if (biome != null) {
@@ -258,7 +265,7 @@ public final class ClientStateTools {
                     JsonObject at = result.getAsJsonObject("position");
                     result.add("blockEntity", ClientCommandTools.serverBlockEntity(context,
                         new BlockPos(at.get("x").getAsInt(), at.get("y").getAsInt(),
-                            at.get("z").getAsInt())));
+                            at.get("z").getAsInt()), chiselGrid));
                 }
                 return ToolResult.structured(result);
             })

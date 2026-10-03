@@ -243,7 +243,7 @@ accident.
 
 #### `server_get_block`
 
-:material-eye: Read-only · `x`, `y`, `z` required · optional `dimension`, `nbt`
+:material-eye: Read-only · `x`, `y`, `z` required · optional `dimension`, `nbt`, `chisel_grid`
 
 Block id, metadata, state properties, light levels, hardness and biome at one position.
 
@@ -258,6 +258,14 @@ because a machine's tag can run to kilobytes. NBT's number widths are dropped (`
 arrays and lists past 256 entries are cut to `{"elided": "int[]", "length": N}` rather than ending
 silently; and a tag over 32 KB comes back as its top-level `keys` with `truncated: true`. The tile
 entity is looked up without creating one, so the read stays a read.
+
+On a Chisels & Bits block the voxel blob in `X` is decoded into `blockEntity.chisel`: `bits` counts
+each block state, most common first, `air` the empty bits, and `bounds` the box the bits fill, and
+`nbt.X` shrinks to its length. `chisel_grid: true` adds `chisel.grid`, every bit as a character, in
+the shape [`client_chisel_block`](#client_chisel_block) takes: `layers` is 16 layers from y 0 up, each
+16 rows from z 0 (north), each 16 characters from x 0 (west), with a `legend` (`.` is air). It costs
+about 5 KB, so it is off by default. All three of C&B's blob formats decode: compact (numeric state
+ids), cross-world (state names) and the legacy name-and-meta form.
 
 Reports `loaded: false` without reading if the chunk is not loaded. `getBlockState` on an unloaded
 position silently returns air, so a naive read would confidently describe a mountain as empty space —
@@ -680,7 +688,8 @@ adjust, check again — and a full state response each time is wasteful.
 
 #### `client_get_block`
 
-:material-eye: Read-only · `x`, `y`, `z` required · optional `relative`, `nbt`, `nbt_source`
+:material-eye: Read-only · `x`, `y`, `z` required · optional `relative`, `nbt`, `nbt_source`,
+`chisel_grid`
 
 `relative: true` treats the coordinates as offsets from the player's block position.
 
@@ -697,6 +706,9 @@ argument. The tool reads that argument from the translated message itself, so th
 structured and arrives whole however long it is. Scraping it out of chat was how a fire-alarm panel's
 479-device `apps` string came back as some 500 wrapped lines mixed in with server broadcasts. The
 result's `source` is `server-blockdata`.
+
+A Chisels & Bits block's blob is decoded from either source, as [`server_get_block`](#server_get_block)
+describes, `chisel_grid` included.
 
 Positions outside the loaded view distance report `loaded: false` and nothing else. The client
 genuinely does not know what is there and will not be told until it gets closer.
@@ -851,6 +863,99 @@ skipping.
 !!! warning "Command spam kicks non-operators"
     Vanilla kicks a player who is not an operator for sending more than about one message a tick,
     sustained. Operators are exempt. For anyone else, set `delay_ms`.
+
+#### `client_command_block_run`
+
+:material-alert: Destructive · Requires `permissions.allowCommands` · `command` required · optional
+`command_block`, `keep_block`, `timeout_ms`
+
+One command of up to 32,000 characters, run on the server through a command block. Chat carries at
+most 256, and on a server you do not run the client is the only way in. That rules out anything
+with large data: a Chisels & Bits voxel blob, a list of fifty linked positions, a long book.
+
+It puts a command block in the first air block 2–6 above the player (or at `command_block`, which
+must be air or an impulse command block), arms it with `/blockdata`, and sets the command with the
+same `MC|AutoCmd` packet the command block's screen sends on Done, with *always active* on. That
+packet carries up to 32,767 bytes, and the server runs the command on its next tick. No screen opens.
+The result is then read back with `/blockdata x y z {}`, because the server never sends a command
+block's result to anyone who has not opened it. `SuccessCount` is set to -1 beforehand, so "not run
+yet" and "ran and failed" read differently. Finally the block is set back to air, unless
+`keep_block` is true or the block was already there.
+
+| Field | Meaning |
+|---|---|
+| `status` | `ok` (`successCount` > 0), `failed`, `no_result` (it had not run within `timeout_ms`), or `refused` |
+| `successCount` | What the command returned; 0 is a failure |
+| `lastOutput` | The block's last output line, timestamp removed. Errors always appear here; success messages only while the `commandBlockOutput` gamerule is on |
+| `commandBlock`, `placed`, `removed` | Where it ran, and whether this call placed and removed the block |
+
+!!! warning "What the server asks for"
+    The server accepts the packet only from a player in **creative mode** with **operator level 2**,
+    and only with `enable-command-block=true` in `server.properties`. The tool checks the first two
+    itself before touching the world, and reports the server's refusal when the third is missing.
+
+The command runs **as the command block**, not as the player: `~` and `@p` resolve from the block's
+position, so use absolute coordinates. Operators see its feedback in chat as `[MCMCP: …]`, the name
+the tool gives the block.
+
+#### `client_set_block_nbt`
+
+:material-alert: Destructive · Requires `permissions.allowCommands` · `x`, `y`, `z`, `nbt` required ·
+optional `command_block`, `keep_block`, `timeout_ms`
+
+`/blockdata x y z <nbt>` with no length limit, through
+[`client_command_block_run`](#client_command_block_run), which has the same requirements. `nbt` is
+an SNBT string or a JSON object, as for [`server_set_blocks`](#server_set_blocks). It merges as
+`/blockdata` does: nested compounds merge, and a list or array replaces the old one whole.
+
+Afterwards the server's tag is read back, and `written` lists the top-level keys that now hold what
+was given. `differs` lists any that do not: a tile entity can normalise or refuse a value without
+`/blockdata` failing.
+
+#### `client_chisel_block`
+
+:material-alert: Destructive · Requires `permissions.allowCommands` · `x`, `y`, `z` required ·
+optional `palette`, `start`, `layers`, `boxes`, `faces`, `dry_run`, `command_block`, `keep_block`,
+`timeout_ms`
+
+Sets the bits of a Chisels & Bits block (lettering, logos and relief on a facade), on a server you
+reach only as a player. It builds the 16×16×16 voxel blob and the tile-entity tags around it, then
+places or updates the block through [`client_command_block_run`](#client_command_block_run), with the
+same requirements. Finally it reads the block back from the server and decodes it: `verified: true`
+means every bit is what was asked for.
+
+`palette` maps single characters to block states: `{"#": "minecraft:stone", "r":
+"minecraft:wool[color=red]"}`. In every grid string, a space leaves a bit as it was, `.` makes it air,
+and any other character is a palette key. Edits apply in order:
+
+| Argument | Effect |
+|---|---|
+| `start` | `empty` (all air, the default), `existing` (the block there now: its bits if it is chiseled, or the whole block if it is plain stone or wood), or a palette key to fill with |
+| `layers` | Every bit, in the shape [`client_get_block`](#client_get_block) `chisel_grid` returns: 16 layers from y 0 up, 16 rows from z 0 (north), 16 characters from x 0 (west) |
+| `boxes` | `{from: [x,y,z], to: [x,y,z], key}`, inclusive, each 0–15 |
+| `faces` | `{face, rows, depth}`: draw on one side, `rows` top first and left to right **as seen from outside that side**, each character `depth` bits deep. `up` and `down` read as a map, north at the top |
+
+`faces` is usually the one you want. To engrave "HI" into a stone block's north side:
+
+```json
+{"x": 10, "y": 64, "z": -3, "palette": {"#": "minecraft:stone"}, "start": "#",
+ "faces": [{"face": "north", "depth": 2, "rows": [
+   "", "", "  ..  ..  ....  ", "  ..  ..   ..   ", "  ......   ..   ",
+   "  ..  ..   ..   ", "  ..  ..  ....  "]}]}
+```
+
+The block placed is `chiselsandbits:chiseled_<material>` for the most common state's material, as
+C&B chooses it. The tags C&B trusts rather than recomputes are worked out the way it would: `b`, the
+most common state; `s`, which sides are solid for neighbours to cull against; `lv`, the light given
+off; and `nc`, whether the block is a full opaque cube. The blob uses the compact format of numeric
+state ids, which client and server share because Forge sends the server's id map at login. States
+are passed through their id first, so a property an id cannot hold (a stair's `shape`) is dropped
+before the write rather than reported as a mismatch after it.
+
+`dry_run: true` builds everything and returns `blobBytes` and `commandChars` without writing. A
+command block holds 32,000 characters, and a byte of blob costs about five as SNBT. Lettering in one
+or two states is tens of bytes; eight states in a regular pattern measured 171 bytes (878
+characters). Noise compresses badly.
 
 #### `client_look`
 

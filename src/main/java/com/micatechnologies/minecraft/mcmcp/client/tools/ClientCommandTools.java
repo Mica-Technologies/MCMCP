@@ -1,7 +1,6 @@
 package com.micatechnologies.minecraft.mcmcp.client.tools;
 
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
@@ -21,6 +20,7 @@ import java.util.concurrent.Callable;
 import net.minecraft.client.Minecraft;
 import net.minecraft.nbt.JsonToNBT;
 import net.minecraft.nbt.NBTException;
+import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.math.BlockPos;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
@@ -340,17 +340,46 @@ public final class ClientCommandTools {
      * hundreds of lines (#32).
      *
      * @return the {@code blockEntity} object for {@code client_get_block}: {@code source}, and
-     *         {@code nbt}, {@code present: false} or {@code error}
+     *         {@code nbt}, {@code present: false} or {@code error}; plus {@code chisel} for a
+     *         Chisels &amp; Bits block
      */
-    static JsonObject serverBlockEntity(ToolContext context, final BlockPos pos) throws Exception {
-        final String command = "/blockdata " + pos.getX() + " " + pos.getY() + " " + pos.getZ()
-            + " {}";
+    static JsonObject serverBlockEntity(ToolContext context, final BlockPos pos, boolean chiselGrid)
+        throws Exception {
         JsonObject json = new JsonObject();
         json.addProperty("source", "server-blockdata");
+        ServerTag read = readServerTag(context, pos);
+        if (read.error != null) {
+            json.addProperty("error", read.error);
+            if (read.raw != null) {
+                json.addProperty("raw", read.raw);
+            }
+        } else if (read.tag == null) {
+            json.addProperty("present", false);
+        } else {
+            JsonObject nbt = NbtJson.toJson(read.tag).getAsJsonObject();
+            json.add("nbt", nbt);
+            GameJson.addChisel(json, nbt, read.tag, chiselGrid);
+        }
+        return json;
+    }
+
+    /** What {@link #readServerTag} found: a tag, no tile entity (all null), or an error. */
+    static final class ServerTag {
+
+        NBTTagCompound tag;
+        String error;
+        /** The server's text when it would not parse. */
+        String raw;
+    }
+
+    static ServerTag readServerTag(ToolContext context, final BlockPos pos) throws Exception {
+        final String command = "/blockdata " + pos.getX() + " " + pos.getY() + " " + pos.getZ()
+            + " {}";
+        ServerTag result = new ServerTag();
         String refusal = ClientInputTools.chatRefusal(command);
         if (refusal != null) {
-            json.addProperty("error", refusal);
-            return json;
+            result.error = refusal;
+            return result;
         }
 
         try (ClientChatRecorder.Capture chat = ClientChatRecorder.capture()) {
@@ -361,9 +390,8 @@ public final class ClientCommandTools {
                 }
             });
             if (client) {
-                json.addProperty("error", "The command did not reach the server: a client-side "
-                    + "handler took it.");
-                return json;
+                result.error = "The command did not reach the server: a client-side handler took it.";
+                return result;
             }
 
             long deadline = System.currentTimeMillis() + BLOCKDATA_TIMEOUT_MILLIS;
@@ -377,29 +405,25 @@ public final class ClientCommandTools {
                     if (("commands.blockdata.failed".equals(key)
                         || "commands.blockdata.success".equals(key)) && args.length > 0) {
                         try {
-                            JsonElement nbt = NbtJson.toJson(JsonToNBT.getTagFromJson(args[0]));
-                            json.add("nbt", nbt);
+                            result.tag = JsonToNBT.getTagFromJson(args[0]);
                         } catch (NBTException e) {
-                            json.addProperty("error", "The server's tag could not be parsed: "
-                                + e.getMessage());
-                            json.addProperty("raw", args[0]);
+                            result.error = "The server's tag could not be parsed: " + e.getMessage();
+                            result.raw = args[0];
                         }
-                        return json;
+                        return result;
                     }
                     if ("commands.blockdata.notValid".equals(key)) {
-                        json.addProperty("present", false);
-                        return json;
+                        return result;
                     }
                     if (entry.isError()) {
-                        json.addProperty("error", "/blockdata failed: " + entry.getText());
-                        return json;
+                        result.error = "/blockdata failed: " + entry.getText();
+                        return result;
                     }
                 }
                 Thread.sleep(POLL_MILLIS * 4);
             }
-            json.addProperty("error", "No answer to " + command + " within "
-                + BLOCKDATA_TIMEOUT_MILLIS + "ms.");
-            return json;
+            result.error = "No answer to " + command + " within " + BLOCKDATA_TIMEOUT_MILLIS + "ms.";
+            return result;
         }
     }
 }

@@ -283,9 +283,13 @@ public final class GameJson {
      * <p>Looked up with {@code CHECK}, which never creates one: {@code World.getTileEntity} will
      * construct a missing tile entity for a block that should have one, and a read must not.
      *
+     * <p>A Chisels &amp; Bits block's voxel blob is decoded into {@code chisel}; see
+     * {@link #addChisel}.
+     *
+     * @param chiselGrid also return a C&amp;B block's voxels as a character grid
      * @return {@code {"present": false}} when there is none, which is an answer and not an omission
      */
-    public static JsonObject blockEntity(World world, BlockPos pos) {
+    public static JsonObject blockEntity(World world, BlockPos pos, boolean chiselGrid) {
         JsonObject json = new JsonObject();
         TileEntity tile = !isLoaded(world, pos) ? null
             : world.getChunk(pos).getTileEntity(pos, Chunk.EnumCreateEntityType.CHECK);
@@ -296,14 +300,17 @@ public final class GameJson {
         json.addProperty("source", world.isRemote ? "client-synced" : "server");
 
         JsonElement nbt;
+        NBTTagCompound tag;
         try {
-            nbt = NbtJson.toJson(tile.writeToNBT(new NBTTagCompound()));
+            tag = tile.writeToNBT(new NBTTagCompound());
+            nbt = NbtJson.toJson(tag);
         } catch (RuntimeException e) {
             // writeToNBT is third-party code on a modded block, and on a client it may be reading
             // fields the mod only ever populates on the server.
             json.addProperty("error", "The tile entity could not write its tag: " + e);
             return json;
         }
+        addChisel(json, nbt.getAsJsonObject(), tag, chiselGrid);
 
         int size = Json.write(nbt).length();
         if (size > MAX_BLOCK_ENTITY_CHARS) {
@@ -318,6 +325,27 @@ public final class GameJson {
         }
         json.add("nbt", nbt);
         return json;
+    }
+
+    /**
+     * Decodes a Chisels &amp; Bits voxel blob into {@code chisel} on {@code blockEntity}, and stands
+     * the raw {@code X} bytes down to their length in {@code nbt}: as JSON numbers they are several
+     * kilobytes that say nothing a model can read.
+     */
+    public static void addChisel(JsonObject blockEntity, JsonObject nbt, NBTTagCompound tag,
+        boolean grid) {
+        if (!ChiselNbt.hasBlob(tag)) {
+            return;
+        }
+        JsonObject chisel = ChiselNbt.describe(tag, grid);
+        blockEntity.add("chisel", chisel);
+        if (!chisel.has("error")) {
+            JsonObject stood = new JsonObject();
+            stood.addProperty("elided", "byte[]");
+            stood.addProperty("length", tag.getByteArray(ChiselNbt.TAG_BLOB).length);
+            stood.addProperty("decoded", "chisel");
+            nbt.add(ChiselNbt.TAG_BLOB, stood);
+        }
     }
 
     // ------------------------------------------------------------------

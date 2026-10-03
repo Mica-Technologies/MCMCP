@@ -84,7 +84,12 @@ public final class ServerWorldTools {
                 .integer("dimension", "Dimension id: 0 overworld, -1 nether, 1 end. Defaults to 0.")
                 .bool("nbt", "Also return 'blockEntity': the tile entity's full saved NBT, or "
                     + "present=false when the block has none. Off by default; a machine's tag can "
-                    + "be kilobytes.")
+                    + "be kilobytes. A Chisels & Bits block's voxel blob comes decoded, as "
+                    + "'chisel': its bit counts by state and the box they fill.")
+                .bool("chisel_grid", "With nbt, on a Chisels & Bits block: also return chisel.grid, every bit as "
+                    + "16 layers (y 0 up) of 16 rows (z 0 = north first) of 16 characters (x 0 = "
+                    + "west first), with a legend; about 5 KB. The bit counts and bounds come "
+                    + "without it.")
                 .required("x", "y", "z")
                 .build())
             .serverOnly()
@@ -95,6 +100,7 @@ public final class ServerWorldTools {
                 final int z = context.requireInt("z");
                 final int dimension = context.getInt("dimension", 0);
                 final boolean nbt = context.getBoolean("nbt", false);
+                final boolean chiselGrid = context.getBoolean("chisel_grid", false);
 
                 JsonObject block = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -103,7 +109,7 @@ public final class ServerWorldTools {
                         BlockPos pos = new BlockPos(x, y, z);
                         JsonObject json = GameJson.block(world, pos);
                         if (nbt && json.get("loaded").getAsBoolean()) {
-                            json.add("blockEntity", GameJson.blockEntity(world, pos));
+                            json.add("blockEntity", GameJson.blockEntity(world, pos, chiselGrid));
                         }
                         json.addProperty("dimension", dimension);
                         String biome = GameJson.biomeId(world, pos);

@@ -426,7 +426,7 @@ public final class ServerBuildTools {
     }
 
     /** An {@code nbt} property: an SNBT string or a JSON object. */
-    static JsonObject nbtSchema(String description) {
+    public static JsonObject nbtSchema(String description) {
         JsonObject schema = new JsonObject();
         JsonArray types = new JsonArray();
         types.add("string");
