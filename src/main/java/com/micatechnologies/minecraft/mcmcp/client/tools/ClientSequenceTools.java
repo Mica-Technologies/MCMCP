@@ -147,7 +147,9 @@ public final class ClientSequenceTools {
         for (int i = 0; i < array.size(); i++) {
             Object parsed = parse(context, i, array.get(i));
             if (parsed instanceof String) {
-                return ToolResult.error("Step " + i + ": " + parsed + " Nothing was run.");
+                String why = (String) parsed;
+                return ToolResult.error("Step " + i + ": " + why
+                    + (why.contains("Nothing was done") ? "" : " Nothing was run."));
             }
             steps.add((Step) parsed);
         }
@@ -234,7 +236,10 @@ public final class ClientSequenceTools {
 
         String name = toolKey.startsWith("client_") ? toolKey : "client_" + toolKey;
         if (!STEP_TOOLS.contains(name)) {
-            String closest = ArgumentNames.closest(name, STEP_TOOLS);
+            // A real tool that is simply not allowed gets no guess: the closest allowed name to
+            // "screenshot" is "select_slot", which helps nobody.
+            String closest = McpRegistry.tool(name, context.getSide()) != null ? null
+                : ArgumentNames.closest(name, STEP_TOOLS);
             return "'" + toolKey + "' cannot be a step"
                 + (closest == null ? "." : "; did you mean '" + closest + "'?")
                 + " Steps can be: " + String.join(", ", STEP_TOOLS) + ".";
