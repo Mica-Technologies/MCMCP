@@ -33,6 +33,9 @@ public class ToolContext {
     @Nullable
     private final JsonElement progressToken;
 
+    /** The last progress value sent, so a smaller or equal one is dropped rather than sent. */
+    private double lastProgress = Double.NEGATIVE_INFINITY;
+
     public ToolContext(McpSession session,
                        JsonObject arguments,
                        GameThreadBridge gameThread,
@@ -185,6 +188,15 @@ public class ToolContext {
         if (progressToken == null) {
             return;
         }
+        // The spec has progress increase with every notification. A call made of several parts —
+        // client_sequence's steps, each reporting on its own scale — would otherwise repeat a value
+        // at each boundary, and a strict client may treat that as a protocol fault.
+        synchronized (this) {
+            if (progress <= lastProgress) {
+                return;
+            }
+            lastProgress = progress;
+        }
         JsonObject params = new JsonObject();
         params.add("progressToken", progressToken);
         params.addProperty("progress", progress);
@@ -196,6 +208,28 @@ public class ToolContext {
         }
         session.enqueue(com.micatechnologies.minecraft.mcmcp.protocol.JsonRpc
             .notification(McpProtocol.NOTIFICATION_PROGRESS, params));
+    }
+
+    /**
+     * A context for running one part of this call as a tool call of its own: same session,
+     * cancellation and game thread, its own arguments.
+     *
+     * <p>Progress the part reports is mapped onto this call's scale, as {@code base} plus the part's
+     * own fraction (held below 1), out of {@code total}. So a step that heartbeats through a long
+     * wait keeps the whole call alive through the orchestrator's no-progress limit, and the numbers
+     * still only go up.
+     */
+    public ToolContext forPart(JsonObject partArguments, final double base, final double total) {
+        final ToolContext whole = this;
+        return new ToolContext(session, partArguments, gameThread, cancellation,
+            gameThreadTimeoutMillis, null) {
+            @Override
+            public void reportProgress(double progress, double partTotal, @Nullable String message) {
+                double fraction = partTotal > 0 ? Math.max(0.0D, Math.min(progress / partTotal, 0.99D))
+                    : 0.5D;
+                whole.reportProgress(base + fraction, total, message);
+            }
+        };
     }
 
     /**

@@ -120,6 +120,26 @@ public final class ToolResult {
         return isError;
     }
 
+    /** The structured payload, or null when this result has only content blocks. */
+    @Nullable
+    public JsonObject getStructuredContent() {
+        return structuredContent;
+    }
+
+    /** Every text block, joined by newlines; empty when there are none. */
+    public String getText() {
+        StringBuilder text = new StringBuilder();
+        for (JsonObject block : content) {
+            if ("text".equals(Json.getString(block, "type"))) {
+                if (text.length() > 0) {
+                    text.append('\n');
+                }
+                text.append(Json.getString(block, "text"));
+            }
+        }
+        return text.toString();
+    }
+
     // ------------------------------------------------------------------
     // Wire form
     // ------------------------------------------------------------------

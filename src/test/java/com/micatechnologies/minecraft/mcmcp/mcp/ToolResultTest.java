@@ -70,4 +70,17 @@ class ToolResultTest {
         assertTrue(result.get("isError").getAsBoolean());
         assertEquals("No player is logged in.", textOf(result));
     }
+
+    @Test
+    void a_result_can_be_read_back_by_a_caller_that_ran_the_tool_itself() {
+        // client_sequence runs tools through their handlers and checks the result it gets back, so
+        // the payload has to be reachable without rendering the wire form.
+        JsonObject data = new JsonObject();
+        data.addProperty("block", "minecraft:stone");
+
+        assertEquals("minecraft:stone",
+            ToolResult.structured(data).getStructuredContent().get("block").getAsString());
+        assertEquals("one\ntwo", ToolResult.text("one").withText("two").getText());
+        assertEquals(null, ToolResult.text("only text").getStructuredContent());
+    }
 }

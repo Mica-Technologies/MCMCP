@@ -1071,6 +1071,49 @@ mine in survival by aiming with `client_look` and holding attack with `client_in
 
 Returns the block before and after, and `broken`.
 
+#### `client_sequence`
+
+:material-alert: Destructive · `steps` required · optional `stop_on_fail`
+
+Run several client tools in one call, in order. Each step names a tool and its usual arguments and
+runs through that tool's own handler, so it behaves exactly as the separate call would — ticks,
+settling and permission checks included. Hand-placing one directional block was five calls (a
+teleport, a slot, a look, a click, a read-back); now it is one.
+
+```json
+{"steps": [
+  {"run_commands": {"commands": ["/tp @p 2000.5 7 -3.5"]}},
+  {"select_slot": {"slot": 0}},
+  {"use_on_block": {"x": 2000, "y": 6, "z": -1, "face": "up", "yaw": 180}},
+  {"get_block": {"x": 2000, "y": 7, "z": -1},
+   "expect": {"block": "realgrid:class_a_transformer_1wire"}}
+]}
+```
+
+A step is an object with one key — the tool's name, with or without `client_` — whose value is the
+tool's arguments. It may add:
+
+- `expect`, checked against the step's result. Only the keys given are checked. Keys may be dotted
+  (`mainHand.item`); `"*"` means present with any value and `null` means absent;
+  `{"$contains": "x"}` and `{"$notContains": "x"}` test a string by substring, which is how to ask
+  whether held-item NBT has a tag.
+- `quiet: true`, which leaves a passing step's result out of the reply.
+
+A step fails when its tool reports an error or an expectation does not match. By default the
+sequence stops there and returns `nextIndex`; `stop_on_fail: false` runs on. Every step is checked
+before any runs — the tool exists and may be a step, and every argument is one it declares — so a
+misspelt argument in a late step changes nothing.
+
+Steps can be the input, GUI and read tools: `select_slot`, `look`, `interact`, `use_on_block`,
+`attack_block`, `key`, `move`, `fly`, `view`, `send_chat`, `run_commands`, `command_block_run`,
+`set_block_nbt`, `chisel_block`, `wait`, `get_block`, `get_blocks`, `looking_at`, `player_state`,
+`inventory`, `nearby_entities`, `read_chat` and the `gui_*` tools. Not the world lifecycle,
+screenshots, profiling, or `client_sequence` itself.
+
+Progress is reported per step, and a step's own progress — a long `client_wait` — is folded into
+it, so a long sequence keeps itself alive through the orchestrator. One call stops starting steps
+after about three minutes and returns `nextIndex`.
+
 #### `client_input_lock`
 
 Requires `permissions.allowPlayerControl` · `locked` required, optional `seconds`, `reason`
