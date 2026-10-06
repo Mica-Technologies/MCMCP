@@ -1096,7 +1096,8 @@ tool's arguments. It may add:
 - `expect`, checked against the step's result. Only the keys given are checked. Keys may be dotted
   (`mainHand.item`); `"*"` means present with any value and `null` means absent;
   `{"$contains": "x"}` and `{"$notContains": "x"}` test a string by substring, which is how to ask
-  whether held-item NBT has a tag.
+  whether held-item NBT has a tag. A tool that answers in text only (`key`, `send_chat`) is
+  checked as `{"text": "..."}`.
 - `quiet: true`, which leaves a passing step's result out of the reply.
 
 A step fails when its tool reports an error or an expectation does not match. By default the

@@ -208,6 +208,12 @@ frequently model-generated and arrive with the wrong primitive type.
   singleplayer — filter on `!world.isRemote`. `ForgeTimings.getAverageTimings()` divides by a fixed
   99 regardless of how many slots were written; average `getRawTimingData()`'s non-zero slots.
 - **`Minecraft.profiler`, not `mcProfiler`**, in this mapping.
+- **`addScheduledTask` blocks, with no timeout, while a scheduled task runs.** Minecraft drains the
+  queue inside `synchronized (scheduledTasks)`, so a long task holds the lock and every other
+  thread's `addScheduledTask` waits on it — the bridge's own timeout only starts once a task is
+  queued. Anything long (a world launch, a world leave) goes through `ClientDeferredTasks`, never the
+  bridge. A world launch run from the queue hung every MCMCP call for as long as Forge's mod-mismatch
+  prompt waited.
 - Game directory comes from `Loader.instance().getConfigDir().getParentFile()` — stable on both sides,
   unlike the client-only `Minecraft.gameDir`.
 - **`EntityPlayerSP.sendChatMessage` is not how chat is sent.** It only sends the packet. The real

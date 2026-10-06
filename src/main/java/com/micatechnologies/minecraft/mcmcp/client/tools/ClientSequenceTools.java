@@ -86,6 +86,7 @@ public final class ClientSequenceTools {
                 + "add 'expect', checked against the step's result: every key given must match. "
                 + "Keys may be dotted ('mainHand.item'); \"*\" means present, null means absent, "
                 + "{\"$contains\": \"x\"} and {\"$notContains\": \"x\"} test a string such as NBT. "
+                + "A tool that answers in text only is checked as {\"text\": ...}. "
                 + "'quiet': true leaves the step's result out of the reply.\n\n"
                 + "A step fails when its tool reports an error or an expectation does not match. "
                 + "By default the sequence stops there; stop_on_fail false runs on. Every step is "

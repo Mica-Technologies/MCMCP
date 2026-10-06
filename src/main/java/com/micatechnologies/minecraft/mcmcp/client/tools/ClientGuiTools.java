@@ -858,7 +858,8 @@ public final class ClientGuiTools {
                 .integer("y", "Vertical coordinate, measured from the top.")
                 .enumeration("space", "Coordinate space. 'pixel' (the default) matches a screenshot's "
                     + "own pixels. 'gui' is Minecraft's scaled space, which is what "
-                    + "client_gui_widgets reports button positions in.", "pixel", "gui")
+                    + "client_gui_widgets reports button positions in, before any conversion a "
+                    + "screen does itself.", "pixel", "gui")
                 .integer("button", "Mouse button: 0 left, 1 right, 2 middle. Defaults to 0.", 0, 2)
                 .required("x", "y")
                 .build())
