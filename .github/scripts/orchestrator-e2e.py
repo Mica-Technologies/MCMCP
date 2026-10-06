@@ -139,15 +139,23 @@ def wait_for_an_instance(orchestrator, timeout):
     Polling rather than assuming: the mod retries its link on a backoff that grows to thirty
     seconds, so a game started before the orchestrator can take that long to appear. That is correct
     behaviour, and a test that did not allow for it would fail on timing rather than on substance.
+
+    Waits for `ready`, not just `connected`: an instance is listed the moment its link is up, before
+    the orchestrator has read its catalogue, and a tools/list in that window lacks the game's tools.
+    That race failed this test once with nothing wrong in either half.
     """
     deadline = time.time() + timeout
+    linked = []
     while time.time() < deadline:
         result = orchestrator.request("tools/call", {"name": "mcmcp_instances", "arguments": {}})
         structured = result.get("structuredContent") or {}
-        connected = structured.get("connected") or []
-        if connected:
-            return connected
+        linked = structured.get("connected") or []
+        if any(entry.get("ready", True) for entry in linked):
+            return [entry for entry in linked if entry.get("ready", True)]
         time.sleep(3)
+    if linked:
+        raise Failure(f"an instance linked but its catalogue never became ready within {timeout}s: "
+                      f"{linked}")
     raise Failure(f"no instance linked within {timeout}s")
 
 
