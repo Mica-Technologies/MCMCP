@@ -79,7 +79,7 @@ public class ClientThreadBridge implements GameThreadBridge {
         }
 
         final CompletableFuture<T> future = new CompletableFuture<>();
-        mc.addScheduledTask(new Runnable() {
+        Runnable runner = new Runnable() {
             @Override
             public void run() {
                 try {
@@ -91,7 +91,16 @@ public class ClientThreadBridge implements GameThreadBridge {
                     future.completeExceptionally(t);
                 }
             }
-        });
+        };
+        // A world launch holds the client thread outside the loop that runs scheduled tasks, for as
+        // long as a Forge startup prompt waits for an answer. ClientStartupQuery runs work from the
+        // prompt's own drawing instead, so the prompt can be seen and answered.
+        if (ClientStartupQuery.holdsClientThread(mc)) {
+            ClientStartupQuery.submit(runner);
+        }
+        else {
+            mc.addScheduledTask(runner);
+        }
 
         try {
             return future.get(timeoutMillis, TimeUnit.MILLISECONDS);

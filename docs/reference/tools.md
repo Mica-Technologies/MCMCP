@@ -1,6 +1,6 @@
 # Tools
 
-66 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+73 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -1255,6 +1255,10 @@ in the background, which Minecraft can believe is focused until somebody clicks 
 
 Call this when an input tool appears to have had no effect — an open GUI swallows movement keys.
 
+`startupQuery` appears while Forge is asking something before a world can load: whether it is a
+yes/no question or a notice, its text (first 2,000 characters), the buttons, and how to answer.
+See `client_world_load`.
+
 #### `client_read_chat`
 
 :material-eye: Read-only · optional `lines`, `filter`
@@ -1627,6 +1631,11 @@ screen and block reads report `loaded=false` for terrain that is merely late.
 `chat` only matches lines that arrive after the wait starts, so it cannot return instantly on
 something from minutes ago.
 
+If Forge stops a world load to ask something, a `worldLoaded`, `chunksLoaded` or `chunksRendered`
+wait returns at once with `blockedOnStartupQuery` and the question under `startupQuery`, including
+how to answer it. A poll that times out because a world launch is holding the client thread counts
+as "not yet" rather than failing the wait.
+
 `ticks` goes up to 6000 (5 minutes), including through the orchestrator. The wait reports progress
 every 5 seconds, and the orchestrator only gives up on a call after 120 seconds with no answer and no
 progress, so a long wait is not cut off.
@@ -1658,9 +1667,25 @@ somebody's survival save, and the recovery is nothing.
 
 #### `client_world_load`
 
-Requires `permissions.allowPlayerControl` · `folderName` required
+Requires `permissions.allowPlayerControl` · `folderName` required · optional `onModMismatch`
 
 Load an existing world, leaving any current one first.
+
+A world saved with a different set of mods makes Forge stop the load and ask whether to continue.
+`onModMismatch` says what to do about that: `report` (the default) leaves the question up for an
+answer — `client_wait` returns with it at once, `client_gui_state` shows it, and
+`client_gui_click` answers it like any other screen. `continue` and `cancel` press FML's own Yes or
+No as soon as the question is drawn, and the `client_wait worldLoaded` that follows reports what was
+asked under `startupQueryAnswered`. `continue` may lose blocks and items from mods that are gone.
+
+!!! note "Why tools keep working while Forge asks"
+
+    The question is asked from inside `launchIntegratedServer`, which holds the client thread in a
+    loop that never runs Minecraft's scheduled tasks — where every MCMCP tool's work normally goes.
+    Each pass of that loop draws the question, though, and drawing it posts Forge's
+    `BackgroundDrawnEvent`. While a world launch holds the client thread, MCMCP queues tool work
+    there instead, so the prompt can be read and answered. Before this, every call ran into its
+    timeout and nothing said why.
 
 #### `client_world_leave`
 

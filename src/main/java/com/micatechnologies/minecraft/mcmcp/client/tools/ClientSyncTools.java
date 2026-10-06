@@ -3,14 +3,19 @@ package com.micatechnologies.minecraft.mcmcp.client.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
+import com.micatechnologies.minecraft.mcmcp.client.ClientStartupQuery;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
@@ -71,6 +76,10 @@ public final class ClientSyncTools {
      */
     private static final long PROGRESS_INTERVAL_MILLIS = 5_000L;
 
+    /** Conditions that need a world, and so cannot be met while a startup prompt holds the load. */
+    private static final Set<String> WORLD_WAITS = new HashSet<>(Arrays.asList(
+        "worldLoaded", "chunksLoaded", "chunksRendered"));
+
     private ClientSyncTools() {
     }
 
@@ -103,7 +112,10 @@ public final class ClientSyncTools {
                 + "'chunksLoaded' waits until this client holds every chunk within 'radius' of (x, z) "
                 + "— the player by default — and 'chunksRendered' also until their meshes are built, "
                 + "which is what a screenshot needs. Use one after a teleport, before surveying. On a "
-                + "timeout the result lists the chunks still missing.")
+                + "timeout the result lists the chunks still missing.\n\n"
+                + "If Forge stops a world load to ask something (a world saved with different mods), "
+                + "a world wait returns at once with 'startupQuery': the question and how to answer "
+                + "it.")
             .schema(JsonSchema.object()
                 .integer("ticks", "How long to wait, in ticks (20 per second). With 'waitFor' this is "
                     + "the timeout; without it, the exact time to wait. Defaults to 20.",
@@ -196,17 +208,47 @@ public final class ClientSyncTools {
                 return ToolResult.text("Wait cancelled.").withStructured(json);
             }
 
-            JsonObject state = context.onGameThread(new Callable<JsonObject>() {
-                @Override
-                public JsonObject call() {
-                    return snapshot(area);
+            JsonObject state;
+            try {
+                state = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() {
+                        return snapshot(area);
+                    }
+                });
+            }
+            catch (JsonRpcException e) {
+                // A world launch holds the client thread for seconds at a time, so one poll can
+                // outlast the game-thread timeout while the load is going perfectly well. That is
+                // "not yet", not a failed wait; the budget still bounds it.
+                if (e.getCode() != JsonRpcException.REQUEST_TIMED_OUT) {
+                    throw e;
                 }
-            });
+                continue;
+            }
+
+            // A Forge prompt holds the world load until somebody answers it, so a wait for the world
+            // would run its whole budget for nothing. Return with the question instead.
+            if (state.has("startupQuery") && WORLD_WAITS.contains(waitFor)) {
+                state.addProperty("conditionMet", false);
+                state.addProperty("blockedOnStartupQuery", true);
+                state.addProperty("waitedMillis", System.currentTimeMillis() - start);
+                state.addProperty("waitFor", waitFor);
+                return ToolResult.text("The world load is waiting for an answer to a Forge prompt, "
+                    + "so '" + waitFor + "' cannot happen until it is answered. "
+                    + state.getAsJsonObject("startupQuery").get("howToAnswer").getAsString())
+                    .withStructured(state);
+            }
 
             if (isSatisfied(waitFor, state, screenName, chatContains, chat)) {
                 state.addProperty("conditionMet", true);
                 state.addProperty("waitedMillis", System.currentTimeMillis() - start);
                 state.addProperty("waitFor", waitFor);
+                JsonObject answered = "worldLoaded".equals(waitFor)
+                    ? ClientStartupQuery.takeLastAnswered() : null;
+                if (answered != null) {
+                    state.add("startupQueryAnswered", answered);
+                }
                 return ToolResult.text("Condition '" + waitFor + "' met after "
                     + (System.currentTimeMillis() - start) + "ms."
                     + ("worldLoaded".equals(waitFor) && state.has("pausesOnLostFocus")
@@ -217,12 +259,22 @@ public final class ClientSyncTools {
             Thread.sleep(POLL_INTERVAL_MILLIS);
         }
 
-        JsonObject timedOut = context.onGameThread(new Callable<JsonObject>() {
-            @Override
-            public JsonObject call() {
-                return snapshot(area);
+        JsonObject timedOut;
+        try {
+            timedOut = context.onGameThread(new Callable<JsonObject>() {
+                @Override
+                public JsonObject call() {
+                    return snapshot(area);
+                }
+            });
+        }
+        catch (JsonRpcException e) {
+            if (e.getCode() != JsonRpcException.REQUEST_TIMED_OUT) {
+                throw e;
             }
-        });
+            timedOut = new JsonObject();
+            timedOut.addProperty("clientThreadBusy", true);
+        }
         timedOut.addProperty("conditionMet", false);
         timedOut.addProperty("waitedMillis", System.currentTimeMillis() - start);
         timedOut.addProperty("waitFor", waitFor);
@@ -246,6 +298,10 @@ public final class ClientSyncTools {
         json.addProperty("terrainReady", !(screen instanceof GuiDownloadTerrain));
         if (mc.world != null && ClientStateTools.pausesOnLostFocus(mc)) {
             json.addProperty("pausesOnLostFocus", true);
+        }
+        JsonObject query = ClientStartupQuery.describe(mc);
+        if (query != null) {
+            json.add("startupQuery", query);
         }
         if (area != null && mc.world != null && mc.player != null) {
             json.add("chunks", area.describe(mc));

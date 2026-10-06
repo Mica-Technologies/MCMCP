@@ -193,6 +193,11 @@ public final class ClientGuiTools {
             + "build; GUI inspection is unavailable.");
     }
 
+    /** The screen's buttons, for client code outside this class. Client thread only. */
+    public static List<GuiButton> buttonsOn(GuiScreen screen) {
+        return buttonsOf(screen);
+    }
+
     /**
      * Finds a method declared anywhere on a screen's own class hierarchy.
      *
@@ -257,14 +262,14 @@ public final class ClientGuiTools {
      * Presses one button the way vanilla's {@code mouseClicked} does once its hit test has found it,
      * with the hit test done in the button's own coordinates. Client thread only.
      *
-     * <p>Package-visible because {@code ClientStartupQuery} answers FML's mod-mismatch prompt with
-     * it: that screen's buttons are FML's own and drawn where they are stored, but by then the
-     * client thread is inside the world launch, and a direct press is the least that can go wrong.
+     * <p>Public because {@code ClientStartupQuery} answers FML's mod-mismatch prompt with it: that
+     * screen's buttons are FML's own and drawn where they are stored, but by then the client thread
+     * is inside the world launch, and a direct press is the least that can go wrong.
      *
      * @return false when the button's own {@code mousePressed} refused, or a Forge handler cancelled
      *         the press; nothing was run in either case
      */
-    static boolean pressButton(GuiScreen screen, GuiButton button) throws Exception {
+    public static boolean pressButton(GuiScreen screen, GuiButton button) throws Exception {
         Minecraft mc = Minecraft.getMinecraft();
         int centreX = button.x + button.width / 2;
         int centreY = button.y + button.height / 2;
@@ -695,7 +700,11 @@ public final class ClientGuiTools {
 
                 final String label = context.getString("label", null);
                 final int index = context.getInt("index", -1);
-                final boolean press = "press".equals(context.getString("mode", "click"));
+                final String mode = context.getString("mode", "click");
+                if (!"click".equals(mode) && !"press".equals(mode)) {
+                    return ToolResult.error("mode is 'click' or 'press'; got '" + mode + "'.");
+                }
+                final boolean press = "press".equals(mode);
                 if (label == null && index < 0) {
                     return ToolResult.error("Pass either 'label' or 'index' to say which button to "
                         + "click. Call client_gui_widgets to see what is available.");

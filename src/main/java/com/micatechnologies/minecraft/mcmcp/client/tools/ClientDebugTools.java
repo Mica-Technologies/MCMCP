@@ -10,6 +10,7 @@ import com.micatechnologies.minecraft.mcmcp.client.ClientCamera;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
+import com.micatechnologies.minecraft.mcmcp.client.ClientStartupQuery;
 import com.micatechnologies.minecraft.mcmcp.client.ScreenSampler;
 import com.micatechnologies.minecraft.mcmcp.client.ScreenshotOutcome;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
@@ -665,7 +666,10 @@ public final class ClientDebugTools {
             .title("GUI state")
             .description("Report what is currently on screen: whether a GUI is open and which one, "
                 + "whether the game has input focus, and whether a world is loaded. Call this when an "
-                + "input tool appears to have had no effect — an open GUI swallows movement keys.")
+                + "input tool appears to have had no effect — an open GUI swallows movement keys.\n\n"
+                + "'startupQuery' appears when Forge is asking something before a world can load, "
+                + "such as whether to continue with different mods; it has the question and how to "
+                + "answer it.")
             .schema(JsonSchema.noArguments())
             .clientOnly()
             .readOnly()
@@ -693,6 +697,10 @@ public final class ClientDebugTools {
                         json.addProperty("displayWidth", mc.displayWidth);
                         json.addProperty("displayHeight", mc.displayHeight);
                         json.addProperty("pendingSyntheticKeys", ClientInputScheduler.pendingCount());
+                        JsonObject query = ClientStartupQuery.describe(mc);
+                        if (query != null) {
+                            json.add("startupQuery", query);
+                        }
                         return json;
                     }
                 });

@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.client.ClientDeferredTasks;
+import com.micatechnologies.minecraft.mcmcp.client.ClientStartupQuery;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
@@ -23,6 +24,7 @@ import net.minecraft.client.gui.GuiMultiplayer;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.server.integrated.IntegratedServer;
+import javax.annotation.Nullable;
 import net.minecraft.world.GameType;
 import net.minecraft.world.WorldSettings;
 import net.minecraft.world.WorldType;
@@ -224,14 +226,9 @@ public final class ClientWorldTools {
                 // Read before the launch is scheduled: launchIntegratedServer holds the client thread
                 // for seconds, and a game-thread call queued behind it would time out.
                 final boolean pauses = pausesOnLostFocus(context);
-                context.getGameThread().runOnGameThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        // Also tears down any world already loaded, so this doubles as "leave and
-                        // start fresh" without the caller having to sequence it.
-                        Minecraft.getMinecraft().launchIntegratedServer(folderName, name, settings);
-                    }
-                });
+                // Also tears down any world already loaded, so this doubles as "leave and start
+                // fresh" without the caller having to sequence it.
+                launchFromTick(folderName, name, settings);
 
                 JsonObject result = new JsonObject();
                 result.addProperty("folderName", folderName);
@@ -345,9 +342,16 @@ public final class ClientWorldTools {
                 + "client_world_list.\n\n"
                 + "Any world currently loaded is left first. Loading takes a few seconds and the "
                 + "client shows a progress screen while it happens, so wait for a world to be present "
-                + "before acting — client_wait with waitFor 'worldLoaded' does exactly that.")
+                + "before acting — client_wait with waitFor 'worldLoaded' does exactly that.\n\n"
+                + "A world saved with different mods makes Forge stop the load and ask whether to "
+                + "continue. By default ('report') the question waits for an answer: client_wait "
+                + "and client_gui_state show it, and client_gui_click answers it. 'continue' or "
+                + "'cancel' answers it as it appears, and client_wait reports what was asked.")
             .schema(JsonSchema.object()
                 .string("folderName", "Save folder name, from client_world_list.")
+                .enumeration("onModMismatch", "How to answer Forge if it asks whether to load a "
+                    + "world saved with different mods. Default 'report'. 'continue' may lose blocks "
+                    + "and items from mods no longer present.", "report", "continue", "cancel")
                 .required("folderName")
                 .build())
             .clientOnly()
@@ -358,6 +362,12 @@ public final class ClientWorldTools {
                 }
 
                 final String folderName = context.requireString("folderName").trim();
+                final String onModMismatch = context.getString("onModMismatch", "report");
+                if (!"report".equals(onModMismatch) && !"continue".equals(onModMismatch)
+                    && !"cancel".equals(onModMismatch)) {
+                    return ToolResult.error("onModMismatch is 'report', 'continue' or 'cancel'; got '"
+                        + onModMismatch + "'.");
+                }
 
                 // Validation first, on the game thread but cheaply; the launch itself is scheduled
                 // without waiting, for the same reason as in client_world_create.
@@ -381,19 +391,18 @@ public final class ClientWorldTools {
                 // Read before the launch is scheduled: launchIntegratedServer holds the client thread
                 // for seconds, and a game-thread call queued behind it would time out.
                 final boolean pauses = pausesOnLostFocus(context);
-                context.getGameThread().runOnGameThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        // Null settings means "load what is on disk" rather than "create"; this is
-                        // the same call GuiWorldSelection makes for an existing save.
-                        Minecraft.getMinecraft().launchIntegratedServer(folderName, displayName, null);
-                    }
-                });
+                // Armed, or disarmed, before the launch is scheduled: the prompt can appear before
+                // anything else here runs again.
+                ClientStartupQuery.arm("report".equals(onModMismatch) ? null : onModMismatch);
+                // Null settings means "load what is on disk" rather than "create"; this is the same
+                // call GuiWorldSelection makes for an existing save.
+                launchFromTick(folderName, displayName, null);
 
                 JsonObject result = new JsonObject();
                 result.addProperty("folderName", folderName);
                 result.addProperty("displayName", displayName);
                 result.addProperty("loadingStarted", true);
+                result.addProperty("onModMismatch", onModMismatch);
                 if (pauses) {
                     result.addProperty("pausesOnLostFocus", true);
                 }
@@ -452,6 +461,33 @@ public final class ClientWorldTools {
      *
      * @throws Exception if the leave did not finish within {@link #WORLD_LEAVE_TIMEOUT_MILLIS}
      */
+    /**
+     * Starts a singleplayer world from the client tick, without waiting for it.
+     *
+     * <p>Not from Minecraft's scheduled-task queue, which is where this used to run. That queue is
+     * drained inside {@code synchronized (scheduledTasks)}, so a launch run from it held the lock
+     * for as long as the launch took — and a Forge prompt makes that as long as nobody answers.
+     * Every {@code addScheduledTask} meanwhile, from any thread, blocked on the lock: each MCMCP
+     * call hung past its own timeout, which only starts once the task is queued (issue #46). The
+     * world-select screen launches from a click handled in the tick, outside the lock, and so does
+     * this. {@link ClientStartupQuery} is told, so tool work is routed to where it can still run.
+     */
+    private static void launchFromTick(final String folderName, final String displayName,
+        @Nullable final WorldSettings settings) {
+        ClientDeferredTasks.runNextTick(new Runnable() {
+            @Override
+            public void run() {
+                ClientStartupQuery.markLaunching(true);
+                try {
+                    Minecraft.getMinecraft().launchIntegratedServer(folderName, displayName, settings);
+                }
+                finally {
+                    ClientStartupQuery.markLaunching(false);
+                }
+            }
+        });
+    }
+
     /** {@link ClientStateTools#pausesOnLostFocus}, read on the client thread. */
     private static boolean pausesOnLostFocus(ToolContext context) throws Exception {
         return context.onGameThread(new Callable<Boolean>() {
