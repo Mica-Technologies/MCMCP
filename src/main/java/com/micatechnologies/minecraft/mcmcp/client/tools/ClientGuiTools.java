@@ -23,6 +23,8 @@ import net.minecraft.client.gui.GuiIngameMenu;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.gui.GuiTextField;
 import net.minecraft.client.gui.ScaledResolution;
+import net.minecraftforge.client.event.GuiScreenEvent;
+import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -52,6 +54,21 @@ import net.minecraftforge.fml.relauncher.SideOnly;
  * {@code handleMouseInput} - MalisisCore's do - may never reach it, so the click landed nowhere while
  * still reporting success. {@code mouseClicked} remains as a fallback for builds where LWJGL's state
  * cannot be driven, and every click result names the path it took in its {@code via} field.
+ *
+ * <h2>When pressing the button directly is right</h2>
+ *
+ * A click at a point assumes the button's stored {@code x}/{@code y} are where the screen draws it.
+ * A screen that scales its own drawing breaks that: CSM's fire alarm panel draws at 0.9 scale about
+ * the centre and converts the mouse back to its design space in {@code mouseClicked}, so a click at
+ * the stored centre was converted to somewhere else and hit nothing (issue #43). Nothing reports a
+ * miss, so there is no signal to fall back on automatically.
+ *
+ * <p>{@code mode: "press"} is the explicit way round it: it runs the hit branch of vanilla's
+ * {@code mouseClicked} against the one button, in the button's own coordinates — its
+ * {@code mousePressed}, Forge's {@code ActionPerformedEvent}s, the press sound and the screen's
+ * {@code actionPerformed}. What it skips is everything the screen does before that branch: its
+ * {@code handleMouseInput} and its own {@code mouseClicked}, which is where a screen would refuse a
+ * click while busy. That is why it is not the default.
  *
  * <h2>Reflection, and why it is named twice</h2>
  *
@@ -234,6 +251,70 @@ public final class ClientGuiTools {
         }
         mouseClicked.invoke(screen, guiX, guiY, button);
         return "mouseClicked";
+    }
+
+    /**
+     * Presses one button the way vanilla's {@code mouseClicked} does once its hit test has found it,
+     * with the hit test done in the button's own coordinates. Client thread only.
+     *
+     * <p>Package-visible because {@code ClientStartupQuery} answers FML's mod-mismatch prompt with
+     * it: that screen's buttons are FML's own and drawn where they are stored, but by then the
+     * client thread is inside the world launch, and a direct press is the least that can go wrong.
+     *
+     * @return false when the button's own {@code mousePressed} refused, or a Forge handler cancelled
+     *         the press; nothing was run in either case
+     */
+    static boolean pressButton(GuiScreen screen, GuiButton button) throws Exception {
+        Minecraft mc = Minecraft.getMinecraft();
+        int centreX = button.x + button.width / 2;
+        int centreY = button.y + button.height / 2;
+        // Called rather than skipped: sliders and toggles act in mousePressed itself, and it is the
+        // button's own enabled-and-visible check.
+        if (!button.mousePressed(mc, centreX, centreY)) {
+            return false;
+        }
+        Method actionPerformed = findMethod(GuiScreen.class, new Class<?>[]{GuiButton.class},
+            "actionPerformed", "func_146284_a");
+        if (actionPerformed == null) {
+            throw new IllegalStateException("Could not locate GuiScreen.actionPerformed on this "
+                + "Minecraft build; pressing buttons directly is unavailable.");
+        }
+        List<GuiButton> buttons = buttonsOf(screen);
+        GuiScreenEvent.ActionPerformedEvent.Pre pre =
+            new GuiScreenEvent.ActionPerformedEvent.Pre(screen, button, buttons);
+        if (MinecraftForge.EVENT_BUS.post(pre)) {
+            return false;
+        }
+        GuiButton pressed = pre.getButton();
+        pressed.playPressSound(mc.getSoundHandler());
+        actionPerformed.invoke(screen, pressed);
+        if (screen.equals(mc.currentScreen)) {
+            MinecraftForge.EVENT_BUS.post(
+                new GuiScreenEvent.ActionPerformedEvent.Post(screen, pressed, buttons));
+        }
+        pressed.mouseReleased(centreX, centreY);
+        return true;
+    }
+
+    /**
+     * Whether the screen handles clicks in its own {@code mouseClicked}. Such a screen may convert
+     * the mouse before testing its buttons, so their stored positions are not necessarily where a
+     * click lands.
+     */
+    private static boolean overridesMouseClicked(GuiScreen screen) {
+        for (Class<?> type = screen.getClass(); type != null && type != GuiScreen.class;
+             type = type.getSuperclass()) {
+            for (String name : new String[]{"mouseClicked", "func_73864_a"}) {
+                try {
+                    type.getDeclaredMethod(name, int.class, int.class, int.class);
+                    return true;
+                }
+                catch (NoSuchMethodException ignored) {
+                    // Try the next name, then the superclass.
+                }
+            }
+        }
+        return false;
     }
 
     @Nullable
@@ -503,7 +584,11 @@ public final class ClientGuiTools {
                 + "full of controls can report zero buttons. When that happens, screenshot the frame "
                 + "and drive it with client_gui_click_at and client_gui_key, which work on any "
                 + "screen. The reply includes both coordinate spaces for converting between a "
-                + "screenshot's pixels and the scaled positions reported here.")
+                + "screenshot's pixels and the scaled positions reported here.\n\n"
+                + "Button x/y are the button's own stored position. A screen that scales its own "
+                + "drawing converts the mouse in its mouseClicked ('overridesMouseClicked' true), so "
+                + "it may draw a button somewhere else; if a click does nothing there, use "
+                + "client_gui_click with mode 'press'.")
             .schema(JsonSchema.noArguments())
             .clientOnly()
             .readOnly()
@@ -530,6 +615,7 @@ public final class ClientGuiTools {
                             json.add("textFields", new JsonArray());
                             return json;
                         }
+                        json.addProperty("overridesMouseClicked", overridesMouseClicked(screen));
 
                         JsonArray buttons = new JsonArray();
                         List<GuiButton> present = buttonsOf(screen);
@@ -581,9 +667,14 @@ public final class ClientGuiTools {
             .title("Click a GUI button")
             .description("Click a button on the currently open screen, by label or by index from "
                 + "client_gui_widgets.\n\n"
-                + "The click goes through the screen's own mouseClicked handler at the button's "
-                + "centre, so screens that do custom hit testing or refuse clicks while busy behave "
-                + "exactly as they would for a person clicking.\n\n"
+                + "By default ('click') this is a mouse click at the button's stored centre, through "
+                + "the screen's own input handling, so screens that do custom hit testing or refuse "
+                + "clicks while busy behave exactly as they would for a person clicking.\n\n"
+                + "A screen that scales its own drawing converts the mouse before hit testing, so a "
+                + "click at the stored centre can land on nothing and change nothing. Use mode "
+                + "'press' there: it presses this one button directly (its mousePressed, then the "
+                + "screen's actionPerformed), the way the screen would on a hit, skipping only the "
+                + "screen's own click handling.\n\n"
                 + "Screens usually change as a result. The reply reports which screen is open "
                 + "afterwards, so compare it against the one you started on to see whether the click "
                 + "did what you expected.")
@@ -591,6 +682,9 @@ public final class ClientGuiTools {
                 .string("label", "Button label to click, matched case-insensitively. Either an exact "
                     + "match or, failing that, a unique substring match. Prefer this over index.")
                 .integer("index", "Button index from client_gui_widgets. Used when label is omitted.")
+                .enumeration("mode", "'click' (default) clicks the mouse at the button's stored "
+                    + "centre. 'press' presses the button directly, for screens that draw scaled "
+                    + "or moved.", "click", "press")
                 .build())
             .clientOnly()
             .handler(context -> {
@@ -601,6 +695,7 @@ public final class ClientGuiTools {
 
                 final String label = context.getString("label", null);
                 final int index = context.getInt("index", -1);
+                final boolean press = "press".equals(context.getString("mode", "click"));
                 if (label == null && index < 0) {
                     return ToolResult.error("Pass either 'label' or 'index' to say which button to "
                         + "click. Call client_gui_widgets to see what is available.");
@@ -637,9 +732,21 @@ public final class ClientGuiTools {
 
                         String clickedLabel = target.displayString;
                         String screenBefore = screen.getClass().getSimpleName();
-                        ScaledResolution buttonResolution = new ScaledResolution(mc);
-                        String via = deliverClick(screen, mouseX, mouseY, 0,
-                            buttonResolution.getScaledWidth(), buttonResolution.getScaledHeight());
+                        String via;
+                        if (press) {
+                            if (!pressButton(screen, target)) {
+                                throw new IllegalStateException("Button '" + clickedLabel + "' "
+                                    + "refused the press: its own mousePressed said no, or a mod "
+                                    + "cancelled it.");
+                            }
+                            via = "press";
+                        }
+                        else {
+                            ScaledResolution buttonResolution = new ScaledResolution(mc);
+                            via = deliverClick(screen, mouseX, mouseY, 0,
+                                buttonResolution.getScaledWidth(),
+                                buttonResolution.getScaledHeight());
+                        }
 
                         JsonObject json = describeScreen(mc.currentScreen);
                         json.addProperty("via", via);

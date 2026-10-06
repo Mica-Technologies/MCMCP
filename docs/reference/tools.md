@@ -1364,6 +1364,12 @@ Clicks go through the screen's own `mouseClicked` at the button's centre, not th
 refuse clicks while loading; calling `actionPerformed` would bypass all of it and fire actions the
 real UI would have declined.
 
+The exception is a screen that scales or moves its own drawing. It converts the mouse in its own
+`mouseClicked` before hit testing, so a click at a button's stored centre is converted to somewhere
+else and hits nothing — with no error, because nothing reports a miss. `client_gui_widgets` flags
+such a screen with `overridesMouseClicked`, and `client_gui_click` with `mode: "press"` presses the
+button directly instead.
+
 #### `client_gui_widgets`
 
 :material-eye: Read-only · no arguments
@@ -1377,13 +1383,21 @@ could have been known in advance.
 
 #### `client_gui_click`
 
-Requires `permissions.allowPlayerControl` · optional `label`, `index`
+Requires `permissions.allowPlayerControl` · optional `label`, `index`, `mode`
 
 Click a button. `label` matches case-insensitively — exact first, then a unique substring, so
 "Game Mode" finds "Game Mode: Survival". An ambiguous substring is an error rather than a
 first-match guess.
 
-Reports the screen before and after, and whether it changed.
+`mode` is `click` (default) or `press`. `click` is a mouse click at the button's stored centre,
+through the screen's own input handling. `press` runs the hit branch of vanilla's `mouseClicked`
+against that one button: its `mousePressed`, Forge's `ActionPerformedEvent`s, the press sound and
+the screen's `actionPerformed`. It is for screens that draw scaled — CSM's fire alarm panel draws
+at 0.9 about the centre, and its RESET button ignored every click at its stored position. What
+`press` skips is the screen's own click handling, which is where a screen refuses a click while
+busy, so it is not the default.
+
+Reports the screen before and after, whether it changed, and `via`: the path the click took.
 
 #### `client_gui_text`
 
