@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp;
 import com.micatechnologies.minecraft.mcmcp.client.ClientThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.client.ClientIdentification;
 import com.micatechnologies.minecraft.mcmcp.client.ClientWatchdog;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientBlockClickTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientCommandBlockTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientCommandTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientDebugTools;
@@ -57,6 +58,7 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientCommandBlockTools.register();
         ClientDebugTools.register();
         ClientInputTools.register();
+        ClientBlockClickTools.register();
         ClientGuiTools.register();
         ClientSyncTools.register();
         ClientWorldTools.register();

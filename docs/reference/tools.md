@@ -1034,6 +1034,43 @@ Returns the target before and after, plus the held item.
     `client_looking_at` or `client_get_block`. Those are what the detail is for; carrying it on
     every movement call made it 79% of a `client_move` response.
 
+#### `client_use_on_block`
+
+:material-alert: Destructive · requires `permissions.allowPlayerControl` · `x`, `y`, `z`, `face`
+required · optional `hitX`, `hitY`, `hitZ`, `hand`, `sneak`, `yaw`, `pitch`
+
+Right-click a named face of a named block with the held item, without aiming the camera: place a
+block against it, open it, click a wire coil onto a connector. It runs what a real right-click on
+that block runs — `PlayerControllerMP.processRightClickBlock`, so the item's `onItemUseFirst`, the
+block's `onBlockActivated`, Forge's `RightClickBlock` event and the server's own reach check and
+placement rules all apply. Only the ray trace that would have picked the target is skipped.
+
+The block must be within reach of the player's eyes and must not be air. To place a block at P,
+click the face of a neighbour of P that touches it.
+
+`hitX`/`hitY`/`hitZ` are where on the block the click lands, as fractions 0–1, defaulting to the
+centre of the face. Some mods pick what was clicked from this point; Immersive Engineering picks
+the wire connector from it.
+
+A placed block's facing is decided on the server from its copy of the player's rotation. `yaw` and
+`pitch` are sent as a rotation packet just before the use packet and the real rotation just after,
+so the server places as if the player faced that way and the camera never moves. `sneak` travels
+the same way, as start- and stop-sneaking actions around the click.
+
+Returns `result` (`success`, `pass` or `fail`), the hand that took it, the clicked block and the
+block beside the clicked face before and after, and the held items afterwards.
+
+#### `client_attack_block`
+
+:material-alert: Destructive · requires `permissions.allowPlayerControl` · `x`, `y`, `z` required ·
+optional `face`
+
+Left-click a named block once, without aiming. In creative that breaks it. In survival it breaks
+only a block that breaks instantly, and otherwise starts breaking it and stops again the next tick;
+mine in survival by aiming with `client_look` and holding attack with `client_interact`.
+
+Returns the block before and after, and `broken`.
+
 #### `client_input_lock`
 
 Requires `permissions.allowPlayerControl` · `locked` required, optional `seconds`, `reason`
