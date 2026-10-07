@@ -70,7 +70,8 @@ public final class ClientSequenceTools {
             "client_get_block", "client_get_blocks", "client_looking_at", "client_player_state",
             "client_inventory", "client_nearby_entities", "client_read_chat",
             "client_gui_state", "client_gui_widgets", "client_gui_click", "client_gui_click_at",
-            "client_gui_key", "client_gui_text", "client_gui_close")));
+            "client_gui_key", "client_gui_text", "client_gui_close", "client_gui_open",
+            "client_options")));
 
     private ClientSequenceTools() {
     }

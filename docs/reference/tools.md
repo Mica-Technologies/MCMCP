@@ -1,6 +1,6 @@
 # Tools
 
-73 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+75 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -1589,6 +1589,44 @@ pause menu whenever its window loses focus, and it stays until something closes 
 
 Escape goes to the screen's own key handler, so a screen that declines to close stays open and the
 reply says so.
+
+#### `client_gui_open`
+
+Requires `permissions.allowPlayerControl` · `screen`, optional `text`
+
+Opens a vanilla screen for the other `client_gui_*` tools to drive: `pause` (the Escape menu, which
+pauses singleplayer), `options`, `sound`, `controls`, `video`, or `chat`, prefilled with `text`.
+`pause` and `chat` need a world. The options screens return to whatever was open, or to the game, on
+Done.
+
+Escape is not a gameplay binding, so `client_key` cannot press it, and the pause menu otherwise opens
+only when the window loses focus. Without this the Options screens were unreachable from in-world.
+
+A mod can replace or cancel a screen as it opens, so the reply names the screen actually showing and
+`opened` says whether it is the one asked for.
+
+#### `client_options`
+
+Requires `permissions.allowPlayerControl` to change anything · optional `set`, `persist`
+
+Reads or changes game options without the Options screens. With no arguments it lists every option:
+a boolean as its value, a number as `[value, min, max]`.
+
+```json
+{ "set": { "sound_master": 0, "render_distance": 8 } }
+```
+
+Volumes are `sound_<category>`, 0 to 1: `master`, `music`, `record`, `weather`, `block`, `hostile`,
+`neutral`, `player`, `ambient`, `voice`. Everything else uses the game's option names in lower case
+(`fov`, `gamma`, `render_distance`, `framerate_limit`, `auto_jump`, ...). Options the game only
+cycles through, such as graphics and GUI scale, are not here; open their screen instead.
+
+Values go through the game's own setters, so a volume reaches the sound engine and a render distance
+reaches the renderer, just as a slider would. The reply gives each option's `old` and `new` value.
+Every name and value is checked before anything changes.
+
+Like `client_view`, a change lasts until the game restarts. Pass `persist: true` to write
+`options.txt` as well, although the Options screens save whatever is set when you press Done.
 
 #### `client_view`
 

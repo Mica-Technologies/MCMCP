@@ -11,6 +11,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -19,8 +20,13 @@ import java.util.concurrent.Callable;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiButton;
+import net.minecraft.client.gui.GuiChat;
+import net.minecraft.client.gui.GuiControls;
 import net.minecraft.client.gui.GuiIngameMenu;
+import net.minecraft.client.gui.GuiOptions;
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.client.gui.GuiScreenOptionsSounds;
+import net.minecraft.client.gui.GuiVideoSettings;
 import net.minecraft.client.gui.GuiTextField;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraftforge.client.event.GuiScreenEvent;
@@ -116,6 +122,7 @@ public final class ClientGuiTools {
         registerGuiKey();
         registerGuiText();
         registerGuiClose();
+        registerGuiOpen();
         registerView();
     }
 
@@ -1348,6 +1355,86 @@ public final class ClientGuiTools {
                     ? "Closed the screen; nothing is open now."
                     : "Screen did not close; " + result.get("screenName").getAsString()
                         + " is still open.")
+                    .withStructured(result);
+            })
+            .build());
+    }
+
+    /**
+     * Opening a vanilla screen from in-world.
+     *
+     * <p>Every other GUI tool acts on a screen that is already open, and Escape — the only key that
+     * opens the pause menu — is not a gameplay binding {@code client_key} can press. The pause menu
+     * otherwise opens only when the window loses focus, which an agent cannot arrange, so the
+     * Options screens behind it were unreachable and muting a test client took a restart and an edit
+     * to options.txt (issue #47).
+     */
+    private static void registerGuiOpen() {
+        McpRegistry.registerTool(McpTool.named("client_gui_open")
+            .title("Open a screen")
+            .description("Open a vanilla screen, which the other client_gui_* tools can then drive: "
+                + "'pause' (the Escape menu; pauses singleplayer), 'options', 'sound', 'controls', "
+                + "'video', or 'chat' (optionally prefilled with 'text'). The options screens return "
+                + "to the screen that was open, or to the game, on Done.\n\n"
+                + "To change a setting without clicking through a screen, use client_options.")
+            .schema(JsonSchema.object()
+                .enumeration("screen", "Which screen to open.",
+                    "pause", "options", "sound", "controls", "video", "chat")
+                .string("text", "chat: text to prefill the chat box with, e.g. '/'.")
+                .required("screen")
+                .build())
+            .clientOnly()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("GUI control is disabled by permissions.allowPlayerControl "
+                        + "in the MCMCP config.");
+                }
+                final String screen = context.requireString("screen");
+                final String text = context.getString("text", "");
+                if (!Arrays.asList("pause", "options", "sound", "controls", "video", "chat")
+                    .contains(screen)) {
+                    return ToolResult.error("Unknown screen '" + screen + "'; use pause, options, "
+                        + "sound, controls, video or chat.");
+                }
+
+                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() {
+                        Minecraft mc = Minecraft.getMinecraft();
+                        GuiScreen parent = mc.currentScreen;
+                        GuiScreen opened;
+                        if ("pause".equals(screen) || "chat".equals(screen)) {
+                            ClientStateTools.requireInWorld();
+                            opened = "pause".equals(screen) ? new GuiIngameMenu() : new GuiChat(text);
+                        }
+                        else if ("options".equals(screen)) {
+                            opened = new GuiOptions(parent, mc.gameSettings);
+                        }
+                        else if ("sound".equals(screen)) {
+                            opened = new GuiScreenOptionsSounds(parent, mc.gameSettings);
+                        }
+                        else if ("controls".equals(screen)) {
+                            opened = new GuiControls(parent, mc.gameSettings);
+                        }
+                        else {
+                            opened = new GuiVideoSettings(parent, mc.gameSettings);
+                        }
+                        String screenBefore = parent == null ? "none" : parent.getClass().getSimpleName();
+                        mc.displayGuiScreen(opened);
+
+                        // GuiOpenEvent lets a mod replace or cancel the screen, so report what is
+                        // actually open rather than what was asked for.
+                        JsonObject json = describeScreen(mc.currentScreen);
+                        json.addProperty("opened", mc.currentScreen == opened);
+                        json.addProperty("screenBefore", screenBefore);
+                        json.addProperty("paused", mc.isGamePaused());
+                        return json;
+                    }
+                });
+                return ToolResult.text(result.get("opened").getAsBoolean()
+                    ? "Opened " + result.get("screenName").getAsString() + "."
+                    : "Asked for '" + screen + "', but " + result.get("screenName").getAsString()
+                        + " is open: a mod replaced or cancelled the screen.")
                     .withStructured(result);
             })
             .build());
