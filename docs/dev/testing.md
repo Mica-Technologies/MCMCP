@@ -142,9 +142,11 @@ Two things that make a local run fail for reasons that are not the code:
 
 - **The installed orchestrator app listens on `25580`**, which is the port the script's own
   orchestrator wants. With the app running, the game links to *it* rather than to the one under test
-  and the script waits out its timeout. Quit the app first. The same applies to the smoke test, whose
-  stub also wants `25580` — for that one you can instead point `orchestrator.orchestratorPort` in
-  `run/server/config/mcmcp.cfg` at a free port and pass the same value as `LINK_PORT`.
+  and the script waits out its timeout. You don't need to quit the app. For this script and for the
+  smoke test (whose stub also wants `25580`), point `orchestrator.orchestratorPort` in
+  `run/server/config/mcmcp.cfg` at a free port and pass the same value as `LINK_PORT`. Put the
+  config back afterwards. On Windows there is no `pkill`, so check that the dedicated server's JVM
+  has exited before the next run.
 - **Build the headless binary on its own**, not with `cargo build -p mcmcp-orchestrator-app`. The
   desktop app declares the shim as a Tauri `externalBin`, and building it copies that sidecar next to
   the app binary with the target triple stripped — which is exactly cargo's output path for the CLI

@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp.command;
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
+import com.micatechnologies.minecraft.mcmcp.link.LinkActivity;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpSession;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpoint;
@@ -197,6 +198,10 @@ public class CommandMcmcp extends CommandBase {
             reply(sender, TextFormatting.RED, "  Enabled in the config, but no link is running. "
                 + "Try '/mcmcp restart', and check the game log.");
         }
+        LinkActivity.Task task = LinkActivity.current();
+        reply(sender, TextFormatting.GRAY, task == null
+            ? "  No task from the orchestrator."
+            : "  Agent's task: " + task);
     }
 
     private void handleTools(ICommandSender sender) {

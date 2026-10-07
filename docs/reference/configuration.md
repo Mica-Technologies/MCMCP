@@ -287,6 +287,20 @@ than dialling a closed port every second forever. It stops growing because the t
 is a person starting an app, and half a minute is about as long as anyone should sit wondering why
 their game has not appeared in the roster.
 
+## `display`
+
+### `showActivityBanner`
+
+Default `true` · read live
+
+A small line at the top of the screen while an agent is working in this game. It shows the tool
+running and how far through it is. When the agent keeps a task list in the orchestrator, it also
+shows the current task. It stays up while a call runs or a task is in progress, then lingers four
+seconds and fades.
+
+It hides with F1, and `client_screenshot` leaves it out: a screenshot waits one frame for the line
+to clear, but only when the line was on screen. Set this `false` to never show it.
+
 ## `limits`
 
 ### `maxSessions`
@@ -453,6 +467,10 @@ orchestrator {
     I:orchestratorPort=25580
     I:reconnectBackoffMaxMillis=30000
     I:reconnectBackoffMillis=1000
+}
+
+display {
+    B:showActivityBanner=true
 }
 
 limits {

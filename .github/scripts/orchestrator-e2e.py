@@ -55,8 +55,11 @@ class Orchestrator:
     def __init__(self, binary, state_dir):
         environment = dict(os.environ)
         environment["MCMCP_LOG"] = "info"
+        # LINK_PORT lets a local run sit beside an orchestrator app that already holds 25580; the
+        # server's orchestrator.orchestratorPort has to name the same port.
+        link_port = os.environ.get("LINK_PORT", "25580")
         self.process = subprocess.Popen(
-            [binary, "--state-dir", state_dir, "serve"],
+            [binary, "--state-dir", state_dir, "serve", "--link-port", link_port],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -257,6 +260,30 @@ def check(orchestrator, link_timeout):
         if read["contents"][0].get("uri") != uri:
             raise Failure("a resource read came back with a URI the client did not ask for")
         checked.append(f"{len(resources)} resources namespaced, and one read back")
+
+    # ---- a task list reaches the game it names ----
+    # The orchestrator sends the game an `activity` control frame, which LinkProtocol.java and
+    # protocol.rs must agree on. This is the one place that is proved: the game reports what it was
+    # told through /mcmcp link.
+    created = orchestrator.request("tools/call", {"name": "mcmcp_tasks", "arguments": {
+        "op": "create", "title": "E2E job", "tasks": ["prove the activity frame"],
+        "instances": [instance_id]}})
+    if created.get("isError"):
+        raise Failure(f"creating a task list failed: {created}")
+    orchestrator.request("tools/call", {"name": "mcmcp_tasks", "arguments": {
+        "op": "update", "list": "e2e-job", "updates": [{"task": "1", "status": "doing"}]}})
+    deadline = time.time() + 15
+    said = ""
+    while time.time() < deadline:
+        link = orchestrator.request("tools/call", {"name": "server_run_command", "arguments": {
+            "command": "mcmcp link", "instance": instance_id}})
+        said = " ".join(item.get("text", "") for item in link.get("content", []))
+        if "prove the activity frame" in said and "doing" in said:
+            break
+        time.sleep(0.5)
+    else:
+        raise Failure(f"the game never reported the task it was sent; /mcmcp link said: {said!r}")
+    checked.append("a task list reached the game it names, over the link's activity frame")
 
     return checked
 

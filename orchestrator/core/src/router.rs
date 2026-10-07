@@ -120,6 +120,8 @@ pub struct Router {
     activity: Arc<Activity>,
     /// Agents' task lists. See [`crate::tasks`].
     tasks: Arc<TaskStore>,
+    /// The last `activity` frame sent to each endpoint, so an unchanged one is not sent again.
+    announced: Mutex<HashMap<String, Value>>,
 }
 
 /// A routed call in flight: the instance handling it, the id that instance knows it by, and its
@@ -190,6 +192,7 @@ impl Router {
             sessions: Mutex::new(HashMap::new()),
             activity: Arc::new(Activity::new()),
             tasks: Arc::new(TaskStore::in_memory()),
+            announced: Mutex::new(HashMap::new()),
         }
     }
 
@@ -201,6 +204,64 @@ impl Router {
 
     pub fn tasks(&self) -> Arc<TaskStore> {
         Arc::clone(&self.tasks)
+    }
+
+    /// Tells every game its current task whenever a list changes, for as long as the store lives.
+    ///
+    /// Spawned once by whatever runs the router. A watch keeps only the latest change, so a burst of
+    /// updates is announced once.
+    pub async fn watch_tasks(self: Arc<Self>) {
+        let mut changes = self.tasks.subscribe();
+        while changes.changed().await.is_ok() {
+            self.announce_tasks().await;
+        }
+    }
+
+    /// Sends each connected endpoint the task it should show, where that changed.
+    pub async fn announce_tasks(&self) {
+        for instance in self.registry.all() {
+            self.announce_task(&instance).await;
+        }
+    }
+
+    async fn announce_task(&self, instance: &Arc<Instance>) {
+        let info = instance.info();
+        let frame = crate::link::protocol::activity(self.task_for(&info).as_ref());
+        {
+            let mut announced = self.announced.lock().expect("announced lock");
+            // A game that was never sent a task shows none, so clearing it would be a wasted frame.
+            let unchanged = match announced.get(&info.id) {
+                Some(previous) => previous == &frame,
+                None => frame["task"].is_null(),
+            };
+            if unchanged {
+                return;
+            }
+            announced.insert(info.id.clone(), frame.clone());
+        }
+        instance.notify_raw(frame).await;
+    }
+
+    /// The task a game should show: from the most recently changed open list that names this
+    /// endpoint or the other half of its game, if that list has anything left to do.
+    fn task_for(&self, info: &InstanceInfo) -> Option<crate::link::protocol::ActivityTask> {
+        let belongs = |named: &str| {
+            named == info.id
+                || named.split(instance::ENDPOINT_SEPARATOR).next() == Some(info.approval_id.as_str())
+        };
+        self.tasks
+            .all(false)
+            .into_iter()
+            .filter(|list| list.instances.iter().any(|named| belongs(named)))
+            .find_map(|list| {
+                let current = list.current()?;
+                Some(crate::link::protocol::ActivityTask {
+                    list: list.title.clone(),
+                    progress: list.progress(),
+                    title: current.title.clone(),
+                    status: current.status.name().to_string(),
+                })
+            })
     }
 
     /// Records to this log instead of the throwaway in-memory one.
@@ -1892,6 +1953,9 @@ impl Router {
                 if let Some(handle) = self.registry.get(&instance) {
                     let info = handle.info();
                     self.session_connected(&info);
+                    // A new link knows nothing of what was shown on the last one.
+                    self.announced.lock().expect("announced lock").remove(&info.id);
+                    self.announce_task(&handle).await;
                     self.record_event(Event::new(
                         Actor::System,
                         Level::Info,
@@ -2809,6 +2873,52 @@ mod tests {
             notes.iter().any(|note| note.contains("1 done, 2 doing")),
             "{notes:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_game_is_told_its_current_task_once_per_change() {
+        let (router, alpha, mut outbound) = router_with("alpha");
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "create", "title": "Job",
+                    "tasks": ["first", "second"], "instances": ["alpha"] }),
+        )
+        .await;
+        router.announce_tasks().await;
+        let frame = outbound.recv().await.expect("an activity frame");
+        assert_eq!(frame["type"], "activity");
+        assert_eq!(frame["task"]["title"], "first");
+        assert_eq!(frame["task"]["progress"], "0/2 done");
+
+        // Unchanged: nothing more is sent.
+        router.announce_tasks().await;
+        assert!(outbound.try_recv().is_err());
+
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "update", "list": "job",
+                    "updates": [{ "task": "1", "status": "done" }, { "task": "2", "status": "doing" }] }),
+        )
+        .await;
+        router.announce_tasks().await;
+        let frame = outbound.recv().await.expect("a changed frame");
+        assert_eq!(
+            (frame["task"]["title"].as_str(), frame["task"]["status"].as_str()),
+            (Some("second"), Some("doing"))
+        );
+
+        // Archived: the game is told to clear it.
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "archive", "list": "job" }),
+        )
+        .await;
+        router.announce_tasks().await;
+        assert_eq!(
+            outbound.recv().await.expect("a clearing frame")["task"],
+            Value::Null
+        );
+        drop(alpha);
     }
 
     #[tokio::test]

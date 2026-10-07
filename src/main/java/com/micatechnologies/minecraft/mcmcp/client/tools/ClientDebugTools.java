@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
+import com.micatechnologies.minecraft.mcmcp.client.ClientActivityBanner;
 import com.micatechnologies.minecraft.mcmcp.client.ClientCamera;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
@@ -180,58 +181,68 @@ public final class ClientDebugTools {
                 // out of the framebuffer, which needs the GL context that only that thread holds.
                 final JsonObject view;
                 final JsonObject capture;
-                if (!overriding) {
-                    view = null;
-                    capture = context.onGameThread(new Callable<JsonObject>() {
-                        @Override
-                        public JsonObject call() {
-                            return captureScreenshot(fileName);
-                        }
-                    });
-                }
-                else {
-                    final double yawArgument = context.getDouble("yaw", Double.NaN);
-                    final double pitchArgument = context.getDouble("pitch", Double.NaN);
-                    view = context.onGameThread(new Callable<JsonObject>() {
-                        @Override
-                        public JsonObject call() {
-                            return applyView(from, lookAt, yawArgument, pitchArgument, fov, fullbright);
-                        }
-                    });
-                    if (view.has("error")) {
-                        return ToolResult.error(view.get("error").getAsString() + " Nothing was "
-                            + "captured.");
+                // The activity line is for the person at the screen. Kept out of the frame, and when
+                // it was on screen, one frame is let through first so the one read has not got it in.
+                try {
+                    if (ClientActivityBanner.beginCapture()) {
+                        ClientFrameClock.await(2, 0, 1000L);
                     }
-                    try {
-                        // A tick for the lightmap to pick up the new gamma, frames for the camera.
-                        ClientFrameClock.await(2, 1, 3000L);
-                        if (from != null) {
-                            settleChunkMeshes(context,
-                                context.getBoundedInt("settle_ms", 5000, 0, MAX_SETTLE_MILLIS), view);
-                        }
+                    if (!overriding) {
+                        view = null;
                         capture = context.onGameThread(new Callable<JsonObject>() {
                             @Override
                             public JsonObject call() {
-                                // Restored in the same task that reads the frame, so the player
-                                // never sees a frame of the detached view after the capture.
-                                try {
-                                    return captureScreenshot(fileName);
-                                }
-                                finally {
-                                    ClientCamera.restore();
-                                }
+                                return captureScreenshot(fileName);
                             }
                         });
                     }
-                    finally {
-                        context.onGameThread(new Callable<Void>() {
+                    else {
+                        final double yawArgument = context.getDouble("yaw", Double.NaN);
+                        final double pitchArgument = context.getDouble("pitch", Double.NaN);
+                        view = context.onGameThread(new Callable<JsonObject>() {
                             @Override
-                            public Void call() {
-                                ClientCamera.restore();
-                                return null;
+                            public JsonObject call() {
+                                return applyView(from, lookAt, yawArgument, pitchArgument, fov, fullbright);
                             }
                         });
+                        if (view.has("error")) {
+                            return ToolResult.error(view.get("error").getAsString() + " Nothing was "
+                                + "captured.");
+                        }
+                        try {
+                            // A tick for the lightmap to pick up the new gamma, frames for the camera.
+                            ClientFrameClock.await(2, 1, 3000L);
+                            if (from != null) {
+                                settleChunkMeshes(context,
+                                    context.getBoundedInt("settle_ms", 5000, 0, MAX_SETTLE_MILLIS), view);
+                            }
+                            capture = context.onGameThread(new Callable<JsonObject>() {
+                                @Override
+                                public JsonObject call() {
+                                    // Restored in the same task that reads the frame, so the player
+                                    // never sees a frame of the detached view after the capture.
+                                    try {
+                                        return captureScreenshot(fileName);
+                                    }
+                                    finally {
+                                        ClientCamera.restore();
+                                    }
+                                }
+                            });
+                        }
+                        finally {
+                            context.onGameThread(new Callable<Void>() {
+                                @Override
+                                public Void call() {
+                                    ClientCamera.restore();
+                                    return null;
+                                }
+                            });
+                        }
                     }
+                }
+                finally {
+                    ClientActivityBanner.endCapture();
                 }
 
                 final String savedPath = capture.get("path").getAsString();

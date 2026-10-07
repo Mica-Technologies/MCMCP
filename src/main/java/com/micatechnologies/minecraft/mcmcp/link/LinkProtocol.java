@@ -48,6 +48,18 @@ public final class LinkProtocol {
     public static final String TYPE_WELCOME = "welcome";
     public static final String TYPE_REJECTED = "rejected";
     public static final String TYPE_STATUS = "status";
+    /**
+     * Sent by the orchestrator after the handshake: the task an agent is working on in this game, or
+     * a null task to clear it. Read by {@link LinkActivity}.
+     */
+    public static final String TYPE_ACTIVITY = "activity";
+
+    // activity fields
+    public static final String FIELD_TASK = "task";
+    public static final String FIELD_LIST = "list";
+    public static final String FIELD_PROGRESS = "progress";
+    public static final String FIELD_TITLE = "title";
+    public static final String FIELD_STATUS = "status";
 
     // Shared control fields
     public static final String FIELD_LINK_PROTOCOL = "linkProtocol";

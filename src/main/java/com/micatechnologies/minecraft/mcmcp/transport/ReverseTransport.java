@@ -5,6 +5,8 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
+import com.micatechnologies.minecraft.mcmcp.link.LinkActivity;
 import com.micatechnologies.minecraft.mcmcp.link.LinkBackoff;
 import com.micatechnologies.minecraft.mcmcp.link.LinkFraming;
 import com.micatechnologies.minecraft.mcmcp.link.LinkHandshake;
@@ -335,6 +337,8 @@ public class ReverseTransport implements McpTransport {
             if (session != null) {
                 sessions.remove(session.getId());
             }
+            // What this link was told is no longer true once nobody is there to update it.
+            LinkActivity.clear(side);
             closeQuietly(connected);
             if (this.socket == connected) {
                 this.socket = null;
@@ -434,8 +438,12 @@ public class ReverseTransport implements McpTransport {
             session.touch(System.currentTimeMillis());
 
             if (LinkFraming.isControlFrame(frame)) {
-                // The orchestrator sends no post-handshake control frame yet. Ignoring an unknown one
-                // rather than dropping the link is what lets a newer orchestrator talk to an older mod.
+                if (LinkProtocol.TYPE_ACTIVITY.equals(Json.getString(frame, LinkProtocol.FIELD_TYPE))) {
+                    LinkActivity.accept(side, frame);
+                    continue;
+                }
+                // Ignoring an unknown control frame rather than dropping the link is what lets a newer
+                // orchestrator talk to an older mod.
                 Mcmcp.LOGGER.debug("MCMCP orchestrator link ignored a control frame of type "
                     + frame.get(LinkProtocol.FIELD_TYPE));
                 continue;

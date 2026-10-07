@@ -20,6 +20,10 @@ pub const TYPE_WELCOME: &str = "welcome";
 pub const TYPE_REJECTED: &str = "rejected";
 /// Sent by an instance after the handshake when its game thread stops or starts finishing frames.
 pub const TYPE_STATUS: &str = "status";
+/// Sent by the orchestrator after the handshake: the task an agent is working on in this game, for
+/// the mod to show. A mod that predates it ignores it, as it ignores any control frame it does not
+/// know.
+pub const TYPE_ACTIVITY: &str = "activity";
 
 /// Retryable. The instance reached us and a human has been asked to approve it.
 pub const REASON_PENDING_APPROVAL: &str = "pending-approval";
@@ -147,6 +151,23 @@ pub fn welcome(orchestrator_version: &str, assigned_name: Option<&str>) -> Value
     frame
 }
 
+/// The task an `activity` frame carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActivityTask {
+    /// The list's title.
+    pub list: String,
+    /// "2/5 done".
+    pub progress: String,
+    /// The task being worked on, or the next one not yet settled.
+    pub title: String,
+    pub status: String,
+}
+
+/// Builds an `activity` frame. `None` clears what the game shows.
+pub fn activity(task: Option<&ActivityTask>) -> Value {
+    json!({ "type": TYPE_ACTIVITY, "task": task })
+}
+
 /// Builds the frame that refuses a link.
 ///
 /// The `reason` is load-bearing on the far side: the mod keeps retrying a `pending-approval` and
@@ -196,6 +217,25 @@ pub fn is_mcp_message(frame: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_activity_frame_carries_the_task_the_mod_reads_or_null_to_clear_it() {
+        // Field names are LinkProtocol.java's FIELD_LIST, FIELD_PROGRESS, FIELD_TITLE, FIELD_STATUS.
+        let task = ActivityTask {
+            list: "Signal tests".into(),
+            progress: "2/5 done".into(),
+            title: "test each".into(),
+            status: "doing".into(),
+        };
+        let frame = activity(Some(&task));
+        assert_eq!(frame["type"], "activity");
+        assert_eq!(frame["task"]["list"], "Signal tests");
+        assert_eq!(frame["task"]["progress"], "2/5 done");
+        assert_eq!(frame["task"]["title"], "test each");
+        assert_eq!(frame["task"]["status"], "doing");
+        assert!(is_control_frame(&frame) && !is_mcp_message(&frame));
+        assert_eq!(activity(None)["task"], Value::Null);
+    }
 
     fn hello_json() -> Value {
         json!({

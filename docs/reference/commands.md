@@ -60,7 +60,12 @@ directions and someone chasing one is not chasing the other.
 MCMCP orchestrator link for modB dev (modb-dev-3f2a1c):
   client -> 127.0.0.1:25580: connected — connected to MCMCP Orchestrator 26.8.26
     Named as mod B (dev) in the orchestrator.
+  Agent's task: Signal tests (2/5 done): test each [doing]
 ```
+
+The last line is the task an agent is working on in this game, as the orchestrator last sent it:
+from a task list the agent keeps with `mcmcp_tasks`. It reads "No task from the orchestrator" when
+there is none.
 
 | State | What to do |
 | --- | --- |

@@ -18,6 +18,9 @@
 #   SMOKE_TIMEOUT   seconds to wait for the server to start (default 900)
 #   LINK_TIMEOUT    seconds to wait for the link to appear once the orchestrator is up (default 150)
 #   ORCH_BINARY     path to the orchestrator binary (default the debug build)
+#   LINK_PORT       port the orchestrator listens on for the game (default 25580). For a local run
+#                   beside the orchestrator app, set it and run/server/config/mcmcp.cfg's
+#                   orchestrator.orchestratorPort to the same free port.
 
 set -uo pipefail
 

@@ -621,6 +621,7 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
             .with_policy(Arc::clone(&policy))
             .with_tasks(Arc::new(TaskStore::load(paths::tasks_directory()?)?)),
     );
+    tokio::spawn(Arc::clone(&router).watch_tasks());
 
     // Seed the tool surface from the last session. Without this, a client that connects before any
     // game is up sees only the roster tool and plans around having no others.

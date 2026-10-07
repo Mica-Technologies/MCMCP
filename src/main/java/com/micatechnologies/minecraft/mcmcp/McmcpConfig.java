@@ -47,6 +47,7 @@ public class McmcpConfig {
     private static final String CATEGORY_LIMITS = "limits";
     private static final String CATEGORY_IDENTITY = "identity";
     private static final String CATEGORY_ORCHESTRATOR = "orchestrator";
+    private static final String CATEGORY_DISPLAY = "display";
 
     /**
      * Dev-launch overrides injected by {@code addon.gradle}.
@@ -91,6 +92,7 @@ public class McmcpConfig {
     private static boolean allowInventoryChanges = true;
     private static boolean allowWorldEdits = false;
     private static boolean allowScreenshots = true;
+    private static boolean showActivityBanner = true;
     private static boolean allowLogAccess = true;
     private static boolean allowChat = true;
     private static boolean allowProcessControl = true;
@@ -231,6 +233,13 @@ public class McmcpConfig {
                 + "This is the one field here meant to be edited. Name it after what you are doing in "
                 + "it — 'mymod dev', 'vanilla control' — because it is how you and a model will tell "
                 + "several running games apart.");
+
+        // Display
+        showActivityBanner = configuration.getBoolean("showActivityBanner", CATEGORY_DISPLAY, true,
+            "Show a small line at the top of the screen while an agent is working in this game: the "
+                + "tool it is running and how far through it is, and its current task when it keeps a "
+                + "task list in the orchestrator. It fades a few seconds after the work stops, hides "
+                + "with F1, and is left out of client_screenshot captures. Takes effect at once.");
 
         // Orchestrator link
         orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR, true,
@@ -491,6 +500,11 @@ public class McmcpConfig {
 
     public static boolean isAllowScreenshots() {
         return allowScreenshots;
+    }
+
+    /** Whether the in-game activity line is shown. Read live, every frame. */
+    public static boolean isShowActivityBanner() {
+        return showActivityBanner;
     }
 
     public static boolean isAllowLogAccess() {

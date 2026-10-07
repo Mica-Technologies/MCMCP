@@ -388,6 +388,11 @@ appear side by side without the agent doing anything extra.
 You can edit lists too: change a status, add a task, or start a list of your own. The agent sees your
 changes the next time it reads the list. Each change, by you or the agent, is a line in the log.
 
+The game shows the task too. While an agent works, a small line at the top of the game's screen
+names the list, its progress, the current task and the tool running. The orchestrator sends the task
+over the link, and `/mcmcp link` prints it. The line is left out of agent screenshots, and
+`display.showActivityBanner` turns it off.
+
 Lists are saved as one JSON file each in `tasks/` in the state directory, so they survive a restart
 and a later session can pick a job up where the last one left it. An agent may **archive** a list it
 has finished, which hides it but keeps the file. Only you can **delete** one, from the app, with a

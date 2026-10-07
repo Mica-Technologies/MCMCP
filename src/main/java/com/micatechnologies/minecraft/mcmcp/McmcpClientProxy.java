@@ -1,5 +1,6 @@
 package com.micatechnologies.minecraft.mcmcp;
 
+import com.micatechnologies.minecraft.mcmcp.client.ClientActivityBanner;
 import com.micatechnologies.minecraft.mcmcp.client.ClientStartupQuery;
 import com.micatechnologies.minecraft.mcmcp.client.ClientThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.client.ClientIdentification;
@@ -54,6 +55,7 @@ public class McmcpClientProxy implements McmcpProxy {
     @Override
     public void registerSideSpecific() {
         ClientIdentification.register();
+        ClientActivityBanner.register();
         ClientStartupQuery.register();
         ClientStateTools.register();
         ClientSurveyTools.register();

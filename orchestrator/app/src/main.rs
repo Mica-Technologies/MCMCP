@@ -1284,6 +1284,9 @@ fn spawn_background(
                     });
                 }
 
+                // Each game is told its current task, for the mod's in-game line.
+                tokio::spawn(Arc::clone(&router).watch_tasks());
+
                 // Task lists, whoever changed them.
                 {
                     let mut changes = router.tasks().subscribe();

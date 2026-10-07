@@ -36,6 +36,9 @@ public class ToolContext {
     /** The last progress value sent, so a smaller or equal one is dropped rather than sent. */
     private double lastProgress = Double.NEGATIVE_INFINITY;
 
+    /** This call's entry in {@link ToolActivity}, or 0 when the call is not being tracked. */
+    private volatile long activityCall;
+
     public ToolContext(McpSession session,
                        JsonObject arguments,
                        GameThreadBridge gameThread,
@@ -52,6 +55,11 @@ public class ToolContext {
 
     public McpSession getSession() {
         return session;
+    }
+
+    /** Ties this call's progress to its {@link ToolActivity} entry. Set once, by the dispatcher. */
+    public void trackActivity(long call) {
+        this.activityCall = call;
     }
 
     public JsonObject getArguments() {
@@ -185,6 +193,11 @@ public class ToolContext {
      * @param total    the expected end value, or a negative number if unknown
      */
     public void reportProgress(double progress, double total, @Nullable String message) {
+        // Recorded whether or not the client asked for progress: the game shows what it is doing to
+        // whoever is watching it, and that is not the client's choice.
+        if (activityCall != 0) {
+            ToolActivity.progress(activityCall, progress, total, message);
+        }
         if (progressToken == null) {
             return;
         }

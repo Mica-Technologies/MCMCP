@@ -281,6 +281,8 @@ public class McpDispatcher {
             gameThreadTimeoutMillis,
             extractProgressToken(params));
 
+        long activity = ToolActivity.callStarted(side, name);
+        context.trackActivity(activity);
         try {
             ToolResult result = tool.call(context);
             return withSteeringNote(session, result.toJson(session.getProtocolVersion()));
@@ -300,6 +302,9 @@ public class McpDispatcher {
             String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             return ToolResult.error("Tool '" + name + "' failed: " + detail)
                 .toJson(session.getProtocolVersion());
+        }
+        finally {
+            ToolActivity.callEnded(activity);
         }
     }
 
