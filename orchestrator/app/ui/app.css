@@ -190,3 +190,65 @@ input.rename {
   opacity: 0.55;
   vertical-align: middle;
 }
+
+/* ---- per-instance colour ----
+   Set on a card, a detail header or a log row as --instance-colour. Derived from the game's id, so
+   it is stable across restarts and both endpoints of one singleplayer world share it. */
+.card { border-left: 3px solid var(--instance-colour, var(--line)); }
+.swatch {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+  background: var(--instance-colour, var(--text-dim)); vertical-align: middle;
+}
+.card { cursor: pointer; }
+.card button, .card input { cursor: pointer; }
+.card:hover { background: #22242e; }
+
+/* ---- activity on a card ---- */
+.activity-line {
+  font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+  min-height: 18px; display: flex; flex-direction: column; gap: 4px;
+}
+.activity-line .now { color: var(--text); }
+.activity-line .now .tool { color: var(--accent); }
+.outcome-ok { color: var(--ok); }
+.outcome-error, .outcome-timed_out { color: var(--danger); }
+.outcome-cancelled { color: var(--warn); }
+
+/* ---- progress ---- */
+.bar-track {
+  height: 6px; border-radius: 999px; background: var(--bg-sunken); overflow: hidden;
+  border: 1px solid var(--line);
+}
+.bar-fill { height: 100%; background: var(--accent); transition: width .15s linear; }
+/* No total: the game is working but cannot say how far through it is. */
+.bar-fill.is-unknown {
+  width: 35% !important; animation: sweep 1.4s ease-in-out infinite;
+}
+@keyframes sweep { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+
+/* ---- detail view ---- */
+.detail-head {
+  display: flex; align-items: center; gap: 14px; padding-bottom: 12px; margin-bottom: 4px;
+  border-bottom: 2px solid var(--instance-colour, var(--line));
+}
+.detail-title { flex: 1 1 auto; }
+.running { display: flex; flex-direction: column; gap: 10px; }
+.running-call {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+}
+.running-call .head { display: flex; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 12.5px; }
+.running-call .tool { color: var(--accent); font-weight: 600; }
+.running-call .message, .running-call .args { font-family: var(--mono); font-size: 12px; color: var(--text-dim); word-break: break-all; }
+.recent-row { grid-template-columns: 68px minmax(140px, auto) 70px 80px 1fr; cursor: pointer; }
+.recent-row .detail { color: var(--text-dim); word-break: break-word; }
+.recent-row .args { grid-column: 2 / -1; color: var(--text-dim); word-break: break-all; }
+.message-row { grid-template-columns: 68px 62px 1fr; }
+.gamelog { max-width: none; max-height: 420px; overflow: auto; white-space: pre; }
+button.inline { padding: 1px 8px; font-size: 11px; margin-left: 8px; text-transform: none; letter-spacing: 0; }
+.who-tool { color: var(--accent); }
+/* The focused card's accent border would otherwise paint over the instance colour on its left. */
+.card.is-focused { border-left-color: var(--instance-colour, var(--accent)); }
+/* Room for the instance swatch beside the time, on one line. */
+#log .row { grid-template-columns: 84px 62px 1fr auto; }
+.row .time { white-space: nowrap; }

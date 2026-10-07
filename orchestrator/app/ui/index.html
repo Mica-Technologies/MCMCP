@@ -53,6 +53,41 @@
         </p>
       </section>
 
+      <!--
+        One instance, in detail: what it is doing now, what it did, and what it said. Reached by
+        clicking a card; not a tab, because it is always about one instance and needs one chosen.
+      -->
+      <section id="panel-detail" class="panel" hidden>
+        <div class="detail-head">
+          <button id="detail-back" class="ghost">← Instances</button>
+          <div class="detail-title">
+            <div class="card-name" id="detail-name"></div>
+            <div class="card-id" id="detail-id"></div>
+          </div>
+          <div id="detail-badges"></div>
+        </div>
+        <p id="detail-alert" class="empty is-down" hidden></p>
+
+        <h2>Running now</h2>
+        <div id="detail-running" class="running"></div>
+
+        <h2>Recent calls</h2>
+        <div id="detail-recent" class="log"></div>
+        <p id="detail-recent-empty" class="muted" hidden>No calls yet.</p>
+
+        <h2>Messages from the game</h2>
+        <div id="detail-messages" class="log"></div>
+        <p id="detail-messages-empty" class="muted" hidden>
+          None. A game sends these when a tool has something to report beyond its result.
+        </p>
+
+        <h2>
+          Game log
+          <button id="detail-log-refresh" class="ghost inline">Refresh</button>
+        </h2>
+        <pre id="detail-gamelog" class="snippet gamelog"></pre>
+      </section>
+
       <section id="panel-log" class="panel" hidden>
         <div class="filters">
           <input id="log-search" type="search" placeholder="Search…" />

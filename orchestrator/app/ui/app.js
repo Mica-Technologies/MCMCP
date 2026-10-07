@@ -19,6 +19,14 @@ const listen = window.__TAURI__.event.listen;
 const filters = { text: "", instance: "", actor: "", level: "" };
 let activePanel = "instances";
 
+/* The latest activity snapshot, pushed by the backend on every change (at most ten a second). The
+ * one place this file keeps a model of server state, and only because progress moves too fast to
+ * re-read everything for: cards and the detail view paint from it without touching the rest. */
+let activity = { running: [], recent: [] };
+/* The endpoint the detail view is showing, and the roster as last read, for its header. */
+let detailInstance = null;
+let lastInstances = [];
+
 const $ = (id) => document.getElementById(id);
 
 function escapeHtml(value) {
@@ -46,6 +54,47 @@ async function call(command, args) {
     toast(String(error));
     throw error;
   }
+}
+
+/* A colour per game, from its id: stable across restarts, shared by both endpoints of one
+ * singleplayer world, and different enough between games to tell three cards apart at a glance. */
+function colourFor(game) {
+  let hash = 0;
+  for (const character of String(game ?? "")) hash = (hash * 31 + character.codePointAt(0)) >>> 0;
+  return `hsl(${hash % 360} 62% 64%)`;
+}
+
+/* The game an endpoint belongs to, from the roster; the endpoint itself when it is not listed. */
+function gameOf(instance) {
+  return lastInstances.find((candidate) => candidate.instance === instance)?.game ?? instance;
+}
+
+function formatDuration(millis) {
+  if (millis < 1000) return `${Math.round(millis)} ms`;
+  if (millis < 60_000) return `${(millis / 1000).toFixed(1)} s`;
+  const minutes = Math.floor(millis / 60_000);
+  return `${minutes} m ${Math.round((millis % 60_000) / 1000)} s`;
+}
+
+function formatAgo(millis) {
+  const seconds = Math.max(0, Math.round((Date.now() - millis) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ago`;
+}
+
+/* "12 / 40" or "12" — and a bar that fills when the total is known and sweeps when it is not. */
+function progressText(progress) {
+  if (!progress) return "";
+  const done = Number.isInteger(progress.progress) ? progress.progress : progress.progress.toFixed(1);
+  return progress.total != null ? `${done} / ${progress.total}` : `${done}`;
+}
+
+function progressBar(progress) {
+  const known = progress && progress.total != null && progress.total > 0;
+  const percent = known ? Math.min(100, (progress.progress / progress.total) * 100) : 0;
+  return `<div class="bar-track"><div class="bar-fill ${known ? "" : "is-unknown"}"
+    style="width:${percent}%"></div></div>`;
 }
 
 // ---------------------------------------------------------------------------------
@@ -141,6 +190,8 @@ async function renderInstances() {
   for (const instance of instances) {
     const card = document.createElement("div");
     card.className = "card";
+    card.dataset.instance = instance.instance;
+    card.style.setProperty("--instance-colour", colourFor(instance.game));
     if (instance.focused) card.classList.add("is-focused");
     if (!instance.connected) card.classList.add("is-offline");
 
@@ -165,7 +216,14 @@ async function renderInstances() {
         ${instance.http_endpoint ? `<dt>Direct</dt><dd>${escapeHtml(instance.http_endpoint)}</dd>` : ""}
         ${instance.pid != null ? `<dt>Process</dt><dd>${instance.pid}${instance.started_at ? ` · up since ${escapeHtml(instance.started_at)}` : ""}</dd>` : ""}
       </dl>
+      ${instance.connected ? '<div class="activity-line"></div>' : ""}
       <div class="actions"></div>`;
+
+    // Anywhere on the card but its controls opens the detail view.
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button, input")) return;
+      openDetail(instance.instance);
+    });
 
     const actions = card.querySelector(".actions");
 
@@ -219,6 +277,8 @@ async function renderInstances() {
 
     container.appendChild(card);
   }
+  lastInstances = instances;
+  paintCardActivity();
 
   // The log's instance filter is populated from the same list, so it never offers a stale id.
   const select = $("log-instance");
@@ -265,8 +325,9 @@ async function renderLog() {
   for (const event of events) {
     const row = document.createElement("div");
     row.className = `row actor-${event.actor} level-${event.level}`;
+    if (event.instance) row.style.setProperty("--instance-colour", colourFor(gameOf(event.instance)));
     row.innerHTML = `
-      <span class="time">${formatTime(event.at)}</span>
+      <span class="time">${event.instance ? '<span class="swatch"></span>' : ""}${formatTime(event.at)}</span>
       <span class="who">${escapeHtml(event.actor)}</span>
       <span class="summary">${escapeHtml(event.summary)}</span>`;
 
@@ -287,6 +348,182 @@ async function renderLog() {
   // Pinned to the newest unless the reader has scrolled up to look at something.
   const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
   if (nearBottom) container.scrollTop = container.scrollHeight;
+}
+
+// ---------------------------------------------------------------------------------
+// Activity
+// ---------------------------------------------------------------------------------
+
+/* Each card's one line: what is running, or the last thing that ran. */
+function paintCardActivity() {
+  for (const line of document.querySelectorAll(".card .activity-line")) {
+    const instance = line.closest(".card").dataset.instance;
+    const running = activity.running.filter((call) => call.instance === instance);
+    if (running.length > 0) {
+      const call = running[running.length - 1];
+      const more = running.length > 1 ? ` (+${running.length - 1} more)` : "";
+      const message = call.progress?.message ? ` · ${escapeHtml(call.progress.message)}` : "";
+      line.innerHTML = `
+        <div class="now"><span class="tool">${escapeHtml(call.tool)}</span>
+          ${escapeHtml(progressText(call.progress))}${message}${more}</div>
+        ${progressBar(call.progress)}`;
+      continue;
+    }
+    const last = activity.recent.find((call) => call.instance === instance);
+    line.innerHTML = last
+      ? `last: ${escapeHtml(last.tool)} · ${formatDuration(last.duration_ms)} ·
+         <span class="outcome-${last.outcome}">${last.outcome.replace("_", " ")}</span> ·
+         ${formatAgo(last.started_at_ms + last.duration_ms)}`
+      : "idle";
+  }
+}
+
+function onActivity(snapshot) {
+  const newestBefore = activity.recent[0]?.id;
+  activity = snapshot;
+  if (activePanel === "instances") paintCardActivity();
+  if (activePanel === "detail") renderDetailActivity();
+  // A finished call is a new line in the log. The log is otherwise re-read on the slow poll, which
+  // left a call that had plainly finished missing from it for up to four seconds.
+  if (activePanel === "log" && snapshot.recent[0]?.id !== newestBefore) renderLog();
+}
+
+// ---------------------------------------------------------------------------------
+// Detail
+// ---------------------------------------------------------------------------------
+
+function openDetail(instance) {
+  detailInstance = instance;
+  $("detail-gamelog").textContent = "";
+  showPanel("detail");
+  loadGameLog();
+}
+
+/* The header, alerts, messages and the full recent list: what changes rarely. */
+async function renderDetail() {
+  if (!detailInstance) return;
+  const view = lastInstances.find((candidate) => candidate.instance === detailInstance);
+  const detail = await invoke("instance_detail", { instance: detailInstance });
+
+  const head = document.querySelector(".detail-head");
+  head.style.setProperty("--instance-colour", colourFor(view?.game ?? detailInstance));
+  $("detail-name").textContent = view?.label ?? detailInstance;
+  $("detail-id").textContent = view?.side ? `${detailInstance} · ${view.side}` : detailInstance;
+  $("detail-badges").innerHTML = view?.connected
+    ? `<span class="badge is-live">connected</span>${view.focused ? ' <span class="badge is-focused">focused</span>' : ""}`
+    : '<span class="badge">not running</span>';
+
+  const alert = $("detail-alert");
+  if (detail.stalled_seconds != null) {
+    alert.hidden = false;
+    alert.textContent = `The game thread has been stalled for ${formatDuration(detail.stalled_seconds * 1000)}. ` +
+      "Calls that need it will wait or time out; off-thread tools still answer.";
+  } else if (detail.last_exit) {
+    const exit = detail.last_exit;
+    const report = exit.crashReport;
+    const crash = report
+      ? ` It crashed: ${[report.description, report.exception].filter(Boolean).join(" — ") || "see the report"} (${report.path}).`
+      : "";
+    alert.hidden = false;
+    alert.textContent = `This game ended ${exit.endedSecondsAgo}s ago.${crash}`;
+  } else {
+    alert.hidden = true;
+  }
+
+  const messages = $("detail-messages");
+  messages.innerHTML = "";
+  $("detail-messages-empty").hidden = detail.messages.length > 0;
+  for (const line of detail.messages.slice(-100)) {
+    const row = document.createElement("div");
+    const level = line.level === "warning" ? "warn" : line.level === "error" ? "error" : "info";
+    row.className = `row message-row level-${level}`;
+    row.innerHTML = `
+      <span class="time">${formatTime(line.at_ms)}</span>
+      <span class="who">${escapeHtml(line.level)}</span>
+      <span class="summary">${escapeHtml(line.text)}</span>`;
+    messages.appendChild(row);
+  }
+
+  // The pushed snapshot carries only the newest calls across every instance; this one is complete.
+  activity = {
+    ...activity,
+    detailRecent: detail.activity.recent,
+  };
+  renderDetailActivity();
+}
+
+/* What is running and what just finished: repainted on every activity event. */
+function renderDetailActivity() {
+  if (!detailInstance) return;
+  const running = activity.running.filter((call) => call.instance === detailInstance);
+  const container = $("detail-running");
+  container.innerHTML = running.length === 0 ? '<p class="muted">Nothing is running.</p>' : "";
+  for (const call of running) {
+    const element = document.createElement("div");
+    element.className = "running-call";
+    element.innerHTML = `
+      <div class="head">
+        <span class="tool">${escapeHtml(call.tool)}</span>
+        <span>${escapeHtml(progressText(call.progress))} · ${formatDuration(Date.now() - call.started_at_ms)}</span>
+      </div>
+      ${progressBar(call.progress)}
+      ${call.progress?.message ? `<div class="message">${escapeHtml(call.progress.message)}</div>` : ""}
+      ${call.arguments ? `<div class="args">${escapeHtml(call.arguments)}</div>` : ""}`;
+    container.appendChild(element);
+  }
+
+  // Newest pushed calls first, then the rest of the full list read when the view opened.
+  const pushed = activity.recent.filter((call) => call.instance === detailInstance);
+  const seen = new Set(pushed.map((call) => call.id));
+  const recent = pushed.concat((activity.detailRecent ?? []).filter((call) => !seen.has(call.id)));
+
+  const list = $("detail-recent");
+  const open = new Set([...list.querySelectorAll(".recent-row.is-open")].map((row) => row.dataset.id));
+  list.innerHTML = "";
+  $("detail-recent-empty").hidden = recent.length > 0;
+  for (const call of recent) {
+    const row = document.createElement("div");
+    row.className = `row recent-row ${call.outcome === "ok" ? "" : "level-error"}`;
+    row.dataset.id = call.id;
+    const detail = call.error ?? (call.last_progress
+      ? `${progressText(call.last_progress)}${call.last_progress.message ? ` · ${call.last_progress.message}` : ""}`
+      : "");
+    row.innerHTML = `
+      <span class="time">${formatTime(call.started_at_ms)}</span>
+      <span class="who-tool">${escapeHtml(call.tool)}</span>
+      <span>${formatDuration(call.duration_ms)}</span>
+      <span class="outcome-${call.outcome}">${call.outcome.replace("_", " ")}</span>
+      <span class="detail">${escapeHtml(detail)}</span>`;
+    const toggle = (expand) => {
+      row.classList.toggle("is-open", expand);
+      row.querySelector(".args")?.remove();
+      if (expand && call.arguments) {
+        const args = document.createElement("span");
+        args.className = "args";
+        args.textContent = call.arguments;
+        row.appendChild(args);
+      }
+    };
+    row.addEventListener("click", () => toggle(!row.classList.contains("is-open")));
+    if (open.has(String(call.id))) toggle(true);
+    list.appendChild(row);
+  }
+}
+
+async function loadGameLog() {
+  if (!detailInstance) return;
+  const view = lastInstances.find((candidate) => candidate.instance === detailInstance);
+  const target = $("detail-gamelog");
+  if (view && !view.connected) {
+    target.textContent = "Not running, so its log cannot be read through the link.";
+    return;
+  }
+  try {
+    target.textContent = (await invoke("game_log_tail", { instance: detailInstance, lines: 150 })) || "(empty)";
+    target.scrollTop = target.scrollHeight;
+  } catch (error) {
+    target.textContent = `Could not read the log: ${error}`;
+  }
 }
 
 // ---------------------------------------------------------------------------------
@@ -357,6 +594,12 @@ async function refresh() {
   if (activePanel === "instances") await renderInstances();
   else if (activePanel === "log") await renderLog();
   else if (activePanel === "settings") await renderSettings();
+  else if (activePanel === "detail") {
+    // The header needs the roster, so it is read first.
+    await renderInstances();
+    await renderDetail();
+    return;
+  }
 
   // The roster feeds the header and the log's filter, so it is refreshed even when not visible.
   if (activePanel !== "instances") await renderInstances();
@@ -365,7 +608,8 @@ async function refresh() {
 function showPanel(name) {
   activePanel = name;
   for (const tab of document.querySelectorAll(".tab")) {
-    tab.classList.toggle("is-active", tab.dataset.panel === name);
+    // The detail view belongs to the Instances tab: it is one of them, looked at closely.
+    tab.classList.toggle("is-active", tab.dataset.panel === (name === "detail" ? "instances" : name));
   }
   for (const panel of document.querySelectorAll(".panel")) {
     panel.hidden = panel.id !== `panel-${name}`;
@@ -416,6 +660,25 @@ $("autostart").addEventListener("change", async (event) => {
 });
 
 listen("mcmcp://changed", refresh);
+listen("mcmcp://activity", (event) => onActivity(event.payload));
+
+$("detail-back").addEventListener("click", () => {
+  detailInstance = null;
+  showPanel("instances");
+});
+$("detail-log-refresh").addEventListener("click", loadGameLog);
+
+/* Elapsed times on running calls tick even when no progress arrives. */
+setInterval(() => {
+  if (activePanel === "detail" && activity.running.length > 0) renderDetailActivity();
+}, 1000);
+
+/* The game log is asked of the game, so it is re-read slowly and only while somebody is looking. */
+setInterval(() => {
+  if (activePanel === "detail") loadGameLog();
+}, 10_000);
+
+invoke("activity_snapshot").then(onActivity);
 
 /* A slow poll behind the event. Events are the fast path; this is what keeps the window honest if
  * one is ever missed, which is cheap insurance for a panel somebody trusts to tell them what is

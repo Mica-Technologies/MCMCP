@@ -27,6 +27,7 @@
 //! already does — if one of them ever needs to reach past the core to work, the core is missing
 //! something and that is the bug to fix.
 
+use mcmcp_orchestrator_core::activity::{LogLine, Snapshot};
 use mcmcp_orchestrator_core::control::{self, Authority};
 use mcmcp_orchestrator_core::events::{Actor, EventLog, Filter, Level};
 use mcmcp_orchestrator_core::instance::UpstreamEvent;
@@ -35,7 +36,7 @@ use mcmcp_orchestrator_core::policy::{Class, Policy, Rule};
 use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::{GateRequest, Router};
 use mcmcp_orchestrator_core::store::ApprovalStore;
-use mcmcp_orchestrator_core::{catalogue, link, mcp_socket, paths};
+use mcmcp_orchestrator_core::{catalogue, jsonrpc, link, mcp_socket, paths};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -55,6 +56,20 @@ use tracing::{info, warn};
 /// server-side one. Correctness beats cleverness in a panel somebody is using to decide whether to
 /// let a model reshape their world.
 const CHANGED: &str = "mcmcp://changed";
+
+/// Emitted when a call starts, reports progress or finishes, carrying an activity snapshot.
+///
+/// The one exception to "one event, and the UI re-reads": progress arrives many times a second
+/// during a batch, and re-reading the roster, the prompts and the log for each one is the wrong
+/// cost for a moving progress bar. This carries what changed, at most every [`ACTIVITY_INTERVAL`].
+const ACTIVITY: &str = "mcmcp://activity";
+
+/// How often, at most, [`ACTIVITY`] is emitted. Ten a second is smooth for a progress bar.
+const ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How many finished calls each [`ACTIVITY`] event carries. Enough for every card's "last call" line
+/// and the top of a detail view; the detail view reads the rest when it opens.
+const ACTIVITY_RECENT: usize = 50;
 
 const EVENT_LOG_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -158,6 +173,7 @@ struct PendingGateView {
 
 struct AppState {
     registry: Arc<Registry>,
+    router: Arc<Router>,
     store: Arc<Mutex<ApprovalStore>>,
     policy: Arc<Mutex<Policy>>,
     policy_path: std::path::PathBuf,
@@ -303,6 +319,56 @@ fn list_instances(state: State<'_, AppState>) -> Vec<InstanceView> {
 /// The second is what a headless `mcmcp-orchestrator serve` holding the link port produces — every
 /// game is connected, to it — and "no game connected" is then true of this process and useless to
 /// the person reading it.
+/// Calls in flight and recently finished, for every instance.
+#[tauri::command]
+fn activity_snapshot(state: State<'_, AppState>) -> Snapshot {
+    state.router.activity().snapshot_limited(None, ACTIVITY_RECENT)
+}
+
+#[derive(Serialize)]
+struct InstanceDetail {
+    instance: String,
+    activity: Snapshot,
+    /// `notifications/message` lines the game sent, oldest first.
+    messages: Vec<LogLine>,
+    /// How long the game thread has been stalled, when it is.
+    stalled_seconds: Option<f64>,
+    /// How the game ended, when it is no longer running and this orchestrator saw it go.
+    last_exit: Option<Value>,
+}
+
+/// Everything the detail view shows about one endpoint, except its game log.
+#[tauri::command]
+fn instance_detail(state: State<'_, AppState>, instance: String) -> InstanceDetail {
+    let activity = state.router.activity();
+    let live = state.registry.get(&instance);
+    let game = game_of(&state, &instance).ok();
+    InstanceDetail {
+        activity: activity.snapshot(Some(&instance)),
+        messages: activity.logs(&instance),
+        stalled_seconds: live
+            .as_ref()
+            .and_then(|handle| handle.stalled_for())
+            .map(|stalled| stalled.as_secs_f64()),
+        last_exit: game.and_then(|game| state.router.last_exit(&game)),
+        instance,
+    }
+}
+
+/// The tail of one endpoint's game log. Asked of the game, so only while it is connected.
+#[tauri::command]
+async fn game_log_tail(
+    state: State<'_, AppState>,
+    instance: String,
+    lines: Option<u64>,
+) -> Result<String, String> {
+    state
+        .router
+        .game_log_tail(&instance, lines.unwrap_or(120))
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn link_failure(state: State<'_, AppState>) -> Option<String> {
     state.link_failure.lock().ok().and_then(|failure| failure.clone())
@@ -871,6 +937,12 @@ fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(25580);
+    // The MCP side's port, overridable for the same reason as the link's: a second copy run for
+    // development must not collide with the one a person is using.
+    let mcp_port: u16 = std::env::var("MCMCP_MCP_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(mcp_socket::DEFAULT_MCP_PORT);
 
     let store = Arc::new(Mutex::new(ApprovalStore::load(paths::approval_store_path()?)?));
     let policy_path = control::policy_path(&paths::state_directory()?);
@@ -892,6 +964,7 @@ fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         registry: Arc::clone(&registry),
+        router: Arc::clone(&router),
         store: Arc::clone(&store),
         policy: Arc::clone(&policy),
         policy_path,
@@ -925,6 +998,9 @@ fn main() -> anyhow::Result<()> {
         .invoke_handler(tauri::generate_handler![
             list_instances,
             link_failure,
+            activity_snapshot,
+            instance_detail,
+            game_log_tail,
             list_events,
             pending_approvals,
             answer_approval,
@@ -948,7 +1024,7 @@ fn main() -> anyhow::Result<()> {
 
             let handle = app.handle().clone();
             spawn_background(
-                handle, registry, store, router, events, approvals, gates, link_port,
+                handle, registry, store, router, events, approvals, gates, link_port, mcp_port,
             );
             Ok(())
         })
@@ -1029,6 +1105,7 @@ fn spawn_background(
     approvals: Arc<ApprovalQueue>,
     gates: Arc<GateQueue>,
     link_port: u16,
+    mcp_port: u16,
 ) {
     std::thread::Builder::new()
         .name("mcmcp-orchestrator".into())
@@ -1090,13 +1167,37 @@ fn spawn_background(
                     let app = app.clone();
                     tokio::spawn(async move {
                         while let Some(event) = events_rx.recv().await {
+                            // Progress and log lines change nothing but activity, which has its own
+                            // event. Treating each as "everything changed" re-read the whole window
+                            // and rewrote the catalogue cache to disk many times a second during a
+                            // batch.
+                            let activity_only = is_activity_only(&event);
                             router.handle_upstream(event).await;
+                            if activity_only {
+                                continue;
+                            }
                             if let Some(aggregate) = router.cached_aggregate()
                                 && let Ok(path) = paths::catalogue_cache_path()
                             {
                                 let _ = catalogue::save_cache(&path, &aggregate);
                             }
                             let _ = app.emit(CHANGED, ());
+                        }
+                    });
+                }
+
+                // Activity, coalesced: a watch keeps only the latest generation, so a burst of
+                // progress while this sleeps becomes one emit rather than a queue of them.
+                {
+                    let activity = router.activity();
+                    let mut changes = activity.subscribe();
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        while changes.changed().await.is_ok() {
+                            tokio::time::sleep(ACTIVITY_INTERVAL).await;
+                            changes.borrow_and_update();
+                            let snapshot = activity.snapshot_limited(None, ACTIVITY_RECENT);
+                            let _ = app.emit(ACTIVITY, snapshot);
                         }
                     });
                 }
@@ -1117,7 +1218,7 @@ fn spawn_background(
                                 return;
                             }
                         };
-                        let address = format!("127.0.0.1:{}", mcp_socket::DEFAULT_MCP_PORT);
+                        let address = format!("127.0.0.1:{mcp_port}");
                         match tokio::net::TcpListener::bind(&address).await {
                             Ok(listener) => {
                                 if let Err(error) = mcp_socket::serve(listener, router, token).await {
@@ -1173,6 +1274,17 @@ fn spawn_background(
             });
         })
         .expect("spawning the orchestrator thread");
+}
+
+/// Whether an upstream event changes nothing but [`ACTIVITY`]: a progress or log notification.
+fn is_activity_only(event: &UpstreamEvent) -> bool {
+    match event {
+        UpstreamEvent::Notification { message, .. } => matches!(
+            jsonrpc::method_of(message),
+            Some("notifications/progress" | "notifications/message")
+        ),
+        _ => false,
+    }
 }
 
 /// Answering an approval the way the headless build would, for reference.

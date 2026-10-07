@@ -271,6 +271,14 @@ impl Activity {
 
     /// Calls in flight and recently finished, optionally for one instance only.
     pub fn snapshot(&self, instance: Option<&str>) -> Snapshot {
+        self.snapshot_limited(instance, RECENT_CAPACITY)
+    }
+
+    /// As [`Self::snapshot`], with at most `recent_limit` finished calls.
+    ///
+    /// For a display that is pushed a snapshot on every change: it needs what is running and the
+    /// last few calls, not the whole ring ten times a second.
+    pub fn snapshot_limited(&self, instance: Option<&str>, recent_limit: usize) -> Snapshot {
         let inner = self.inner.lock().expect("activity lock");
         let wanted = |candidate: &str| instance.is_none_or(|instance| instance == candidate);
         Snapshot {
@@ -285,6 +293,7 @@ impl Activity {
                 .recent
                 .iter()
                 .filter(|call| wanted(&call.instance))
+                .take(recent_limit)
                 .cloned()
                 .collect(),
         }
@@ -472,6 +481,20 @@ mod tests {
         let snapshot = activity.snapshot(Some("beta.server"));
         assert_eq!(snapshot.running.len(), 1);
         assert_eq!(snapshot.running[0].tool, "server_get_block");
+    }
+
+    #[test]
+    fn a_limited_snapshot_keeps_every_running_call_and_only_the_newest_finished_ones() {
+        let activity = Activity::new();
+        for _ in 0..10 {
+            let id = activity.start("alpha.client", "client_look", &json!({}), None);
+            activity.finish(id, Outcome::Ok, None);
+        }
+        activity.start("alpha.client", "client_wait", &json!({}), None);
+        let snapshot = activity.snapshot_limited(None, 3);
+        assert_eq!(snapshot.running.len(), 1);
+        assert_eq!(snapshot.recent.len(), 3);
+        assert_eq!(snapshot.recent[0].id, CallId(10));
     }
 
     #[test]

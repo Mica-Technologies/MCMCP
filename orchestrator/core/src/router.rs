@@ -1000,7 +1000,7 @@ impl Router {
     }
 
     /// How a game that is no longer running ended, if this orchestrator saw it go.
-    fn last_exit(&self, game: &str) -> Option<Value> {
+    pub fn last_exit(&self, game: &str) -> Option<Value> {
         let sessions = self.sessions.lock().expect("sessions lock");
         let session = sessions.get(game)?;
         let ended_at = session.ended_at?;
@@ -1015,6 +1015,31 @@ impl Router {
             "crashReport": crash_report.map(|report| report.to_json()),
             "jvmErrorLog": jvm_error_log.map(|path| path.to_string_lossy().to_string()),
         }))
+    }
+
+    /// The last `lines` lines of one endpoint's game log, as `game_read_log` returns them.
+    ///
+    /// For a person looking at that game in the app. It asks the game, as `mcmcp_read_logs` does,
+    /// rather than reading `latest.log` from disk: the orchestrator may not share a filesystem with
+    /// the game, and the game already knows which file is its log.
+    pub async fn game_log_tail(&self, endpoint: &str, lines: u64) -> anyhow::Result<String> {
+        let Some(instance) = self.registry.get(endpoint) else {
+            anyhow::bail!("{endpoint} is not connected");
+        };
+        let result = instance
+            .request(
+                "tools/call",
+                Some(json!({
+                    "name": "game_read_log",
+                    "arguments": { "lines": lines.clamp(1, 500) },
+                })),
+            )
+            .await?;
+        let text = first_text(&result).unwrap_or_default().to_string();
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            anyhow::bail!("{text}");
+        }
+        Ok(text)
     }
 
     /// The game an endpoint id belongs to, whether or not it is still connected.

@@ -151,6 +151,35 @@ Two things that make a local run fail for reasons that are not the code:
   crate, so it overwrites the real binary with the placeholder. The script now detects this and says
   so rather than failing at exec.
 
+## Testing the desktop app beside the one you use
+
+A second copy of the app normally just reveals the first and exits: the single-instance plugin is
+keyed on the bundle identifier. Build the copy under test with a different one, and give it its own
+state and ports:
+
+```bash
+cd orchestrator
+TAURI_CONFIG='{"identifier":"com.micatechnologies.mcmcp.orchestrator.devtest"}' \
+  cargo build -p mcmcp-orchestrator-app
+MCMCP_ORCHESTRATOR_HOME="$(cygpath -w "$SCRATCH/orch-state")" \
+MCMCP_LINK_PORT=26580 MCMCP_MCP_PORT=26581 \
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9223" \
+  ./target/debug/mcmcp-orchestrator-app.exe
+```
+
+- Point a dev client's `orchestrator.orchestratorPort` at `26580`.
+- Drive MCP through the real shim:
+  `MCMCP_ORCHESTRATOR_HOME=... mcmcp-orchestrator shim --mcp-port 26581 --link-port 26580 --no-launch`.
+- The remote-debugging port is WebView2's Chrome DevTools Protocol. `http://127.0.0.1:9223/json`
+  lists the page, and `Page.captureScreenshot` or `Runtime.evaluate` over its WebSocket show and
+  inspect the window without a person at it.
+
+Afterwards:
+
+- Rebuild without `TAURI_CONFIG`, so the debug binary carries the real identifier again.
+- Rebuild the CLI on its own (see above).
+- Delete `%LOCALAPPDATA%\com.micatechnologies.mcmcp.orchestrator.devtest`.
+
 ## Client endpoint testing
 
 The client endpoint has no CI equivalent — a dev client needs a display, and its most valuable tools

@@ -348,6 +348,34 @@ about fails in the direction that loses work.
 open: if you move focus and the model does not notice, its next world-changing call lands somewhere
 it did not intend. Everything else makes that visible; this makes it impossible.
 
+## Watching a game work
+
+Each card in the app shows what that game is doing right now: the tool that is running and, for a
+long call, how far through it is (`client_sequence 26 / 60 · client_wait`, with a bar filling
+under it). When nothing is running it shows the last call, how long it took and how it ended. Both
+endpoints of one game share a colour, used on its cards and beside its lines in the log, so three
+games stay distinct at a glance.
+
+Click a card for its detail view:
+
+- **Running now** — each call in flight, its progress, its latest message, how long it has been
+  running, and a summary of its arguments. A call with no known total shows a sweeping bar instead
+  of a filling one.
+- **Recent calls** — newest first, with duration, outcome, and how far each got or why it failed.
+  Click one for its arguments.
+- **Messages from the game** — anything a tool reported along the way.
+- **Game log** — the tail of the game's `latest.log`, re-read every ten seconds while the view is
+  open, or on **Refresh**.
+
+If the game thread is stalled, or the game has gone, the view says so at the top, along with the
+crash report when there is one.
+
+Progress comes from the games: `client_sequence`, `client_run_commands`, `client_get_blocks`'
+`find` mode, `server_set_blocks` and the waits all report it. The orchestrator records it whether
+or not your MCP client asked to see it, so the app shows a batch's progress even when the model's
+client does not. This view lives in the app only; activity is not written to disk, so the headless
+`mcmcp-orchestrator` has no equivalent. The log below is the durable record.
+
 ## The log
 
 Every call the model makes, every approval, every focus change, filtered by instance, by who acted,
