@@ -510,6 +510,84 @@ fn undo_image(path: String) -> Option<String> {
 }
 
 // ----------------------------------------------------------------------------------
+// Marks
+// ----------------------------------------------------------------------------------
+
+/// A client endpoint's marks, newest first.
+#[tauri::command]
+async fn marks(state: State<'_, AppState>, instance: String) -> Result<Value, String> {
+    let result = state
+        .router
+        .call_as_person(&instance, "client_marks", json!({ "op": "list" }))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result["structuredContent"]["marks"].clone())
+}
+
+/// Drops a pin at a column, as the person's own mark; the game puts it on the surface.
+#[tauri::command]
+async fn mark_add(
+    state: State<'_, AppState>,
+    instance: String,
+    x: i64,
+    z: i64,
+    note: String,
+) -> Result<Value, String> {
+    let result = state
+        .router
+        .call_as_person(
+            &instance,
+            "client_marks",
+            json!({ "op": "add", "x": x, "z": z, "note": note, "as_player": true }),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result["structuredContent"]["mark"].clone())
+}
+
+#[tauri::command]
+async fn mark_clear(state: State<'_, AppState>, instance: String, id: String) -> Result<(), String> {
+    state
+        .router
+        .call_as_person(&instance, "client_marks", json!({ "op": "clear", "id": id }))
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// A map of the player's surroundings to drop pins on: the image, and how its pixels map to blocks.
+#[tauri::command]
+async fn pin_map(state: State<'_, AppState>, instance: String) -> Result<Value, String> {
+    let result = state
+        .router
+        .call_as_person(
+            &instance,
+            "client_render_map",
+            json!({ "radius": 96, "max_dimension": 640, "inline": true }),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let image = result["content"]
+        .as_array()
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+        })
+        .ok_or("the map came back without an image")?;
+    let mime = image["mimeType"].as_str().unwrap_or("image/png");
+    let data = image["data"].as_str().unwrap_or_default();
+    let structured = &result["structuredContent"];
+    Ok(json!({
+        "image": format!("data:{mime};base64,{data}"),
+        "from": structured["from"],
+        "scale": structured["scale"],
+        "pixelsPerBlock": structured["pixelsPerBlock"],
+        "width": structured["width"],
+    }))
+}
+
+// ----------------------------------------------------------------------------------
 // Flight recorder
 // ----------------------------------------------------------------------------------
 
@@ -1232,6 +1310,10 @@ fn main() -> anyhow::Result<()> {
             undo_points,
             undo_restore,
             undo_image,
+            marks,
+            mark_add,
+            mark_clear,
+            pin_map,
             flight_sessions,
             flight_session,
             thumbnail,

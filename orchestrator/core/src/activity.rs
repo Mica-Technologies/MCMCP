@@ -249,10 +249,8 @@ impl Activity {
     pub fn log(&self, instance: &str, params: &Value) {
         let text = match params.get("data") {
             Some(Value::String(text)) => text.clone(),
-            // The mod sends {"message": "..."}; a person wants the sentence, not the wrapper.
-            Some(Value::Object(map))
-                if map.len() == 1 && map.get("message").is_some_and(Value::is_string) =>
-            {
+            // The mod sends {"message": "...", ...}; a person wants the sentence, not the wrapper.
+            Some(Value::Object(map)) if map.get("message").is_some_and(Value::is_string) => {
                 map["message"].as_str().unwrap_or_default().to_string()
             }
             Some(other) => other.to_string(),

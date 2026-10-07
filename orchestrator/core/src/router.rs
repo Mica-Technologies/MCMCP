@@ -2273,6 +2273,26 @@ impl Router {
                 }
                 if let Some(params) = message_params(&forwarded) {
                     self.activity.log(instance_id, params);
+                    // A mark is something a person (or an agent) did in the game, so it belongs in the
+                    // durable record too — that is how it reaches the flight recorder.
+                    if let Some(mark) = params.get("data").and_then(|data| data.get("mark")) {
+                        let by = if mark.get("by").and_then(Value::as_str) == Some("agent") {
+                            Actor::Model
+                        } else {
+                            Actor::Human
+                        };
+                        let text = params["data"]
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("marked a spot")
+                            .to_string();
+                        self.events.note_about(
+                            by,
+                            Some(instance_id.to_string()),
+                            self.label_of(instance_id),
+                            text,
+                        );
+                    }
                 }
                 self.notify_downstream(forwarded);
             }
@@ -3146,6 +3166,31 @@ mod tests {
             .unwrap();
         assert_eq!((saved.info().width, saved.info().height), (320, 180));
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[tokio::test]
+    async fn a_mark_made_in_the_game_is_recorded_as_the_persons() {
+        let (router, _alpha, _outbound) = router_with("alpha");
+        router
+            .handle_upstream(UpstreamEvent::Notification {
+                instance: "alpha".into(),
+                message: json!({
+                    "jsonrpc": "2.0", "method": "notifications/message",
+                    "params": { "level": "notice", "logger": "mcmcp.marks", "data": {
+                        "message": "Marked 1 64 2 (minecraft:stone): the broken signal",
+                        "mark": { "id": "m1", "x": 1, "y": 64, "z": 2, "by": "player" },
+                    } },
+                }),
+            })
+            .await;
+        let events = router.events().slice(&crate::events::Filter::default(), 10);
+        let note = events.last().expect("the mark is in the log");
+        assert_eq!(note.actor, Actor::Human);
+        assert!(note.summary().contains("the broken signal"));
+        assert_eq!(
+            router.activity().logs("alpha")[0].text,
+            "Marked 1 64 2 (minecraft:stone): the broken signal"
+        );
     }
 
     #[tokio::test]

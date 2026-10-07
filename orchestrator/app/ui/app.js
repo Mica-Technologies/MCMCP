@@ -402,6 +402,9 @@ function openDetail(instance) {
   detailInstance = instance;
   undoLoadedFor = null;
   $("detail-undo").innerHTML = "";
+  marksLoadedFor = null;
+  $("detail-marks").innerHTML = "";
+  $("detail-pin").hidden = true;
   activity = { ...activity, detailRecent: [] };
   $("detail-gamelog").textContent = "";
   showPanel("detail");
@@ -421,6 +424,10 @@ async function renderDetail() {
   $("detail-badges").innerHTML = view?.connected
     ? `<span class="badge is-live">connected</span>${view.focused ? ' <span class="badge is-focused">focused</span>' : ""}`
     : '<span class="badge">not running</span>';
+
+  const isClient = view?.side === "client" && view?.connected;
+  $("detail-marks-section").hidden = !isClient;
+  if (isClient && marksLoadedFor !== detailInstance) loadMarks();
 
   const isServer = view?.side === "server" && view?.connected;
   $("detail-undo-section").hidden = !isServer;
@@ -522,6 +529,105 @@ function renderDetailActivity() {
     if (open.has(String(call.id))) toggle(true);
     list.appendChild(row);
   }
+}
+
+// ---------------------------------------------------------------------------------
+// Marks (in the detail view of a client endpoint)
+// ---------------------------------------------------------------------------------
+
+let marksLoadedFor = null;
+/* The pin map as last fetched, and the block a click chose: {x, z, left, top}. */
+let pinMap = null;
+let pinTarget = null;
+
+async function loadMarks() {
+  const instance = detailInstance;
+  if (!instance) return;
+  marksLoadedFor = instance;
+  const list = $("detail-marks");
+  let marks;
+  try {
+    marks = (await invoke("marks", { instance })) ?? [];
+  } catch (error) {
+    list.innerHTML = `<p class="muted">Could not list marks: ${escapeHtml(error)}</p>`;
+    return;
+  }
+  if (detailInstance !== instance) return;
+  list.innerHTML = "";
+  $("detail-marks-empty").hidden = marks.length > 0;
+  for (const mark of marks) {
+    const row = document.createElement("div");
+    row.className = "row mark-row";
+    const where = `${mark.x} ${mark.y} ${mark.z}${mark.block ? ` · ${mark.block}` : ""}`;
+    row.innerHTML = `
+      <span class="time">${formatTime(mark.at)}</span>
+      <span class="who">${mark.by === "agent" ? "agent" : "you"}</span>
+      <span class="summary">${escapeHtml(where)}${mark.note ? ` — ${escapeHtml(mark.note)}` : ""}</span>`;
+    const remove = document.createElement("button");
+    remove.className = "copy";
+    remove.textContent = "remove";
+    remove.addEventListener("click", async () => {
+      await call("mark_clear", { instance, id: mark.id });
+      loadMarks();
+    });
+    row.appendChild(remove);
+    list.appendChild(row);
+  }
+}
+
+async function showPinMap() {
+  const panel = $("detail-pin");
+  if (!panel.hidden) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  $("detail-pin-note").hidden = true;
+  pinTarget = null;
+  document.querySelector(".pin-stage .pin")?.remove();
+  $("detail-pin-image").removeAttribute("src");
+  try {
+    pinMap = await call("pin_map", { instance: detailInstance });
+    $("detail-pin-image").src = pinMap.image;
+  } catch {
+    panel.hidden = true;
+  }
+}
+
+/* A click on the map, as a block column: the map says where it starts, how many blocks a sampled
+ * column covers and how many pixels a column is drawn as; the image may be shown smaller than that. */
+function pickPin(event) {
+  if (!pinMap) return;
+  const image = event.currentTarget;
+  const shown = image.getBoundingClientRect();
+  const fullPixelX = (event.clientX - shown.left) * (pinMap.width / shown.width);
+  const fullPixelY = (event.clientY - shown.top) * (pinMap.width / shown.width);
+  pinTarget = {
+    x: pinMap.from.x + Math.floor(fullPixelX / pinMap.pixelsPerBlock) * pinMap.scale,
+    z: pinMap.from.z + Math.floor(fullPixelY / pinMap.pixelsPerBlock) * pinMap.scale,
+  };
+  let pin = document.querySelector(".pin-stage .pin");
+  if (!pin) {
+    pin = document.createElement("span");
+    pin.className = "pin";
+    document.querySelector(".pin-stage").appendChild(pin);
+  }
+  pin.style.left = `${event.clientX - shown.left}px`;
+  pin.style.top = `${event.clientY - shown.top}px`;
+  $("detail-pin-note").hidden = false;
+  $("detail-pin-text").placeholder = `What is at ${pinTarget.x}, ${pinTarget.z}? (Enter to drop the pin)`;
+  $("detail-pin-text").focus();
+}
+
+async function dropPin() {
+  if (!pinTarget) return;
+  const mark = await call("mark_add", {
+    instance: detailInstance, x: pinTarget.x, z: pinTarget.z, note: $("detail-pin-text").value.trim(),
+  });
+  toast(`Marked ${mark.x} ${mark.y} ${mark.z} for the agent`);
+  $("detail-pin-text").value = "";
+  $("detail-pin").hidden = true;
+  loadMarks();
 }
 
 // ---------------------------------------------------------------------------------
@@ -1106,6 +1212,11 @@ $("detail-back").addEventListener("click", () => {
 });
 $("detail-log-refresh").addEventListener("click", loadGameLog);
 $("detail-undo-refresh").addEventListener("click", loadUndoPoints);
+$("detail-marks-refresh").addEventListener("click", loadMarks);
+$("detail-pin-map").addEventListener("click", showPinMap);
+$("detail-pin-image").addEventListener("click", pickPin);
+$("detail-pin-drop").addEventListener("click", dropPin);
+$("detail-pin-text").addEventListener("keydown", (event) => { if (event.key === "Enter") dropPin(); });
 
 /* Elapsed times on running calls tick even when no progress arrives. */
 setInterval(() => {

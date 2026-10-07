@@ -51,6 +51,13 @@ An endpoint bound beyond loopback is called out, as is authentication being off:
     Bound beyond loopback and reachable from the network.
 ```
 
+## `/mark [note]`
+
+A client command, so it works on any server, with or without MCMCP. It marks the block you are
+looking at, or the spot you are standing on, with the note, for an agent to read with
+`client_marks`. The agent is told at once. The "Mark this spot" key does the same without a note;
+it is unbound until you bind it in Controls.
+
 ## `/mcmcp link`
 
 The orchestrator link in detail. Separate from `status` because the answers point in different

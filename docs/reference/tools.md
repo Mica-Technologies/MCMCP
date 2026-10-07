@@ -1,6 +1,6 @@
 # Tools
 
-76 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+77 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -790,6 +790,24 @@ covering the whole world border returns in a fraction of a second. The reply giv
 `chunksSearched`, and the rest of the box is counted in `chunksUnloaded`. Those chunks are listed in
 `unloadedChunks` only when there are 64 or fewer. Move the player and search again to cover
 the rest.
+
+#### `client_marks`
+
+`op`, optional `x`, `y`, `z`, `note`, `id`, `all`, `as_player`
+
+The spots marked in this world, for an agent to look at. A player makes them with `/mark [note]`
+while looking at a block, or with the "Mark this spot" key. A person can also drop a pin on the map
+in the orchestrator app. Each mark has `x`, `y`, `z`, the `block`, the `note`, `by` (player or agent)
+and `at`. A new mark also arrives at once, as a log message carrying the mark.
+
+| `op` | Does |
+| --- | --- |
+| `list` (default) | The marks, newest first |
+| `add` | Marks a spot for the player to see, with a `note`. Without `y` it marks the surface of that column |
+| `clear` | Removes one by `id`, or every one with `all: true` |
+
+Marks are kept per world: in the save folder in singleplayer, and under `mcmcp-marks/` and the
+server's address otherwise. The newest 200 are kept.
 
 #### `client_render_map`
 

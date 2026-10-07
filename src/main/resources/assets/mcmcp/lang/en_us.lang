@@ -9,3 +9,7 @@
 # in English. Translating them would make the mod worse in exactly the place it matters most.
 
 mcmcp.command.usage=/mcmcp <status|tools|sessions|token|reload|restart|stop>
+
+# Controls: the key that marks the looked-at block for an agent (unbound by default)
+key.categories.mcmcp=MCMCP
+key.mcmcp.mark=Mark this spot for the agent

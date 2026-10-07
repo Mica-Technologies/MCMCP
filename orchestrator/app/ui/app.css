@@ -330,3 +330,17 @@ button.danger.is-armed { background: var(--danger); color: #10131a; }
 .undo-point .images img { display: block; width: 160px; image-rendering: pixelated; border-radius: 4px; border: 1px solid var(--line); }
 .undo-point .problem { grid-column: 1 / -1; color: var(--warn); font-size: 12.5px; }
 .undo-point.is-restored { opacity: .6; }
+
+/* ---- marks and the pin map ---- */
+.pin-map { margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px; }
+.pin-stage { position: relative; display: inline-block; max-width: 640px; }
+.pin-stage img { display: block; max-width: 100%; cursor: crosshair; border-radius: 6px; border: 1px solid var(--line); image-rendering: pixelated; }
+.pin-stage .pin {
+  position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
+  background: var(--warn); border: 2px solid #10131a; pointer-events: none;
+}
+.mark-row { grid-template-columns: 84px 62px 1fr auto; }
+.mark-row .copy { opacity: 1; }
+
+/* `hidden` must win over any display a class sets, or a panel styled as flex can never be hidden. */
+[hidden] { display: none !important; }

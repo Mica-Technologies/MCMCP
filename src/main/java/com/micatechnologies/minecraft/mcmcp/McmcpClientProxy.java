@@ -13,6 +13,7 @@ import com.micatechnologies.minecraft.mcmcp.client.tools.ClientGuiTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientInputTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientLifecycleTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientMapTools;
+import com.micatechnologies.minecraft.mcmcp.client.tools.ClientMarkTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientOptionsTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientPerformanceTools;
 import com.micatechnologies.minecraft.mcmcp.client.tools.ClientPrompts;
@@ -67,6 +68,7 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientBlockClickTools.register();
         ClientGuiTools.register();
         ClientOptionsTools.register();
+        ClientMarkTools.register();
         ClientSyncTools.register();
         ClientSequenceTools.register();
         ClientWorldTools.register();

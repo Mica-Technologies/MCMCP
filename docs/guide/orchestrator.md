@@ -24,7 +24,7 @@ in-game says so — the only sign is a line in `logs/latest.log`.
 You can fix that by hand. Give each instance a different port, add a separate entry per instance to
 your MCP client's config, and keep track of which port is which game. It works, and it costs a config
 edit for every instance you add, plus one tool catalogue per instance in every request your model
-makes — the same 76 tools, three times over, distinguished only by a prefix.
+makes — the same 77 tools, three times over, distinguished only by a prefix.
 
 The orchestrator replaces that with one connection out of each game to one place.
 
@@ -403,6 +403,17 @@ Lists are saved as one JSON file each in `tasks/` in the state directory, so the
 and a later session can pick a job up where the last one left it. An agent may **archive** a list it
 has finished, which hides it but keeps the file. Only you can **delete** one, from the app, with a
 second click to confirm; the tool does not offer it.
+
+## Pointing at things: marks
+
+Describing "the broken signal by the station" costs an agent a search; you already know where it is.
+In the game, look at the block and type `/mark the broken signal`. You can also bind the "Mark this
+spot" key in Controls. In the app, a client's detail view has **Drop a pin on the map…**: click the
+spot, say what it is, and the pin goes on the surface there.
+
+The agent is told the moment a mark is made, and `client_marks` lists them with exact coordinates.
+It works the other way too: an agent can mark what it found, for you. Marks appear in the detail
+view, in the game's messages, and in the flight recorder. They are kept per world.
 
 ## Sessions: what happened while you were away
 

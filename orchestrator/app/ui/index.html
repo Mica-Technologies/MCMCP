@@ -77,6 +77,27 @@
         <div id="detail-recent" class="log"></div>
         <p id="detail-recent-empty" class="muted" hidden>No calls yet.</p>
 
+        <div id="detail-marks-section" hidden>
+          <h2>
+            Marks
+            <button id="detail-marks-refresh" class="ghost inline">Refresh</button>
+            <button id="detail-pin-map" class="ghost inline">Drop a pin on the map…</button>
+          </h2>
+          <div id="detail-pin" class="pin-map" hidden>
+            <p class="muted">Click where you want the agent to look. The pin goes on the surface there.</p>
+            <div class="pin-stage"><img id="detail-pin-image" alt="map around the player" /></div>
+            <div id="detail-pin-note" class="task-add" hidden>
+              <input id="detail-pin-text" type="text" maxlength="200" placeholder="What is here? (Enter to drop the pin)" />
+              <button id="detail-pin-drop">Drop pin</button>
+            </div>
+          </div>
+          <div id="detail-marks" class="log"></div>
+          <p id="detail-marks-empty" class="muted" hidden>
+            None yet. Type <code>/mark what this is</code> in the game while looking at a block, or
+            drop a pin on the map.
+          </p>
+        </div>
+
         <div id="detail-undo-section" hidden>
           <h2>
             Undo points
