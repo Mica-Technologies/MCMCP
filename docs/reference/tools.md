@@ -725,7 +725,7 @@ the truth, since this is the side that draws the block.
 #### `client_get_blocks`
 
 :material-eye: Read-only · `x`, `y`, `z` required · optional `toX`, `toY`, `toZ`, `relative`, `mode`,
-`blocks`, `exclude`, `tile_entities`, `per_layer`, `limit`
+`blocks`, `exclude`, `tile_entities`, `per_layer`, `limit`, `nbt`
 
 A region read over the chunks the client already holds, so it works on any server, including one
 without MCMCP. Before this tool the only client-side read was `client_get_block`, one position per
@@ -735,6 +735,7 @@ call. Surveying one city parcel before clearing it took about 22,000 of those ca
 |---|---|
 | `summary` (default) | `counts` per block id, most common first; `per_layer: true` adds the same per `y` |
 | `positions` | Each matching block's `[x,y,z]`, grouped by id, capped at `limit` (default 256, max 4096); the counts stay exact |
+| `find` | The same answer as `positions` for a box of any size. Needs `blocks` or `tile_entities`; `nbt: true` adds the first 64 listed matches' tile-entity NBT under `blockEntities`, keyed `"x,y,z"` |
 | `heightmap` | `heights[z][x]`: the highest matching `y` in each column, `-1` where there is none, at most 128 × 128 columns |
 | `surface` | The heightmap plus `blocks[z][x]`, which block is on top, as an index into `palette`. Limited by columns, not volume, so it can cover the whole 0–255 range |
 
@@ -748,6 +749,16 @@ Chunks outside the view distance are listed in `unloadedChunks` and skipped, nev
 in a heightmap their columns are `null`. One read covers up to `limits.maxBlockVolume` × 8 blocks:
 a client read of chunks already in memory is cheap, and the size of the answer is bounded by the mode
 rather than the volume.
+
+`find` is for locating something rare in an area far larger than one read: a block type along a
+whole road corridor took about 400 tiled reads, each with a teleport, before it existed. It has no
+volume cap, because its cost is set by the chunks the client holds rather than by the box. It
+searches only loaded chunks within 32 chunks of the player, skips empty sections without reading
+them, and works a few milliseconds at a time so the game keeps rendering between batches. A box
+covering the whole world border returns in a fraction of a second. The reply gives
+`chunksSearched`, and the rest of the box is counted in `chunksUnloaded`. Those chunks are listed in
+`unloadedChunks` only when there are 64 or fewer. Move the player and search again to cover
+the rest.
 
 #### `client_render_map`
 
@@ -1101,7 +1112,9 @@ tool's arguments. It may add:
 - `quiet: true`, which leaves a passing step's result out of the reply.
 
 A step fails when its tool reports an error or an expectation does not match. By default the
-sequence stops there and returns `nextIndex`; `stop_on_fail: false` runs on. Every step is checked
+sequence stops there and returns `nextIndex`; `stop_on_fail: false` runs on. The first failure
+is repeated at the top of the reply as `firstError`, so a loop that reads only each step's
+`result` cannot miss it. Every step is checked
 before any runs — the tool exists and may be a step, and every argument is one it declares — so a
 misspelt argument in a late step changes nothing.
 

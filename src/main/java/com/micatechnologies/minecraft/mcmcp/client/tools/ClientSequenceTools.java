@@ -162,6 +162,7 @@ public final class ClientSequenceTools {
         int failed = 0;
         Integer nextIndex = null;
         String stopReason = null;
+        JsonObject firstError = null;
 
         for (Step step : steps) {
             if (context.getCancellation().isCancelled()) {
@@ -186,6 +187,9 @@ public final class ClientSequenceTools {
             }
             else {
                 failed++;
+                if (firstError == null) {
+                    firstError = summarizeFailure(entry);
+                }
                 if (stopOnFail) {
                     if (step.index + 1 < steps.size()) {
                         nextIndex = step.index + 1;
@@ -207,8 +211,28 @@ public final class ClientSequenceTools {
         if (nextIndex != null) {
             json.addProperty("nextIndex", nextIndex);
         }
+        // Up front, beside the counts: a caller looping over results for each step's 'result' skips
+        // a failed step without noticing, and two whole-corridor scans reported "0 found" that way
+        // before anyone saw the steps had failed (issue #48).
+        if (firstError != null) {
+            json.add("firstError", firstError);
+        }
         json.add("results", results);
         return ToolResult.structured(json);
+    }
+
+    /** The failed step's index, tool and why it failed, without its result. */
+    private static JsonObject summarizeFailure(JsonObject entry) {
+        JsonObject failure = new JsonObject();
+        failure.add("i", entry.get("i"));
+        failure.add("tool", entry.get("tool"));
+        if (entry.has("error")) {
+            failure.add("error", entry.get("error"));
+        }
+        if (entry.has("expectFailed")) {
+            failure.add("expectFailed", entry.get("expectFailed"));
+        }
+        return failure;
     }
 
     /**

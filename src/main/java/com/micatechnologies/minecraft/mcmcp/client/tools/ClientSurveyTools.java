@@ -8,6 +8,7 @@ import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.tools.BlockPatterns;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
@@ -20,12 +21,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.Callable;
+import javax.annotation.Nullable;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.chunk.storage.ExtendedBlockStorage;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -57,7 +60,26 @@ public final class ClientSurveyTools {
 
     private static final int MAX_POSITIONS = 4096;
 
+    /** find: most tile entities whose NBT one reply carries; a modded one can be kilobytes. */
+    private static final int MAX_NBT = 64;
+
+    /**
+     * find: how far from the player's chunk a chunk can be and still be held. The server's view
+     * distance tops out at 32, and clipping the box to this window keeps a continent-sized box from
+     * costing a lookup per chunk column it names.
+     */
+    private static final int CHUNK_WINDOW = 32;
+
+    /** find: how long one game-thread hop may scan before handing the thread back for a frame. */
+    private static final long HOP_NANOS = 8_000_000L;
+
+    /** find: unloaded chunks are listed only when there are this few; otherwise just counted. */
+    private static final int MAX_LISTED_UNLOADED = 64;
+
     private static final List<String> AIR = Collections.singletonList("minecraft:air");
+
+    private static final List<String> MODES =
+        Arrays.asList("summary", "positions", "find", "heightmap", "surface");
 
     private ClientSurveyTools() {
     }
@@ -73,7 +95,11 @@ public final class ClientSurveyTools {
                 + "Use this instead of many client_get_block calls to survey an area.\n\n"
                 + "mode 'summary' (default): how many of each block, optionally per layer. "
                 + "'positions': where each matching block is, as [x,y,z], grouped by block and "
-                + "capped at 'limit'. 'heightmap': the y of the highest matching block in every "
+                + "capped at 'limit'. 'find': the same answer for a box of any size, for locating "
+                + "rare blocks: it needs 'blocks' or 'tile_entities', searches only the loaded "
+                + "chunks inside the box a few at a time so the game keeps running, and counts the "
+                + "rest in chunksUnloaded; 'nbt' adds each listed match's tile-entity NBT. "
+                + "'heightmap': the y of the highest matching block in every "
                 + "column, as rows of z holding x from the low corner; -1 where there is none. "
                 + "'surface': the same, plus which block is on top, as indices into a palette — "
                 + "what is on the ground, not only how high. surface is limited by columns, not "
@@ -94,13 +120,15 @@ public final class ClientSurveyTools {
                 .bool("relative", "Treat all six coordinates as offsets from the player's block "
                     + "position.")
                 .enumeration("mode", "What to return. Defaults to 'summary'.",
-                    "summary", "positions", "heightmap", "surface")
+                    "summary", "positions", "find", "heightmap", "surface")
                 .stringArray("blocks", "Only count blocks matching one of these patterns.")
                 .stringArray("exclude", "Leave out blocks matching any of these patterns.")
                 .bool("tile_entities", "Only count blocks that have a tile entity on this client.")
                 .bool("per_layer", "summary: also break the counts down by y. Default false.")
-                .integer("limit", "positions: most positions returned; the counts stay exact. "
+                .integer("limit", "positions, find: most positions returned; the counts stay exact. "
                     + "Default 256.", 1, MAX_POSITIONS)
+                .bool("nbt", "find: also return the tile-entity NBT of the first " + MAX_NBT
+                    + " listed matches, keyed \"x,y,z\".")
                 .required("x", "y", "z")
                 .build())
             .clientOnly()
@@ -114,9 +142,9 @@ public final class ClientSurveyTools {
                 final int z2 = context.getInt("toZ", z1);
                 final boolean relative = context.getBoolean("relative", false);
                 final String mode = context.getString("mode", "summary");
-                if (!Arrays.asList("summary", "positions", "heightmap", "surface").contains(mode)) {
+                if (!MODES.contains(mode)) {
                     return ToolResult.error("Unknown mode '" + mode + "'; use summary, positions, "
-                        + "heightmap or surface.");
+                        + "find, heightmap or surface.");
                 }
                 final BlockPatterns include = BlockPatterns.of(
                     Json.getStringList(context.getArguments(), "blocks"));
@@ -126,6 +154,14 @@ public final class ClientSurveyTools {
                 final boolean tileEntitiesOnly = context.getBoolean("tile_entities", false);
                 final boolean perLayer = context.getBoolean("per_layer", false);
                 final int limit = context.getBoundedInt("limit", 256, 1, MAX_POSITIONS);
+                if ("find".equals(mode)) {
+                    if (include.isEmpty() && !tileEntitiesOnly) {
+                        return ToolResult.error("mode 'find' searches for something: pass 'blocks', "
+                            + "'tile_entities': true, or both.");
+                    }
+                    return find(context, new int[]{x1, y1, z1, x2, y2, z2}, relative, include,
+                        exclude, tileEntitiesOnly, limit, context.getBoolean("nbt", false));
+                }
 
                 final long maxVolume = (long) McmcpConfig.getMaxBlockVolume() * VOLUME_FACTOR;
                 long volume = (long) (Math.abs(x2 - x1) + 1) * (Math.abs(z2 - z1) + 1)
@@ -136,7 +172,9 @@ public final class ClientSurveyTools {
                 if (volume > maxVolume && !"surface".equals(mode)) {
                     return ToolResult.error("That region is " + volume + " blocks; one read covers at "
                         + "most " + maxVolume + " (limits.maxBlockVolume x " + VOLUME_FACTOR + "). "
-                        + "Split it.");
+                        + ("positions".equals(mode)
+                            ? "Split it, or use mode 'find', which takes a box of any size."
+                            : "Split it."));
                 }
                 long columns = (long) (Math.abs(x2 - x1) + 1) * (Math.abs(z2 - z1) + 1);
                 if (("heightmap".equals(mode) || "surface".equals(mode)) && columns > MAX_COLUMNS) {
@@ -162,6 +200,177 @@ public final class ClientSurveyTools {
                 return ToolResult.structured(result);
             })
             .build());
+    }
+
+    /**
+     * mode 'find': a search over a box of any size, answered in a size set by what it finds.
+     *
+     * <p>Searching a road corridor for one rare block (issue #48) took about 400 reads at the
+     * per-read volume cap, each with a teleport, for an answer of a handful of positions. The cap
+     * bounds how long a read holds the client thread; here that is bounded instead by splitting the
+     * work into hops of a few milliseconds, between which the game renders a frame. Only loaded
+     * chunks can be searched, and the client holds few of them, so the real cost is set by those,
+     * not by the box: empty sections are skipped outright.
+     */
+    private static ToolResult find(ToolContext context, int[] corners, boolean relative,
+        BlockPatterns include, BlockPatterns exclude, boolean tileEntitiesOnly, int limit,
+        boolean nbt) {
+        final FindPlan plan = context.onGameThread(() -> {
+            Minecraft mc = ClientStateTools.requireInWorld();
+            BlockPos origin = relative ? GameJson.blockPosOf(mc.player) : BlockPos.ORIGIN;
+            Region region = new Region(
+                origin.getX() + corners[0], origin.getY() + corners[1], origin.getZ() + corners[2],
+                origin.getX() + corners[3], origin.getY() + corners[4], origin.getZ() + corners[5]);
+            BlockPos player = GameJson.blockPosOf(mc.player);
+            int[] window = chunkWindow(region.minX, region.maxX, region.minZ, region.maxZ,
+                player.getX() >> 4, player.getZ() >> 4, CHUNK_WINDOW);
+            List<long[]> loaded = new ArrayList<>();
+            if (window != null) {
+                for (int cx = window[0]; cx <= window[1]; cx++) {
+                    for (int cz = window[2]; cz <= window[3]; cz++) {
+                        if (GameJson.isLoaded(mc.world, new BlockPos(cx << 4, 0, cz << 4))) {
+                            loaded.add(new long[]{cx, cz});
+                        }
+                    }
+                }
+            }
+            long columns = chunkColumns(region.minX, region.maxX, region.minZ, region.maxZ);
+            JsonArray unloaded = new JsonArray();
+            // Listing the unloaded chunks is only worth it when there are few; then the box is small
+            // enough to walk. A corridor's thousands of them are a count, not a list.
+            if (columns - loaded.size() <= MAX_LISTED_UNLOADED) {
+                for (int cx = region.minX >> 4; cx <= region.maxX >> 4; cx++) {
+                    for (int cz = region.minZ >> 4; cz <= region.maxZ >> 4; cz++) {
+                        if (!GameJson.isLoaded(mc.world, new BlockPos(cx << 4, 0, cz << 4))) {
+                            JsonArray pair = new JsonArray();
+                            pair.add(cx);
+                            pair.add(cz);
+                            unloaded.add(pair);
+                        }
+                    }
+                }
+            }
+            return new FindPlan(region, loaded, columns, unloaded,
+                System.identityHashCode(mc.world));
+        });
+
+        final Found found = new Found(limit, nbt ? Math.min(limit, MAX_NBT) : 0);
+        int next = 0;
+        while (next < plan.chunks.size()) {
+            final int start = next;
+            next = context.onGameThread(() -> {
+                Minecraft mc = ClientStateTools.requireInWorld();
+                if (System.identityHashCode(mc.world) != plan.worldIdentity) {
+                    throw new IllegalStateException("The client changed world part way through the "
+                        + "search; run it again.");
+                }
+                Survey survey = new Survey(mc.world, include, exclude, tileEntitiesOnly);
+                long deadline = System.nanoTime() + HOP_NANOS;
+                int i = start;
+                // At least one chunk per hop, so a slow chunk cannot stall the search.
+                while (i < plan.chunks.size() && (i == start || System.nanoTime() < deadline)) {
+                    long[] chunk = plan.chunks.get(i++);
+                    int cx = (int) chunk[0];
+                    int cz = (int) chunk[1];
+                    if (GameJson.isLoaded(mc.world, new BlockPos(cx << 4, 0, cz << 4))) {
+                        survey.find(mc.world.getChunk(cx, cz), plan.region, found);
+                        found.chunksSearched++;
+                    }
+                    else {
+                        found.unloadedSince++;
+                    }
+                }
+                return i;
+            });
+            context.reportProgress(next, plan.chunks.size(), "Searched " + next + " of "
+                + plan.chunks.size() + " loaded chunks; " + found.matched + " found");
+        }
+
+        JsonObject json = plan.region.describe();
+        json.addProperty("matched", found.matched);
+        json.add("counts", Survey.sortedCounts(found.counts));
+        JsonObject grouped = new JsonObject();
+        for (Map.Entry<String, JsonArray> entry : found.positions.entrySet()) {
+            grouped.add(entry.getKey(), entry.getValue());
+        }
+        json.add("positions", grouped);
+        if (found.matched > found.listed) {
+            json.addProperty("truncated", true);
+            json.addProperty("listed", found.listed);
+        }
+        if (nbt) {
+            json.add("blockEntities", found.blockEntities);
+        }
+        json.addProperty("chunksSearched", found.chunksSearched);
+        long unloadedCount = plan.columns - plan.chunks.size() + found.unloadedSince;
+        if (unloadedCount > 0) {
+            json.addProperty("chunksUnloaded", unloadedCount);
+            if (plan.unloaded.size() > 0 && found.unloadedSince == 0) {
+                json.add("unloadedChunks", plan.unloaded);
+            }
+        }
+        return ToolResult.structured(json);
+    }
+
+    /**
+     * The chunk range of a block box, clipped to {@code radius} chunks around the player's chunk,
+     * as {minChunkX, maxChunkX, minChunkZ, maxChunkZ}; null when the two do not overlap.
+     */
+    @Nullable
+    static int[] chunkWindow(int minX, int maxX, int minZ, int maxZ, int playerChunkX,
+        int playerChunkZ, int radius) {
+        int minCX = Math.max(minX >> 4, playerChunkX - radius);
+        int maxCX = Math.min(maxX >> 4, playerChunkX + radius);
+        int minCZ = Math.max(minZ >> 4, playerChunkZ - radius);
+        int maxCZ = Math.min(maxZ >> 4, playerChunkZ + radius);
+        if (minCX > maxCX || minCZ > maxCZ) {
+            return null;
+        }
+        return new int[]{minCX, maxCX, minCZ, maxCZ};
+    }
+
+    /** How many chunk columns a block box touches. */
+    static long chunkColumns(int minX, int maxX, int minZ, int maxZ) {
+        return ((long) (maxX >> 4) - (minX >> 4) + 1) * ((long) (maxZ >> 4) - (minZ >> 4) + 1);
+    }
+
+    /** What the first hop of a find learns: where to look. Plain values only. */
+    private static final class FindPlan {
+
+        final Region region;
+        final List<long[]> chunks;
+        final long columns;
+        final JsonArray unloaded;
+        final int worldIdentity;
+
+        FindPlan(Region region, List<long[]> chunks, long columns, JsonArray unloaded,
+            int worldIdentity) {
+            this.region = region;
+            this.chunks = chunks;
+            this.columns = columns;
+            this.unloaded = unloaded;
+            this.worldIdentity = worldIdentity;
+        }
+    }
+
+    /** A find's running answer, written on the client thread one hop at a time. */
+    private static final class Found {
+
+        final int limit;
+        final int nbtLimit;
+        final Map<String, int[]> counts = new LinkedHashMap<>();
+        final Map<String, JsonArray> positions = new LinkedHashMap<>();
+        final JsonObject blockEntities = new JsonObject();
+        long matched;
+        int listed;
+        int nbtListed;
+        int chunksSearched;
+        int unloadedSince;
+
+        Found(int limit, int nbtLimit) {
+            this.limit = limit;
+            this.nbtLimit = nbtLimit;
+        }
     }
 
     private static final class Region {
@@ -200,6 +409,12 @@ public final class ClientSurveyTools {
 
         /** Building an id string per block is most of the cost of a read; there are few states. */
         private final Map<IBlockState, String> ids = new IdentityHashMap<>();
+
+        /** find's cache: the id of a state that passes the filters, or {@link #NO_MATCH}. */
+        private final Map<IBlockState, String> verdicts = new IdentityHashMap<>();
+
+        @SuppressWarnings("RedundantStringConstructorCall")
+        private static final String NO_MATCH = new String("");
         private final JsonArray unloadedChunks = new JsonArray();
 
         Survey(WorldClient world, BlockPatterns include, BlockPatterns exclude,
@@ -252,6 +467,86 @@ public final class ClientSurveyTools {
                 return null;
             }
             return id;
+        }
+
+        /** The state's id if it passes the block filters, else null; once per state, not per block. */
+        @Nullable
+        private String matchingState(IBlockState state) {
+            String verdict = verdicts.get(state);
+            if (verdict == null) {
+                ResourceLocation name = state.getBlock().getRegistryName();
+                String id = name == null ? "unknown" : name.toString();
+                int metadata = state.getBlock().getMetaFromState(state);
+                if (metadata != 0) {
+                    id = id + ":" + metadata;
+                }
+                boolean passes = (include.isEmpty() || include.matches(id)) && !exclude.matches(id);
+                verdict = passes ? id : NO_MATCH;
+                verdicts.put(state, verdict);
+            }
+            return verdict == NO_MATCH ? null : verdict;
+        }
+
+        /**
+         * Adds one chunk's matches inside {@code region} to {@code found}, a section at a time. An
+         * empty section is all air, and air is never what a find is looking for, so it is skipped
+         * without reading a block.
+         */
+        void find(Chunk chunk, Region region, Found found) {
+            int minX = Math.max(region.minX, chunk.x << 4);
+            int maxX = Math.min(region.maxX, (chunk.x << 4) + 15);
+            int minZ = Math.max(region.minZ, chunk.z << 4);
+            int maxZ = Math.min(region.maxZ, (chunk.z << 4) + 15);
+            ExtendedBlockStorage[] sections = chunk.getBlockStorageArray();
+            BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+            for (int sectionY = region.minY >> 4; sectionY <= region.maxY >> 4; sectionY++) {
+                ExtendedBlockStorage section = sections[sectionY];
+                if (section == Chunk.NULL_BLOCK_STORAGE || section.isEmpty()) {
+                    continue;
+                }
+                int minY = Math.max(region.minY, sectionY << 4);
+                int maxY = Math.min(region.maxY, (sectionY << 4) + 15);
+                for (int y = minY; y <= maxY; y++) {
+                    for (int z = minZ; z <= maxZ; z++) {
+                        for (int x = minX; x <= maxX; x++) {
+                            String id = matchingState(section.get(x & 15, y & 15, z & 15));
+                            if (id == null) {
+                                continue;
+                            }
+                            pos.setPos(x, y, z);
+                            if (tileEntitiesOnly
+                                && chunk.getTileEntity(pos, Chunk.EnumCreateEntityType.CHECK) == null) {
+                                continue;
+                            }
+                            record(found, id, pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void record(Found found, String id, BlockPos pos) {
+            found.matched++;
+            increment(found.counts, id);
+            if (found.listed >= found.limit) {
+                return;
+            }
+            JsonArray list = found.positions.get(id);
+            if (list == null) {
+                list = new JsonArray();
+                found.positions.put(id, list);
+            }
+            JsonArray xyz = new JsonArray();
+            xyz.add(pos.getX());
+            xyz.add(pos.getY());
+            xyz.add(pos.getZ());
+            list.add(xyz);
+            found.listed++;
+            if (found.nbtListed < found.nbtLimit) {
+                found.blockEntities.add(pos.getX() + "," + pos.getY() + "," + pos.getZ(),
+                    GameJson.blockEntity(world, pos.toImmutable(), false));
+                found.nbtListed++;
+            }
         }
 
         JsonObject scan(Region region, String mode, boolean perLayer, int limit) {
