@@ -375,6 +375,33 @@ impl TaskStore {
         })
     }
 
+    /// Moves one task to `position` (0 is first; past the end means last). For a person reordering a
+    /// plan by hand; the ids stay as they were, so nothing a model remembers changes meaning.
+    pub fn move_task(
+        &self,
+        key: &str,
+        task: &str,
+        position: usize,
+        authority: Authority,
+    ) -> Result<TaskList, String> {
+        let editor = Editor::from(authority);
+        self.edit(key, |list| {
+            let Some(from) = list
+                .tasks
+                .iter()
+                .position(|candidate| candidate.id == task.trim())
+            else {
+                return Err(format!("'{}' has no task '{task}'.", list.id));
+            };
+            let mut moved = list.tasks.remove(from);
+            moved.updated_ms = now_millis();
+            moved.updated_by = editor;
+            let to = position.min(list.tasks.len());
+            list.tasks.insert(to, moved);
+            Ok(())
+        })
+    }
+
     /// Hides a list, or brings it back. The file stays.
     pub fn set_archived(&self, key: &str, archived: bool) -> Result<TaskList, String> {
         self.edit(key, |list| {
@@ -636,6 +663,24 @@ mod tests {
         assert!(refusal.contains("only be done by a person"), "{refusal}");
         store.delete("job", Authority::Human).unwrap();
         assert!(store.all(true).is_empty());
+    }
+
+    #[test]
+    fn a_task_moves_without_changing_any_id() {
+        let store = TaskStore::in_memory();
+        store
+            .create("Job", &tasks(&["a", "b", "c"]), &[], Authority::Model)
+            .unwrap();
+        let list = store.move_task("job", "3", 0, Authority::Human).unwrap();
+        let order: Vec<(&str, &str)> = list
+            .tasks
+            .iter()
+            .map(|task| (task.id.as_str(), task.title.as_str()))
+            .collect();
+        assert_eq!(order, vec![("3", "c"), ("1", "a"), ("2", "b")]);
+        let list = store.move_task("job", "3", 99, Authority::Human).unwrap();
+        assert_eq!(list.tasks.last().unwrap().id, "3");
+        assert!(store.move_task("job", "9", 0, Authority::Human).is_err());
     }
 
     #[test]

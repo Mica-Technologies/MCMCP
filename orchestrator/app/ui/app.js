@@ -858,7 +858,7 @@ function renderTaskList(list) {
   actions.appendChild(remove);
 
   const rows = element.querySelector(".tasks");
-  for (const task of list.tasks) {
+  for (const [position, task] of list.tasks.entries()) {
     const row = document.createElement("div");
     row.className = `task status-${task.status}`;
     row.dataset.status = task.status;
@@ -871,6 +871,21 @@ function renderTaskList(list) {
       <span class="task-activity"></span>`;
     row.querySelector("select").addEventListener("change", (event) =>
       call("task_update", { list: list.id, task: task.id, status: event.target.value }));
+    if (!list.archived) {
+      const move = document.createElement("span");
+      move.className = "task-move";
+      for (const [label, to, title] of [["↑", position - 1, "Move up"], ["↓", position + 1, "Move down"]]) {
+        const button = document.createElement("button");
+        button.className = "ghost";
+        button.textContent = label;
+        button.title = title;
+        button.disabled = to < 0 || to >= list.tasks.length;
+        button.addEventListener("click", () => call("task_move", { list: list.id, task: task.id, position: to }));
+        move.appendChild(button);
+      }
+      // Beside the title, so it lands in the fourth column and the note keeps its own row.
+      row.querySelector(".task-title").after(move);
+    }
     rows.appendChild(row);
   }
 

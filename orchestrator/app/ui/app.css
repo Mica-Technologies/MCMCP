@@ -351,3 +351,10 @@ button.danger.is-armed { background: var(--danger); color: #10131a; }
 .data-table .note { display: block; color: var(--text-dim); font-size: 11.5px; }
 .data-game h3 { font-size: 13.5px; margin: 14px 0 4px; }
 .data-game h3 .muted { font-weight: 400; font-family: var(--mono); font-size: 11.5px; }
+
+/* Up and down on a task, shown on hover so a long plan is not a column of arrows. */
+.task { grid-template-columns: 34px 96px 1fr auto; }
+.task .task-note, .task .task-activity { grid-column: 3 / 5; }
+.task .task-move { display: flex; gap: 2px; opacity: 0; transition: opacity .1s; }
+.task:hover .task-move { opacity: 1; }
+.task .task-move button { padding: 0 6px; font-size: 11px; }

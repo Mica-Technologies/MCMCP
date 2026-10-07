@@ -413,6 +413,22 @@ fn task_add(state: State<'_, AppState>, list: String, title: String) -> Result<T
     Ok(updated)
 }
 
+/// Moves a task up or down a list, as the person.
+#[tauri::command]
+fn task_move(
+    state: State<'_, AppState>,
+    list: String,
+    task: String,
+    position: usize,
+) -> Result<TaskList, String> {
+    let updated = state
+        .router
+        .tasks()
+        .move_task(&list, &task, position, Authority::Human)?;
+    note_task_change(&state, &updated, "reordered");
+    Ok(updated)
+}
+
 #[tauri::command]
 fn task_create(state: State<'_, AppState>, title: String) -> Result<TaskList, String> {
     let created = state.router.tasks().create(&title, &[], &[], Authority::Human)?;
@@ -1352,6 +1368,7 @@ fn main() -> anyhow::Result<()> {
             task_lists,
             task_update,
             task_add,
+            task_move,
             task_create,
             task_archive,
             task_delete,

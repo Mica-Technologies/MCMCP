@@ -359,6 +359,8 @@ games stay distinct at a glance.
 
 Click a card for its detail view:
 
+![The detail view of a game running a 60-step client_sequence, with its progress bar, its arguments and the calls before it](../images/orchestrator-detail-view.png)
+
 - **Running now** — each call in flight, its progress, its latest message, how long it has been
   running, and a summary of its arguments. A call with no known total shows a sweeping bar instead
   of a filling one.
@@ -387,11 +389,16 @@ client does not. This view lives in the app only; activity is not written to dis
 
 For a job of several steps an agent can keep a task list with `mcmcp_tasks`: create one with its
 tasks, mark each `doing` as it starts and `done`, `blocked` or `skipped` as it finishes, with a note
-where one helps. The **Tasks** tab shows every list live. A task being worked on shows beneath it
+where one helps. The **Tasks** tab shows every list live.
+
+![A task list in the Tasks tab, with the task in progress showing the game's running call beneath it](../images/orchestrator-tasks.png)
+
+A task being worked on shows beneath it
 whatever its list's instances are running right now, progress bar included, so the plan and the work
 appear side by side without the agent doing anything extra.
 
-You can edit lists too: change a status, add a task, or start a list of your own. The agent sees your
+You can edit lists too: change a status, add a task, move a task up or down (hover over it for the
+arrows), or start a list of your own. A task keeps its id when it moves. The agent sees your
 changes the next time it reads the list. Each change, by you or the agent, is a line in the log.
 
 The game shows the task too. While an agent works, a small line at the top of the game's screen
