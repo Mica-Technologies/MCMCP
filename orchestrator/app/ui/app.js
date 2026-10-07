@@ -380,7 +380,8 @@ function paintCardActivity() {
 
 function onActivity(snapshot) {
   const newestBefore = activity.recent[0]?.id;
-  activity = snapshot;
+  // The detail view's complete list survives a push, which carries only the newest calls.
+  activity = { ...snapshot, detailRecent: activity.detailRecent };
   if (activePanel === "instances") paintCardActivity();
   if (activePanel === "detail") renderDetailActivity();
   // A finished call is a new line in the log. The log is otherwise re-read on the slow poll, which
@@ -394,6 +395,7 @@ function onActivity(snapshot) {
 
 function openDetail(instance) {
   detailInstance = instance;
+  activity = { ...activity, detailRecent: [] };
   $("detail-gamelog").textContent = "";
   showPanel("detail");
   loadGameLog();
@@ -475,7 +477,8 @@ function renderDetailActivity() {
   // Newest pushed calls first, then the rest of the full list read when the view opened.
   const pushed = activity.recent.filter((call) => call.instance === detailInstance);
   const seen = new Set(pushed.map((call) => call.id));
-  const recent = pushed.concat((activity.detailRecent ?? []).filter((call) => !seen.has(call.id)));
+  const recent = pushed.concat((activity.detailRecent ?? [])
+    .filter((call) => call.instance === detailInstance && !seen.has(call.id)));
 
   const list = $("detail-recent");
   const open = new Set([...list.querySelectorAll(".recent-row.is-open")].map((row) => row.dataset.id));
