@@ -16,6 +16,7 @@
 //! - [`store`] — which instances have been approved, keyed by id and authenticated by secret hash
 //! - [`paths`] — where this orchestrator keeps its state on each platform
 
+pub mod activity;
 pub mod catalogue;
 pub mod control;
 pub mod crash;

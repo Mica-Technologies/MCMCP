@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tracing::{debug, warn};
 
+use crate::activity::{Activity, CallId, Outcome};
 use crate::catalogue::{self, ALL_INSTANCES, Aggregate, Contribution, INSTANCE_ARGUMENT};
 use crate::events::{Actor, Event, EventKind, EventLog, Level};
 use crate::instance::{self, Catalogue, Instance, InstanceInfo, UpstreamEvent};
@@ -69,8 +70,9 @@ pub struct Router {
     /// tool surface every time — constant in a mod-development loop — and a client connecting before
     /// any game is up would see nothing but the roster tool and plan around having no others.
     cached: Mutex<Option<Aggregate>>,
-    /// Client request id to the instance and instance-side id handling it, for cancellation.
-    inflight: Mutex<HashMap<String, (Arc<Instance>, String)>>,
+    /// Client request id to the instance and instance-side id handling it, for cancellation, and
+    /// the call's entry in [`Activity`] so a cancellation is shown as one.
+    inflight: Mutex<HashMap<String, InFlight>>,
     /// The other direction: an id this orchestrator gave the client, to the instance waiting on it
     /// and the id that instance used.
     ///
@@ -113,7 +115,13 @@ pub struct Router {
     last_process: Mutex<HashMap<String, ProcessIdentity>>,
     /// Per game: the session this orchestrator last saw, for reporting how it ended.
     sessions: Mutex<HashMap<String, GameSession>>,
+    /// Calls in flight with their progress, recent calls, and each game's log messages.
+    activity: Arc<Activity>,
 }
+
+/// A routed call in flight: the instance handling it, the id that instance knows it by, and its
+/// entry in [`Activity`].
+type InFlight = (Arc<Instance>, String, CallId);
 
 /// A game process as the link describes it: pid and start time.
 type ProcessIdentity = (Option<i64>, Option<String>);
@@ -177,6 +185,7 @@ impl Router {
             retained: Mutex::new(BTreeMap::new()),
             last_process: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            activity: Arc::new(Activity::new()),
         }
     }
 
@@ -202,6 +211,11 @@ impl Router {
 
     pub fn policy(&self) -> Arc<Mutex<Policy>> {
         Arc::clone(&self.policy)
+    }
+
+    /// What every game is doing right now. See [`crate::activity`].
+    pub fn activity(&self) -> Arc<Activity> {
+        Arc::clone(&self.activity)
     }
 
     /// Seeds the cached catalogue from disk, so a client connecting before any game is up still
@@ -317,7 +331,10 @@ impl Router {
                     .get(&request_id)
                     .cloned();
                 match target {
-                    Some((instance, instance_request_id)) => {
+                    Some((instance, instance_request_id, call)) => {
+                        // Finished here rather than when the answer comes back, which it may never:
+                        // the later finish, with whatever the game said, is then ignored.
+                        self.activity.finish(call, Outcome::Cancelled, Some(&reason));
                         // Translated, not forwarded: the instance only recognises the id we minted.
                         instance.cancel(&instance_request_id, &reason).await;
                         debug!(%request_id, "forwarded a cancellation");
@@ -779,9 +796,13 @@ impl Router {
             Err(error) => return Ok(tool_error(&format!("could not reach that instance: {error}"))),
         };
 
+        // Recorded once the call has reached the game: one that never got there was not activity.
+        let call = self
+            .activity
+            .start(&instance.id(), name, &logged_arguments, Some(&progress_token));
         self.inflight.lock().expect("inflight lock").insert(
             tracking_key.clone(),
-            (Arc::clone(&instance), instance_request_id.clone()),
+            (Arc::clone(&instance), instance_request_id.clone(), call),
         );
 
         let outcome = instance
@@ -808,6 +829,11 @@ impl Router {
                     .is_some_and(|tool| tool.get("outputSchema").is_some());
                 // Stamped before it is measured, deliberately: the event should record what the
                 // client was actually sent, and the stamp is part of that.
+                self.activity.finish(
+                    call,
+                    if is_error { Outcome::Error } else { Outcome::Ok },
+                    if is_error { first_text(&result) } else { None },
+                );
                 annotate_result(&mut result, &info.id, &info.label, declares_output_schema);
                 stamp_process(&mut result, info.pid, info.started_at.as_deref());
                 for note in notes.iter().rev() {
@@ -828,6 +854,16 @@ impl Router {
                 Ok(result)
             }
             Err(error) => {
+                let timed_out = error.downcast_ref::<instance::CallTimedOut>().is_some();
+                self.activity.finish(
+                    call,
+                    if timed_out {
+                        Outcome::TimedOut
+                    } else {
+                        Outcome::Error
+                    },
+                    Some(&error.to_string()),
+                );
                 let mut message = match error.downcast_ref::<instance::CallTimedOut>() {
                     // The orchestrator's limit, said as such: the game is usually fine and may
                     // still be running the call, so it is asked to stop rather than left to finish
@@ -1073,13 +1109,23 @@ impl Router {
             let instance = Arc::clone(instance);
             let arguments = arguments.clone();
             let name = name.to_string();
+            let activity = Arc::clone(&self.activity);
             handles.push(tokio::spawn(async move {
+                let arguments = Value::Object(arguments);
+                let call = activity.start(&instance.id(), &name, &arguments, None);
                 let outcome = instance
                     .request(
                         "tools/call",
-                        Some(json!({ "name": name, "arguments": Value::Object(arguments) })),
+                        Some(json!({ "name": name, "arguments": arguments })),
                     )
                     .await;
+                match &outcome {
+                    Ok(result) if result.get("isError").and_then(Value::as_bool) == Some(true) => {
+                        activity.finish(call, Outcome::Error, first_text(result));
+                    }
+                    Ok(_) => activity.finish(call, Outcome::Ok, None),
+                    Err(error) => activity.finish(call, Outcome::Error, Some(&error.to_string())),
+                }
                 (instance.info(), outcome)
             }));
         }
@@ -1954,6 +2000,9 @@ impl Router {
                         .to_string();
                     params.insert("logger".into(), json!(format!("{instance_id}/{logger}")));
                 }
+                if let Some(params) = message_params(&forwarded) {
+                    self.activity.log(instance_id, params);
+                }
                 self.notify_downstream(forwarded);
             }
 
@@ -1966,6 +2015,12 @@ impl Router {
                     .and_then(|params| params.get("progressToken"))
                     .cloned()
                     .unwrap_or(Value::Null);
+                // Recorded before deciding whether to forward: a minted token's progress stops here,
+                // and it is exactly the progress of calls the client did not ask to watch that a
+                // person watching the orchestrator wants to see.
+                if let Some(params) = message_params(&message) {
+                    self.activity.progress(instance_id, params);
+                }
                 let forward = match self.registry.get(instance_id) {
                     Some(instance) => instance.note_progress(&token),
                     None => true,
@@ -1980,6 +2035,20 @@ impl Router {
             }
         }
     }
+}
+
+/// A message's `params`, if it has them.
+fn message_params(message: &Value) -> Option<&Value> {
+    message.get("params").filter(|params| params.is_object())
+}
+
+/// The first text block of a result, which for a tool error is the reason.
+fn first_text(result: &Value) -> Option<&str> {
+    result
+        .get("content")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|block| block.get("text").and_then(Value::as_str))
 }
 
 // ------------------------------------------------------------------
@@ -2440,6 +2509,81 @@ mod tests {
                 "the orchestrator's own heartbeat reached the client: {message}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_running_call_shows_its_progress_in_activity_and_its_failure_once_it_ends() {
+        // The progress of a call the client did not ask to watch stops in the orchestrator. It must
+        // still reach Activity: that is the progress a person watching the app wants to see.
+        let (router, alpha, mut outbound) = router_with("alpha");
+        alpha.set_catalogue(Catalogue {
+            tools: vec![json!({ "name": "client_sequence", "description": "steps" })],
+            ..Catalogue::default()
+        });
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "alpha".into(),
+            })
+            .await;
+
+        let answering = Arc::clone(&alpha);
+        let game_router = Arc::clone(&router);
+        let instance_side = tokio::spawn(async move {
+            let request = outbound.recv().await.expect("the call is forwarded");
+            let token = request["params"]["_meta"]["progressToken"].clone();
+            game_router
+                .handle_upstream(UpstreamEvent::Notification {
+                    instance: "alpha".into(),
+                    message: json!({
+                        "jsonrpc": "2.0", "method": "notifications/progress",
+                        "params": { "progressToken": token, "progress": 12, "total": 40,
+                                    "message": "client_look" },
+                    }),
+                })
+                .await;
+            let running = game_router.activity().snapshot(None).running;
+            assert_eq!(running.len(), 1, "{running:?}");
+            assert_eq!(running[0].tool, "client_sequence");
+            let progress = running[0].progress.clone().expect("progress was recorded");
+            assert_eq!((progress.progress, progress.total), (12.0, Some(40.0)));
+            assert_eq!(progress.message.as_deref(), Some("client_look"));
+
+            answering.complete(json!({
+                "jsonrpc": "2.0",
+                "id": jsonrpc::id_of(&request).unwrap(),
+                "result": { "content": [{ "type": "text", "text": "Step 12 failed." }],
+                            "isError": true },
+            }));
+        });
+
+        call(&router, json!({"name": "client_sequence", "steps": []})).await;
+        instance_side.await.unwrap();
+
+        let snapshot = router.activity().snapshot(Some("alpha"));
+        assert!(snapshot.running.is_empty());
+        let finished = &snapshot.recent[0];
+        assert_eq!(finished.outcome, crate::activity::Outcome::Error);
+        assert_eq!(finished.error.as_deref(), Some("Step 12 failed."));
+        assert_eq!(finished.last_progress.as_ref().map(|p| p.progress), Some(12.0));
+    }
+
+    #[tokio::test]
+    async fn a_game_log_message_is_kept_for_its_instance() {
+        let (router, _alpha, _outbound) = router_with("alpha");
+        router
+            .handle_upstream(UpstreamEvent::Notification {
+                instance: "alpha".into(),
+                message: json!({
+                    "jsonrpc": "2.0", "method": "notifications/message",
+                    "params": { "level": "warning", "logger": "mcmcp.client",
+                                "data": "step 3 failed" },
+                }),
+            })
+            .await;
+        let logs = router.activity().logs("alpha");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].text, "step 3 failed");
+        assert_eq!(logs[0].logger.as_deref(), Some("alpha/mcmcp.client"));
     }
 
     fn tool_names(response: &Value) -> Vec<String> {
