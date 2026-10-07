@@ -927,7 +927,9 @@ function formatDate(millis) {
   const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return date.toDateString() === today.toDateString()
     ? `Today ${time}`
-    : `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+    : date.getFullYear() === today.getFullYear()
+      ? `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`
+      : date.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
 }
 
 async function renderSessions() {
@@ -1048,6 +1050,100 @@ function nextProblem() {
 }
 
 // ---------------------------------------------------------------------------------
+// Data
+// ---------------------------------------------------------------------------------
+
+const AGES = [[null, "never"], [1, "1 day"], [7, "7 days"], [14, "14 days"], [30, "30 days"],
+  [90, "90 days"], [365, "1 year"]];
+/* Read when the tab opens and on Refresh: asking every game to measure its folder each poll is not
+ * free, and these numbers do not move by the second. */
+let dataShown = false;
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function ageSelect(key, retention) {
+  const select = document.createElement("select");
+  const current = retention[key] ?? null;
+  for (const [days, label] of AGES) {
+    const option = document.createElement("option");
+    option.value = days ?? "";
+    option.textContent = label;
+    select.appendChild(option);
+  }
+  // An age set elsewhere (the file, the CLI) that is not one of the choices still shows.
+  if (current != null && !AGES.some(([days]) => days === current)) {
+    const option = document.createElement("option");
+    option.value = current;
+    option.textContent = `${current} days`;
+    select.appendChild(option);
+  }
+  select.value = current ?? "";
+  select.addEventListener("change", async () => {
+    await call("set_retention", { kind: key, days: select.value ? Number(select.value) : null });
+    toast(select.value ? `${key} will expire after ${select.value} days` : `${key} will be kept`);
+  });
+  return select;
+}
+
+function dataRow(kind, retentionKey, retention) {
+  const row = document.createElement("tr");
+  row.innerHTML = `
+    <td>${escapeHtml(kind.label)}${kind.note ? `<span class="note">${escapeHtml(kind.note)}</span>` : ""}</td>
+    <td class="number">${formatBytes(kind.bytes)}</td>
+    <td class="number">${kind.items}</td>
+    <td class="number">${kind.oldestMs ?? kind.oldest_ms ? escapeHtml(formatDate(kind.oldestMs ?? kind.oldest_ms)) : "—"}</td>
+    <td class="expiry"></td>`;
+  const cell = row.querySelector(".expiry");
+  if (kind.expirable === false) cell.innerHTML = '<span class="muted">—</span>';
+  else cell.appendChild(ageSelect(retentionKey, retention));
+  return row;
+}
+
+async function renderData() {
+  dataShown = true;
+  const overview = await invoke("storage_overview");
+  const retention = overview.retention ?? {};
+  $("data-state-dir").textContent = overview.stateDirectory;
+
+  let total = 0;
+  const body = $("data-orchestrator");
+  body.innerHTML = "";
+  for (const kind of overview.orchestrator) {
+    total += kind.bytes;
+    body.appendChild(dataRow(kind, kind.kind, retention));
+  }
+
+  const games = $("data-games");
+  games.innerHTML = overview.games.length ? "" : '<p class="muted">No game is connected.</p>';
+  for (const game of overview.games) {
+    const section = document.createElement("div");
+    section.className = "data-game";
+    section.style.setProperty("--instance-colour", colourFor(game.game));
+    section.innerHTML = `<h3><span class="swatch"></span>${escapeHtml(game.label)}
+      <span class="muted">${escapeHtml(game.directory ?? "")}</span></h3>`;
+    if (game.error) {
+      section.insertAdjacentHTML("beforeend", `<p class="muted">Could not ask it: ${escapeHtml(game.error)}</p>`);
+    } else {
+      const table = document.createElement("table");
+      table.className = "gating data-table";
+      table.innerHTML = "<thead><tr><th>What</th><th>Size</th><th>Items</th><th>Oldest</th><th>Expire after</th></tr></thead><tbody></tbody>";
+      for (const kind of game.kinds ?? []) {
+        total += kind.bytes;
+        table.querySelector("tbody").appendChild(dataRow(kind, `game.${kind.kind}`, retention));
+      }
+      section.appendChild(table);
+    }
+    games.appendChild(section);
+  }
+  $("data-total").textContent = `${formatBytes(total)} in all`;
+}
+
+// ---------------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------------
 
@@ -1117,6 +1213,9 @@ async function refresh() {
   else if (activePanel === "settings") await renderSettings();
   else if (activePanel === "tasks") await renderTasks();
   else if (activePanel === "sessions") await renderSessions();
+  else if (activePanel === "data") {
+    if (!dataShown) await renderData();
+  }
   else if (activePanel === "detail") {
     // The header needs the roster, so it is read first.
     await renderInstances();
@@ -1130,6 +1229,7 @@ async function refresh() {
 
 function showPanel(name) {
   activePanel = name;
+  dataShown = false;
   for (const tab of document.querySelectorAll(".tab")) {
     // The detail view belongs to the Instances tab: it is one of them, looked at closely.
     tab.classList.toggle("is-active", tab.dataset.panel === (name === "detail" ? "instances" : name));
@@ -1198,6 +1298,13 @@ $("task-new").addEventListener("keydown", (event) => {
 $("task-show-archived").addEventListener("change", renderTasks);
 
 $("session-instance").addEventListener("change", renderSessionTimeline);
+
+$("data-refresh").addEventListener("click", renderData);
+$("data-clean").addEventListener("click", async () => {
+  const done = await call("clean_up_now");
+  toast(done.length ? `Removed: ${done.join("; ")}` : "Nothing was old enough to remove");
+  renderData();
+});
 $("session-next-problem").addEventListener("click", nextProblem);
 $("session-export").addEventListener("click", async () => {
   if (!selectedSession) return;

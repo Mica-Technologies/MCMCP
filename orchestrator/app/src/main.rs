@@ -38,7 +38,7 @@ use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::{GateRequest, Router};
 use mcmcp_orchestrator_core::store::ApprovalStore;
 use mcmcp_orchestrator_core::tasks::{Status, TaskList, TaskStore, TaskUpdate};
-use mcmcp_orchestrator_core::{catalogue, jsonrpc, link, mcp_socket, paths};
+use mcmcp_orchestrator_core::{catalogue, jsonrpc, link, mcp_socket, paths, storage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -507,6 +507,54 @@ fn undo_image(path: String) -> Option<String> {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
+}
+
+// ----------------------------------------------------------------------------------
+// Data
+// ----------------------------------------------------------------------------------
+
+/// Everything MCMCP keeps, here and in each connected game, with the ages set for each kind.
+#[tauri::command]
+async fn storage_overview(state: State<'_, AppState>) -> Result<Value, String> {
+    let directory = paths::state_directory().map_err(|error| error.to_string())?;
+    let archived = storage::archived_task_usage(&state.router, &directory);
+    Ok(json!({
+        "stateDirectory": directory.display().to_string(),
+        "orchestrator": storage::usage(&directory, archived),
+        "games": storage::game_usage(&state.router).await,
+        "retention": storage::Retention::load(&directory).days,
+    }))
+}
+
+/// Sets or clears (`days: null`) the age past which one kind is removed.
+#[tauri::command]
+fn set_retention(state: State<'_, AppState>, kind: String, days: Option<u32>) -> Result<(), String> {
+    let directory = paths::state_directory().map_err(|error| error.to_string())?;
+    let mut retention = storage::Retention::load(&directory);
+    retention
+        .set(&kind, days, Authority::Human)
+        .map_err(|error| error.to_string())?;
+    retention.save(&directory).map_err(|error| error.to_string())?;
+    state.events.note(
+        Actor::Human,
+        None,
+        match days {
+            Some(days) if days > 0 => format!("set {kind} to expire after {days} days"),
+            _ => format!("set {kind} to never expire"),
+        },
+    );
+    Ok(())
+}
+
+/// Applies every age that is set, now, rather than at the next hourly pass.
+#[tauri::command]
+async fn clean_up_now(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let directory = paths::state_directory().map_err(|error| error.to_string())?;
+    let done = storage::run_retention(&state.router, &directory).await;
+    for line in &done {
+        state.events.note(Actor::Human, None, format!("expired {line}"));
+    }
+    Ok(done)
 }
 
 // ----------------------------------------------------------------------------------
@@ -1310,6 +1358,9 @@ fn main() -> anyhow::Result<()> {
             undo_points,
             undo_restore,
             undo_image,
+            storage_overview,
+            set_retention,
+            clean_up_now,
             marks,
             mark_add,
             mark_clear,
@@ -1521,6 +1572,11 @@ fn spawn_background(
 
                 // Each game is told its current task, for the mod's in-game line.
                 tokio::spawn(Arc::clone(&router).watch_tasks());
+
+                // Whatever a person set to expire, hourly.
+                if let Ok(directory) = paths::state_directory() {
+                    tokio::spawn(storage::retention_loop(Arc::clone(&router), directory));
+                }
 
                 // Task lists, whoever changed them.
                 {

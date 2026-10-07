@@ -28,6 +28,7 @@
         <button class="tab" data-panel="tasks" role="tab">Tasks</button>
         <button class="tab" data-panel="sessions" role="tab">Sessions</button>
         <button class="tab" data-panel="log" role="tab">Log</button>
+        <button class="tab" data-panel="data" role="tab">Data</button>
         <button class="tab" data-panel="settings" role="tab">Settings</button>
       </nav>
     </header>
@@ -188,6 +189,31 @@
         </div>
         <div id="log" class="log"></div>
         <p id="log-empty" class="empty" hidden>Nothing recorded yet.</p>
+      </section>
+
+      <!--
+        What MCMCP keeps on disk, here and in each connected game, and how long. Nothing expires
+        until a person picks an age; ages apply hourly, or at once with "Clean up now".
+      -->
+      <section id="panel-data" class="panel" hidden>
+        <p class="muted">
+          What MCMCP keeps, and how much room it takes. Nothing is removed until you choose an age
+          for it; ages are applied every hour, or now with <strong>Clean up now</strong>.
+        </p>
+        <div class="filters">
+          <button id="data-clean" class="primary">Clean up now</button>
+          <button id="data-refresh" class="ghost">Refresh</button>
+          <span id="data-total" class="muted"></span>
+        </div>
+        <h2>This orchestrator</h2>
+        <p class="muted"><code id="data-state-dir"></code></p>
+        <table class="gating data-table">
+          <thead><tr><th>What</th><th>Size</th><th>Items</th><th>Oldest</th><th>Expire after</th></tr></thead>
+          <tbody id="data-orchestrator"></tbody>
+        </table>
+        <h2>Games</h2>
+        <p class="muted">Ages for games apply to every game, connected or next time it connects.</p>
+        <div id="data-games"></div>
       </section>
 
       <section id="panel-settings" class="panel" hidden>

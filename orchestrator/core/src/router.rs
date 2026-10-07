@@ -217,6 +217,10 @@ impl Router {
         Arc::clone(&self.tasks)
     }
 
+    pub fn registry(&self) -> Arc<Registry> {
+        Arc::clone(&self.registry)
+    }
+
     /// Tells every game its current task whenever a list changes, for as long as the store lives.
     ///
     /// Spawned once by whatever runs the router. A watch keeps only the latest change, so a burst of

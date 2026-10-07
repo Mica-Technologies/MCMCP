@@ -33,6 +33,7 @@ pub mod policy;
 pub mod registry;
 pub mod router;
 pub mod stdio;
+pub mod storage;
 pub mod store;
 pub mod tasks;
 pub mod thumbnail;

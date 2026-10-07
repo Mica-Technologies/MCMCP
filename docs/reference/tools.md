@@ -1,6 +1,6 @@
 # Tools
 
-77 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+78 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -104,6 +104,26 @@ Returns text only: a header line — `# <path> — N lines matching "<filter>"` 
 There is deliberately no structured form. A client may show `structuredContent` in place of the text
 when both are present, so a structured payload carrying only the counts hid the lines themselves, and
 one carrying the lines as well doubled the cost of every log read.
+
+### `game_storage`
+
+:material-alert: Destructive · optional `op`, `kind`, `older_than_days`
+
+What MCMCP keeps in this game's folder, and how much room it takes:
+- dumps in `mcmcp/dumps/`;
+- the screenshots and maps it named itself (`screenshots/mcmcp-*.png`);
+- undo points;
+- marks.
+
+A screenshot given a name of its own can't be told from a person's, so it is never counted or
+removed.
+
+| `op` | Does |
+| --- | --- |
+| `usage` (default) | Each kind's size, item count and oldest item |
+| `expire` | Removes one `kind`'s items older than `older_than_days` |
+
+The orchestrator app's Data tab uses this to show each game's data and apply the ages a person sets.
 
 ### `game_health`
 

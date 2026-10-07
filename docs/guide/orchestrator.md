@@ -24,7 +24,7 @@ in-game says so — the only sign is a line in `logs/latest.log`.
 You can fix that by hand. Give each instance a different port, add a separate entry per instance to
 your MCP client's config, and keep track of which port is which game. It works, and it costs a config
 edit for every instance you add, plus one tool catalogue per instance in every request your model
-makes — the same 77 tools, three times over, distinguished only by a prefix.
+makes — the same 78 tools, three times over, distinguished only by a prefix.
 
 The orchestrator replaces that with one connection out of each game to one place.
 
@@ -438,6 +438,23 @@ Thumbnails are 320 pixels on the long edge, made from inline screenshots and fro
 `thumbnails/`. A session is only as old as the event log: about 16 MB of history across its two
 files.
 
+## What MCMCP keeps: the Data tab
+
+The **Data** tab shows everything MCMCP keeps on disk and how much room each kind takes, with its
+item count and its oldest item.
+
+For the orchestrator, that is the event log, the diagnostic log, screenshot thumbnails, exported
+reports, archived task lists, and its settings. For each connected game, it is dumps, the screenshots
+and maps MCMCP named, undo points and marks.
+
+**Nothing is removed until you choose an age.** Every kind that can expire has an **Expire after**
+setting, which starts at *never*. Ages apply every hour, or at once with **Clean up now**. An age for
+a game kind applies to every game. Each removal is a line in the log.
+
+The two logs are not offered for expiry: they keep themselves to about 16 MB each, and the Sessions
+tab reads the event log. Open task lists never expire; only archived ones do. Ages are kept in
+`storage.json` in the state directory.
+
 ## The log
 
 Every call the model makes, every approval, every focus change, filtered by instance, by who acted,
@@ -538,7 +555,7 @@ Network settings are read when the link starts, so changing them needs `/mcmcp r
 Holding approvals (`instances.json`), the gating policy (`policy.json`), the event log
 (`events.jsonl`), the diagnostic log (`orchestrator.log`), the cached tool catalogue, agents' task
 lists (`tasks/`), screenshot thumbnails (`thumbnails/`), exported session reports (`reports/`),
-and the shim's token. Approvals store a **hash** of each instance secret, never the secret — the secrets stay in
+the Data tab's expiry ages (`storage.json`), and the shim's token. Approvals store a **hash** of each instance secret, never the secret — the secrets stay in
 each game's own config.
 
 The two logs answer different questions. `events.jsonl` is what happened *to instances* — links,
