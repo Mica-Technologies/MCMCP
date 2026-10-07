@@ -121,6 +121,13 @@ pub enum EventKind {
         /// Defaulted, so event logs written before it existed still load.
         #[serde(default)]
         result_bytes: usize,
+        /// Why it failed, or the last progress it reported: for a batch, how far it got.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        /// The file name of a thumbnail of the screenshot this call took, in the thumbnails
+        /// directory. See [`crate::flight`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thumbnail: Option<String>,
     },
     /// A call the gating policy refused before it reached a game.
     ToolBlocked {
@@ -485,6 +492,8 @@ mod tests {
                 is_error,
                 duration_ms: 12,
                 result_bytes: 480,
+                detail: None,
+                thumbnail: None,
             },
         )
     }
@@ -539,6 +548,8 @@ mod tests {
                 is_error: false,
                 duration_ms: 12,
                 result_bytes: 480,
+                detail: None,
+                thumbnail: None,
             },
             EventKind::ToolBlocked {
                 tool: "server_set_block".into(),
@@ -775,6 +786,8 @@ mod tests {
                 is_error: false,
                 duration_ms: 12,
                 result_bytes: 0,
+                detail: None,
+                thumbnail: None,
             },
         );
 

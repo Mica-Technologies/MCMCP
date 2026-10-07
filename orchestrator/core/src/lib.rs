@@ -21,6 +21,7 @@ pub mod catalogue;
 pub mod control;
 pub mod crash;
 pub mod events;
+pub mod flight;
 pub mod instance;
 pub mod jsonrpc;
 pub mod link;
@@ -34,6 +35,7 @@ pub mod router;
 pub mod stdio;
 pub mod store;
 pub mod tasks;
+pub mod thumbnail;
 
 /// The orchestrator's version, from Cargo. Deliberately never a git tag — see the workspace
 /// manifest for why a tag here would rewrite the *mod's* version.

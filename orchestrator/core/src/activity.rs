@@ -219,11 +219,12 @@ impl Activity {
     }
 
     /// Records how a call ended and moves it to the recent ring. A second finish is ignored.
-    pub fn finish(&self, id: CallId, outcome: Outcome, error: Option<&str>) {
+    ///
+    /// Returns the last progress the call reported, which says how far a batch got.
+    pub fn finish(&self, id: CallId, outcome: Outcome, error: Option<&str>) -> Option<Progress> {
         let mut inner = self.inner.lock().expect("activity lock");
-        let Some(call) = inner.running.remove(&id) else {
-            return;
-        };
+        let call = inner.running.remove(&id)?;
+        let last = call.progress.clone();
         let finished = FinishedCall {
             id,
             duration_ms: now_millis().saturating_sub(call.started_at_ms),
@@ -238,6 +239,7 @@ impl Activity {
         inner.recent.push_front(finished);
         inner.recent.truncate(RECENT_CAPACITY);
         self.bump(&mut inner);
+        last
     }
 
     /// Records a `notifications/message` from a game.

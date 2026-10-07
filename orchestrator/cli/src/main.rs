@@ -619,7 +619,8 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
         Router::new(Arc::clone(&registry), Arc::clone(&store))
             .with_events(events.clone())
             .with_policy(Arc::clone(&policy))
-            .with_tasks(Arc::new(TaskStore::load(paths::tasks_directory()?)?)),
+            .with_tasks(Arc::new(TaskStore::load(paths::tasks_directory()?)?))
+            .with_thumbnails(paths::thumbnails_directory()?),
     );
     tokio::spawn(Arc::clone(&router).watch_tasks());
 

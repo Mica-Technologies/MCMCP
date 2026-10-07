@@ -26,6 +26,7 @@
       <nav class="tabs" role="tablist">
         <button class="tab is-active" data-panel="instances" role="tab">Instances</button>
         <button class="tab" data-panel="tasks" role="tab">Tasks</button>
+        <button class="tab" data-panel="sessions" role="tab">Sessions</button>
         <button class="tab" data-panel="log" role="tab">Log</button>
         <button class="tab" data-panel="settings" role="tab">Settings</button>
       </nav>
@@ -108,6 +109,32 @@
           No task lists yet. An agent starts one with <code>mcmcp_tasks</code> when it takes on a job
           of several steps, and you will see it here as it works. You can start one yourself above.
         </p>
+      </section>
+
+      <!--
+        The flight recorder: the event log grouped into stretches of work, with a thumbnail of every
+        screenshot, readable after the fact and exportable as one HTML page.
+      -->
+      <section id="panel-sessions" class="panel" hidden>
+        <div class="sessions-layout">
+          <div id="session-list" class="session-list"></div>
+          <div class="session-view">
+            <div class="filters">
+              <select id="session-instance"><option value="">All instances</option></select>
+              <button id="session-next-problem" class="ghost">Next problem ↓</button>
+              <label class="switch inline-switch">
+                <input type="checkbox" id="session-redact" />
+                <span>Leave arguments out</span>
+              </label>
+              <button id="session-export">Export report…</button>
+            </div>
+            <div id="session-timeline" class="log"></div>
+            <p id="sessions-empty" class="empty" hidden>
+              No sessions yet. A session is a stretch of work by an agent or by you, with no gap
+              longer than half an hour; it appears here once the first call has been made.
+            </p>
+          </div>
+        </div>
       </section>
 
       <section id="panel-log" class="panel" hidden>

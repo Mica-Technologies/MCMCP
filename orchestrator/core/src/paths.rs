@@ -80,6 +80,16 @@ pub fn event_log_path() -> Result<PathBuf> {
     Ok(state_directory()?.join("events.jsonl"))
 }
 
+/// Small copies of the screenshots sessions took. See [`crate::thumbnail`].
+pub fn thumbnails_directory() -> Result<PathBuf> {
+    Ok(state_directory()?.join("thumbnails"))
+}
+
+/// Where exported session reports are written.
+pub fn reports_directory() -> Result<PathBuf> {
+    Ok(state_directory()?.join("reports"))
+}
+
 /// Where agents' task lists live, one JSON file each. See [`crate::tasks`].
 pub fn tasks_directory() -> Result<PathBuf> {
     Ok(state_directory()?.join("tasks"))

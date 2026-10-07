@@ -122,6 +122,9 @@ pub struct Router {
     tasks: Arc<TaskStore>,
     /// The last `activity` frame sent to each endpoint, so an unchanged one is not sent again.
     announced: Mutex<HashMap<String, Value>>,
+    /// Where screenshot thumbnails go, for the flight recorder; `None` keeps none.
+    thumbnails: Option<std::path::PathBuf>,
+    next_thumbnail: AtomicU64,
 }
 
 /// A routed call in flight: the instance handling it, the id that instance knows it by, and its
@@ -193,7 +196,15 @@ impl Router {
             activity: Arc::new(Activity::new()),
             tasks: Arc::new(TaskStore::in_memory()),
             announced: Mutex::new(HashMap::new()),
+            thumbnails: None,
+            next_thumbnail: AtomicU64::new(1),
         }
+    }
+
+    /// Keeps a thumbnail of every screenshot a routed call takes, in `directory`.
+    pub fn with_thumbnails(mut self, directory: std::path::PathBuf) -> Self {
+        self.thumbnails = Some(directory);
+        self
     }
 
     /// Keeps task lists in this store, on disk, instead of a throwaway in-memory one.
@@ -906,11 +917,17 @@ impl Router {
                     .is_some_and(|tool| tool.get("outputSchema").is_some());
                 // Stamped before it is measured, deliberately: the event should record what the
                 // client was actually sent, and the stamp is part of that.
-                self.activity.finish(
+                let last_progress = self.activity.finish(
                     call,
                     if is_error { Outcome::Error } else { Outcome::Ok },
                     if is_error { first_text(&result) } else { None },
                 );
+                let detail = if is_error {
+                    first_text(&result).map(|text| truncate_chars(text, 300))
+                } else {
+                    last_progress.and_then(|progress| progress.message)
+                };
+                let thumbnail = self.keep_thumbnail(&result);
                 annotate_result(&mut result, &info.id, &info.label, declares_output_schema);
                 stamp_process(&mut result, info.pid, info.started_at.as_deref());
                 for note in notes.iter().rev() {
@@ -926,6 +943,8 @@ impl Router {
                         is_error,
                         duration_ms,
                         result_bytes: wire_bytes(&result),
+                        detail,
+                        thumbnail,
                     },
                 ));
                 Ok(result)
@@ -972,6 +991,8 @@ impl Router {
                         is_error: true,
                         duration_ms,
                         result_bytes: wire_bytes(&result),
+                        detail: Some(truncate_chars(&message, 300)),
+                        thumbnail: None,
                     },
                 ));
                 Ok(result)
@@ -1186,6 +1207,44 @@ impl Router {
         }
     }
 
+    /// Starts a thumbnail of the screenshot a result carries, if it carries one, and returns the
+    /// name it will have.
+    ///
+    /// The name is chosen and returned at once so the event can record it; the image is decoded and
+    /// shrunk on a blocking thread, off the call's path. If that fails the file simply never
+    /// appears, and whatever shows the timeline treats a missing thumbnail as no thumbnail.
+    fn keep_thumbnail(&self, result: &Value) -> Option<String> {
+        let directory = self.thumbnails.clone()?;
+        let source = screenshot_in(result)?;
+        let name = format!(
+            "{}-{}.png",
+            crate::events::now_millis(),
+            self.next_thumbnail.fetch_add(1, Ordering::Relaxed)
+        );
+        let file = name.clone();
+        tokio::task::spawn_blocking(move || {
+            let bytes = match source {
+                Screenshot::Inline(bytes) => bytes,
+                Screenshot::File(path) => match crate::thumbnail::read_screenshot(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        debug!(%error, "no thumbnail: could not read the screenshot");
+                        return;
+                    }
+                },
+            };
+            match crate::thumbnail::downscale_png(&bytes, crate::thumbnail::THUMBNAIL_EDGE) {
+                Ok(png) => {
+                    if let Err(error) = crate::thumbnail::save(&directory, &file, &png) {
+                        warn!(%error, "could not save a thumbnail");
+                    }
+                }
+                Err(error) => debug!(%error, "no thumbnail: not a usable PNG"),
+            }
+        });
+        Some(name)
+    }
+
     /// The last `lines` lines of one endpoint's game log, as `game_read_log` returns them.
     ///
     /// For a person looking at that game in the app. It asks the game, as `mcmcp_read_logs` does,
@@ -1313,13 +1372,14 @@ impl Router {
                         Some(json!({ "name": name, "arguments": arguments })),
                     )
                     .await;
-                match &outcome {
+                let (ended, error) = match &outcome {
                     Ok(result) if result.get("isError").and_then(Value::as_bool) == Some(true) => {
-                        activity.finish(call, Outcome::Error, first_text(result));
+                        (Outcome::Error, first_text(result).map(str::to_string))
                     }
-                    Ok(_) => activity.finish(call, Outcome::Ok, None),
-                    Err(error) => activity.finish(call, Outcome::Error, Some(&error.to_string())),
-                }
+                    Ok(_) => (Outcome::Ok, None),
+                    Err(error) => (Outcome::Error, Some(error.to_string())),
+                };
+                activity.finish(call, ended, error.as_deref());
                 (instance.info(), outcome)
             }));
         }
@@ -2293,6 +2353,48 @@ fn parse_task_updates(raw: Option<&Value>) -> Result<Vec<TaskUpdate>, String> {
         .collect()
 }
 
+/// Where a result's screenshot is: inline, or a file the game saved.
+enum Screenshot {
+    Inline(Vec<u8>),
+    File(std::path::PathBuf),
+}
+
+/// The screenshot a result carries: an inline PNG image block first, else a `.png` path in its
+/// structured content, which is how `client_screenshot` reports a capture it did not inline.
+fn screenshot_in(result: &Value) -> Option<Screenshot> {
+    use base64::Engine;
+    let inline = result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|block| {
+            block.get("type").and_then(Value::as_str) == Some("image")
+                && block.get("mimeType").and_then(Value::as_str) == Some("image/png")
+        })
+        .and_then(|block| block.get("data").and_then(Value::as_str))
+        .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok());
+    if let Some(bytes) = inline {
+        return Some(Screenshot::Inline(bytes));
+    }
+    let path = result
+        .get("structuredContent")
+        .and_then(|content| content.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| path.to_ascii_lowercase().ends_with(".png"))?;
+    Some(Screenshot::File(std::path::PathBuf::from(path)))
+}
+
+/// At most `limit` characters, cut on a character boundary.
+fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(limit).collect();
+    cut.push('…');
+    cut
+}
+
 /// A message's `params`, if it has them.
 fn message_params(message: &Value) -> Option<&Value> {
     message.get("params").filter(|params| params.is_object())
@@ -2620,6 +2722,13 @@ mod tests {
     use std::sync::Arc;
 
     fn router_with(instance_id: &str) -> (Arc<Router>, Arc<Instance>, tokio::sync::mpsc::Receiver<Value>) {
+        router_with_thumbnails(instance_id, None)
+    }
+
+    fn router_with_thumbnails(
+        instance_id: &str,
+        thumbnails: Option<std::path::PathBuf>,
+    ) -> (Arc<Router>, Arc<Instance>, tokio::sync::mpsc::Receiver<Value>) {
         let (sender, outbound) = tokio::sync::mpsc::channel(8);
         let instance = Arc::new(Instance::new(
             InstanceInfo {
@@ -2638,11 +2747,14 @@ mod tests {
         ));
         let registry = Arc::new(Registry::new());
         registry.insert(Arc::clone(&instance));
-        let router = Arc::new(Router::new(
+        let mut router = Router::new(
             registry,
             Arc::new(Mutex::new(ApprovalStore::load("unused-in-tests.json").unwrap())),
-        ));
-        (router, instance, outbound)
+        );
+        if let Some(directory) = thumbnails {
+            router = router.with_thumbnails(directory);
+        }
+        (Arc::new(router), instance, outbound)
     }
 
     async fn declare_client_capabilities(router: &Router, capabilities: Value) {
@@ -2955,6 +3067,72 @@ mod tests {
             deletion["isError"], true,
             "a model cannot delete a list: {deletion}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_screenshot_a_call_returns_is_kept_as_a_thumbnail_named_in_its_event() {
+        use base64::Engine;
+        let directory = std::env::temp_dir().join(format!("mcmcp-router-thumbs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let (router, alpha, mut outbound) = router_with_thumbnails("alpha", Some(directory.clone()));
+        alpha.set_catalogue(Catalogue {
+            tools: vec![json!({ "name": "client_screenshot", "description": "shoot" })],
+            ..Catalogue::default()
+        });
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "alpha".into(),
+            })
+            .await;
+
+        let mut frame = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut frame, 640, 360);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&vec![90u8; 640 * 360 * 3])
+                .unwrap();
+        }
+        let data = base64::engine::general_purpose::STANDARD.encode(&frame);
+        let answering = Arc::clone(&alpha);
+        let game = tokio::spawn(async move {
+            let request = outbound.recv().await.expect("the call is forwarded");
+            answering.complete(json!({
+                "jsonrpc": "2.0",
+                "id": jsonrpc::id_of(&request).unwrap(),
+                "result": { "content": [
+                    { "type": "text", "text": "Screenshot saved." },
+                    { "type": "image", "mimeType": "image/png", "data": data },
+                ], "isError": false },
+            }));
+        });
+        call(&router, json!({ "name": "client_screenshot" })).await;
+        game.await.unwrap();
+
+        let events = router.events().slice(&crate::events::Filter::default(), 50);
+        let name = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolCall { thumbnail, .. } => thumbnail.clone(),
+                _ => None,
+            })
+            .expect("the call's event names a thumbnail");
+        // Written off the call's path, so give it a moment.
+        let path = directory.join(&name);
+        for _ in 0..100 {
+            if path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let saved = png::Decoder::new(std::fs::File::open(&path).expect("the thumbnail was written"))
+            .read_info()
+            .unwrap();
+        assert_eq!((saved.info().width, saved.info().height), (320, 180));
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[tokio::test]

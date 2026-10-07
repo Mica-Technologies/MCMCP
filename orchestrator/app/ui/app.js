@@ -692,6 +692,146 @@ function paintTaskActivity() {
 }
 
 // ---------------------------------------------------------------------------------
+// Sessions (flight recorder)
+// ---------------------------------------------------------------------------------
+
+let selectedSession = null;
+/* What the timeline was last drawn from, so the slow poll redraws it only when it changed. */
+let drawnSession = { id: null, count: -1, instance: null };
+/* Thumbnails by name. Read once each: they never change, and the poll would otherwise refetch them. */
+const thumbnails = new Map();
+
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function formatDate(millis) {
+  const date = new Date(millis);
+  const today = new Date();
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return date.toDateString() === today.toDateString()
+    ? `Today ${time}`
+    : `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
+
+async function renderSessions() {
+  const sessions = await invoke("flight_sessions");
+  $("sessions-empty").hidden = sessions.length > 0;
+  if (!sessions.some((session) => session.id === selectedSession)) {
+    selectedSession = sessions[0]?.id ?? null;
+  }
+
+  const list = $("session-list");
+  list.innerHTML = "";
+  for (const session of sessions) {
+    const item = document.createElement("div");
+    item.className = `session-item${session.id === selectedSession ? " is-selected" : ""}`;
+    const minutes = Math.max(1, Math.round((session.end_ms - session.start_ms) / 60_000));
+    item.innerHTML = `
+      <div class="when">${escapeHtml(formatDate(session.start_ms))}</div>
+      <div class="counts">${minutes} min · ${plural(session.calls, "call")}${session.screenshots ? ` · ${plural(session.screenshots, "shot")}` : ""}
+        ${session.errors ? `· <span class="problems">${plural(session.errors, "problem")}</span>` : ""}</div>
+      <div class="counts">${session.instances.map((instance) =>
+        `<span style="--instance-colour:${colourFor(gameOf(instance))}"><span class="swatch"></span>${escapeHtml(instance)}</span>`).join(" ")}</div>`;
+    item.addEventListener("click", () => {
+      selectedSession = session.id;
+      renderSessions();
+    });
+    list.appendChild(item);
+  }
+  await renderSessionTimeline();
+}
+
+async function renderSessionTimeline() {
+  const container = $("session-timeline");
+  if (!selectedSession) {
+    container.innerHTML = "";
+    return;
+  }
+  const events = await invoke("flight_session", { id: selectedSession });
+
+  // The instance filter offers what this session touched.
+  const select = $("session-instance");
+  const chosen = select.value;
+  const instances = [...new Set(events.map((event) => event.instance).filter(Boolean))].sort();
+  select.innerHTML = '<option value="">All instances</option>';
+  for (const instance of instances) {
+    const option = document.createElement("option");
+    option.value = instance;
+    option.textContent = instance;
+    select.appendChild(option);
+  }
+  select.value = instances.includes(chosen) ? chosen : "";
+
+  // Redrawn only when something changed: a session still being worked in grows, an old one does not,
+  // and redrawing collapses whatever arguments somebody had opened.
+  if (drawnSession.id === selectedSession && drawnSession.count === events.length
+      && drawnSession.instance === select.value) {
+    return;
+  }
+  drawnSession = { id: selectedSession, count: events.length, instance: select.value };
+
+  container.innerHTML = "";
+  for (const event of events) {
+    if (select.value && event.instance !== select.value) continue;
+    const row = document.createElement("div");
+    row.className = `row session-row actor-${event.actor} level-${event.level}`;
+    if (event.instance) row.style.setProperty("--instance-colour", colourFor(gameOf(event.instance)));
+    row.innerHTML = `
+      <span class="time">${event.instance ? '<span class="swatch"></span>' : ""}${formatTime(event.at)}</span>
+      <span class="who">${escapeHtml(event.actor === "human" ? "you" : event.actor)}</span>
+      <span class="summary">${escapeHtml(event.summary)}</span>
+      <span class="extra"></span>`;
+    const extra = row.querySelector(".extra");
+    if (event.detail) {
+      const detail = document.createElement("span");
+      detail.className = "detail";
+      detail.textContent = event.detail;
+      extra.appendChild(detail);
+    }
+    if (event.kind === "tool_call" && event.arguments && Object.keys(event.arguments).length) {
+      const args = document.createElement("span");
+      args.className = "args is-folded";
+      args.title = "Click to show all";
+      args.textContent = JSON.stringify(event.arguments);
+      args.addEventListener("click", () => args.classList.toggle("is-folded"));
+      extra.appendChild(args);
+    }
+    if (event.thumbnail) {
+      const image = document.createElement("img");
+      image.alt = "screenshot";
+      extra.appendChild(image);
+      loadThumbnail(event.thumbnail).then((source) => {
+        if (source) image.src = source;
+        else image.remove();
+      });
+    }
+    if (!extra.childElementCount) extra.remove();
+    container.appendChild(row);
+  }
+}
+
+async function loadThumbnail(name) {
+  if (!thumbnails.has(name)) thumbnails.set(name, invoke("thumbnail", { name }));
+  return thumbnails.get(name);
+}
+
+/* Scrolls to the next warning or error below what is in view, wrapping to the first. */
+function nextProblem() {
+  const panel = $("panel-sessions");
+  const rows = [...document.querySelectorAll("#session-timeline .row.level-warn, #session-timeline .row.level-error")];
+  if (!rows.length) {
+    toast("No problems in this session");
+    return;
+  }
+  const viewTop = panel.getBoundingClientRect().top;
+  const next = rows.find((row) => row.getBoundingClientRect().top > viewTop + 60) ?? rows[0];
+  for (const row of document.querySelectorAll(".session-row.is-highlighted")) row.classList.remove("is-highlighted");
+  next.classList.add("is-highlighted");
+  next.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+// ---------------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------------
 
@@ -760,6 +900,7 @@ async function refresh() {
   else if (activePanel === "log") await renderLog();
   else if (activePanel === "settings") await renderSettings();
   else if (activePanel === "tasks") await renderTasks();
+  else if (activePanel === "sessions") await renderSessions();
   else if (activePanel === "detail") {
     // The header needs the roster, so it is read first.
     await renderInstances();
@@ -839,6 +980,14 @@ $("task-new").addEventListener("keydown", (event) => {
   if (event.key === "Enter") $("task-new-create").click();
 });
 $("task-show-archived").addEventListener("change", renderTasks);
+
+$("session-instance").addEventListener("change", renderSessionTimeline);
+$("session-next-problem").addEventListener("click", nextProblem);
+$("session-export").addEventListener("click", async () => {
+  if (!selectedSession) return;
+  const path = await call("export_session", { id: selectedSession, redact: $("session-redact").checked });
+  toast(`Written to ${path}`);
+});
 $("task-instance").addEventListener("change", renderTasks);
 
 $("detail-back").addEventListener("click", () => {

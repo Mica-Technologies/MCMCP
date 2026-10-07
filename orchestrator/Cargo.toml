@@ -34,6 +34,11 @@ serde = { version = "1", features = ["derive"] }
 # needlessly unstable tool catalogue.
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+# Screenshot thumbnails for the flight recorder. Already in the build through Tauri, and nothing
+# heavier (no `image`) is needed to decode, shrink and re-encode a PNG.
+png = "0.17"
+# Inline screenshots arrive base64-encoded, and thumbnails leave the same way. Also already in the build.
+base64 = "0.22"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

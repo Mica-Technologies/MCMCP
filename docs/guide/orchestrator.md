@@ -398,6 +398,29 @@ and a later session can pick a job up where the last one left it. An agent may *
 has finished, which hides it but keeps the file. Only you can **delete** one, from the app, with a
 second click to confirm; the tool does not offer it.
 
+## Sessions: what happened while you were away
+
+The **Sessions** tab is the flight recorder. It groups the event log into stretches of work: calls
+by an agent and edits by you, with no gap longer than half an hour. The orchestrator's own
+comings and goings never start or extend a session.
+
+Each session is listed with its length, its calls, its problems and the games it touched. Open one
+for its timeline:
+
+- every call, with its arguments (click to unfold) and either why it failed or how far it got;
+- a thumbnail of every screenshot, beside the call that took it;
+- task changes, focus moves, and games linking.
+
+**Next problem** jumps between failures. **Export report…** writes the session as one HTML page,
+with styles and thumbnails inlined and nothing fetched from anywhere, to `reports/` in the state
+directory. That page is suitable for reading later or attaching to a bug. Tick **Leave arguments
+out** before exporting a report that is going somewhere the arguments should not.
+
+Thumbnails are 320 pixels on the long edge, made from inline screenshots and from the files
+`client_screenshot` saves. They are made off the call's path, and the newest thousand are kept, in
+`thumbnails/`. A session is only as old as the event log: about 16 MB of history across its two
+files.
+
 ## The log
 
 Every call the model makes, every approval, every focus change, filtered by instance, by who acted,
@@ -497,7 +520,8 @@ Network settings are read when the link starts, so changing them needs `/mcmcp r
 
 Holding approvals (`instances.json`), the gating policy (`policy.json`), the event log
 (`events.jsonl`), the diagnostic log (`orchestrator.log`), the cached tool catalogue, agents' task
-lists (`tasks/`), and the shim's token. Approvals store a **hash** of each instance secret, never the secret — the secrets stay in
+lists (`tasks/`), screenshot thumbnails (`thumbnails/`), exported session reports (`reports/`),
+and the shim's token. Approvals store a **hash** of each instance secret, never the secret — the secrets stay in
 each game's own config.
 
 The two logs answer different questions. `events.jsonl` is what happened *to instances* — links,

@@ -2071,6 +2071,7 @@ name = "mcmcp-orchestrator-app"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "mcmcp-orchestrator-core",
  "serde",
  "serde_json",
@@ -2087,6 +2088,8 @@ name = "mcmcp-orchestrator-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "sha2",
