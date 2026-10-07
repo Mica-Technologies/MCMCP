@@ -25,6 +25,7 @@
       </div>
       <nav class="tabs" role="tablist">
         <button class="tab is-active" data-panel="instances" role="tab">Instances</button>
+        <button class="tab" data-panel="tasks" role="tab">Tasks</button>
         <button class="tab" data-panel="log" role="tab">Log</button>
         <button class="tab" data-panel="settings" role="tab">Settings</button>
       </nav>
@@ -86,6 +87,27 @@
           <button id="detail-log-refresh" class="ghost inline">Refresh</button>
         </h2>
         <pre id="detail-gamelog" class="snippet gamelog"></pre>
+      </section>
+
+      <!--
+        The plans agents keep with mcmcp_tasks, live. A person can tick, annotate and add tasks too;
+        deleting a list is only possible here, never from a tool.
+      -->
+      <section id="panel-tasks" class="panel" hidden>
+        <div class="filters">
+          <input id="task-new" type="text" placeholder="Start a new list…" maxlength="200" />
+          <button id="task-new-create">Create</button>
+          <select id="task-instance"><option value="">All instances</option></select>
+          <label class="switch inline-switch">
+            <input type="checkbox" id="task-show-archived" />
+            <span>Show archived</span>
+          </label>
+        </div>
+        <div id="task-lists" class="task-lists"></div>
+        <p id="tasks-empty" class="empty" hidden>
+          No task lists yet. An agent starts one with <code>mcmcp_tasks</code> when it takes on a job
+          of several steps, and you will see it here as it works. You can start one yourself above.
+        </p>
       </section>
 
       <section id="panel-log" class="panel" hidden>

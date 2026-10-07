@@ -36,6 +36,7 @@ use mcmcp_orchestrator_core::policy::{Class, Policy, Rule};
 use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::{GateRequest, Router};
 use mcmcp_orchestrator_core::store::ApprovalStore;
+use mcmcp_orchestrator_core::tasks::{Status, TaskList, TaskStore, TaskUpdate};
 use mcmcp_orchestrator_core::{catalogue, jsonrpc, link, mcp_socket, paths};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -70,6 +71,10 @@ const ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(
 /// How many finished calls each [`ACTIVITY`] event carries. Enough for every card's "last call" line
 /// and the top of a detail view; the detail view reads the rest when it opens.
 const ACTIVITY_RECENT: usize = 50;
+
+/// Emitted when a task list changes, by a model or by a person here. No payload: the Tasks tab
+/// re-reads the lists, which are few and small.
+const TASKS: &str = "mcmcp://tasks";
 
 const EVENT_LOG_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -367,6 +372,76 @@ async fn game_log_tail(
         .game_log_tail(&instance, lines.unwrap_or(120))
         .await
         .map_err(|error| error.to_string())
+}
+
+/// Every task list, archived ones too: the panel shows them folded away rather than not at all.
+#[tauri::command]
+fn task_lists(state: State<'_, AppState>) -> Vec<TaskList> {
+    state.router.tasks().all(true)
+}
+
+/// A person's edit to one task. Each field is optional; a person changes one thing at a time.
+#[tauri::command]
+fn task_update(
+    state: State<'_, AppState>,
+    list: String,
+    task: String,
+    status: Option<String>,
+    note: Option<String>,
+    title: Option<String>,
+) -> Result<TaskList, String> {
+    let status = match status.as_deref() {
+        None => None,
+        Some(name) => Some(Status::parse(name).ok_or_else(|| format!("'{name}' is not a status"))?),
+    };
+    let update = TaskUpdate {
+        task,
+        status,
+        note,
+        title,
+    };
+    let updated = state.router.tasks().update(&list, &[update], Authority::Human)?;
+    note_task_change(&state, &updated, "edited a task");
+    Ok(updated)
+}
+
+#[tauri::command]
+fn task_add(state: State<'_, AppState>, list: String, title: String) -> Result<TaskList, String> {
+    let updated = state.router.tasks().add(&list, &[title], Authority::Human)?;
+    note_task_change(&state, &updated, "added a task");
+    Ok(updated)
+}
+
+#[tauri::command]
+fn task_create(state: State<'_, AppState>, title: String) -> Result<TaskList, String> {
+    let created = state.router.tasks().create(&title, &[], &[], Authority::Human)?;
+    note_task_change(&state, &created, "created");
+    Ok(created)
+}
+
+#[tauri::command]
+fn task_archive(state: State<'_, AppState>, list: String, archived: bool) -> Result<TaskList, String> {
+    let updated = state.router.tasks().set_archived(&list, archived)?;
+    note_task_change(&state, &updated, if archived { "archived" } else { "restored" });
+    Ok(updated)
+}
+
+/// Deletes a list and its file. The one task operation a model is never offered.
+#[tauri::command]
+fn task_delete(state: State<'_, AppState>, list: String) -> Result<(), String> {
+    state.router.tasks().delete(&list, Authority::Human)?;
+    state
+        .events
+        .note(Actor::Human, None, format!("task list '{list}': deleted"));
+    Ok(())
+}
+
+fn note_task_change(state: &State<'_, AppState>, list: &TaskList, what: &str) {
+    state.events.note(
+        Actor::Human,
+        None,
+        format!("task list '{}': {what} ({})", list.id, list.progress()),
+    );
 }
 
 #[tauri::command]
@@ -953,7 +1028,8 @@ fn main() -> anyhow::Result<()> {
     let router = Arc::new(
         Router::new(Arc::clone(&registry), Arc::clone(&store))
             .with_events(events.clone())
-            .with_policy(Arc::clone(&policy)),
+            .with_policy(Arc::clone(&policy))
+            .with_tasks(Arc::new(TaskStore::load(paths::tasks_directory()?)?)),
     );
     if let Some(cached) = catalogue::load_cache(&paths::catalogue_cache_path()?) {
         router.restore_cache(cached);
@@ -1001,6 +1077,12 @@ fn main() -> anyhow::Result<()> {
             activity_snapshot,
             instance_detail,
             game_log_tail,
+            task_lists,
+            task_update,
+            task_add,
+            task_create,
+            task_archive,
+            task_delete,
             list_events,
             pending_approvals,
             answer_approval,
@@ -1198,6 +1280,17 @@ fn spawn_background(
                             changes.borrow_and_update();
                             let snapshot = activity.snapshot_limited(None, ACTIVITY_RECENT);
                             let _ = app.emit(ACTIVITY, snapshot);
+                        }
+                    });
+                }
+
+                // Task lists, whoever changed them.
+                {
+                    let mut changes = router.tasks().subscribe();
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        while changes.changed().await.is_ok() {
+                            let _ = app.emit(TASKS, ());
                         }
                     });
                 }

@@ -384,6 +384,7 @@ function onActivity(snapshot) {
   activity = { ...snapshot, detailRecent: activity.detailRecent };
   if (activePanel === "instances") paintCardActivity();
   if (activePanel === "detail") renderDetailActivity();
+  if (activePanel === "tasks") paintTaskActivity();
   // A finished call is a new line in the log. The log is otherwise re-read on the slow poll, which
   // left a call that had plainly finished missing from it for up to four seconds.
   if (activePanel === "log" && snapshot.recent[0]?.id !== newestBefore) renderLog();
@@ -530,6 +531,163 @@ async function loadGameLog() {
 }
 
 // ---------------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------------
+
+const STATUSES = ["todo", "doing", "done", "blocked", "skipped"];
+let taskLists = [];
+/* A delete needs a second click within a few seconds: browser dialogs block the webview, and a
+ * list deleted by one stray click is gone for good. */
+let armedDelete = null;
+
+async function renderTasks() {
+  taskLists = await invoke("task_lists");
+  const showArchived = $("task-show-archived").checked;
+  const instanceFilter = $("task-instance").value;
+
+  // The instance filter offers every instance any list names, plus the connected ones.
+  const select = $("task-instance");
+  const chosen = select.value;
+  const names = new Set(lastInstances.filter((i) => i.connected).map((i) => i.instance));
+  for (const list of taskLists) for (const instance of list.instances ?? []) names.add(instance);
+  select.innerHTML = '<option value="">All instances</option>';
+  for (const name of [...names].sort()) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+  select.value = names.has(chosen) ? chosen : "";
+
+  // A re-render must not swallow what somebody is typing into an "add a task" box.
+  const focused = document.activeElement?.id?.startsWith("task-add-") ? document.activeElement : null;
+  const typing = focused ? { id: focused.id, value: focused.value } : null;
+
+  const visible = taskLists.filter((list) =>
+    (showArchived || !list.archived) &&
+    (!select.value || (list.instances ?? []).includes(select.value)));
+  const container = $("task-lists");
+  container.innerHTML = "";
+  $("tasks-empty").hidden = visible.length > 0;
+
+  for (const list of visible) container.appendChild(renderTaskList(list));
+
+  if (typing) {
+    const field = $(typing.id);
+    if (field) {
+      field.value = typing.value;
+      field.focus();
+    }
+  }
+  paintTaskActivity();
+}
+
+function renderTaskList(list) {
+  const settled = list.tasks.filter((task) => task.status === "done" || task.status === "skipped").length;
+  const element = document.createElement("div");
+  element.className = `task-list${list.archived ? " is-archived" : ""}`;
+  element.dataset.list = list.id;
+  const chips = (list.instances ?? []).map((instance) =>
+    `<span class="chip" style="--instance-colour:${colourFor(gameOf(instance))}"><span class="swatch"></span>${escapeHtml(instance)}</span>`);
+  element.innerHTML = `
+    <div class="task-list-head">
+      <div>
+        <div class="task-list-title">${escapeHtml(list.title)}</div>
+        <div class="task-list-meta">
+          <span>${settled}/${list.tasks.length} done</span>
+          <span>updated ${formatAgo(list.updated_ms)}</span>
+          <code>${escapeHtml(list.id)}</code>
+          ${chips.join("")}
+        </div>
+      </div>
+      <div class="actions"></div>
+    </div>
+    ${list.tasks.length ? progressBar({ progress: settled, total: list.tasks.length }) : ""}
+    <div class="tasks"></div>
+    ${list.archived ? "" : `<div class="task-add">
+      <input id="task-add-${escapeHtml(list.id)}" type="text" placeholder="Add a task…" maxlength="200" />
+      <button>Add</button></div>`}`;
+
+  const actions = element.querySelector(".actions");
+  const archive = document.createElement("button");
+  archive.textContent = list.archived ? "Restore" : "Archive";
+  archive.addEventListener("click", () => call("task_archive", { list: list.id, archived: !list.archived }));
+  actions.appendChild(archive);
+
+  const remove = document.createElement("button");
+  remove.className = "danger";
+  remove.textContent = armedDelete === list.id ? "Really delete?" : "Delete";
+  remove.classList.toggle("is-armed", armedDelete === list.id);
+  remove.title = "Delete the list and its file. Agents cannot do this.";
+  remove.addEventListener("click", async () => {
+    if (armedDelete !== list.id) {
+      armedDelete = list.id;
+      renderTasks();
+      setTimeout(() => {
+        if (armedDelete === list.id) {
+          armedDelete = null;
+          renderTasks();
+        }
+      }, 3500);
+      return;
+    }
+    armedDelete = null;
+    await call("task_delete", { list: list.id });
+    renderTasks();
+  });
+  actions.appendChild(remove);
+
+  const rows = element.querySelector(".tasks");
+  for (const task of list.tasks) {
+    const row = document.createElement("div");
+    row.className = `task status-${task.status}`;
+    row.dataset.status = task.status;
+    row.innerHTML = `
+      <span class="task-id">${escapeHtml(task.id)}</span>
+      <select>${STATUSES.map((status) =>
+        `<option value="${status}"${status === task.status ? " selected" : ""}>${status}</option>`).join("")}</select>
+      <span class="task-title" title="${task.updated_by === "human" ? "last changed by you" : "last changed by the agent"}">${escapeHtml(task.title)}</span>
+      ${task.note ? `<span class="task-note">${escapeHtml(task.note)}</span>` : ""}
+      <span class="task-activity"></span>`;
+    row.querySelector("select").addEventListener("change", (event) =>
+      call("task_update", { list: list.id, task: task.id, status: event.target.value }));
+    rows.appendChild(row);
+  }
+
+  const add = element.querySelector(".task-add");
+  if (add) {
+    const field = add.querySelector("input");
+    const submit = async () => {
+      const title = field.value.trim();
+      if (!title) return;
+      field.value = "";
+      await call("task_add", { list: list.id, title });
+    };
+    add.querySelector("button").addEventListener("click", submit);
+    field.addEventListener("keydown", (event) => { if (event.key === "Enter") submit(); });
+  }
+  return element;
+}
+
+/* Beneath a task being worked on: what its list's instances are running right now. This is what
+ * ties the plan to the work without the agent doing anything. */
+function paintTaskActivity() {
+  for (const element of document.querySelectorAll(".task-list")) {
+    const list = taskLists.find((candidate) => candidate.id === element.dataset.list);
+    const instances = list?.instances ?? [];
+    for (const row of element.querySelectorAll(".task")) {
+      const slot = row.querySelector(".task-activity");
+      const call = row.dataset.status === "doing"
+        ? activity.running.find((running) => instances.includes(running.instance))
+        : null;
+      slot.innerHTML = call
+        ? `<span>${escapeHtml(call.tool)} ${escapeHtml(progressText(call.progress))}${call.progress?.message ? ` · ${escapeHtml(call.progress.message)}` : ""}</span>${progressBar(call.progress)}`
+        : "";
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------------
 
@@ -597,6 +755,7 @@ async function refresh() {
   if (activePanel === "instances") await renderInstances();
   else if (activePanel === "log") await renderLog();
   else if (activePanel === "settings") await renderSettings();
+  else if (activePanel === "tasks") await renderTasks();
   else if (activePanel === "detail") {
     // The header needs the roster, so it is read first.
     await renderInstances();
@@ -664,6 +823,19 @@ $("autostart").addEventListener("change", async (event) => {
 
 listen("mcmcp://changed", refresh);
 listen("mcmcp://activity", (event) => onActivity(event.payload));
+listen("mcmcp://tasks", () => { if (activePanel === "tasks") renderTasks(); });
+
+$("task-new-create").addEventListener("click", async () => {
+  const title = $("task-new").value.trim();
+  if (!title) return;
+  $("task-new").value = "";
+  await call("task_create", { title });
+});
+$("task-new").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") $("task-new-create").click();
+});
+$("task-show-archived").addEventListener("change", renderTasks);
+$("task-instance").addEventListener("change", renderTasks);
 
 $("detail-back").addEventListener("click", () => {
   detailInstance = null;

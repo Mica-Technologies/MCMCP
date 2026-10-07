@@ -94,6 +94,7 @@ mcmcp_focus                # read or change where unaimed calls go
 mcmcp_set_label            # rename an instance so it can be told apart
 mcmcp_compare_instances    # what differs between the connected games
 mcmcp_read_logs            # every game's log, merged in time order and tagged
+mcmcp_tasks                # keep a task list for a job, which you see live in the app
 ```
 
 **Every result says which instance produced it**, in three places: a prefix on the text, a
@@ -376,6 +377,22 @@ or not your MCP client asked to see it, so the app shows a batch's progress even
 client does not. This view lives in the app only; activity is not written to disk, so the headless
 `mcmcp-orchestrator` has no equivalent. The log below is the durable record.
 
+## Task lists
+
+For a job of several steps an agent can keep a task list with `mcmcp_tasks`: create one with its
+tasks, mark each `doing` as it starts and `done`, `blocked` or `skipped` as it finishes, with a note
+where one helps. The **Tasks** tab shows every list live. A task being worked on shows beneath it
+whatever its list's instances are running right now, progress bar included, so the plan and the work
+appear side by side without the agent doing anything extra.
+
+You can edit lists too: change a status, add a task, or start a list of your own. The agent sees your
+changes the next time it reads the list. Each change, by you or the agent, is a line in the log.
+
+Lists are saved as one JSON file each in `tasks/` in the state directory, so they survive a restart
+and a later session can pick a job up where the last one left it. An agent may **archive** a list it
+has finished, which hides it but keeps the file. Only you can **delete** one, from the app, with a
+second click to confirm; the tool does not offer it.
+
 ## The log
 
 Every call the model makes, every approval, every focus change, filtered by instance, by who acted,
@@ -474,8 +491,8 @@ Network settings are read when the link starts, so changing them needs `/mcmcp r
 | Linux | `$XDG_STATE_HOME/mcmcp-orchestrator`, or `~/.local/state/mcmcp-orchestrator` |
 
 Holding approvals (`instances.json`), the gating policy (`policy.json`), the event log
-(`events.jsonl`), the diagnostic log (`orchestrator.log`), the cached tool catalogue, and the shim's
-token. Approvals store a **hash** of each instance secret, never the secret — the secrets stay in
+(`events.jsonl`), the diagnostic log (`orchestrator.log`), the cached tool catalogue, agents' task
+lists (`tasks/`), and the shim's token. Approvals store a **hash** of each instance secret, never the secret — the secrets stay in
 each game's own config.
 
 The two logs answer different questions. `events.jsonl` is what happened *to instances* — links,

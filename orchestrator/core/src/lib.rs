@@ -33,6 +33,7 @@ pub mod registry;
 pub mod router;
 pub mod stdio;
 pub mod store;
+pub mod tasks;
 
 /// The orchestrator's version, from Cargo. Deliberately never a git tag — see the workspace
 /// manifest for why a tag here would rewrite the *mod's* version.

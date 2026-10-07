@@ -80,6 +80,11 @@ pub fn event_log_path() -> Result<PathBuf> {
     Ok(state_directory()?.join("events.jsonl"))
 }
 
+/// Where agents' task lists live, one JSON file each. See [`crate::tasks`].
+pub fn tasks_directory() -> Result<PathBuf> {
+    Ok(state_directory()?.join("tasks"))
+}
+
 /// The diagnostic log, as distinct from [`event_log_path`].
 ///
 /// `events.jsonl` is the record of what happened *to instances* — links, tool calls, approvals — and

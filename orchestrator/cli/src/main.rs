@@ -17,6 +17,7 @@ use mcmcp_orchestrator_core::policy::{Class, Rule};
 use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::Router;
 use mcmcp_orchestrator_core::store::ApprovalStore;
+use mcmcp_orchestrator_core::tasks::TaskStore;
 use mcmcp_orchestrator_core::{catalogue, control, link, paths, stdio};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -617,7 +618,8 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
     let router = Arc::new(
         Router::new(Arc::clone(&registry), Arc::clone(&store))
             .with_events(events.clone())
-            .with_policy(Arc::clone(&policy)),
+            .with_policy(Arc::clone(&policy))
+            .with_tasks(Arc::new(TaskStore::load(paths::tasks_directory()?)?)),
     );
 
     // Seed the tool surface from the last session. Without this, a client that connects before any

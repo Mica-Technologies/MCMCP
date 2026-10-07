@@ -22,6 +22,7 @@ pub const NAMES: &[&str] = &[
     "mcmcp_set_label",
     "mcmcp_compare_instances",
     "mcmcp_read_logs",
+    "mcmcp_tasks",
 ];
 
 /// The prompt the orchestrator offers, for the workflow it exists to support.
@@ -161,6 +162,50 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                 },
             },
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true },
+        })),
+        own(json!({
+            "name": "mcmcp_tasks",
+            "title": "Keep a task list",
+            "description": "Keep a task list for a multi-step job, which the person watching sees live                 in the orchestrator's app and which survives restarts, so a later session can pick                 the job up. Create one when a job has several steps, mark each task doing as you                 start it and done (or blocked, with a note) as you finish, and archive the list when                 the job is over.\n\nop 'list' (default) summarises the open lists; 'get' returns one                 in full; 'create' takes a title and tasks; 'add' appends tasks; 'update' changes                 several tasks at once by id; 'archive' hides a finished list. A list is named by its                 id or its title.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "op": {
+                        "type": "string",
+                        "enum": ["list", "get", "create", "add", "update", "archive"],
+                        "default": "list",
+                    },
+                    "list": { "type": "string", "description": "get, add, update, archive: the list's id or title." },
+                    "title": { "type": "string", "description": "create: the job, in a few words.", "maxLength": 200 },
+                    "tasks": {
+                        "type": "array",
+                        "description": "create, add: task titles, in order.",
+                        "items": { "type": "string", "maxLength": 200 },
+                        "maxItems": 200,
+                    },
+                    "instances": {
+                        "type": "array",
+                        "description": "create: the instances the job runs on, so the app shows their activity beside it.",
+                        "items": { "type": "string" },
+                    },
+                    "updates": {
+                        "type": "array",
+                        "description": "update: changes, applied together or not at all.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task": { "type": "string", "description": "The task's id." },
+                                "status": { "type": "string", "enum": ["todo", "doing", "done", "blocked", "skipped"] },
+                                "note": { "type": "string", "description": "Why it is blocked, what was found. Empty clears it.", "maxLength": 1000 },
+                                "title": { "type": "string", "maxLength": 200 },
+                            },
+                            "required": ["task"],
+                        },
+                    },
+                    "include_archived": { "type": "boolean", "description": "list: include archived lists." },
+                },
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false },
         })),
     ]
 }

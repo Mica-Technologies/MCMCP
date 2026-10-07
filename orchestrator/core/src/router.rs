@@ -34,6 +34,7 @@ use crate::orchestrator_tools;
 use crate::policy::{Decision, Policy};
 use crate::registry::{FocusResolution, Registry};
 use crate::store::ApprovalStore;
+use crate::tasks::{Status, TaskList, TaskStore, TaskUpdate};
 
 /// Protocol versions this orchestrator will negotiate with its client.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -117,6 +118,8 @@ pub struct Router {
     sessions: Mutex<HashMap<String, GameSession>>,
     /// Calls in flight with their progress, recent calls, and each game's log messages.
     activity: Arc<Activity>,
+    /// Agents' task lists. See [`crate::tasks`].
+    tasks: Arc<TaskStore>,
 }
 
 /// A routed call in flight: the instance handling it, the id that instance knows it by, and its
@@ -186,7 +189,18 @@ impl Router {
             last_process: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             activity: Arc::new(Activity::new()),
+            tasks: Arc::new(TaskStore::in_memory()),
         }
+    }
+
+    /// Keeps task lists in this store, on disk, instead of a throwaway in-memory one.
+    pub fn with_tasks(mut self, tasks: Arc<TaskStore>) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
+    pub fn tasks(&self) -> Arc<TaskStore> {
+        Arc::clone(&self.tasks)
     }
 
     /// Records to this log instead of the throwaway in-memory one.
@@ -393,7 +407,9 @@ impl Router {
              worlds with different mods, and acting on the wrong one is rarely harmless.\n\n\
              Every result tells you which instance produced it. Trust that over your memory of what \
              was focused: a human can change focus at any time, and the result line is how you find \
-             out.\n\n",
+             out.\n\n\
+             For a job of several steps, keep a task list with `mcmcp_tasks`: the person watching \
+             sees it live, and it survives restarts.\n\n",
         );
         let connected = self.registry.count();
         if connected == 0 {
@@ -1017,6 +1033,98 @@ impl Router {
         }))
     }
 
+    /// `mcmcp_tasks`: every refusal is a tool error naming what to do instead.
+    fn tasks_tool(&self, arguments: &Map<String, Value>) -> Value {
+        let op = arguments.get("op").and_then(Value::as_str).unwrap_or("list");
+        let text = |key: &str| arguments.get(key).and_then(Value::as_str).map(str::to_string);
+        let strings = |key: &str| -> Vec<String> {
+            arguments
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let list_key = || {
+            text("list")
+                .ok_or_else(|| format!("op '{op}' needs 'list': a list's id or title. op 'list' shows them."))
+        };
+        let authority = crate::control::Authority::Model;
+
+        let outcome: Result<(TaskList, String), String> = match op {
+            "list" => {
+                let include_archived = arguments
+                    .get("include_archived")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let lists: Vec<Value> = self
+                    .tasks
+                    .all(include_archived)
+                    .iter()
+                    .map(TaskList::summary)
+                    .collect();
+                return structured_result(json!({ "lists": lists }));
+            }
+            "get" => list_key()
+                .and_then(|key| self.tasks.get(&key))
+                .map(|list| (list, String::new())),
+            "create" => match text("title") {
+                None => Err("op 'create' needs a 'title'.".into()),
+                Some(title) => self
+                    .tasks
+                    .create(&title, &strings("tasks"), &strings("instances"), authority)
+                    .map(|list| {
+                        let what = format!("created with {} tasks", list.tasks.len());
+                        (list, what)
+                    }),
+            },
+            "add" => list_key().and_then(|key| {
+                let added = strings("tasks");
+                self.tasks
+                    .add(&key, &added, authority)
+                    .map(|list| (list, format!("added {} tasks", added.len())))
+            }),
+            "update" => list_key().and_then(|key| {
+                let updates = parse_task_updates(arguments.get("updates"))?;
+                let what = updates
+                    .iter()
+                    .map(|update| match update.status {
+                        Some(status) => format!("{} {}", update.task, status.name()),
+                        None => format!("{} edited", update.task),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.tasks
+                    .update(&key, &updates, authority)
+                    .map(|list| (list, what))
+            }),
+            "archive" => list_key()
+                .and_then(|key| self.tasks.set_archived(&key, true))
+                .map(|list| (list, "archived".to_string())),
+            other => Err(format!(
+                "Unknown op '{other}'; use list, get, create, add, update or archive."
+            )),
+        };
+
+        match outcome {
+            Ok((list, what)) => {
+                if !what.is_empty() {
+                    self.events.note(
+                        Actor::Model,
+                        None,
+                        format!("task list '{}': {what} ({})", list.id, list.progress()),
+                    );
+                }
+                structured_result(task_list_json(&list))
+            }
+            Err(message) => tool_error(&message),
+        }
+    }
+
     /// The last `lines` lines of one endpoint's game log, as `game_read_log` returns them.
     ///
     /// For a person looking at that game in the app. It asks the game, as `mcmcp_read_logs` does,
@@ -1399,6 +1507,7 @@ impl Router {
             }
             "mcmcp_compare_instances" => self.compare_instances().await,
             "mcmcp_read_logs" => self.read_logs(arguments).await,
+            "mcmcp_tasks" => self.tasks_tool(arguments),
             other => tool_error(&format!("unknown orchestrator tool: {other}")),
         }
     }
@@ -2062,6 +2171,64 @@ impl Router {
     }
 }
 
+/// A task list as a model reads it: the plan and where it stands, without bookkeeping fields.
+fn task_list_json(list: &TaskList) -> Value {
+    let tasks: Vec<Value> = list
+        .tasks
+        .iter()
+        .map(|task| {
+            let mut entry = json!({ "id": task.id, "title": task.title, "status": task.status.name() });
+            if let Some(note) = &task.note {
+                entry["note"] = json!(note);
+            }
+            entry
+        })
+        .collect();
+    let mut json = json!({
+        "id": list.id,
+        "title": list.title,
+        "progress": list.progress(),
+        "tasks": tasks,
+    });
+    if list.archived {
+        json["archived"] = json!(true);
+    }
+    if !list.instances.is_empty() {
+        json["instances"] = json!(list.instances);
+    }
+    json
+}
+
+/// `updates` from a tool call. A task id may arrive as a number; models write `"task": 3`.
+fn parse_task_updates(raw: Option<&Value>) -> Result<Vec<TaskUpdate>, String> {
+    let Some(items) = raw.and_then(Value::as_array) else {
+        return Err("op 'update' needs 'updates': [{\"task\": \"1\", \"status\": \"done\"}].".into());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let task = match item.get("task") {
+                Some(Value::String(id)) => id.clone(),
+                Some(Value::Number(id)) => id.to_string(),
+                _ => return Err("every update needs 'task', the task's id.".to_string()),
+            };
+            let status =
+                match item.get("status").and_then(Value::as_str) {
+                    None => None,
+                    Some(name) => Some(Status::parse(name).ok_or_else(|| {
+                        format!("'{name}' is not a status; use {}.", Status::NAMES.join(", "))
+                    })?),
+                };
+            Ok(TaskUpdate {
+                task,
+                status,
+                note: item.get("note").and_then(Value::as_str).map(str::to_string),
+                title: item.get("title").and_then(Value::as_str).map(str::to_string),
+            })
+        })
+        .collect()
+}
+
 /// A message's `params`, if it has them.
 fn message_params(message: &Value) -> Option<&Value> {
     message.get("params").filter(|params| params.is_object())
@@ -2590,6 +2757,94 @@ mod tests {
         assert_eq!(finished.outcome, crate::activity::Outcome::Error);
         assert_eq!(finished.error.as_deref(), Some("Step 12 failed."));
         assert_eq!(finished.last_progress.as_ref().map(|p| p.progress), Some(12.0));
+    }
+
+    #[tokio::test]
+    async fn a_model_keeps_a_task_list_through_mcmcp_tasks() {
+        let (router, _alpha, _outbound) = router_with("alpha");
+        let created = call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "create", "title": "Signal tests",
+                    "tasks": ["place signals", "test each", "write it up"],
+                    "instances": ["alpha"] }),
+        )
+        .await;
+        assert_eq!(created["isError"], false, "{created}");
+        assert_eq!(created["structuredContent"]["id"], "signal-tests");
+        assert_eq!(created["structuredContent"]["progress"], "0/3 done");
+
+        // A task id as a number, the way models write it, and a status in their words.
+        let updated = call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "update", "list": "Signal tests",
+                    "updates": [{ "task": 1, "status": "completed" },
+                                { "task": "2", "status": "doing", "note": "3 of 8" }] }),
+        )
+        .await;
+        assert_eq!(updated["isError"], false, "{updated}");
+        assert_eq!(updated["structuredContent"]["progress"], "1/3 done");
+        assert_eq!(updated["structuredContent"]["tasks"][1]["note"], "3 of 8");
+
+        let listed = call(&router, json!({ "name": "mcmcp_tasks" })).await;
+        let summary = &listed["structuredContent"]["lists"][0];
+        assert_eq!(summary["current"]["title"], "test each");
+        assert_eq!(summary["instances"], json!(["alpha"]));
+
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "archive", "list": "signal-tests" }),
+        )
+        .await;
+        let after = call(&router, json!({ "name": "mcmcp_tasks" })).await;
+        assert_eq!(after["structuredContent"]["lists"], json!([]));
+
+        // The person watching sees each change in the log.
+        let notes: Vec<String> = router
+            .events()
+            .slice(&crate::events::Filter::default(), 50)
+            .iter()
+            .map(|event| event.summary())
+            .collect();
+        assert!(
+            notes.iter().any(|note| note.contains("1 done, 2 doing")),
+            "{notes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_list_mistake_is_a_tool_error_that_says_what_to_do() {
+        let (router, _alpha, _outbound) = router_with("alpha");
+        let missing = call(&router, json!({ "name": "mcmcp_tasks", "op": "get" })).await;
+        assert_eq!(missing["isError"], true);
+        assert!(
+            missing["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("needs 'list'")
+        );
+
+        let status = call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "update", "list": "x",
+                    "updates": [{ "task": "1", "status": "finished" }] }),
+        )
+        .await;
+        assert!(
+            status["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("not a status")
+        );
+
+        let deletion = call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "delete", "list": "x" }),
+        )
+        .await;
+        assert_eq!(
+            deletion["isError"], true,
+            "a model cannot delete a list: {deletion}"
+        );
     }
 
     #[tokio::test]
