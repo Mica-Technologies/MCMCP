@@ -400,6 +400,8 @@ function onActivity(snapshot) {
 
 function openDetail(instance) {
   detailInstance = instance;
+  undoLoadedFor = null;
+  $("detail-undo").innerHTML = "";
   activity = { ...activity, detailRecent: [] };
   $("detail-gamelog").textContent = "";
   showPanel("detail");
@@ -419,6 +421,10 @@ async function renderDetail() {
   $("detail-badges").innerHTML = view?.connected
     ? `<span class="badge is-live">connected</span>${view.focused ? ' <span class="badge is-focused">focused</span>' : ""}`
     : '<span class="badge">not running</span>';
+
+  const isServer = view?.side === "server" && view?.connected;
+  $("detail-undo-section").hidden = !isServer;
+  if (isServer && undoLoadedFor !== detailInstance) loadUndoPoints();
 
   const alert = $("detail-alert");
   if (detail.stalled_seconds != null) {
@@ -516,6 +522,110 @@ function renderDetailActivity() {
     if (open.has(String(call.id))) toggle(true);
     list.appendChild(row);
   }
+}
+
+// ---------------------------------------------------------------------------------
+// Undo points (in the detail view of a server endpoint)
+// ---------------------------------------------------------------------------------
+
+/* Read when the view opens and on Refresh, not on every poll: listing reads the game's files. */
+let undoLoadedFor = null;
+let armedRestore = null;
+const undoImages = new Map();
+
+async function loadUndoPoints() {
+  const instance = detailInstance;
+  if (!instance) return;
+  undoLoadedFor = instance;
+  const list = $("detail-undo");
+  let points;
+  try {
+    points = (await invoke("undo_points", { instance }))?.points ?? [];
+  } catch (error) {
+    list.innerHTML = `<p class="muted">Could not list undo points: ${escapeHtml(error)}</p>`;
+    return;
+  }
+  if (detailInstance !== instance) return;
+  list.innerHTML = "";
+  $("detail-undo-empty").hidden = points.length > 0;
+  for (const point of points) list.appendChild(renderUndoPoint(instance, point));
+}
+
+function renderUndoPoint(instance, point) {
+  const element = document.createElement("div");
+  element.className = `undo-point${point.restoredBy ? " is-restored" : ""}`;
+  const area = point.from && point.to
+    ? `${point.from.x} ${point.from.y} ${point.from.z} → ${point.to.x} ${point.to.y} ${point.to.z}`
+    : "";
+  const note = point.restoredBy ? ` · restored (${escapeHtml(point.restoredBy)})`
+    : point.undoes ? ` · undid ${escapeHtml(point.undoes)}` : "";
+  element.innerHTML = `
+    <div>
+      <div class="what"><span class="tool">${escapeHtml(point.tool)}</span> · ${plural(point.blocks, "block")}</div>
+      <div class="meta">${escapeHtml(formatDate(point.at))} · ${escapeHtml(area)}${note} · <code>${escapeHtml(point.id)}</code></div>
+    </div>
+    <div class="actions"></div>
+    <div class="images"></div>`;
+
+  const images = element.querySelector(".images");
+  for (const [key, label] of [["beforeImage", "before"], ["afterImage", "after"]]) {
+    if (!point[key]) continue;
+    const figure = document.createElement("figure");
+    figure.innerHTML = `<img alt="${label}"><figcaption>${label}</figcaption>`;
+    images.appendChild(figure);
+    if (!undoImages.has(point[key])) undoImages.set(point[key], invoke("undo_image", { path: point[key] }));
+    undoImages.get(point[key]).then((source) => {
+      if (source) figure.querySelector("img").src = source;
+      else figure.remove();
+    });
+  }
+  if (!images.childElementCount) images.remove();
+
+  const actions = element.querySelector(".actions");
+  const restore = (force) => {
+    const button = document.createElement("button");
+    const key = `${point.id}:${force}`;
+    button.className = force ? "danger" : "";
+    button.textContent = armedRestore === key ? "Really restore?" : force ? "Restore anyway" : "Restore";
+    button.classList.toggle("is-armed", armedRestore === key);
+    button.title = "Put back the blocks this write replaced. Needs a second click.";
+    button.addEventListener("click", async () => {
+      if (armedRestore !== key) {
+        armedRestore = key;
+        button.textContent = "Really restore?";
+        button.classList.add("is-armed");
+        setTimeout(() => {
+          if (armedRestore === key) {
+            armedRestore = null;
+            button.textContent = force ? "Restore anyway" : "Restore";
+            button.classList.remove("is-armed");
+          }
+        }, 3500);
+        return;
+      }
+      armedRestore = null;
+      button.disabled = true;
+      try {
+        const result = await invoke("undo_restore", { instance, id: point.id, force });
+        toast(`Restored ${plural(result?.blocks ?? 0, "block")}`);
+        loadUndoPoints();
+      } catch (error) {
+        // Blocks changed since the write: say where, and offer to restore over them.
+        button.disabled = false;
+        button.textContent = force ? "Restore anyway" : "Restore";
+        button.classList.remove("is-armed");
+        element.querySelector(".problem")?.remove();
+        const problem = document.createElement("div");
+        problem.className = "problem";
+        problem.textContent = String(error);
+        element.appendChild(problem);
+        if (!force && String(error).includes("changed since")) actions.appendChild(restore(true));
+      }
+    });
+    return button;
+  };
+  if (!point.restoredBy) actions.appendChild(restore(false));
+  return element;
 }
 
 async function loadGameLog() {
@@ -995,6 +1105,7 @@ $("detail-back").addEventListener("click", () => {
   showPanel("instances");
 });
 $("detail-log-refresh").addEventListener("click", loadGameLog);
+$("detail-undo-refresh").addEventListener("click", loadUndoPoints);
 
 /* Elapsed times on running calls tick even when no progress arrives. */
 setInterval(() => {

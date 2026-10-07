@@ -1,6 +1,6 @@
 # Tools
 
-75 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+76 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -537,11 +537,42 @@ holds the tick loop. A larger region or list is written in batches of that size,
 another with ticks between, up to 32 batches per call — so clearing a scene is one call rather than
 one per layer. `batches` in the response says how many it took.
 
+**Undo.** Each call records what every block it changed was before, and names the record in
+`undoPoint`; `server_undo` puts it back. See below.
+
 !!! warning "Direct writes bypass hooks"
 
     These do not fire block-place events. Claim protection, machinery callbacks and other mods'
     hooks do not run. On a world with protection mods, build through commands or player actions
     instead.
+
+#### `server_undo`
+
+:material-alert: Destructive · `op`, optional `id`, `force`, `limit`
+
+Lists the undo points block writes left, or puts one back.
+
+Each `server_set_blocks` call records what every block it changed was before: the block and its
+tile-entity data. `server_set_block` records one too, but only when `undo.recordSingleBlockWrites`
+is on. The record is made as each block changes, for only the blocks that change, so there is no
+extra pass over the region. It is kept in the world's `mcmcp-undo` folder, with a top-down map of
+the area before and after.
+
+| `op` | Does |
+| --- | --- |
+| `list` (default) | The points, newest first: `id`, `tool`, `at`, `blocks`, `from`/`to`, image paths, and `restoredBy` or `undoes` |
+| `restore` | Puts point `id` back. Requires `permissions.allowWorldEdits` |
+
+A restore first checks that every block it would put back is still what the write left. If any has
+changed since, it refuses, names where, and changes nothing: restoring over later work is a
+second mistake, not a fix. `force: true` restores anyway. A restore leaves an undo point of its own,
+so it can be undone too.
+
+The orchestrator app shows a server's undo points in its detail view, with the before and after
+maps and a Restore button.
+
+Not covered: writes made by commands (`/fill`, `/clone`) or by players. They never pass through
+MCMCP's write path.
 
 ### Players
 

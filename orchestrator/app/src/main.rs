@@ -446,6 +446,70 @@ fn note_task_change(state: &State<'_, AppState>, list: &TaskList, what: &str) {
 }
 
 // ----------------------------------------------------------------------------------
+// Undo points
+// ----------------------------------------------------------------------------------
+
+/// A server endpoint's undo points, newest first, as `server_undo` lists them.
+#[tauri::command]
+async fn undo_points(state: State<'_, AppState>, instance: String) -> Result<Value, String> {
+    let result = state
+        .router
+        .call_as_person(&instance, "server_undo", json!({ "op": "list", "limit": 50 }))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result.get("structuredContent").cloned().unwrap_or(Value::Null))
+}
+
+/// Puts an undo point back, as the person: no gate, and noted in the log as theirs.
+#[tauri::command]
+async fn undo_restore(
+    state: State<'_, AppState>,
+    instance: String,
+    id: String,
+    force: bool,
+) -> Result<Value, String> {
+    let result = state
+        .router
+        .call_as_person(
+            &instance,
+            "server_undo",
+            json!({ "op": "restore", "id": id, "force": force }),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let label = label_of(&state, &instance);
+    state.events.note_about(
+        Actor::Human,
+        Some(instance.clone()),
+        label,
+        format!("restored undo point {id}{}", if force { " (forced)" } else { "" }),
+    );
+    Ok(result.get("structuredContent").cloned().unwrap_or(Value::Null))
+}
+
+/// An undo point's before or after map, as a data URI.
+///
+/// The path comes from the game, so only a PNG inside an `mcmcp-undo` folder is read: this cannot be
+/// talked into returning any other file.
+#[tauri::command]
+fn undo_image(path: String) -> Option<String> {
+    use base64::Engine;
+    let path = std::path::Path::new(&path);
+    let in_undo_folder = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .is_some_and(|name| name == "mcmcp-undo");
+    if !in_undo_folder {
+        return None;
+    }
+    let bytes = mcmcp_orchestrator_core::thumbnail::read_screenshot(path).ok()?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+// ----------------------------------------------------------------------------------
 // Flight recorder
 // ----------------------------------------------------------------------------------
 
@@ -1165,6 +1229,9 @@ fn main() -> anyhow::Result<()> {
             task_create,
             task_archive,
             task_delete,
+            undo_points,
+            undo_restore,
+            undo_image,
             flight_sessions,
             flight_session,
             thumbnail,

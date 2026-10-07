@@ -301,6 +301,28 @@ seconds and fades.
 It hides with F1, and `client_screenshot` leaves it out: a screenshot waits one frame for the line
 to clear, but only when the line was on screen. Set this `false` to never show it.
 
+## `undo`
+
+### `enableUndoPoints`
+
+Default `true` · read live
+
+Before `server_set_blocks` writes, record what each block it changes was, so `server_undo` or the
+orchestrator app can put the write back. See [`server_undo`](tools.md#server_undo).
+
+### `recordSingleBlockWrites`
+
+Default `false` · read live
+
+Also record an undo point for every `server_set_block` call. This gives an audit trail of an agent
+placing blocks one at a time. It is off by default because each point is a file of its own.
+
+### `maxUndoPoints`
+
+Default `50`, range 1–1000
+
+How many undo points each world keeps. The oldest go first.
+
 ## `limits`
 
 ### `maxSessions`
@@ -471,6 +493,12 @@ orchestrator {
 
 display {
     B:showActivityBanner=true
+}
+
+undo {
+    B:enableUndoPoints=true
+    I:maxUndoPoints=50
+    B:recordSingleBlockWrites=false
 }
 
 limits {

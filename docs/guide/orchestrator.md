@@ -24,7 +24,7 @@ in-game says so — the only sign is a line in `logs/latest.log`.
 You can fix that by hand. Give each instance a different port, add a separate entry per instance to
 your MCP client's config, and keep track of which port is which game. It works, and it costs a config
 edit for every instance you add, plus one tool catalogue per instance in every request your model
-makes — the same 75 tools, three times over, distinguished only by a prefix.
+makes — the same 76 tools, three times over, distinguished only by a prefix.
 
 The orchestrator replaces that with one connection out of each game to one place.
 
@@ -370,6 +370,12 @@ Click a card for its detail view:
 
 If the game thread is stalled, or the game has gone, the view says so at the top, along with the
 crash report when there is one.
+
+A server endpoint's view also lists its **undo points**: each `server_set_blocks` write, with maps
+of the area before and after, and a Restore button. A restore refuses if blocks have changed since
+the write and says where, then offers **Restore anyway**. Both buttons need a second click. A
+restore from here acts as you, so the gating policy does not stop it, and the log records it as
+yours.
 
 Progress comes from the games: `client_sequence`, `client_run_commands`, `client_get_blocks`'
 `find` mode, `server_set_blocks` and the waits all report it. The orchestrator records it whether

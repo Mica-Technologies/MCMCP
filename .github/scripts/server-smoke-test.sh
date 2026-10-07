@@ -395,6 +395,61 @@ case "$DUMP_BODY" in
 esac
 
 # ---------------------------------------------------------------------------
+# Undo points: write, list, restore, read back
+# ---------------------------------------------------------------------------
+
+# One tools/call; prints the body. $1 = id, $2 = tool, $3 = arguments as JSON.
+mcp_call() {
+  curl -fsS --max-time 60 \
+    -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "Mcp-Session-Id: ${SESSION_ID}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}" 2>&1
+}
+
+# World edits are off by default. Turned on for this check through the config and /mcmcp reload,
+# which is also how an operator would do it, and put back to whatever they were afterwards — a local
+# run/server config may have had them on already.
+echo "==> undo points: enable world edits"
+WORLD_EDITS_WERE="$(grep -o 'B:allowWorldEdits=[a-z]*' "$CONFIG_FILE" | head -1)"
+sed -i 's/B:allowWorldEdits=false/B:allowWorldEdits=true/' "$CONFIG_FILE"
+RELOAD_BODY="$(mcp_call 20 server_run_command '{"command":"mcmcp reload"}')" \
+  || mcp_failure "reloading the config failed: ${RELOAD_BODY}"
+
+UNDO_Y=$((SPAWN_Y + 40))
+echo "==> undo points: fill gold at ${SPAWN_X} ${UNDO_Y} ${SPAWN_Z}"
+FILL_BODY="$(mcp_call 21 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:gold_block\",\"x\":${SPAWN_X},\"y\":${UNDO_Y},\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 2)),\"toY\":$((UNDO_Y + 1)),\"toZ\":$((SPAWN_Z + 2))}")" \
+  || mcp_failure "server_set_blocks request failed: ${FILL_BODY}"
+UNDO_ID="$(printf '%s' "$FILL_BODY" | grep -o '"undoPoint":"u[0-9]*"' | head -1 | sed 's/.*"\(u[0-9]*\)"/\1/')"
+[ -n "$UNDO_ID" ] || mcp_failure "server_set_blocks left no undo point: ${FILL_BODY}"
+echo "    wrote 18 blocks, undo point ${UNDO_ID}"
+
+LIST_BODY="$(mcp_call 22 server_undo '{"op":"list"}')" || mcp_failure "server_undo list failed: ${LIST_BODY}"
+case "$LIST_BODY" in
+  *"\"id\":\"${UNDO_ID}\""*) echo "    listed" ;;
+  *) mcp_failure "server_undo list did not include ${UNDO_ID}: ${LIST_BODY}" ;;
+esac
+
+RESTORE_BODY="$(mcp_call 23 server_undo "{\"op\":\"restore\",\"id\":\"${UNDO_ID}\"}")" \
+  || mcp_failure "server_undo restore failed: ${RESTORE_BODY}"
+case "$RESTORE_BODY" in
+  *'"isError":false'*'"restored"'*|*'"restored"'*'"isError":false'*) echo "    restored" ;;
+  *) mcp_failure "server_undo restore did not succeed: ${RESTORE_BODY}" ;;
+esac
+
+AFTER_BODY="$(mcp_call 24 server_get_block "{\"x\":$((SPAWN_X + 1)),\"y\":$((UNDO_Y + 1)),\"z\":$((SPAWN_Z + 1))}")" \
+  || mcp_failure "server_get_block after restore failed: ${AFTER_BODY}"
+case "$AFTER_BODY" in
+  *'gold_block'*) mcp_failure "the gold is still there after the restore: ${AFTER_BODY}" ;;
+  *) echo "    the block is back to what it was" ;;
+esac
+
+sed -i "s/B:allowWorldEdits=true/${WORLD_EDITS_WERE:-B:allowWorldEdits=false}/" "$CONFIG_FILE"
+mcp_call 25 server_run_command '{"command":"mcmcp reload"}' >/dev/null
+
+# ---------------------------------------------------------------------------
 # Orchestrator link
 # ---------------------------------------------------------------------------
 

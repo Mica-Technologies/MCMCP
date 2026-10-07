@@ -77,6 +77,17 @@
         <div id="detail-recent" class="log"></div>
         <p id="detail-recent-empty" class="muted" hidden>No calls yet.</p>
 
+        <div id="detail-undo-section" hidden>
+          <h2>
+            Undo points
+            <button id="detail-undo-refresh" class="ghost inline">Refresh</button>
+          </h2>
+          <div id="detail-undo" class="undo-list"></div>
+          <p id="detail-undo-empty" class="muted" hidden>
+            None yet. Each server_set_blocks call leaves one; see undo in the MCMCP config.
+          </p>
+        </div>
+
         <h2>Messages from the game</h2>
         <div id="detail-messages" class="log"></div>
         <p id="detail-messages-empty" class="muted" hidden>

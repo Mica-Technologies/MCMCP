@@ -394,29 +394,42 @@ public final class ServerWorldTools {
                     return ToolResult.error(e.getMessage());
                 }
 
+                // Only with undo.recordSingleBlockWrites: one block is one file, which is an audit
+                // trail somebody chose rather than a default.
+                final UndoPoints.Recorder recorder = ServerUndoTools.start(true);
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
                     public JsonObject call() {
                         WorldServer world = requireWorld(dimension);
                         BlockPos pos = new BlockPos(x, y, z);
                         JsonObject previous = GameJson.block(world, pos);
+                        UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
 
                         IBlockState state = target.getStateFromMeta(metadata);
                         // Flag 3 = update neighbours + send to clients. Anything less leaves
                         // connected players seeing the old block until they reload the chunk.
                         boolean changed = world.setBlockState(pos, state, 3);
+                        boolean wrote = changed;
 
                         JsonObject json = new JsonObject();
                         json.addProperty("changed", changed);
                         if (nbt != null) {
-                            json.addProperty("nbt", TileEntityNbt.merge(world, pos, nbt).name()
-                                .toLowerCase(java.util.Locale.ROOT));
+                            TileEntityNbt.Outcome outcome = TileEntityNbt.merge(world, pos, nbt);
+                            wrote |= outcome == TileEntityNbt.Outcome.APPLIED;
+                            json.addProperty("nbt", outcome.name().toLowerCase(java.util.Locale.ROOT));
+                        }
+                        if (recorder != null && wrote) {
+                            recorder.record(pos, was, world.getBlockState(pos));
                         }
                         json.add("previous", previous);
                         json.add("current", GameJson.block(world, pos));
                         return json;
                     }
                 });
+                if (recorder != null) {
+                    ServerUndoTools.finish(context, recorder, "server_set_block", dimension, null, null,
+                        result, null);
+                }
                 return ToolResult.structured(result);
             })
             .build());

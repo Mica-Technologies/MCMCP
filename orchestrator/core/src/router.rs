@@ -1251,23 +1251,36 @@ impl Router {
     /// rather than reading `latest.log` from disk: the orchestrator may not share a filesystem with
     /// the game, and the game already knows which file is its log.
     pub async fn game_log_tail(&self, endpoint: &str, lines: u64) -> anyhow::Result<String> {
+        let result = self
+            .call_as_person(endpoint, "game_read_log", json!({ "lines": lines.clamp(1, 500) }))
+            .await?;
+        Ok(first_text(&result).unwrap_or_default().to_string())
+    }
+
+    /// Calls a game's tool on a person's behalf, from the app.
+    ///
+    /// Straight to the game, past the gating policy: the policy exists to put a model's calls in
+    /// front of a person, and this call is that person. A caller that changes something notes it in
+    /// the log as the person's. A tool error comes back as an `Err` carrying the tool's own words.
+    pub async fn call_as_person(
+        &self,
+        endpoint: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> anyhow::Result<Value> {
         let Some(instance) = self.registry.get(endpoint) else {
             anyhow::bail!("{endpoint} is not connected");
         };
         let result = instance
             .request(
                 "tools/call",
-                Some(json!({
-                    "name": "game_read_log",
-                    "arguments": { "lines": lines.clamp(1, 500) },
-                })),
+                Some(json!({ "name": tool, "arguments": arguments })),
             )
             .await?;
-        let text = first_text(&result).unwrap_or_default().to_string();
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
-            anyhow::bail!("{text}");
+            anyhow::bail!("{}", first_text(&result).unwrap_or("the tool failed"));
         }
-        Ok(text)
+        Ok(result)
     }
 
     /// The game an endpoint id belongs to, whether or not it is still connected.

@@ -48,6 +48,7 @@ public class McmcpConfig {
     private static final String CATEGORY_IDENTITY = "identity";
     private static final String CATEGORY_ORCHESTRATOR = "orchestrator";
     private static final String CATEGORY_DISPLAY = "display";
+    private static final String CATEGORY_UNDO = "undo";
 
     /**
      * Dev-launch overrides injected by {@code addon.gradle}.
@@ -93,6 +94,9 @@ public class McmcpConfig {
     private static boolean allowWorldEdits = false;
     private static boolean allowScreenshots = true;
     private static boolean showActivityBanner = true;
+    private static boolean undoPointsEnabled = true;
+    private static boolean undoSingleBlockWrites = false;
+    private static int maxUndoPoints = 50;
     private static boolean allowLogAccess = true;
     private static boolean allowChat = true;
     private static boolean allowProcessControl = true;
@@ -240,6 +244,19 @@ public class McmcpConfig {
                 + "tool it is running and how far through it is, and its current task when it keeps a "
                 + "task list in the orchestrator. It fades a few seconds after the work stops, hides "
                 + "with F1, and is left out of client_screenshot captures. Takes effect at once.");
+
+        // Undo points
+        undoPointsEnabled = configuration.getBoolean("enableUndoPoints", CATEGORY_UNDO, true,
+            "Before server_set_blocks writes, record what each block it changes was, so the write can "
+                + "be put back with server_undo or from the orchestrator app. Recorded only for blocks "
+                + "the write actually changes, as it changes them, so it costs no extra pass over the "
+                + "region. Kept in the world's mcmcp-undo folder. Takes effect at once.");
+        undoSingleBlockWrites = configuration.getBoolean("recordSingleBlockWrites", CATEGORY_UNDO, false,
+            "Also record an undo point for every server_set_block call, not only for batches. Useful "
+                + "as an audit trail of an agent placing blocks one at a time; off by default because "
+                + "each is a file of its own.");
+        maxUndoPoints = configuration.getInt("maxUndoPoints", CATEGORY_UNDO, 50, 1, 1000,
+            "How many undo points each world keeps. The oldest go first.");
 
         // Orchestrator link
         orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR, true,
@@ -503,6 +520,20 @@ public class McmcpConfig {
     }
 
     /** Whether the in-game activity line is shown. Read live, every frame. */
+    /** Whether server_set_blocks records undo points. Read live. */
+    public static boolean isUndoPointsEnabled() {
+        return undoPointsEnabled;
+    }
+
+    /** Whether server_set_block records one too. Read live. */
+    public static boolean isUndoSingleBlockWrites() {
+        return undoSingleBlockWrites;
+    }
+
+    public static int getMaxUndoPoints() {
+        return maxUndoPoints;
+    }
+
     public static boolean isShowActivityBanner() {
         return showActivityBanner;
     }

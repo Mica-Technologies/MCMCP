@@ -9,6 +9,7 @@ import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,6 +60,7 @@ public final class ServerBuildTools {
     public static void register() {
         registerGetBlocks();
         registerSetBlocks();
+        ServerUndoTools.register();
     }
 
     // ------------------------------------------------------------------
@@ -347,6 +349,9 @@ public final class ServerBuildTools {
                         }
                     }
 
+                    final UndoPoints.Recorder recorder = ServerUndoTools.start(false);
+                    final int[] area = recorder == null ? null : listArea(placements);
+                    final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                     final Tally tally = new Tally();
                     runInBatches(context, placements.size(), batchLimit, new Batch() {
                         @Override
@@ -356,11 +361,16 @@ public final class ServerBuildTools {
                                 Placement placement = placements.get(i);
                                 place(world, placement.pos,
                                     placement.block.getStateFromMeta(placement.metadata),
-                                    placement.nbt, replaceOnly, tally);
+                                    placement.nbt, replaceOnly, tally, recorder);
                             }
                         }
                     }, tally);
-                    return ToolResult.structured(tally.toJson(dimension, placements.size(), replaceOnlyId));
+                    JsonObject json = tally.toJson(dimension, placements.size(), replaceOnlyId);
+                    if (recorder != null) {
+                        ServerUndoTools.finish(context, recorder, "server_set_blocks", dimension, area,
+                            beforeImage, json, null);
+                    }
+                    return ToolResult.structured(json);
                 }
 
                 // Fill mode.
@@ -400,6 +410,9 @@ public final class ServerBuildTools {
                 }
 
                 final IBlockState state = fillBlock.getStateFromMeta(metadata);
+                final UndoPoints.Recorder recorder = ServerUndoTools.start(false);
+                final int[] area = recorder == null ? null : UndoPoints.imageArea(minX, minZ, maxX, maxZ);
+                final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                 final Tally tally = new Tally();
                 runInBatches(context, (int) volume, batchLimit, new Batch() {
                     @Override
@@ -412,7 +425,7 @@ public final class ServerBuildTools {
                             int x = minX + i % sizeX;
                             int z = minZ + (i / sizeX) % sizeZ;
                             int y = minY + i / (sizeX * sizeZ);
-                            place(world, new BlockPos(x, y, z), state, fillNbt, replaceOnly, tally);
+                            place(world, new BlockPos(x, y, z), state, fillNbt, replaceOnly, tally, recorder);
                         }
                     }
                 }, tally);
@@ -420,6 +433,10 @@ public final class ServerBuildTools {
                 json.addProperty("block", blockId);
                 json.add("from", GameJson.blockPos(new BlockPos(minX, minY, minZ)));
                 json.add("to", GameJson.blockPos(new BlockPos(maxX, maxY, maxZ)));
+                if (recorder != null) {
+                    ServerUndoTools.finish(context, recorder, "server_set_blocks", dimension, area,
+                        beforeImage, json, null);
+                }
                 return ToolResult.structured(json);
             })
             .build());
@@ -439,23 +456,49 @@ public final class ServerBuildTools {
         return schema;
     }
 
-    /** Places one block and merges its tile-entity data. Game thread only. */
+    /**
+     * Places one block and merges its tile-entity data, recording what it replaced when a recorder is
+     * given. Game thread only.
+     */
     private static void place(WorldServer world, BlockPos pos, IBlockState state,
-                              @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, Tally tally) {
+                              @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, Tally tally,
+                              @Nullable UndoPoints.Recorder recorder) {
         if (replaceOnly != null && world.getBlockState(pos).getBlock() != replaceOnly) {
             tally.skipped++;
             return;
         }
-        if (world.setBlockState(pos, state, 3)) {
+        UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
+        boolean changed = world.setBlockState(pos, state, 3);
+        if (changed) {
             tally.written++;
         }
         if (nbt != null) {
             TileEntityNbt.Outcome outcome = TileEntityNbt.merge(world, pos, nbt);
+            changed |= outcome == TileEntityNbt.Outcome.APPLIED;
             tally.nbt[outcome.ordinal()]++;
             if (outcome == TileEntityNbt.Outcome.NO_TILE_ENTITY && tally.noTileEntityAt.size() < 5) {
                 tally.noTileEntityAt.add(GameJson.blockPos(pos));
             }
         }
+        if (recorder != null && changed) {
+            recorder.record(pos, was, world.getBlockState(pos));
+        }
+    }
+
+    /** The map area around a list of placements, or null when they are too spread out to draw. */
+    @Nullable
+    private static int[] listArea(List<Placement> placements) {
+        int minX = Integer.MAX_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int maxZ = Integer.MIN_VALUE;
+        for (Placement placement : placements) {
+            minX = Math.min(minX, placement.pos.getX());
+            minZ = Math.min(minZ, placement.pos.getZ());
+            maxX = Math.max(maxX, placement.pos.getX());
+            maxZ = Math.max(maxZ, placement.pos.getZ());
+        }
+        return UndoPoints.imageArea(minX, minZ, maxX, maxZ);
     }
 
     /** One game-thread task's share of a bulk write, over indices {@code [from, to)}. */
