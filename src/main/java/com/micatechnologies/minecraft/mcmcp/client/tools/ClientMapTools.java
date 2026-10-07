@@ -220,7 +220,7 @@ public final class ClientMapTools {
                         return ToolResult.error("The client changed world while the map was being "
                             + "drawn. Nothing was saved; draw it again.");
                     }
-                    context.reportProgress(to, pixelsZ, null);
+                    context.reportProgress(to, pixelsZ, "rows drawn");
                 }
 
                 Integer markerX = playerX >= minX && playerX < minX + spanX ? playerX : null;

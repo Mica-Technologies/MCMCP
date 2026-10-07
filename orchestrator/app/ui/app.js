@@ -86,7 +86,11 @@ function formatAgo(millis) {
 /* "12 / 40" or "12" — and a bar that fills when the total is known and sweeps when it is not. */
 function progressText(progress) {
   if (!progress) return "";
-  const done = Number.isInteger(progress.progress) ? progress.progress : progress.progress.toFixed(1);
+  // Against a total, whole units: a sequence's progress sits just above the steps finished while the
+  // next one runs, and "12.001 / 40" says nothing "12 / 40" does not.
+  const done = progress.total != null || Number.isInteger(progress.progress)
+    ? Math.floor(progress.progress)
+    : progress.progress.toFixed(1);
   return progress.total != null ? `${done} / ${progress.total}` : `${done}`;
 }
 

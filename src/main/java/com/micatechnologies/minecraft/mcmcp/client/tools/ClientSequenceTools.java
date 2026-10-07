@@ -13,6 +13,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
+import com.micatechnologies.minecraft.mcmcp.protocol.McpLogLevel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -59,6 +60,18 @@ public final class ClientSequenceTools {
     private static final String EXPECT = "expect";
 
     private static final String QUIET = "quiet";
+
+    /**
+     * Where a step's progress starts, above the whole number of steps already finished.
+     *
+     * <p>Progress may only go up. A finished step reports its whole number; the next one has to say
+     * "now running this" at a value above that, or the report is dropped as a repeat and whoever is
+     * watching still sees the last step's outcome while the next one runs.
+     */
+    private static final double STEP_START = 0.001D;
+
+    /** The longest failure reason put in a progress message or a log line. */
+    private static final int REASON_CHARS = 160;
 
     /** The tools a step may name. */
     private static final Set<String> STEP_TOOLS = Collections.unmodifiableSet(new LinkedHashSet<>(
@@ -175,18 +188,33 @@ public final class ClientSequenceTools {
                 stopReason = "time limit for one call";
                 break;
             }
-            context.reportProgress(step.index, steps.size(), step.tool.getName());
+            // Progress counts finished steps, so a sequence that ran every step ends at its total,
+            // and the message names the step running now, then how it ended.
+            context.reportProgress(step.index + STEP_START, steps.size(), step.tool.getName());
             // The dispatcher notes each call so the client keeps its frame rate up while an agent is
             // driving; a long sequence is still an agent driving.
             ToolActivity.noteCall(context.getSide());
 
             JsonObject entry = runStep(context, step, steps.size());
             results.add(entry);
+            // The last step's report is the sequence's last word, so it sums up the run instead: a
+            // sequence that ended on a passing step is not a sequence that passed.
+            boolean last = step.index + 1 == steps.size();
             if (entry.get("ok").getAsBoolean()) {
                 passed++;
+                context.reportProgress(step.index + 1, steps.size(),
+                    last ? summary(steps.size(), passed, failed) : step.tool.getName() + " ok");
             }
             else {
                 failed++;
+                String reason = failureReason(entry);
+                context.reportProgress(step.index + 1, steps.size(),
+                    last ? summary(steps.size(), passed, failed)
+                        : step.tool.getName() + " failed: " + reason);
+                // A failed step does not fail the call, so it would otherwise only be visible to
+                // whoever reads the reply. This puts it where a person watching the game sees it.
+                context.log(McpLogLevel.WARNING, "client_sequence step " + step.index + " ("
+                    + step.tool.getName() + ") failed: " + reason);
                 if (firstError == null) {
                     firstError = summarizeFailure(entry);
                 }
@@ -219,6 +247,26 @@ public final class ClientSequenceTools {
         }
         json.add("results", results);
         return ToolResult.structured(json);
+    }
+
+    private static String summary(int ran, int passed, int failed) {
+        return ran + " ran: " + passed + " passed" + (failed > 0 ? ", " + failed + " failed" : "");
+    }
+
+    /** Why a step failed, in one short line. */
+    private static String failureReason(JsonObject entry) {
+        String reason;
+        if (entry.has("error")) {
+            reason = entry.get("error").getAsString();
+        }
+        else if (entry.has("expectFailed")) {
+            reason = entry.get("expectFailed").getAsJsonArray().get(0).getAsString();
+        }
+        else {
+            reason = "unknown";
+        }
+        reason = reason.replace('\n', ' ').trim();
+        return reason.length() <= REASON_CHARS ? reason : reason.substring(0, REASON_CHARS) + "…";
     }
 
     /** The failed step's index, tool and why it failed, without its result. */
@@ -308,7 +356,8 @@ public final class ClientSequenceTools {
 
         ToolResult result;
         try {
-            result = step.tool.call(context.forPart(step.arguments, step.index, total));
+            result = step.tool.call(context.forPart(step.arguments, step.index + STEP_START, total,
+                step.tool.getName()));
         }
         catch (JsonRpcException e) {
             // The dispatcher's rule: cancellation stays a protocol error, everything else a handler

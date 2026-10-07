@@ -247,6 +247,12 @@ impl Activity {
     pub fn log(&self, instance: &str, params: &Value) {
         let text = match params.get("data") {
             Some(Value::String(text)) => text.clone(),
+            // The mod sends {"message": "..."}; a person wants the sentence, not the wrapper.
+            Some(Value::Object(map))
+                if map.len() == 1 && map.get("message").is_some_and(Value::is_string) =>
+            {
+                map["message"].as_str().unwrap_or_default().to_string()
+            }
             Some(other) => other.to_string(),
             None => return,
         };
@@ -539,6 +545,16 @@ mod tests {
         let beta = activity.logs("beta.server");
         assert_eq!(beta[0].text, r#"{"chunk":[1,2]}"#);
         assert_eq!(beta[0].level, "warning");
+    }
+
+    #[test]
+    fn a_message_wrapped_the_way_the_mod_sends_it_is_kept_as_its_sentence() {
+        let activity = Activity::new();
+        activity.log(
+            "alpha.client",
+            &json!({ "level": "warning", "data": { "message": "step 3 failed" } }),
+        );
+        assert_eq!(activity.logs("alpha.client")[0].text, "step 3 failed");
     }
 
     #[test]

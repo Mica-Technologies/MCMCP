@@ -1114,7 +1114,9 @@ tool's arguments. It may add:
 A step fails when its tool reports an error or an expectation does not match. By default the
 sequence stops there and returns `nextIndex`; `stop_on_fail: false` runs on. The first failure
 is repeated at the top of the reply as `firstError`, so a loop that reads only each step's
-`result` cannot miss it. Every step is checked
+`result` cannot miss it, and is sent as a warning log message, which the orchestrator app shows
+under the game's messages. Progress counts finished steps and names the one running; the last
+report sums up the run (`21 ran: 20 passed, 1 failed`). Every step is checked
 before any runs — the tool exists and may be a step, and every argument is one it declares — so a
 misspelt argument in a late step changes nothing.
 

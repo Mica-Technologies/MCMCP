@@ -104,4 +104,20 @@ class ToolContextTest {
         assertEquals(2.5, sent.get(1), 1e-9);
         assertEquals(2.99, sent.get(2), 1e-9);
     }
+
+    @Test
+    void a_parts_messages_say_which_part_is_speaking() throws InterruptedException {
+        // Someone watching a sequence sees "client_wait · waiting 8 ticks", not a bare message that
+        // could have come from any of forty steps.
+        McpSession session = new McpSession("test", 0L);
+        ToolContext part = context(session, new JsonObject())
+            .forPart(new JsonObject(), 2, 5, "client_wait");
+        part.reportProgress(1, 4, "waiting 8 ticks");
+        part.reportProgress(2, 4, null);
+
+        JsonObject first = session.pollOutbound(0L).getAsJsonObject("params");
+        JsonObject second = session.pollOutbound(0L).getAsJsonObject("params");
+        assertEquals("client_wait · waiting 8 ticks", first.get("message").getAsString());
+        assertEquals("client_wait", second.get("message").getAsString());
+    }
 }

@@ -149,9 +149,11 @@ public final class ClientCommandTools {
                     stopReason = "time limit for one call";
                     break;
                 }
-                if (i % 25 == 0) {
-                    context.reportProgress(i, commands.size(), null);
-                }
+                // Every command, naming it: the reports are a few dozen bytes beside a command that takes
+                // at least a tick, and "/fill … 12 of 40" is what someone watching wants to see.
+                String next = commands.get(i).trim();
+                context.reportProgress(i, commands.size(),
+                    next.length() <= 80 ? next : next.substring(0, 80) + "…");
 
                 // Anything still arriving belongs to the last command the server was sent.
                 drain(chat, lastSent);
@@ -231,6 +233,14 @@ public final class ClientCommandTools {
             }
             results.add(entry);
         }
+
+        // The last word for someone watching: how the batch went, rather than the last command sent,
+        // which reads as success when that command was the one that failed.
+        StringBuilder summary = new StringBuilder().append(outcomes.size()).append(" ran");
+        for (Map.Entry<String, Integer> entry : counts.entrySet()) {
+            summary.append(", ").append(entry.getValue()).append(' ').append(entry.getKey());
+        }
+        context.reportProgress(outcomes.size(), commands.size(), summary.toString());
 
         JsonObject json = new JsonObject();
         json.addProperty("total", commands.size());

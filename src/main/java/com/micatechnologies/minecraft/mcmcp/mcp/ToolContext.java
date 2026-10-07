@@ -220,6 +220,15 @@ public class ToolContext {
      * still only go up.
      */
     public ToolContext forPart(JsonObject partArguments, final double base, final double total) {
+        return forPart(partArguments, base, total, null);
+    }
+
+    /**
+     * As {@link #forPart(JsonObject, double, double)}, with each of the part's progress messages
+     * prefixed by {@code messagePrefix} — which part is speaking, for someone watching the whole.
+     */
+    public ToolContext forPart(JsonObject partArguments, final double base, final double total,
+        @Nullable final String messagePrefix) {
         final ToolContext whole = this;
         return new ToolContext(session, partArguments, gameThread, cancellation,
             gameThreadTimeoutMillis, null) {
@@ -227,7 +236,9 @@ public class ToolContext {
             public void reportProgress(double progress, double partTotal, @Nullable String message) {
                 double fraction = partTotal > 0 ? Math.max(0.0D, Math.min(progress / partTotal, 0.99D))
                     : 0.5D;
-                whole.reportProgress(base + fraction, total, message);
+                String labelled = messagePrefix == null ? message
+                    : message == null ? messagePrefix : messagePrefix + " · " + message;
+                whole.reportProgress(base + fraction, total, labelled);
             }
         };
     }

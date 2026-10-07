@@ -83,13 +83,17 @@ public final class ClientSyncTools {
     private ClientSyncTools() {
     }
 
-    /** Reports progress if {@link #PROGRESS_INTERVAL_MILLIS} has passed; returns when it last did. */
-    private static long heartbeat(ToolContext context, long start, long lastProgress, long budgetMillis) {
+    /**
+     * Reports progress if {@link #PROGRESS_INTERVAL_MILLIS} has passed; returns when it last did.
+     * In seconds, which is how a person reads a wait: "35 / 240" rather than "35000 / 240000".
+     */
+    private static long heartbeat(ToolContext context, long start, long lastProgress, long budgetMillis,
+        String message) {
         long now = System.currentTimeMillis();
         if (now - lastProgress < PROGRESS_INTERVAL_MILLIS) {
             return lastProgress;
         }
-        context.reportProgress(now - start, budgetMillis, null);
+        context.reportProgress((now - start) / 1000.0D, budgetMillis / 1000.0D, message);
         return now;
     }
 
@@ -164,7 +168,8 @@ public final class ClientSyncTools {
                                 + (System.currentTimeMillis() - start) + "ms.");
                         }
                         Thread.sleep(Math.min(POLL_INTERVAL_MILLIS, remaining));
-                        lastProgress = heartbeat(context, start, lastProgress, budgetMillis);
+                        lastProgress = heartbeat(context, start, lastProgress, budgetMillis,
+                            "waiting " + ticks + " ticks");
                         remaining = budgetMillis - (System.currentTimeMillis() - start);
                     }
                     JsonObject json = new JsonObject();
@@ -199,7 +204,8 @@ public final class ClientSyncTools {
         long start = System.currentTimeMillis();
         long lastProgress = start;
         while (System.currentTimeMillis() - start < budgetMillis) {
-            lastProgress = heartbeat(context, start, lastProgress, budgetMillis);
+            lastProgress = heartbeat(context, start, lastProgress, budgetMillis,
+                "waiting for " + waitFor);
             if (context.getCancellation().isCancelled()) {
                 JsonObject json = new JsonObject();
                 json.addProperty("conditionMet", false);
