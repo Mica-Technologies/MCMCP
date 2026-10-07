@@ -83,6 +83,10 @@ public final class ServerCommandTools {
                 }
 
                 final String asPlayer = context.getString("asPlayer", null);
+                // /fill and /clone leave undo points like server_set_blocks does: {dimension, area,
+                // before map}, filled in on the game thread when the command is one of those.
+                final UndoPoints.Recorder recorder = ServerUndoTools.start(false);
+                final Object[] undo = new Object[3];
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -103,7 +107,18 @@ public final class ServerCommandTools {
                         }
 
                         CapturingCommandSender sender = new CapturingCommandSender(origin);
+                        CommandUndo.Snapshot snapshot = recorder == null ? null
+                            : CommandUndo.before(sender, command, recorder);
+                        if (snapshot != null) {
+                            int[] area = snapshot.area();
+                            undo[0] = snapshot.world.provider.getDimension();
+                            undo[1] = area;
+                            undo[2] = area == null ? null : UndoPoints.drawArea(snapshot.world, area);
+                        }
                         int returnValue = server.getCommandManager().executeCommand(sender, command);
+                        if (snapshot != null) {
+                            snapshot.recordChanges(recorder);
+                        }
 
                         JsonObject json = new JsonObject();
                         json.addProperty("command", command);
@@ -124,6 +139,11 @@ public final class ServerCommandTools {
                         return json;
                     }
                 });
+
+                if (recorder != null && undo[0] != null) {
+                    ServerUndoTools.finish(context, recorder, "server_run_command", (Integer) undo[0],
+                        (int[]) undo[1], (java.awt.image.BufferedImage) undo[2], result, null);
+                }
 
                 String output = result.get("output").getAsJsonArray().size() == 0
                     ? "(the command produced no output)"

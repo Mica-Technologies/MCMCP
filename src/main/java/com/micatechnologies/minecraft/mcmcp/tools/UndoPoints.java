@@ -195,7 +195,7 @@ public final class UndoPoints {
     }
 
     @Nullable
-    private static NBTTagCompound tileEntityNbt(World world, BlockPos pos) {
+    static NBTTagCompound tileEntityNbt(World world, BlockPos pos) {
         TileEntity tileEntity = world.getTileEntity(pos);
         return tileEntity == null ? null : tileEntity.writeToNBT(new NBTTagCompound());
     }

@@ -446,6 +446,20 @@ case "$AFTER_BODY" in
   *) echo "    the block is back to what it was" ;;
 esac
 
+echo "==> undo points: /fill through server_run_command, then restore it"
+CMD_BODY="$(mcp_call 26 server_run_command "{\"command\":\"fill ${SPAWN_X} ${UNDO_Y} ${SPAWN_Z} $((SPAWN_X + 1)) ${UNDO_Y} $((SPAWN_Z + 1)) minecraft:diamond_block\"}")" \
+  || mcp_failure "the fill command failed: ${CMD_BODY}"
+CMD_UNDO="$(printf '%s' "$CMD_BODY" | grep -o '"undoPoint":"u[0-9]*"' | head -1 | sed 's/.*"\(u[0-9]*\)"/\1/')"
+[ -n "$CMD_UNDO" ] || mcp_failure "the fill command left no undo point: ${CMD_BODY}"
+CMD_RESTORE="$(mcp_call 27 server_undo "{\"op\":\"restore\",\"id\":\"${CMD_UNDO}\"}")" \
+  || mcp_failure "restoring the fill failed: ${CMD_RESTORE}"
+CMD_AFTER="$(mcp_call 28 server_get_block "{\"x\":${SPAWN_X},\"y\":${UNDO_Y},\"z\":${SPAWN_Z}}")" \
+  || mcp_failure "server_get_block after the fill restore failed: ${CMD_AFTER}"
+case "$CMD_AFTER" in
+  *'diamond_block'*) mcp_failure "the diamond is still there after restoring ${CMD_UNDO}: ${CMD_AFTER}" ;;
+  *) echo "    /fill left ${CMD_UNDO}, and restoring it put the blocks back" ;;
+esac
+
 sed -i "s/B:allowWorldEdits=true/${WORLD_EDITS_WERE:-B:allowWorldEdits=false}/" "$CONFIG_FILE"
 mcp_call 25 server_run_command '{"command":"mcmcp reload"}' >/dev/null
 

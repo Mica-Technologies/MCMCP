@@ -591,8 +591,15 @@ so it can be undone too.
 The orchestrator app shows a server's undo points in its detail view, with the before and after
 maps and a Restore button.
 
-Not covered: writes made by commands (`/fill`, `/clone`) or by players. They never pass through
-MCMCP's write path.
+`/fill` and `/clone` run through `server_run_command` leave undo points too. The region the command
+will write is read just before it runs, in the same game-thread task, and compared just after. A
+clone with `move` covers its source as well. Relative coordinates mean what they mean to the
+command.
+
+Not covered:
+- commands sent with `client_run_commands`, which reach the server as chat and never touch a world
+  MCMCP can read;
+- writes by players or by other mods.
 
 ### Players
 
@@ -654,6 +661,9 @@ different thing.
 Returns everything the command printed, plus its integer result. That matters: without captured
 output, `/tp` failing because the target is offline and `/tp` failing because the coordinates are out
 of range are the same integer.
+
+A `/fill` or `/clone` leaves an undo point and names it in `undoPoint`, as `server_set_blocks` does.
+See [`server_undo`](#server_undo).
 
 `asPlayer` is what you want for anything using relative coordinates or `@s` — the command's origin is
 that player's position.
