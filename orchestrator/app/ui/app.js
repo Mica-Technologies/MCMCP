@@ -926,11 +926,30 @@ function paintTaskActivity() {
 // Sessions (flight recorder)
 // ---------------------------------------------------------------------------------
 
+/* Rows the window is given at once; the same number the app hands out. */
+const SESSION_PAGE = 300;
+
 let selectedSession = null;
-/* What the timeline was last drawn from, so the slow poll redraws it only when it changed. */
-let drawnSession = { id: null, count: -1, instance: null };
+/* The list as last drawn, so a poll that finds nothing new leaves it alone. */
+let sessionsShown = "";
+let sessionSummaries = [];
+/* What the timeline holds: rows `start` to `end` of the session's `total`, after the instance filter.
+ * `endMs` is the session's last event when drawn; a poll that sees it unchanged fetches nothing. */
+let drawn = { id: null, instance: null, endMs: -1, start: 0, end: 0, total: 0, problems: [] };
 /* Thumbnails by name. Read once each: they never change, and the poll would otherwise refetch them. */
 const thumbnails = new Map();
+/* Thumbnails are read as their rows come into view, not all at once when a page is drawn. */
+const thumbnailObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    const image = entry.target;
+    thumbnailObserver.unobserve(image);
+    loadThumbnail(image.dataset.thumbnail).then((source) => {
+      if (source) image.src = source;
+      else image.remove();
+    });
+  }
+}, { rootMargin: "400px" });
 
 function plural(count, noun) {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
@@ -949,99 +968,202 @@ function formatDate(millis) {
 
 async function renderSessions() {
   const sessions = await invoke("flight_sessions");
+  sessionSummaries = sessions;
   $("sessions-empty").hidden = sessions.length > 0;
   if (!sessions.some((session) => session.id === selectedSession)) {
     selectedSession = sessions[0]?.id ?? null;
   }
 
-  const list = $("session-list");
-  list.innerHTML = "";
-  for (const session of sessions) {
-    const item = document.createElement("div");
-    item.className = `session-item${session.id === selectedSession ? " is-selected" : ""}`;
-    const minutes = Math.max(1, Math.round((session.end_ms - session.start_ms) / 60_000));
-    item.innerHTML = `
-      <div class="when">${escapeHtml(formatDate(session.start_ms))}</div>
-      <div class="counts">${minutes} min · ${plural(session.calls, "call")}${session.screenshots ? ` · ${plural(session.screenshots, "shot")}` : ""}
-        ${session.errors ? `· <span class="problems">${plural(session.errors, "problem")}</span>` : ""}</div>
-      <div class="counts">${session.instances.map((instance) =>
-        `<span style="--instance-colour:${colourFor(gameOf(instance))}"><span class="swatch"></span>${escapeHtml(instance)}</span>`).join(" ")}</div>`;
-    item.addEventListener("click", () => {
-      selectedSession = session.id;
-      renderSessions();
-    });
-    list.appendChild(item);
+  const shown = JSON.stringify([selectedSession, sessions]);
+  if (shown !== sessionsShown) {
+    sessionsShown = shown;
+    const list = $("session-list");
+    list.innerHTML = "";
+    for (const session of sessions) {
+      const item = document.createElement("div");
+      item.className = `session-item${session.id === selectedSession ? " is-selected" : ""}`;
+      const minutes = Math.max(1, Math.round((session.end_ms - session.start_ms) / 60_000));
+      item.innerHTML = `
+        <div class="when">${escapeHtml(formatDate(session.start_ms))}</div>
+        <div class="counts">${minutes} min · ${plural(session.calls, "call")}${session.screenshots ? ` · ${plural(session.screenshots, "shot")}` : ""}
+          ${session.errors ? `· <span class="problems">${plural(session.errors, "problem")}</span>` : ""}</div>
+        <div class="counts">${session.instances.map((instance) =>
+          `<span style="--instance-colour:${colourFor(gameOf(instance))}"><span class="swatch"></span>${escapeHtml(instance)}</span>`).join(" ")}</div>`;
+      item.addEventListener("click", () => {
+        selectedSession = session.id;
+        renderSessions();
+      });
+      list.appendChild(item);
+    }
   }
   await renderSessionTimeline();
 }
 
+function sessionPage(start) {
+  return invoke("flight_session", {
+    id: selectedSession,
+    instance: $("session-instance").value || null,
+    start: start ?? null,
+  });
+}
+
+/* Brings the timeline up to date, fetching only what it does not already hold. A session nobody is
+ * working in costs nothing to keep open; one still growing has its new rows added to the end. */
 async function renderSessionTimeline() {
   const container = $("session-timeline");
-  if (!selectedSession) {
+  const summary = sessionSummaries.find((session) => session.id === selectedSession);
+  if (!summary) {
     container.innerHTML = "";
+    drawn = { id: null, instance: null, endMs: -1, start: 0, end: 0, total: 0, problems: [] };
     return;
   }
-  const events = await invoke("flight_session", { id: selectedSession });
+  const instance = $("session-instance").value || null;
+  const same = drawn.id === summary.id && drawn.instance === instance;
+  if (same && drawn.endMs === summary.end_ms) return;
+
+  if (same && drawn.end === drawn.total) {
+    // Following the newest end: add what arrived, unless so much did that a fresh page is simpler.
+    const page = await sessionPage(drawn.end);
+    if (page.start + page.events.length === page.total) {
+      takePage(page, summary);
+      appendRows(page.events, page.start);
+      return;
+    }
+  } else if (same) {
+    // Reading further back. Leave the view alone; "Show later" reaches what arrived.
+    drawn.endMs = summary.end_ms;
+    return;
+  }
+  await drawPage(await sessionPage(null), summary);
+}
+
+/* Replaces the timeline with one page. */
+async function drawPage(page, summary = sessionSummaries.find((session) => session.id === selectedSession)) {
+  const container = $("session-timeline");
+  container.innerHTML = "";
+  drawn.start = page.start;
+  drawn.end = page.start;
+  takePage(page, summary);
+  appendRows(page.events, page.start);
+}
+
+function takePage(page, summary) {
+  drawn.id = summary?.id ?? selectedSession;
+  drawn.instance = $("session-instance").value || null;
+  drawn.endMs = summary?.end_ms ?? drawn.endMs;
+  drawn.total = page.total;
+  drawn.problems = page.problems;
 
   // The instance filter offers what this session touched.
   const select = $("session-instance");
-  const chosen = select.value;
-  const instances = [...new Set(events.map((event) => event.instance).filter(Boolean))].sort();
-  select.innerHTML = '<option value="">All instances</option>';
-  for (const instance of instances) {
-    const option = document.createElement("option");
-    option.value = instance;
-    option.textContent = instance;
-    select.appendChild(option);
+  const options = ["", ...page.instances];
+  if ([...select.options].map((option) => option.value).join("\n") !== options.join("\n")) {
+    const chosen = select.value;
+    select.innerHTML = '<option value="">All instances</option>';
+    for (const instance of page.instances) {
+      const option = document.createElement("option");
+      option.value = instance;
+      option.textContent = instance;
+      select.appendChild(option);
+    }
+    select.value = page.instances.includes(chosen) ? chosen : "";
   }
-  select.value = instances.includes(chosen) ? chosen : "";
+}
 
-  // Redrawn only when something changed: a session still being worked in grows, an old one does not,
-  // and redrawing collapses whatever arguments somebody had opened.
-  if (drawnSession.id === selectedSession && drawnSession.count === events.length
-      && drawnSession.instance === select.value) {
-    return;
-  }
-  drawnSession = { id: selectedSession, count: events.length, instance: select.value };
+function appendRows(events, start) {
+  const container = $("session-timeline");
+  const later = $("session-later");
+  const fragment = document.createDocumentFragment();
+  events.forEach((event, offset) => fragment.appendChild(sessionRow(event, start + offset)));
+  if (later) container.insertBefore(fragment, later);
+  else container.appendChild(fragment);
+  drawn.end = Math.max(drawn.end, start + events.length);
+  drawControls();
+}
 
-  container.innerHTML = "";
-  for (const event of events) {
-    if (select.value && event.instance !== select.value) continue;
-    const row = document.createElement("div");
-    row.className = `row session-row actor-${event.actor} level-${event.level}`;
-    if (event.instance) row.style.setProperty("--instance-colour", colourFor(gameOf(event.instance)));
-    row.innerHTML = `
-      <span class="time">${event.instance ? '<span class="swatch"></span>' : ""}${formatTime(event.at)}</span>
-      <span class="who">${escapeHtml(event.actor === "human" ? "you" : event.actor)}</span>
-      <span class="summary">${escapeHtml(event.summary)}</span>
-      <span class="extra"></span>`;
-    const extra = row.querySelector(".extra");
-    if (event.detail) {
-      const detail = document.createElement("span");
-      detail.className = "detail";
-      detail.textContent = event.detail;
-      extra.appendChild(detail);
+function prependRows(events, start) {
+  const panel = $("panel-sessions");
+  const before = panel.scrollHeight;
+  const fragment = document.createDocumentFragment();
+  events.forEach((event, offset) => fragment.appendChild(sessionRow(event, start + offset)));
+  const first = $("session-timeline").querySelector(".session-row");
+  $("session-timeline").insertBefore(fragment, first);
+  drawn.start = start;
+  drawControls();
+  // Keep what was being read where it was.
+  panel.scrollTop += panel.scrollHeight - before;
+}
+
+/* "Show earlier" above the first row and "Show later" below the last, when there is more. */
+function drawControls() {
+  const container = $("session-timeline");
+  for (const [id, wanted, text, onClick, atTop] of [
+    ["session-earlier", drawn.start > 0, `Show earlier · ${drawn.start} more`, showEarlier, true],
+    ["session-later", drawn.end < drawn.total, "Show later", showLater, false],
+  ]) {
+    let button = $(id);
+    if (!wanted) {
+      button?.remove();
+      continue;
     }
-    if (event.kind === "tool_call" && event.arguments && Object.keys(event.arguments).length) {
-      const args = document.createElement("span");
-      args.className = "args is-folded";
-      args.title = "Click to show all";
-      args.textContent = JSON.stringify(event.arguments);
-      args.addEventListener("click", () => args.classList.toggle("is-folded"));
-      extra.appendChild(args);
+    if (!button) {
+      button = document.createElement("button");
+      button.id = id;
+      button.className = "ghost session-more";
+      button.addEventListener("click", onClick);
+      if (atTop) container.prepend(button);
+      else container.appendChild(button);
     }
-    if (event.thumbnail) {
-      const image = document.createElement("img");
-      image.alt = "screenshot";
-      extra.appendChild(image);
-      loadThumbnail(event.thumbnail).then((source) => {
-        if (source) image.src = source;
-        else image.remove();
-      });
-    }
-    if (!extra.childElementCount) extra.remove();
-    container.appendChild(row);
+    button.textContent = text;
   }
+}
+
+async function showEarlier() {
+  const start = Math.max(0, drawn.start - SESSION_PAGE);
+  const page = await sessionPage(start);
+  prependRows(page.events.slice(0, drawn.start - page.start), page.start);
+}
+
+async function showLater() {
+  const page = await sessionPage(drawn.end);
+  takePage(page, sessionSummaries.find((session) => session.id === selectedSession));
+  appendRows(page.events, page.start);
+}
+
+function sessionRow(event, index) {
+  const row = document.createElement("div");
+  row.className = `row session-row actor-${event.actor} level-${event.level}`;
+  row.dataset.index = index;
+  if (event.instance) row.style.setProperty("--instance-colour", colourFor(gameOf(event.instance)));
+  row.innerHTML = `
+    <span class="time">${event.instance ? '<span class="swatch"></span>' : ""}${formatTime(event.at)}</span>
+    <span class="who">${escapeHtml(event.actor === "human" ? "you" : event.actor)}</span>
+    <span class="summary">${escapeHtml(event.summary)}</span>
+    <span class="extra"></span>`;
+  const extra = row.querySelector(".extra");
+  if (event.detail) {
+    const detail = document.createElement("span");
+    detail.className = "detail";
+    detail.textContent = event.detail;
+    extra.appendChild(detail);
+  }
+  if (event.kind === "tool_call" && event.arguments && Object.keys(event.arguments).length) {
+    const args = document.createElement("span");
+    args.className = "args is-folded";
+    args.title = "Click to show all";
+    args.textContent = JSON.stringify(event.arguments);
+    args.addEventListener("click", () => args.classList.toggle("is-folded"));
+    extra.appendChild(args);
+  }
+  if (event.thumbnail) {
+    const image = document.createElement("img");
+    image.alt = "screenshot";
+    image.dataset.thumbnail = event.thumbnail;
+    extra.appendChild(image);
+    thumbnailObserver.observe(image);
+  }
+  if (!extra.childElementCount) extra.remove();
+  return row;
 }
 
 async function loadThumbnail(name) {
@@ -1049,19 +1171,36 @@ async function loadThumbnail(name) {
   return thumbnails.get(name);
 }
 
-/* Scrolls to the next warning or error below what is in view, wrapping to the first. */
-function nextProblem() {
-  const panel = $("panel-sessions");
-  const rows = [...document.querySelectorAll("#session-timeline .row.level-warn, #session-timeline .row.level-error")];
-  if (!rows.length) {
+/* Goes to the next warning, error, failed or blocked call: after the one last gone to while it is
+ * still in view, otherwise after the first row in view. Wraps to the first, and one outside the rows
+ * drawn is fetched with the rows around it. */
+async function nextProblem() {
+  const problems = drawn.problems;
+  if (!problems.length) {
     toast("No problems in this session");
     return;
   }
-  const viewTop = panel.getBoundingClientRect().top;
-  const next = rows.find((row) => row.getBoundingClientRect().top > viewTop + 60) ?? rows[0];
-  for (const row of document.querySelectorAll(".session-row.is-highlighted")) row.classList.remove("is-highlighted");
-  next.classList.add("is-highlighted");
-  next.scrollIntoView({ block: "center", behavior: "smooth" });
+  const view = $("panel-sessions").getBoundingClientRect();
+  const rowOf = (index) => document.querySelector(`#session-timeline .session-row[data-index="${index}"]`);
+  const highlighted = document.querySelector(".session-row.is-highlighted");
+  let from;
+  if (highlighted && highlighted.getBoundingClientRect().bottom > view.top
+      && highlighted.getBoundingClientRect().top < view.bottom) {
+    from = +highlighted.dataset.index;
+  } else {
+    const top = [...document.querySelectorAll("#session-timeline .session-row")]
+      .find((row) => row.getBoundingClientRect().bottom > view.top + 60);
+    from = top ? +top.dataset.index - 1 : drawn.start - 1;
+  }
+  const target = problems.find((index) => index > from) ?? problems[0];
+  if (!rowOf(target)) {
+    await drawPage(await sessionPage(Math.max(0, target - 20)));
+  }
+  const row = rowOf(target);
+  if (!row) return;
+  for (const highlighted of document.querySelectorAll(".session-row.is-highlighted")) highlighted.classList.remove("is-highlighted");
+  row.classList.add("is-highlighted");
+  row.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 // ---------------------------------------------------------------------------------

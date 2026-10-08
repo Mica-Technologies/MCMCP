@@ -315,6 +315,8 @@ button.danger.is-armed { background: var(--danger); color: #10131a; }
 .session-row { grid-template-columns: 84px 62px minmax(0, 1fr); }
 .session-row .summary, .session-row .extra { min-width: 0; }
 .session-list { position: sticky; top: 0; align-self: start; max-height: calc(100vh - 110px); }
+/* The timeline is drawn a page at a time; these fetch the next page either way. */
+.session-more { display: block; margin: 6px auto; font-size: 12px; }
 
 /* ---- undo points ---- */
 .undo-list { display: flex; flex-direction: column; gap: 10px; }

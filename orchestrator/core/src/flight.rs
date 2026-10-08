@@ -17,9 +17,19 @@
 //!
 //! Nothing new is stored for this. The log already keeps every call with its arguments, task
 //! changes and focus moves; this is a way of reading it.
+//!
+//! # Read once, then from where it left off
+//!
+//! The log runs to tens of thousands of lines, and a window showing it polls. Parsing all of it on
+//! every poll cost a few hundred milliseconds each time, so [`LogCache`] parses it once and then
+//! reads only what was appended since. A session is likewise handed out a page at a time
+//! ([`session_page`]): one session of 17,000 calls was a 9.5 MB reply, and drawing every row of it
+//! left a window holding nearly 3 GB.
 
 use std::collections::BTreeSet;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::time::SystemTime;
 
 use base64::Engine;
 use serde::Serialize;
@@ -43,22 +53,97 @@ pub struct SessionSummary {
     pub instances: Vec<String>,
 }
 
+/// One page of a session, for a window that shows a few hundred rows at a time.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionPage {
+    /// Events in the session, after the instance filter.
+    pub total: usize,
+    /// Where `events` starts within those.
+    pub start: usize,
+    pub events: Vec<Event>,
+    /// Every instance the session touched, for the filter.
+    pub instances: Vec<String>,
+    /// Where each warning and error sits within the filtered events, so a window can go to one it
+    /// has not loaded.
+    pub problems: Vec<usize>,
+}
+
 /// Reads the event log and its rotated predecessor, oldest first. Lines that will not parse are
-/// skipped: a half-written last line is normal in a file a live process is appending to.
+/// skipped.
 pub fn read_events(log: &Path) -> Vec<Event> {
-    let mut events = Vec::new();
-    for path in [log.with_extension("jsonl.1"), log.to_path_buf()] {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        events.extend(
-            text.lines()
-                .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| serde_json::from_str::<Event>(line).ok()),
-        );
+    let mut cache = LogCache::default();
+    cache.refresh(log);
+    cache.events
+}
+
+/// The event log, parsed once and then read on from where it left off.
+///
+/// The log is only ever appended to, until it rotates: the live file is renamed over the old one
+/// and a fresh one begun. So a change to the rotated file, or a live file shorter than what has
+/// been read, means start again; anything else means read the new bytes.
+#[derive(Debug, Default)]
+pub struct LogCache {
+    events: Vec<Event>,
+    /// The rotated file's length and modification time when it was read.
+    rotated: Option<(u64, SystemTime)>,
+    /// How far into the live file has been read. Always at the end of a line.
+    offset: u64,
+}
+
+impl LogCache {
+    /// Brings the cache up to date with the files and returns every event, oldest first.
+    pub fn refresh(&mut self, log: &Path) -> &[Event] {
+        let previous = log.with_extension("jsonl.1");
+        let rotated = stamp(&previous);
+        let live = std::fs::metadata(log).map(|meta| meta.len()).unwrap_or(0);
+        if rotated != self.rotated || live < self.offset {
+            self.events = std::fs::read(&previous)
+                .map(|bytes| parse_lines(&bytes))
+                .unwrap_or_default();
+            self.events.sort_by_key(|event| event.at);
+            self.rotated = rotated;
+            self.offset = 0;
+        }
+        if live > self.offset {
+            self.read_on(log);
+        }
+        &self.events
     }
-    events.sort_by_key(|event| event.at);
-    events
+
+    /// Reads the live file from `offset`, as far as its last complete line. A half-written last
+    /// line is normal in a file a live process is appending to; it is read whole next time.
+    fn read_on(&mut self, log: &Path) {
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(log).and_then(|mut file| {
+            file.seek(SeekFrom::Start(self.offset))?;
+            file.read_to_end(&mut bytes)
+        });
+        if read.is_err() {
+            return;
+        }
+        let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+            return;
+        };
+        let added = parse_lines(&bytes[..=end]);
+        self.offset += end as u64 + 1;
+        self.events.extend(added);
+        if !self.events.is_sorted_by_key(|event| event.at) {
+            self.events.sort_by_key(|event| event.at);
+        }
+    }
+}
+
+fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+fn parse_lines(bytes: &[u8]) -> Vec<Event> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Event>(line).ok())
+        .collect()
 }
 
 /// Every session in `events`, newest first. `events` must be in time order.
@@ -83,25 +168,66 @@ pub fn session_events(events: &[Event], id: &str) -> Vec<Event> {
     let Some(summary) = sessions(events).into_iter().find(|summary| summary.id == id) else {
         return Vec::new();
     };
-    in_window(events, summary.start_ms, summary.end_ms)
-        .into_iter()
-        .cloned()
-        .collect()
+    in_window(events, summary.start_ms, summary.end_ms).to_vec()
 }
 
-fn in_window(events: &[Event], start: u64, end: u64) -> Vec<&Event> {
-    events
+/// Up to `limit` events of the session starting at `id`, from `start` within those `instance`
+/// leaves, or the last `limit` when `start` is not given. `None` if there is no such session.
+pub fn session_page(
+    events: &[Event],
+    id: &str,
+    instance: Option<&str>,
+    start: Option<usize>,
+    limit: usize,
+) -> Option<SessionPage> {
+    let summary = sessions(events).into_iter().find(|summary| summary.id == id)?;
+    let window = in_window(events, summary.start_ms, summary.end_ms);
+    let instances: BTreeSet<&str> = window
         .iter()
-        .filter(|event| event.at >= start && event.at <= end)
-        .collect()
+        .filter_map(|event| event.instance.as_deref())
+        .collect();
+    let chosen: Vec<&Event> = window
+        .iter()
+        .filter(|event| instance.is_none_or(|wanted| event.instance.as_deref() == Some(wanted)))
+        .collect();
+    let total = chosen.len();
+    let start = start.unwrap_or_else(|| total.saturating_sub(limit)).min(total);
+    let end = start.saturating_add(limit).min(total);
+    Some(SessionPage {
+        total,
+        start,
+        events: chosen[start..end].iter().map(|event| (*event).clone()).collect(),
+        instances: instances.into_iter().map(str::to_string).collect(),
+        problems: chosen
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| is_problem(event))
+            .map(|(index, _)| index)
+            .collect(),
+    })
 }
 
-fn summarise(start: u64, end: u64, events: Vec<&Event>) -> SessionSummary {
+/// A warning, an error, a call that failed or one that was blocked: what "Next problem" stops at.
+fn is_problem(event: &Event) -> bool {
+    matches!(event.level, Level::Warn | Level::Error)
+        || matches!(event.kind, EventKind::ToolBlocked { .. })
+        || matches!(event.kind, EventKind::ToolCall { is_error: true, .. })
+}
+
+/// The events from `start` to `end` inclusive. `events` is in time order, so this is two binary
+/// searches rather than a pass over the whole log for every session.
+fn in_window(events: &[Event], start: u64, end: u64) -> &[Event] {
+    let from = events.partition_point(|event| event.at < start);
+    let to = events.partition_point(|event| event.at <= end);
+    &events[from..to.max(from)]
+}
+
+fn summarise(start: u64, end: u64, events: &[Event]) -> SessionSummary {
     let mut calls = 0;
     let mut errors = 0;
     let mut screenshots = 0;
     let mut instances = BTreeSet::new();
-    for event in &events {
+    for event in events {
         if let EventKind::ToolCall {
             is_error, thumbnail, ..
         } = &event.kind
@@ -417,5 +543,61 @@ mod tests {
             vec![1, 2]
         );
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_cache_reads_only_what_was_appended_and_starts_again_after_a_rotation() {
+        let directory = std::env::temp_dir().join(format!("mcmcp-flight-cache-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let log = directory.join("events.jsonl");
+        let line = |at| format!("{}\n", serde_json::to_string(&call(at, false, None)).unwrap());
+        let times = |cache: &mut LogCache| {
+            cache
+                .refresh(&log)
+                .iter()
+                .map(|event| event.at)
+                .collect::<Vec<_>>()
+        };
+
+        let mut cache = LogCache::default();
+        std::fs::write(&log, format!("{}{{ half a", line(1))).unwrap();
+        assert_eq!(times(&mut cache), vec![1]);
+
+        // The half line is finished, and another written: both are picked up, once each.
+        std::fs::write(&log, format!("{}{}{}", line(1), line(2), line(3))).unwrap();
+        assert_eq!(times(&mut cache), vec![1, 2, 3]);
+
+        // Rotation: the live file becomes the old one and a new one begins.
+        std::fs::rename(&log, log.with_extension("jsonl.1")).unwrap();
+        std::fs::write(&log, line(4)).unwrap();
+        assert_eq!(times(&mut cache), vec![1, 2, 3, 4]);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_session_is_handed_out_a_page_at_a_time_from_its_newest_end() {
+        let mut events: Vec<Event> = (0..10).map(|at| call(at * MINUTE, at == 2, None)).collect();
+        events[7].instance = Some("beta.client".into());
+        let id = sessions(&events)[0].id.clone();
+
+        let page = session_page(&events, &id, None, None, 4).unwrap();
+        assert_eq!((page.total, page.start), (10, 6));
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.at / MINUTE)
+                .collect::<Vec<_>>(),
+            vec![6, 7, 8, 9]
+        );
+        assert_eq!(page.instances, vec!["alpha.client", "beta.client"]);
+        assert_eq!(page.problems, vec![2]);
+
+        let earlier = session_page(&events, &id, None, Some(2), 4).unwrap();
+        assert_eq!(earlier.events.first().map(|event| event.at), Some(2 * MINUTE));
+
+        let filtered = session_page(&events, &id, Some("beta.client"), None, 4).unwrap();
+        assert_eq!((filtered.total, filtered.events.len()), (1, 1));
+        assert!(session_page(&events, "nope", None, None, 4).is_none());
     }
 }

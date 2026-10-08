@@ -30,7 +30,7 @@
 use mcmcp_orchestrator_core::activity::{LogLine, Snapshot};
 use mcmcp_orchestrator_core::control::{self, Authority};
 use mcmcp_orchestrator_core::events::{Actor, EventLog, Filter, Level};
-use mcmcp_orchestrator_core::flight::{self, SessionSummary};
+use mcmcp_orchestrator_core::flight::{self, LogCache, SessionSummary};
 use mcmcp_orchestrator_core::instance::UpstreamEvent;
 use mcmcp_orchestrator_core::link::listener::{ApprovalOutcome, ApprovalRequest, LinkContext};
 use mcmcp_orchestrator_core::policy::{Class, Policy, Rule};
@@ -192,6 +192,8 @@ struct AppState {
     /// Set once, by the background thread, if the link port cannot be bound. The roster reads it so
     /// that an orchestrator no game can reach does not describe itself as one no game has reached.
     link_failure: Mutex<Option<String>>,
+    /// The event log as the Sessions tab reads it: parsed once, then read on as it grows.
+    flight: Arc<Mutex<LogCache>>,
 }
 
 // ----------------------------------------------------------------------------------
@@ -655,28 +657,64 @@ async fn pin_map(state: State<'_, AppState>, instance: String) -> Result<Value, 
 // Flight recorder
 // ----------------------------------------------------------------------------------
 
-/// Every session in the event log, newest first.
+/// Most rows of a session handed to the window at once.
 ///
-/// Read from the file each time rather than kept in memory: the log on disk outlives this process,
-/// and yesterday's session is exactly the one somebody comes looking for.
-#[tauri::command]
-fn flight_sessions() -> Result<Vec<SessionSummary>, String> {
+/// One session of 17,000 calls, drawn whole, was a 9.5 MB reply and nearly 3 GB of window. A few
+/// hundred rows is more than a screen holds, and the rest are a click away.
+const SESSION_PAGE: usize = 300;
+
+/// Runs `work` on the event log off the main thread.
+///
+/// A synchronous command runs on the main thread, where reading the log — tens of thousands of
+/// lines the first time — stalled the whole window, and the Sessions tab polls.
+async fn with_log<T: Send + 'static>(
+    state: &State<'_, AppState>,
+    work: impl FnOnce(&[mcmcp_orchestrator_core::events::Event]) -> T + Send + 'static,
+) -> Result<T, String> {
     let log = paths::event_log_path().map_err(|error| error.to_string())?;
-    Ok(flight::sessions(&flight::read_events(&log)))
+    let cache = Arc::clone(&state.flight);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        work(cache.refresh(&log))
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
-/// One session's events, oldest first.
+/// Every session in the event log, newest first.
+///
+/// Read from the file rather than kept by the router: the log on disk outlives this process, and
+/// yesterday's session is exactly the one somebody comes looking for.
 #[tauri::command]
-fn flight_session(id: String) -> Result<Vec<Value>, String> {
-    let log = paths::event_log_path().map_err(|error| error.to_string())?;
-    Ok(flight::session_events(&flight::read_events(&log), &id)
+async fn flight_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
+    with_log(&state, flight::sessions).await
+}
+
+/// One page of a session, oldest first within it: the newest page unless `start` is given.
+#[tauri::command]
+async fn flight_session(
+    state: State<'_, AppState>,
+    id: String,
+    instance: Option<String>,
+    start: Option<usize>,
+) -> Result<Value, String> {
+    let page = with_log(&state, move |events| {
+        flight::session_page(events, &id, instance.as_deref(), start, SESSION_PAGE)
+    })
+    .await?
+    .ok_or("that session is no longer in the event log")?;
+    let events: Vec<Value> = page
+        .events
         .iter()
         .map(|event| {
             let mut json = serde_json::to_value(event).unwrap_or(Value::Null);
             json["summary"] = json!(event.summary());
             json
         })
-        .collect())
+        .collect();
+    let mut json = serde_json::to_value(&page).map_err(|error| error.to_string())?;
+    json["events"] = Value::Array(events);
+    Ok(json)
 }
 
 /// A thumbnail as a data URI, or nothing if it is gone.
@@ -684,7 +722,7 @@ fn flight_session(id: String) -> Result<Vec<Value>, String> {
 /// Only a name the router generates is accepted — digits, a dash, `.png` — so this cannot be talked
 /// into reading any other file.
 #[tauri::command]
-fn thumbnail(name: String) -> Option<String> {
+async fn thumbnail(name: String) -> Option<String> {
     use base64::Engine;
     let valid = name.ends_with(".png")
         && name.len() < 64
@@ -695,7 +733,10 @@ fn thumbnail(name: String) -> Option<String> {
         return None;
     }
     let path = paths::thumbnails_directory().ok()?.join(&name);
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || std::fs::read(path))
+        .await
+        .ok()?
+        .ok()?;
     Some(format!(
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -704,18 +745,20 @@ fn thumbnail(name: String) -> Option<String> {
 
 /// Writes one session as a self-contained HTML page and returns where.
 #[tauri::command]
-fn export_session(state: State<'_, AppState>, id: String, redact: bool) -> Result<String, String> {
-    let log = paths::event_log_path().map_err(|error| error.to_string())?;
-    let events = flight::read_events(&log);
-    let summary = flight::sessions(&events)
-        .into_iter()
-        .find(|summary| summary.id == id)
-        .ok_or_else(|| format!("there is no session {id} in the event log"))?;
-    let session = flight::session_events(&events, &id);
+async fn export_session(state: State<'_, AppState>, id: String, redact: bool) -> Result<String, String> {
     let thumbnails = paths::thumbnails_directory().map_err(|error| error.to_string())?;
-    let html = flight::render_report(&summary, &session, redact, |name| {
-        std::fs::read(thumbnails.join(name)).ok()
-    });
+    let session_id = id.clone();
+    let html = with_log(&state, move |events| {
+        let summary = flight::sessions(events)
+            .into_iter()
+            .find(|summary| summary.id == session_id)?;
+        let session = flight::session_events(events, &session_id);
+        Some(flight::render_report(&summary, &session, redact, |name| {
+            std::fs::read(thumbnails.join(name)).ok()
+        }))
+    })
+    .await?
+    .ok_or_else(|| format!("there is no session {id} in the event log"))?;
     let directory = paths::reports_directory().map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let path = directory.join(format!(
@@ -1337,6 +1380,7 @@ fn main() -> anyhow::Result<()> {
         gates: Arc::clone(&gates),
         link_port,
         link_failure: Mutex::new(None),
+        flight: Arc::new(Mutex::new(LogCache::default())),
     };
 
     tauri::Builder::default()

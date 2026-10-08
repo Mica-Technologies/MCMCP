@@ -435,7 +435,10 @@ for its timeline:
 - a thumbnail of every screenshot, beside the call that took it;
 - task changes, focus moves, and games linking.
 
-**Next problem** jumps between failures. **Export report…** writes the session as one HTML page,
+The timeline opens on the newest 300 rows; **Show earlier** above them loads the 300 before. A session
+still being worked in adds its new rows at the bottom as they happen.
+
+**Next problem** jumps between failures, loading the rows around one that is not shown yet. **Export report…** writes the session as one HTML page,
 with styles and thumbnails inlined and nothing fetched from anywhere, to `reports/` in the state
 directory. That page is suitable for reading later or attaching to a bug. Tick **Leave arguments
 out** before exporting a report that is going somewhere the arguments should not.
