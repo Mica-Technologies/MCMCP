@@ -2,7 +2,10 @@ package com.micatechnologies.minecraft.mcmcp.client.tools;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+
+import com.google.gson.JsonObject;
 
 import org.junit.jupiter.api.Test;
 
@@ -48,5 +51,31 @@ class ClientSurveyToolsTest {
     void chunkColumnsDoesNotOverflowForAContinentSizedBox() {
         assertEquals(3_750_001L * 3_750_001L,
             ClientSurveyTools.chunkColumns(-30_000_000, 30_000_000, -30_000_000, 30_000_000));
+    }
+
+    @Test
+    void aHeightmapIsLimitedByColumnsSoASeaBedTileOfTheWholeDepthFits() {
+        // #50: 128 x 128 columns over y 0..61 is 1,015,808 blocks, four times the volume cap.
+        assertNull(ClientSurveyTools.sizeRefusal("heightmap", 1_015_808L, 16_384L, 262_144L));
+        assertNull(ClientSurveyTools.sizeRefusal("underside", 128L * 128L * 256L, 16_384L, 262_144L));
+    }
+
+    @Test
+    void aColumnModePastTheColumnCapIsRefusedInColumns() {
+        JsonObject refusal = ClientSurveyTools.sizeRefusal("surface", 129L * 128L, 129L * 128L, 262_144L);
+        assertNotNull(refusal);
+        assertEquals(129L * 128L, refusal.get("requested").getAsLong());
+        assertEquals(16_384L, refusal.get("limit").getAsLong());
+        assertEquals("columns", refusal.get("unit").getAsString());
+    }
+
+    @Test
+    void aPositionsReadPastTheVolumeCapIsRefusedWithTheNumbersAScriptNeedsToSplitIt() {
+        JsonObject refusal = ClientSurveyTools.sizeRefusal("positions", 262_145L, 1L, 262_144L);
+        assertNotNull(refusal);
+        assertEquals(262_145L, refusal.get("requested").getAsLong());
+        assertEquals(262_144L, refusal.get("limit").getAsLong());
+        assertEquals("blocks", refusal.get("unit").getAsString());
+        assertNull(ClientSurveyTools.sizeRefusal("positions", 262_144L, 1L, 262_144L));
     }
 }

@@ -25,6 +25,7 @@ import javax.annotation.Nullable;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
+import net.minecraft.init.Blocks;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.Chunk;
@@ -79,7 +80,11 @@ public final class ClientSurveyTools {
     private static final List<String> AIR = Collections.singletonList("minecraft:air");
 
     private static final List<String> MODES =
-        Arrays.asList("summary", "positions", "find", "heightmap", "surface");
+        Arrays.asList("summary", "positions", "find", "heightmap", "surface", "underside");
+
+    /** The modes that answer one value per column, and so are limited by columns, not volume. */
+    private static final List<String> COLUMN_MODES =
+        Arrays.asList("heightmap", "surface", "underside");
 
     private ClientSurveyTools() {
     }
@@ -95,21 +100,26 @@ public final class ClientSurveyTools {
                 + "Use this instead of many client_get_block calls to survey an area.\n\n"
                 + "mode 'summary' (default): how many of each block, optionally per layer. "
                 + "'positions': where each matching block is, as [x,y,z], grouped by block and "
-                + "capped at 'limit'. 'find': the same answer for a box of any size, for locating "
+                + "capped at 'limit', listed x first then z then y; when capped, 'truncated' and "
+                + "'listedThrough' say where the list stopped. 'find': the same answer for a box of any size, for locating "
                 + "rare blocks: it needs 'blocks' or 'tile_entities', searches only the loaded "
                 + "chunks inside the box a few at a time so the game keeps running, and counts the "
                 + "rest in chunksUnloaded; 'nbt' adds each listed match's tile-entity NBT. "
                 + "'heightmap': the y of the highest matching block in every "
                 + "column, as rows of z holding x from the low corner; -1 where there is none. "
                 + "'surface': the same, plus which block is on top, as indices into a palette — "
-                + "what is on the ground, not only how high. surface is limited by columns, not "
-                + "volume, so it can cover the whole height range.\n\n"
+                + "what is on the ground, not only how high. 'underside': surface from below, the "
+                + "lowest matching block at or above y in every column — with y one above the "
+                + "ground, the clearance under every deck and bridge. heightmap, surface and "
+                + "underside are limited by columns (128 x 128), not volume, so they can cover the "
+                + "whole height range.\n\n"
                 + "Filter with 'blocks' and 'exclude'. A pattern is a whole id ('minecraft:wool' "
                 + "matches every colour, 'minecraft:wool:14' one), a bare path ('barrier' in any "
-                + "namespace), or use * for a substring ('*alarm*'). 'positions' and 'heightmap' "
-                + "exclude air unless you pass 'exclude' yourself.\n\n"
+                + "namespace), or use * for a substring ('*alarm*'). Every mode but 'summary' "
+                + "excludes air unless you pass 'exclude' yourself.\n\n"
                 + "Only chunks inside the client's view distance can be read; the others are listed "
-                + "in 'unloadedChunks' and left out, never reported as air.")
+                + "in 'unloadedChunks' and left out, never reported as air. A region too large for "
+                + "its mode is refused with a JSON body: error, requested, limit.")
             .schema(JsonSchema.object()
                 .integer("x", "X of one corner.")
                 .integer("y", "Y of one corner, 0-255.")
@@ -120,7 +130,7 @@ public final class ClientSurveyTools {
                 .bool("relative", "Treat all six coordinates as offsets from the player's block "
                     + "position.")
                 .enumeration("mode", "What to return. Defaults to 'summary'.",
-                    "summary", "positions", "find", "heightmap", "surface")
+                    "summary", "positions", "find", "heightmap", "surface", "underside")
                 .stringArray("blocks", "Only count blocks matching one of these patterns.")
                 .stringArray("exclude", "Leave out blocks matching any of these patterns.")
                 .bool("tile_entities", "Only count blocks that have a tile entity on this client.")
@@ -144,7 +154,7 @@ public final class ClientSurveyTools {
                 final String mode = context.getString("mode", "summary");
                 if (!MODES.contains(mode)) {
                     return ToolResult.error("Unknown mode '" + mode + "'; use summary, positions, "
-                        + "find, heightmap or surface.");
+                        + "find, heightmap, surface or underside.");
                 }
                 final BlockPatterns include = BlockPatterns.of(
                     Json.getStringList(context.getArguments(), "blocks"));
@@ -163,23 +173,15 @@ public final class ClientSurveyTools {
                         exclude, tileEntitiesOnly, limit, context.getBoolean("nbt", false));
                 }
 
-                final long maxVolume = (long) McmcpConfig.getMaxBlockVolume() * VOLUME_FACTOR;
-                long volume = (long) (Math.abs(x2 - x1) + 1) * (Math.abs(z2 - z1) + 1)
-                    * (Math.min(255, Math.max(y1, y2)) - Math.max(0, Math.min(y1, y2)) + 1);
-                // surface stops at the first match down each column, so its cost is set by the
-                // column count below, and charging it for the whole height range would make the
-                // one question it answers — what is on top of a district — need dozens of reads.
-                if (volume > maxVolume && !"surface".equals(mode)) {
-                    return ToolResult.error("That region is " + volume + " blocks; one read covers at "
-                        + "most " + maxVolume + " (limits.maxBlockVolume x " + VOLUME_FACTOR + "). "
-                        + ("positions".equals(mode)
-                            ? "Split it, or use mode 'find', which takes a box of any size."
-                            : "Split it."));
-                }
                 long columns = (long) (Math.abs(x2 - x1) + 1) * (Math.abs(z2 - z1) + 1);
-                if (("heightmap".equals(mode) || "surface".equals(mode)) && columns > MAX_COLUMNS) {
-                    return ToolResult.error("A " + mode + " covers at most " + MAX_COLUMNS + " columns "
-                        + "(128 x 128); that one is " + columns + ". Split it.");
+                long volume = columns
+                    * Math.max(0, Math.min(255, Math.max(y1, y2)) - Math.max(0, Math.min(y1, y2)) + 1);
+                JsonObject refusal = sizeRefusal(mode, volume, columns,
+                    (long) McmcpConfig.getMaxBlockVolume() * VOLUME_FACTOR);
+                if (refusal != null) {
+                    // As JSON, so a script parsing every reply can tell a refusal from an answer and
+                    // split the region, rather than dying on the first one it meets (#50).
+                    return ToolResult.error(Json.write(refusal)).withStructured(refusal);
                 }
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
@@ -191,8 +193,9 @@ public final class ClientSurveyTools {
                             origin.getX() + x1, origin.getY() + y1, origin.getZ() + z1,
                             origin.getX() + x2, origin.getY() + y2, origin.getZ() + z2);
                         Survey survey = new Survey(mc.world, include, exclude, tileEntitiesOnly);
-                        if ("heightmap".equals(mode) || "surface".equals(mode)) {
-                            return survey.heightmap(region, "surface".equals(mode));
+                        if (COLUMN_MODES.contains(mode)) {
+                            return survey.heightmap(region, !"heightmap".equals(mode),
+                                "underside".equals(mode));
                         }
                         return survey.scan(region, mode, perLayer, limit);
                     }
@@ -286,20 +289,12 @@ public final class ClientSurveyTools {
                 + plan.chunks.size() + " loaded chunks; " + found.matched + " found");
         }
 
+        // Coverage and truncation ahead of the positions, as in 'positions' mode (#49).
         JsonObject json = plan.region.describe();
         json.addProperty("matched", found.matched);
-        json.add("counts", Survey.sortedCounts(found.counts));
-        JsonObject grouped = new JsonObject();
-        for (Map.Entry<String, JsonArray> entry : found.positions.entrySet()) {
-            grouped.add(entry.getKey(), entry.getValue());
-        }
-        json.add("positions", grouped);
+        json.addProperty("listed", found.listed);
         if (found.matched > found.listed) {
             json.addProperty("truncated", true);
-            json.addProperty("listed", found.listed);
-        }
-        if (nbt) {
-            json.add("blockEntities", found.blockEntities);
         }
         json.addProperty("chunksSearched", found.chunksSearched);
         long unloadedCount = plan.columns - plan.chunks.size() + found.unloadedSince;
@@ -308,6 +303,15 @@ public final class ClientSurveyTools {
             if (plan.unloaded.size() > 0 && found.unloadedSince == 0) {
                 json.add("unloadedChunks", plan.unloaded);
             }
+        }
+        json.add("counts", Survey.sortedCounts(found.counts));
+        JsonObject grouped = new JsonObject();
+        for (Map.Entry<String, JsonArray> entry : found.positions.entrySet()) {
+            grouped.add(entry.getKey(), entry.getValue());
+        }
+        json.add("positions", grouped);
+        if (nbt) {
+            json.add("blockEntities", found.blockEntities);
         }
         return ToolResult.structured(json);
     }
@@ -327,6 +331,42 @@ public final class ClientSurveyTools {
             return null;
         }
         return new int[]{minCX, maxCX, minCZ, maxCZ};
+    }
+
+    /**
+     * Why a region is too large for {@code mode}, as {error, requested, limit, unit}; null when it
+     * fits. find takes a box of any size and is not checked here.
+     *
+     * <p>The column modes stop at the first match in each column, so their cost is set by the column
+     * count, and charging them for the whole height range made the questions they answer — what is
+     * on top of a district, how deep the sea bed lies — need four to sixteen reads (#50).
+     */
+    @Nullable
+    static JsonObject sizeRefusal(String mode, long volume, long columns, long maxVolume) {
+        JsonObject refusal = new JsonObject();
+        if (COLUMN_MODES.contains(mode)) {
+            if (columns <= MAX_COLUMNS) {
+                return null;
+            }
+            refusal.addProperty("error", "A " + mode + " covers at most " + MAX_COLUMNS
+                + " columns (128 x 128); that one is " + columns + ". Split it.");
+            refusal.addProperty("requested", columns);
+            refusal.addProperty("limit", MAX_COLUMNS);
+            refusal.addProperty("unit", "columns");
+            return refusal;
+        }
+        if (volume <= maxVolume) {
+            return null;
+        }
+        refusal.addProperty("error", "That region is " + volume + " blocks; one read covers at most "
+            + maxVolume + " (limits.maxBlockVolume x " + VOLUME_FACTOR + "). "
+            + ("positions".equals(mode)
+                ? "Split it, or use mode 'find', which takes a box of any size."
+                : "Split it."));
+        refusal.addProperty("requested", volume);
+        refusal.addProperty("limit", maxVolume);
+        refusal.addProperty("unit", "blocks");
+        return refusal;
     }
 
     /** How many chunk columns a block box touches. */
@@ -556,6 +596,7 @@ public final class ClientSurveyTools {
             Map<String, JsonArray> positions = new LinkedHashMap<>();
             int listed = 0;
             long matched = 0;
+            int[] lastListed = null;
             BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 
             for (int x = region.minX; x <= region.maxX; x++) {
@@ -592,6 +633,7 @@ public final class ClientSurveyTools {
                             xyz.add(z);
                             list.add(xyz);
                             listed++;
+                            lastListed = new int[]{x, y, z};
                         }
                     }
                 }
@@ -599,6 +641,23 @@ public final class ClientSurveyTools {
 
             JsonObject json = region.describe();
             json.addProperty("matched", matched);
+            // Ahead of the positions, not after them: a capped list is cut at some x, which reads
+            // exactly like "nothing is there", and a flag at the end of a long list went unseen and
+            // nearly had 48 painted blocks placed a second time (#49).
+            if ("positions".equals(mode)) {
+                json.addProperty("listed", listed);
+                if (matched > listed) {
+                    json.addProperty("truncated", true);
+                    json.add("listedThrough", xyzArray(lastListed));
+                    json.addProperty("note", "The list stopped at 'limit'. Positions are listed x "
+                        + "first, then z, then y, so everything after listedThrough is left out of "
+                        + "'positions' though counted. Raise 'limit' or read from x "
+                        + (lastListed == null ? region.minX : lastListed[0]) + " on.");
+                }
+            }
+            if (unloadedChunks.size() > 0) {
+                json.add("unloadedChunks", unloadedChunks);
+            }
             json.add("counts", sortedCounts(counts));
             if (perLayer) {
                 JsonArray layerArray = new JsonArray();
@@ -616,24 +675,34 @@ public final class ClientSurveyTools {
                     grouped.add(entry.getKey(), entry.getValue());
                 }
                 json.add("positions", grouped);
-                if (matched > listed) {
-                    json.addProperty("truncated", true);
-                    json.addProperty("listed", listed);
-                }
-            }
-            if (unloadedChunks.size() > 0) {
-                json.add("unloadedChunks", unloadedChunks);
             }
             return json;
         }
 
+        private static JsonArray xyzArray(@Nullable int[] xyz) {
+            JsonArray array = new JsonArray();
+            if (xyz != null) {
+                for (int value : xyz) {
+                    array.add(value);
+                }
+            }
+            return array;
+        }
+
         /**
-         * The highest matching block per column; with {@code withBlocks}, also which block it is,
-         * as an index into a palette so a repeated id costs a few bytes rather than its full name.
+         * The highest matching block per column, or with {@code fromBottom} the lowest; with
+         * {@code withBlocks}, also which block it is, as an index into a palette so a repeated id
+         * costs a few bytes rather than its full name.
+         *
+         * <p>A whole empty section is passed over in one step when air does not match. Now that a
+         * column read may span 0-255 (#50), a sea-bed or underside survey would otherwise read every
+         * block of the open air above or below what it is looking for.
          */
-        JsonObject heightmap(Region region, boolean withBlocks) {
+        JsonObject heightmap(Region region, boolean withBlocks, boolean fromBottom) {
             Map<Long, Chunk> chunks = new LinkedHashMap<>();
             BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+            boolean airMatches = !tileEntitiesOnly
+                && matchingState(Blocks.AIR.getDefaultState()) != null;
             JsonArray rows = new JsonArray();
             JsonArray blockRows = new JsonArray();
             Map<String, Integer> paletteIndex = new LinkedHashMap<>();
@@ -652,7 +721,18 @@ public final class ClientSurveyTools {
                     }
                     int top = -1;
                     String topId = null;
-                    for (int y = region.maxY; y >= region.minY; y--) {
+                    ExtendedBlockStorage[] sections = chunk.getBlockStorageArray();
+                    int step = fromBottom ? 1 : -1;
+                    for (int y = fromBottom ? region.minY : region.maxY;
+                        y >= region.minY && y <= region.maxY; y += step) {
+                        ExtendedBlockStorage section = sections[y >> 4];
+                        if (!airMatches
+                            && (section == Chunk.NULL_BLOCK_STORAGE || section.isEmpty())) {
+                            // To the last y of this section in the walk's direction; the loop's
+                            // step then crosses into the next one.
+                            y = fromBottom ? (y | 15) : (y & ~15);
+                            continue;
+                        }
                         pos.setPos(x, y, z);
                         String id = matching(chunk, pos);
                         if (id != null) {
@@ -683,10 +763,13 @@ public final class ClientSurveyTools {
             }
 
             JsonObject json = region.describe();
+            String which = fromBottom ? "the lowest" : "the highest";
             json.addProperty("layout", withBlocks
-                ? "heights[z - from.z][x - from.x] and blocks[...] (an index into palette) for the "
-                    + "same column; -1 = nothing matching, null = chunk not loaded"
-                : "heights[z - from.z][x - from.x]; -1 = nothing matching, null = chunk not loaded");
+                ? "heights[z - from.z][x - from.x] is the y of " + which + " matching block and "
+                    + "blocks[...] (an index into palette) which block it is; -1 = nothing "
+                    + "matching, null = chunk not loaded"
+                : "heights[z - from.z][x - from.x] is the y of " + which + " matching block; "
+                    + "-1 = nothing matching, null = chunk not loaded");
             if (highest >= 0) {
                 json.addProperty("highest", highest);
                 json.addProperty("lowest", lowest);

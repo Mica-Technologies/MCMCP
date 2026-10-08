@@ -795,21 +795,25 @@ call. Surveying one city parcel before clearing it took about 22,000 of those ca
 | `mode` | Returns |
 |---|---|
 | `summary` (default) | `counts` per block id, most common first; `per_layer: true` adds the same per `y` |
-| `positions` | Each matching block's `[x,y,z]`, grouped by id, capped at `limit` (default 256, max 4096); the counts stay exact |
+| `positions` | Each matching block's `[x,y,z]`, grouped by id, capped at `limit` (default 256, max 4096); the counts stay exact. Listed x first, then z, then y, so a capped list is cut at some x: `listed`, `truncated` and `listedThrough` come before the positions and say where |
 | `find` | The same answer as `positions` for a box of any size. Needs `blocks` or `tile_entities`; `nbt: true` adds the first 64 listed matches' tile-entity NBT under `blockEntities`, keyed `"x,y,z"` |
-| `heightmap` | `heights[z][x]`: the highest matching `y` in each column, `-1` where there is none, at most 128 × 128 columns |
-| `surface` | The heightmap plus `blocks[z][x]`, which block is on top, as an index into `palette`. Limited by columns, not volume, so it can cover the whole 0–255 range |
+| `heightmap` | `heights[z][x]`: the highest matching `y` in each column, `-1` where there is none |
+| `surface` | The heightmap plus `blocks[z][x]`, which block is on top, as an index into `palette` |
+| `underside` | `surface` from below: the lowest matching `y` at or above `y` in each column, and which block it is. With `y` one above the ground, the clearance under every deck and bridge in one read |
 
 `blocks` and `exclude` take patterns. A whole id matches every metadata (`minecraft:wool`) unless it
 names one (`minecraft:wool:14`). A bare path matches it in any namespace (`barrier`). `*` asks for a
 substring (`*alarm*`). Plain substring matching was avoided on purpose, because `air` is a substring
-of `oak_stairs`. `positions` and `heightmap` exclude air unless `exclude` is given.
+of `oak_stairs`. Every mode but `summary` excludes air unless `exclude` is given.
 `tile_entities: true` keeps only blocks the client holds a tile entity for.
 
 Chunks outside the view distance are listed in `unloadedChunks` and skipped, never counted as air;
 in a heightmap their columns are `null`. One read covers up to `limits.maxBlockVolume` × 8 blocks:
 a client read of chunks already in memory is cheap, and the size of the answer is bounded by the mode
-rather than the volume.
+rather than the volume. `heightmap`, `surface` and `underside` are the exception: they stop at the
+first match in each column, so they are limited to 128 × 128 columns instead and can cover the whole
+0–255 range. A region too large for its mode is refused with a JSON body, `error`, `requested`,
+`limit` and `unit`, so a script splitting a large survey can tell the refusal from an answer.
 
 `find` is for locating something rare in an area far larger than one read: a block type along a
 whole road corridor took about 400 tiled reads, each with a teleport, before it existed. It has no
