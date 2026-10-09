@@ -47,35 +47,55 @@ agent ──MCP──▶ orchestrator ──link──▶ player's game
     this server's tools: /mcmcp companion allow <player>
     ```
 
-2. Allow the players who may use it. Edit `companion.allowedPlayers` in `config/mcmcp.cfg`, one UUID
-   (or name) per line, then run `/mcmcp reload`:
+2. Allow the players who may use it, from the console or in game:
 
     ```
-    companion {
-        S:allowedPlayers <
-            d04d5aaa-c6c9-386f-97c8-ff8571aa906a
-         >
-    }
+    /mcmcp companion allow Builder
     ```
 
-3. The player rejoins. Their MCMCP asks the server for the companion as they join. Their
-   `mcmcp_endpoint_info` shows `companion.state: "available"`, and the orchestrator lists
-   `<game>.server`.
+    This saves their UUID to `companion.allowedPlayers` and takes effect at once. You can also edit
+    the list in `config/mcmcp.cfg`, one UUID or name per line, then run `/mcmcp reload`. Names are
+    turned into UUIDs when the server starts.
 
-## Who can use it
+3. The player's MCMCP asked for the companion when they joined. Once they're allowed, the server
+   answers. Their `mcmcp_endpoint_info` shows `companion.state: "available"`, and the orchestrator
+   lists `<game>.server`.
+
+## Who can use it, and for what
 
 A player needs **both**:
 
 - **An allowlist entry** in `companion.allowedPlayers`. An empty list means nobody, so being an
   operator is never enough on its own.
-- **The `mcmcp.companion.use` permission node.** It defaults to operators. A permission mod that
-  implements Forge's PermissionAPI (FTB Utilities' ranks, for example) can grant or deny it per
-  rank.
+- **A permission node for each kind of call.** A permission mod that implements Forge's
+  PermissionAPI (FTB Utilities' ranks, for example) can grant or deny each node per rank. Without
+  one, the defaults apply:
 
-The player's identity always comes from the connection the request arrives on, never from anything
-in the request. A refused player is told why, for example "You are not on this server's MCMCP
-companion allowlist. Ask an operator to run /mcmcp companion allow <name>", and stays connected
-to the server.
+| Node | Unlocks | Default |
+| --- | --- | --- |
+| `mcmcp.companion.read` | `server_get_block(s)`, `server_find_blocks`, `server_nearby_entities`, `server_world_info`, `server_list_players`, `server_player_state`, `server_player_inventory`, `server_tick_stats`, `mcmcp_endpoint_info`, `game_list_mods`, `game_health` | operators |
+| `mcmcp.companion.write` | `server_set_block(s)`, `server_undo`, `server_teleport_player` | operators |
+| `mcmcp.companion.command` | `server_run_command` as yourself, `server_tell_player` | operators |
+| `mcmcp.companion.others` | naming a player other than yourself in those tools | operators |
+| `mcmcp.companion.command.console` | `server_run_command` with the console's authority | **nobody** |
+
+Anything not in the table is never served through the companion: `server_stop`, `server_save_world`,
+`server_broadcast`, the profilers, the log readers, `game_storage`, and resources and prompts. A
+player's `tools/list` shows only the tools their grants unlock.
+
+- **As whom.** The player's identity always comes from the connection a request arrives on, never
+  from anything in the request. A `server_run_command` with no `asPlayer` runs as the player, with
+  their own command permissions, not with the console's. `blockedCommands` applies either way.
+  Naming another player in `asPlayer` or `player` needs `mcmcp.companion.others`.
+- **Independent of the endpoint.** The endpoint's `permissions.*` switches don't apply to companion
+  calls, and a dedicated server leaves them off. The grants decide.
+- **Refusals.** A refused player is told why, for example "You are not on this server's MCMCP
+  companion allowlist. Ask an operator to run /mcmcp companion allow <name>", and stays connected
+  to the server.
+- **Changes apply live.** Grants are re-checked every five seconds and after every
+  `/mcmcp companion` or `/mcmcp reload`. Allowing a player hands their client the tools straight
+  away. Revoking one, turning the companion off, or removing a node stops their running calls and
+  withdraws the tools, with no rejoin.
 
 ## What it costs the server
 
@@ -88,12 +108,25 @@ to the server.
   decompressed, and at most `companion.maxOpenMessages` may be partly sent at once.
 - **A broken client loses only its companion.** One that breaks either limit, or sends something
   unreadable, has its companion session dropped and logged. The player is never kicked.
-- **Every call is recorded.** The server's [request journal](../reference/configuration.md#journal)
-  is on by default and records every call the companion runs.
+- **Calls per player are capped.** `companion.maxConcurrentCalls` (4) are allowed at once.
+
+## What is recorded
+
+- **The request journal.** The server's [journal](../reference/configuration.md#journal) is on by
+  default. It records every companion call with the player it ran as.
+- **The server log.** Every write and command gets an INFO line, for example
+  `MCMCP companion: Builder server_set_blocks written=9 undoPoint=u1791579262093`.
+- **Operators in chat.** Online operators see a grey line in chat, at most one per player every ten
+  seconds: `[MCMCP] Builder's agent: server_set_blocks written=9 (and 1 more)`. Turn it off with
+  `companion.notifyOps`.
+- **Undo points.** Every write leaves an [undo point](../reference/tools.md#server_undo), single
+  blocks included, whatever `undo.*` says. The point records who made it (`"by"`).
 
 ## Status
 
-- On the server: `/mcmcp status` shows `Companion: on, N allowed, M connected`.
+- On the server: `/mcmcp status` shows `Companion: on, N allowed, M connected`. `/mcmcp companion`
+  lists each connected player's grants and running calls. See
+  [commands](../reference/commands.md#mcmcp-companion).
 - On the client: `mcmcp_endpoint_info` has a `companion` block. Its `state` is one of:
 
 | `state` | Meaning |

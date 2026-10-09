@@ -39,7 +39,10 @@ import net.minecraft.util.text.event.HoverEvent;
 public class CommandMcmcp extends CommandBase {
 
     private static final List<String> SUBCOMMANDS =
-        Arrays.asList("status", "link", "tools", "sessions", "token", "reload", "restart", "stop");
+        Arrays.asList("status", "link", "tools", "sessions", "token", "reload", "restart", "stop", "companion");
+
+    private static final List<String> COMPANION_SUBCOMMANDS =
+        Arrays.asList("status", "list", "allow", "revoke", "on", "off");
 
     @Override
     public String getName() {
@@ -48,7 +51,7 @@ public class CommandMcmcp extends CommandBase {
 
     @Override
     public String getUsage(ICommandSender sender) {
-        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop>";
+        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop|companion>";
     }
 
     /**
@@ -67,6 +70,13 @@ public class CommandMcmcp extends CommandBase {
                                           @Nullable BlockPos targetPos) {
         if (args.length == 1) {
             return getListOfStringsMatchingLastWord(args, SUBCOMMANDS);
+        }
+        if (args.length == 2 && "companion".equalsIgnoreCase(args[0])) {
+            return getListOfStringsMatchingLastWord(args, COMPANION_SUBCOMMANDS);
+        }
+        if (args.length == 3 && "companion".equalsIgnoreCase(args[0])
+            && ("allow".equalsIgnoreCase(args[1]) || "revoke".equalsIgnoreCase(args[1]))) {
+            return getListOfStringsMatchingLastWord(args, server.getOnlinePlayerNames());
         }
         return new ArrayList<>();
     }
@@ -93,8 +103,12 @@ public class CommandMcmcp extends CommandBase {
             case "token":
                 handleToken(sender);
                 break;
+            case "companion":
+                handleCompanion(server, sender, args);
+                break;
             case "reload":
                 McmcpConfig.reload();
+                CompanionServer.accessChanged();
                 reply(sender, TextFormatting.GREEN, "MCMCP config reloaded. Network settings take effect "
                     + "on '/mcmcp restart'.");
                 break;
@@ -111,6 +125,109 @@ public class CommandMcmcp extends CommandBase {
             default:
                 throw new WrongUsageException(getUsage(sender));
         }
+    }
+
+    /**
+     * {@code /mcmcp companion status|list|allow <player>|revoke <player>|on|off}.
+     *
+     * <p>Changing who may use the companion is refused when the command arrives through an MCMCP tool
+     * call. An agent with command access, running as an operator, could otherwise widen its own reach or
+     * hand access to another player — the same reason the orchestrator keeps approvals out of its
+     * tools. These are for a person at the console or in the game.
+     */
+    private void handleCompanion(MinecraftServer server, ICommandSender sender, String[] args)
+        throws WrongUsageException {
+        String sub = args.length < 2 ? "status" : args[1].toLowerCase(java.util.Locale.ROOT);
+        boolean changes = "allow".equals(sub) || "revoke".equals(sub) || "on".equals(sub) || "off".equals(sub);
+        if (changes && sender instanceof com.micatechnologies.minecraft.mcmcp.tools.CapturingCommandSender) {
+            reply(sender, TextFormatting.RED, "Changing who may use the MCMCP companion is for a person at "
+                + "the console or in the game, not for a tool call.");
+            return;
+        }
+        if (changes && !sender.canUseCommand(3, getName())) {
+            reply(sender, TextFormatting.RED, "Changing the MCMCP companion needs operator level 3.");
+            return;
+        }
+        switch (sub) {
+            case "status":
+            case "list": {
+                com.google.gson.JsonObject status = CompanionServer.status();
+                reply(sender, TextFormatting.AQUA, "MCMCP companion: " + (McmcpConfig.isCompanionEnabled() ? "on" : "off"));
+                List<String> allowed = McmcpConfig.getCompanionAllowedPlayers();
+                reply(sender, TextFormatting.WHITE, "  Allowed (" + allowed.size() + "): "
+                    + (allowed.isEmpty() ? "nobody" : describeAllowed(server, allowed)));
+                for (com.google.gson.JsonElement entry : status.getAsJsonArray("players")) {
+                    com.google.gson.JsonObject player = entry.getAsJsonObject();
+                    reply(sender, TextFormatting.GRAY, "  " + player.get("player").getAsString() + ": "
+                        + player.get("classes") + ", " + player.get("sessions").getAsInt() + " session(s), "
+                        + player.get("runningCalls").getAsInt() + " running");
+                }
+                break;
+            }
+            case "allow":
+            case "revoke": {
+                if (args.length < 3) {
+                    throw new WrongUsageException("/mcmcp companion " + sub + " <player>");
+                }
+                String id = resolvePlayer(server, args[2]);
+                List<String> allowed = new ArrayList<>(McmcpConfig.getCompanionAllowedPlayers());
+                boolean present = allowed.removeIf(entry -> entry.trim().equalsIgnoreCase(id)
+                    || entry.trim().equalsIgnoreCase(args[2]));
+                if ("allow".equals(sub)) {
+                    allowed.add(id);
+                }
+                McmcpConfig.setCompanionAllowedPlayers(allowed);
+                CompanionServer.accessChanged();
+                if ("allow".equals(sub)) {
+                    reply(sender, TextFormatting.GREEN, args[2] + " may use the MCMCP companion"
+                        + (McmcpConfig.isCompanionEnabled() ? "." : ", once it is turned on (/mcmcp companion on)."));
+                }
+                else {
+                    reply(sender, present ? TextFormatting.GREEN : TextFormatting.GRAY, present
+                        ? args[2] + " may no longer use the MCMCP companion; anything they had running was stopped."
+                        : args[2] + " was not on the companion allowlist.");
+                }
+                break;
+            }
+            case "on":
+            case "off":
+                McmcpConfig.setCompanionEnabled("on".equals(sub));
+                CompanionServer.accessChanged();
+                reply(sender, TextFormatting.GREEN, "MCMCP companion turned " + sub + ".");
+                break;
+            default:
+                throw new WrongUsageException("/mcmcp companion <status|list|allow|revoke|on|off>");
+        }
+    }
+
+    /** A player's UUID from the online list or the profile cache, or the name as given when unknown. */
+    private static String resolvePlayer(MinecraftServer server, String name) {
+        net.minecraft.entity.player.EntityPlayerMP online = server.getPlayerList().getPlayerByUsername(name);
+        if (online != null) {
+            return online.getUniqueID().toString();
+        }
+        com.mojang.authlib.GameProfile profile = server.getPlayerProfileCache().getGameProfileForUsername(name);
+        return profile != null && profile.getId() != null ? profile.getId().toString() : name;
+    }
+
+    /** The allowlist with names where the profile cache knows them. */
+    private static String describeAllowed(MinecraftServer server, List<String> allowed) {
+        List<String> names = new ArrayList<>();
+        for (String entry : allowed) {
+            String name = entry;
+            try {
+                com.mojang.authlib.GameProfile profile = server.getPlayerProfileCache()
+                    .getProfileByUUID(java.util.UUID.fromString(entry.trim()));
+                if (profile != null && profile.getName() != null) {
+                    name = profile.getName();
+                }
+            }
+            catch (IllegalArgumentException notAUuid) {
+                // A name not yet resolved; shown as it is.
+            }
+            names.add(name);
+        }
+        return String.join(", ", names);
     }
 
     private void handleStatus(ICommandSender sender) {

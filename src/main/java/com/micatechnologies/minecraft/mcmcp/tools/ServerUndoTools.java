@@ -6,6 +6,7 @@ import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
+import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
@@ -74,9 +75,11 @@ public final class ServerUndoTools {
         if (!"restore".equals(op)) {
             return ToolResult.error("Unknown op '" + op + "'; use list or restore.");
         }
-        if (!McmcpConfig.isAllowWorldEdits()) {
-            return ToolResult.error("Restoring writes to the world, which is disabled by "
+        String denied = context.refusal(Capability.WORLD_EDITS, McmcpConfig.isAllowWorldEdits(),
+            "Restoring writes to the world, which is disabled by "
                 + "permissions.allowWorldEdits in the MCMCP config.");
+        if (denied != null) {
+            return ToolResult.error(denied);
         }
         String id = context.getString("id", null);
         JsonObject point = id == null ? null : UndoPoints.find(folder, id);
@@ -127,7 +130,7 @@ public final class ServerUndoTools {
 
         final int[] area = areaOf(point);
         final BufferedImage beforeImage = drawImage(context, dimension, area);
-        final UndoPoints.Recorder recorder = McmcpConfig.isUndoPointsEnabled() ? new UndoPoints.Recorder() : null;
+        final UndoPoints.Recorder recorder = start(context, false);
         final Map<Integer, NBTTagCompound> tileEntities = UndoPoints.tileEntities(record);
         for (int from = 0; from < total; from += batch) {
             final int start = from;
@@ -184,7 +187,12 @@ public final class ServerUndoTools {
      * {@code undo.recordSingleBlockWrites}.
      */
     @Nullable
-    static UndoPoints.Recorder start(boolean singleBlock) {
+    static UndoPoints.Recorder start(ToolContext context, boolean singleBlock) {
+        // A write a player makes through the companion always leaves a point, single block or not:
+        // on a shared server it is the way back from a mistake and the record of who made it.
+        if (context.getPrincipal().isCompanion()) {
+            return new UndoPoints.Recorder();
+        }
         if (!McmcpConfig.isUndoPointsEnabled()) {
             return null;
         }
@@ -233,6 +241,10 @@ public final class ServerUndoTools {
             JsonObject meta = UndoPoints.meta(id, tool, dimension, recorder.count(), (JsonObject) taken[2]);
             if (undoes != null) {
                 meta.addProperty("undoes", undoes);
+            }
+            if (context.getPrincipal().isCompanion()) {
+                // Who made the write, on a server where several players' agents may be building.
+                meta.addProperty("by", context.getPrincipal().getPlayerName());
             }
             BufferedImage afterImage = beforeImage == null ? null : drawImage(context, dimension, area);
             UndoPoints.save(folder, meta, (NBTTagCompound) taken[1], beforeImage, afterImage);

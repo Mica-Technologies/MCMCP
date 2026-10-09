@@ -230,6 +230,15 @@ public final class ClientCompanion {
         if (message.type == CompanionProtocol.TYPE_WELCOME) {
             welcomed(CompanionHandshake.parse(message.bytes));
         }
+        else if (message.type == CompanionProtocol.TYPE_BYE) {
+            // The server ended this player's access while they stay connected. A later welcome (an
+            // operator allowing them again) brings the tools back without a rejoin.
+            JsonObject bye = CompanionHandshake.parse(message.bytes);
+            set(State.UNAUTHORISED, Json.getString(bye, "reason", "The server ended companion access."),
+                serverModVersion);
+            Mcmcp.LOGGER.info("MCMCP companion: " + detail);
+            LIFECYCLE.execute(ClientCompanion::stopEndpoint);
+        }
         else if (message.type == CompanionProtocol.TYPE_MCP) {
             CompanionForwarder current = forwarder;
             if (current == null) {

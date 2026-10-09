@@ -354,9 +354,10 @@ endpoint already serves the world.
 
 `string list` · default empty
 
-Players who may use the companion, one UUID per line. A name is accepted too. An empty list means
-nobody. A player must also hold the `mcmcp.companion.use` permission node, which operators do by
-default. Being an operator is not enough on its own.
+Players who may use the companion, one UUID per line. A name is accepted too, and is turned into a
+UUID when the server starts. An empty list means nobody. A player must also hold the
+`mcmcp.companion.<class>` permission node for each kind of call. Being an operator is not enough on
+its own. `/mcmcp companion allow|revoke` edits this list for you.
 
 ### `maxMessageMB`
 
@@ -384,6 +385,20 @@ while the player's connection reports that it is full.
 
 The most data waiting to go to one player. A reply that would overfill it becomes a tool error
 naming this setting.
+
+### `maxConcurrentCalls`
+
+`integer` 1–16 · default `4`
+
+Tool calls one player may have running at once. One more is refused with a tool error until one of
+them finishes.
+
+### `notifyOps`
+
+`boolean` · default `true`
+
+Tell online operators in chat when a player's agent changes something: at most one grey line per
+player every ten seconds. Every such call is logged and journalled either way.
 
 ### `maxSessionsPerPlayer`
 

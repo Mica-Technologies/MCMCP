@@ -144,7 +144,7 @@ public class Mcmcp {
     @EventHandler
     public void serverStarting(FMLServerStartingEvent event) {
         event.registerServerCommand(new CommandMcmcp());
-        CompanionServer.serverStarting();
+        CompanionServer.serverStarting(event.getServer());
         reportServerExposure(event.getServer().isDedicatedServer());
 
         if (!McmcpConfig.isServerEndpointEnabled()) {

@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
+import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
@@ -285,10 +286,12 @@ public final class ServerBuildTools {
             .serverOnly()
             .destructive()
             .handler(context -> {
-                if (!McmcpConfig.isAllowWorldEdits()) {
-                    return ToolResult.error("Direct world edits are disabled by "
+                String denied = context.refusal(Capability.WORLD_EDITS, McmcpConfig.isAllowWorldEdits(),
+                    "Direct world edits are disabled by "
                         + "permissions.allowWorldEdits in the MCMCP config. Ask the server operator to "
                         + "enable it, or build through player actions or commands instead.");
+                if (denied != null) {
+                    return ToolResult.error(denied);
                 }
 
                 final int dimension = context.getInt("dimension", 0);
@@ -349,7 +352,7 @@ public final class ServerBuildTools {
                         }
                     }
 
-                    final UndoPoints.Recorder recorder = ServerUndoTools.start(false);
+                    final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
                     final int[] area = recorder == null ? null : listArea(placements);
                     final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                     final Tally tally = new Tally();
@@ -410,7 +413,7 @@ public final class ServerBuildTools {
                 }
 
                 final IBlockState state = fillBlock.getStateFromMeta(metadata);
-                final UndoPoints.Recorder recorder = ServerUndoTools.start(false);
+                final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
                 final int[] area = recorder == null ? null : UndoPoints.imageArea(minX, minZ, maxX, maxZ);
                 final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                 final Tally tally = new Tally();

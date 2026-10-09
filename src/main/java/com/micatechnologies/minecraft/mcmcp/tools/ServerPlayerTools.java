@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
+import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
@@ -249,9 +250,11 @@ public final class ServerPlayerTools {
             .serverOnly()
             .destructive()
             .handler(context -> {
-                if (!McmcpConfig.isAllowWorldEdits()) {
-                    return ToolResult.error("Teleporting players is disabled by "
+                String denied = context.refusal(Capability.WORLD_EDITS, McmcpConfig.isAllowWorldEdits(),
+                    "Teleporting players is disabled by "
                         + "permissions.allowWorldEdits in the MCMCP config.");
+                if (denied != null) {
+                    return ToolResult.error(denied);
                 }
 
                 final String username = context.requireString("player");

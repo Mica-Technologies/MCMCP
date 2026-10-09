@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
+import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
@@ -366,10 +367,12 @@ public final class ServerWorldTools {
             .serverOnly()
             .destructive()
             .handler(context -> {
-                if (!McmcpConfig.isAllowWorldEdits()) {
-                    return ToolResult.error("Direct world edits are disabled by "
+                String denied = context.refusal(Capability.WORLD_EDITS, McmcpConfig.isAllowWorldEdits(),
+                    "Direct world edits are disabled by "
                         + "permissions.allowWorldEdits in the MCMCP config. Ask the server operator to "
                         + "enable it, or achieve the change through player actions or a command.");
+                if (denied != null) {
+                    return ToolResult.error(denied);
                 }
 
                 final String blockId = context.requireString("block");
@@ -396,7 +399,7 @@ public final class ServerWorldTools {
 
                 // Only with undo.recordSingleBlockWrites: one block is one file, which is an audit
                 // trail somebody chose rather than a default.
-                final UndoPoints.Recorder recorder = ServerUndoTools.start(true);
+                final UndoPoints.Recorder recorder = ServerUndoTools.start(context, true);
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
                     public JsonObject call() {

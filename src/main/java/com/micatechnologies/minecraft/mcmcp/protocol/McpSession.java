@@ -76,6 +76,13 @@ public class McpSession {
      */
     private final boolean orchestratorLink;
 
+    /**
+     * Who this session's calls run as. The endpoint caller unless a transport says otherwise: the
+     * companion sets the player whose connection the session arrived on.
+     */
+    private volatile com.micatechnologies.minecraft.mcmcp.mcp.Principal principal =
+        com.micatechnologies.minecraft.mcmcp.mcp.Principal.ENDPOINT;
+
     /** Set once this direct session has been told an orchestrator is available — see {@link #claimSteeringNote}. */
     private final AtomicBoolean steeringNoteDelivered = new AtomicBoolean(false);
 
@@ -108,6 +115,15 @@ public class McpSession {
 
     public boolean isOrchestratorLink() {
         return orchestratorLink;
+    }
+
+    public com.micatechnologies.minecraft.mcmcp.mcp.Principal getPrincipal() {
+        return principal;
+    }
+
+    /** Set by the transport that created the session, before any message is dispatched on it. */
+    public void setPrincipal(com.micatechnologies.minecraft.mcmcp.mcp.Principal principal) {
+        this.principal = principal;
     }
 
     /**

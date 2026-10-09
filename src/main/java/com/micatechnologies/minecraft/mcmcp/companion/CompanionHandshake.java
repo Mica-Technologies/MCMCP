@@ -66,6 +66,16 @@ public final class CompanionHandshake {
         return bytes(json);
     }
 
+    /**
+     * The server ending a player's companion access while they stay connected: revoked, the companion
+     * turned off, a permission removed. The client stops presenting the server's tools.
+     */
+    public static byte[] bye(String reason) {
+        JsonObject json = new JsonObject();
+        json.addProperty("reason", reason);
+        return bytes(json);
+    }
+
     /** The peer's protocol version from a hello or welcome, or -1 when it is not one. */
     public static int protocolOf(@Nullable JsonObject message) {
         return message == null ? -1 : Json.getInt(message, "protocol", -1);

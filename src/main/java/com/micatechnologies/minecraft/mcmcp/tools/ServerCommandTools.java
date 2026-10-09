@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
+import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
@@ -67,9 +68,11 @@ public final class ServerCommandTools {
             .serverOnly()
             .destructive()
             .handler(context -> {
-                if (!McmcpConfig.isAllowCommands()) {
-                    return ToolResult.error("Command execution is disabled by "
+                String denied = context.refusal(Capability.COMMANDS, McmcpConfig.isAllowCommands(),
+                    "Command execution is disabled by "
                         + "permissions.allowCommands in the MCMCP config.");
+                if (denied != null) {
+                    return ToolResult.error(denied);
                 }
 
                 final String rawCommand = context.requireString("command");
@@ -85,7 +88,7 @@ public final class ServerCommandTools {
                 final String asPlayer = context.getString("asPlayer", null);
                 // /fill and /clone leave undo points like server_set_blocks does: {dimension, area,
                 // before map}, filled in on the game thread when the command is one of those.
-                final UndoPoints.Recorder recorder = ServerUndoTools.start(false);
+                final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
                 final Object[] undo = new Object[3];
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
@@ -165,9 +168,11 @@ public final class ServerCommandTools {
                 .build())
             .serverOnly()
             .handler(context -> {
-                if (!McmcpConfig.isAllowChat()) {
-                    return ToolResult.error("Chat is disabled by permissions.allowChat in the MCMCP "
+                String denied = context.refusal(Capability.CHAT, McmcpConfig.isAllowChat(),
+                    "Chat is disabled by permissions.allowChat in the MCMCP "
                         + "config.");
+                if (denied != null) {
+                    return ToolResult.error(denied);
                 }
                 final String message = context.requireString("message");
 
@@ -198,9 +203,11 @@ public final class ServerCommandTools {
                 .build())
             .serverOnly()
             .handler(context -> {
-                if (!McmcpConfig.isAllowChat()) {
-                    return ToolResult.error("Chat is disabled by permissions.allowChat in the MCMCP "
+                String denied = context.refusal(Capability.CHAT, McmcpConfig.isAllowChat(),
+                    "Chat is disabled by permissions.allowChat in the MCMCP "
                         + "config.");
+                if (denied != null) {
+                    return ToolResult.error(denied);
                 }
                 final String username = context.requireString("player");
                 final String message = context.requireString("message");
