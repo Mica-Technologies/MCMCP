@@ -129,6 +129,9 @@ public final class CompanionServer {
         node(Principal.CLASS_LOAD, DefaultPermissionLevel.OP,
             "Keep chunks loaded through the MCMCP companion (server_keep_loaded, load: true), within the "
                 + "chunk-loading limits in the MCMCP config.");
+        node(Principal.CLASS_USE, DefaultPermissionLevel.OP,
+            "Use items on blocks and activate blocks from any distance through the MCMCP companion "
+                + "(server_use_item_on_block, server_activate_block). Protection mods still apply.");
         node(Principal.CLASS_OTHERS, DefaultPermissionLevel.OP,
             "Name players other than yourself in MCMCP companion tools (state, inventory, teleport, asPlayer).");
         node(Principal.CLASS_CONSOLE, DefaultPermissionLevel.NONE,

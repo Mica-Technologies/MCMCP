@@ -43,6 +43,7 @@ public final class CommonTools {
         ServerRegionTools.register();
         ServerBulkTools.register();
         ServerTileEntityTools.register();
+        ServerInteractTools.register();
         StorageTools.register();
         ServerPlayerTools.register();
         ServerCommandTools.register();

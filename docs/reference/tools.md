@@ -812,6 +812,48 @@ Gated on `allowWorldEdits` rather than `allowPlayerControl`: the latter governs 
 input on the client endpoint, which is bounded by what you could do anyway. Moving someone else is a
 different thing.
 
+### Using items and blocks
+
+#### `server_use_item_on_block`
+
+:material-alert: Destructive · `x`, `y`, `z`, `player` required · optional `face`, `hitX`/`hitY`/`hitZ`, `slot`, `sneak`, `container`, `load`
+
+Uses the item in a hotbar slot on a block, as that player, **from any distance**. This is the click
+that a span-wire tool (anchor A, then anchor B), a track tool or a door placement needs. It runs
+the game's own right-click path as the real player:
+
+- Forge's interact event fires, so claim and protection mods still decide.
+- The item's and the block's own handlers run, and a placement fires the place event.
+- Build height, spawn protection and the world border are checked as they would be for a click.
+  Only reach is lifted.
+
+The item must already be in the player's hotbar; `slot` picks it, and the player's selection is
+restored afterwards. The reply has:
+- the block before and after;
+- the block on the clicked face after (where a placement lands);
+- the item left in hand;
+- `changed`, which says whether anything happened. Vanilla answers `pass` for some clicks that
+  did act, so don't rely on `result` for that.
+
+Through the companion, `player` is always you, and the tool needs `mcmcp.companion.use`. Every call
+leaves an undo point for the clicked block and the one beside it.
+
+#### `server_activate_block`
+
+:material-alert: Destructive · as above, without `slot`
+
+Right-clicks a block with an empty hand from any distance: open a controller, flip a lever, open a
+container.
+
+**Containers.** A container opened from more than about eight blocks away is closed by the server
+on the next tick. Anything to do in it must happen in the same call, through `container`:
+
+- `{"read": true}` lists its slots, excluding the player's own inventory.
+- `{"button": n}` presses button `n` the way the container's own buttons do (vanilla's enchant-button
+  path).
+
+Text fields in modded GUIs are not reachable this way; use the client's GUI tools for those.
+
 ### Commands and chat
 
 #### `server_run_command`

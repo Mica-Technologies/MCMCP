@@ -43,7 +43,7 @@ public final class CompanionPolicy implements CallFilter {
     /** Every class a player can be granted, in the order they are checked and listed. */
     public static final Set<String> ALL_CLASSES = Collections.unmodifiableSet(new LinkedHashSet<>(
         java.util.Arrays.asList(Principal.CLASS_READ, Principal.CLASS_WRITE, Principal.CLASS_COMMAND,
-            Principal.CLASS_LOAD, Principal.CLASS_OTHERS, Principal.CLASS_CONSOLE)));
+            Principal.CLASS_LOAD, Principal.CLASS_USE, Principal.CLASS_OTHERS, Principal.CLASS_CONSOLE)));
 
     /** Tool name to the class that unlocks it. Anything absent is never served. */
     static final Map<String, String> CLASSES = new HashMap<>();
@@ -68,12 +68,17 @@ public final class CompanionPolicy implements CallFilter {
         for (String load : new String[] {"server_keep_loaded", "server_release_loaded"}) {
             CLASSES.put(load, Principal.CLASS_LOAD);
         }
+        for (String use : new String[] {"server_use_item_on_block", "server_activate_block"}) {
+            CLASSES.put(use, Principal.CLASS_USE);
+        }
         PLAYER_ARGUMENTS.put("server_run_command", "asPlayer");
         PLAYER_ARGUMENTS.put("server_run_commands", "asPlayer");
         PLAYER_ARGUMENTS.put("server_player_state", "player");
         PLAYER_ARGUMENTS.put("server_player_inventory", "player");
         PLAYER_ARGUMENTS.put("server_teleport_player", "player");
         PLAYER_ARGUMENTS.put("server_tell_player", "player");
+        PLAYER_ARGUMENTS.put("server_use_item_on_block", "player");
+        PLAYER_ARGUMENTS.put("server_activate_block", "player");
     }
 
     /** The class a tool belongs to, or null when the companion never serves it. */
