@@ -105,7 +105,6 @@ public class Mcmcp {
         CommonPrompts.register();
         proxy.preInit(event);
         CompanionServer.preInit();
-        com.micatechnologies.minecraft.mcmcp.spike.Spike.preInit(); // PHASE 0 SPIKE — remove
         LOGGER.info(McmcpConstants.MOD_NAME + " " + McmcpConstants.MOD_VERSION + " loaded.");
     }
 
@@ -115,7 +114,6 @@ public class Mcmcp {
         CompanionServer.init();
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.init();
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.init();
-        com.micatechnologies.minecraft.mcmcp.spike.Spike.init(); // PHASE 0 SPIKE — remove
         proxy.registerSideSpecific();
     }
 
