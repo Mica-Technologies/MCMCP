@@ -460,6 +460,39 @@ case "$CMD_AFTER" in
   *) echo "    /fill left ${CMD_UNDO}, and restoring it put the blocks back" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Chunk loading
+#
+# Nothing loads a chunk implicitly: a write into terrain that was never generated writes nothing and
+# generates nothing. A hold loads what it needs and its release gives everything back at once,
+# rather than at the next autosave.
+# ---------------------------------------------------------------------------
+
+echo "==> Chunk loading: a write far outside the world generates nothing"
+FAR_BODY="$(mcp_call 40 server_set_blocks '{"mode":"fill","block":"minecraft:glass","x":900000,"y":100,"z":900000,"toX":900001,"toZ":900001}')" \
+  || mcp_failure "the far write failed: ${FAR_BODY}"
+case "$FAR_BODY" in
+  *'"written":0'*'"unloaded":4'*'"ungenerated":1'*) echo "    nothing written, the chunk reported as ungenerated" ;;
+  *) mcp_failure "a write into ungenerated terrain did something: ${FAR_BODY}" ;;
+esac
+
+echo "==> Chunk loading: hold a region beside spawn, then release it"
+HOLD_BODY="$(mcp_call 41 server_keep_loaded "{\"x\":$((SPAWN_X + 160)),\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 191)),\"toZ\":$((SPAWN_Z + 31))}")" \
+  || mcp_failure "server_keep_loaded failed: ${HOLD_BODY}"
+HOLD_ID="$(printf '%s' "$HOLD_BODY" | grep -o '"id":"h[0-9]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$HOLD_ID" ] || mcp_failure "server_keep_loaded returned no hold id: ${HOLD_BODY}"
+case "$HOLD_BODY" in
+  *'"inBox":'*) echo "    held as ${HOLD_ID}" ;;
+  *) mcp_failure "the hold reported no chunks block: ${HOLD_BODY}" ;;
+esac
+mcp_call 42 server_release_loaded "{\"id\":\"${HOLD_ID}\"}" > /dev/null || mcp_failure "server_release_loaded failed"
+sleep 1
+LIST_BODY="$(mcp_call 43 server_keep_loaded '{"op":"list"}')" || mcp_failure "op list failed: ${LIST_BODY}"
+case "$LIST_BODY" in
+  *'"heldChunks":0'*) echo "    released; MCMCP holds nothing" ;;
+  *) mcp_failure "chunks still held after release: ${LIST_BODY}" ;;
+esac
+
 sed -i "s/B:allowWorldEdits=true/${WORLD_EDITS_WERE:-B:allowWorldEdits=false}/" "$CONFIG_FILE"
 mcp_call 25 server_run_command '{"command":"mcmcp reload"}' >/dev/null
 

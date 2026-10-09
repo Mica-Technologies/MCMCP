@@ -52,6 +52,7 @@ public class McmcpConfig {
     private static final String CATEGORY_UNDO = "undo";
     private static final String CATEGORY_JOURNAL = "journal";
     private static final String CATEGORY_COMPANION = "companion";
+    private static final String CATEGORY_CHUNKS = "chunks";
 
     /**
      * Dev-launch overrides injected by {@code addon.gradle}.
@@ -126,6 +127,20 @@ public class McmcpConfig {
     private static int companionMaxSessionsPerPlayer = 4;
     private static int companionMaxConcurrentCalls = 4;
     private static boolean companionNotifyOps = true;
+
+    // Chunk loading
+    private static int chunkLoadsPerTick = 8;
+    private static int chunkLoadsPerMinute = 600;
+    private static int chunkLoadsPerMinutePerCaller = 400;
+    private static int chunkMaxHeld = 1024;
+    private static int chunkMaxHeldPerCaller = 512;
+    private static int chunkHoldIdleSeconds = 120;
+    private static int chunkHoldMaxSeconds = 900;
+    private static int chunkMaxWaitSeconds = 60;
+    private static int chunkThrottleMspt = 40;
+    private static int chunkPauseMspt = 50;
+    private static int chunkPauseHeapPercent = 85;
+    private static int chunkShedAfterSeconds = 30;
 
     // Identity
     private static String instanceId = "";
@@ -335,6 +350,39 @@ public class McmcpConfig {
             "Tell online operators in chat when a player's agent changes something through the companion "
                 + "(a write, a command): at most one grey line per player every ten seconds. Every such call "
                 + "is also logged, and every call journalled, whether or not this is on.");
+
+        // Chunk loading
+        configuration.setCategoryComment(CATEGORY_CHUNKS, "How MCMCP loads chunks that are not already in "
+            + "memory: server_keep_loaded, and load: true on a read or write. Every such load is rationed, "
+            + "watched against the server's tick time and memory, and given back as soon as nothing needs "
+            + "it. All read live.");
+        chunkLoadsPerTick = configuration.getInt("loadsPerTick", CATEGORY_CHUNKS, 8, 1, 64,
+            "Most chunks MCMCP loads from disk in one tick. About half a millisecond each for a vanilla "
+                + "chunk; more for a modded one. Never more than 2 while the server is throttled.");
+        chunkLoadsPerMinute = configuration.getInt("loadsPerMinute", CATEGORY_CHUNKS, 600, 20, 100000,
+            "Most chunk loads MCMCP causes in any minute, for everyone together.");
+        chunkLoadsPerMinutePerCaller = configuration.getInt("loadsPerMinutePerCaller", CATEGORY_CHUNKS, 400, 20,
+            100000, "Most chunk loads one caller (one player's agent, or the endpoint) causes in any minute.");
+        chunkMaxHeld = configuration.getInt("maxHeldChunks", CATEGORY_CHUNKS, 1024, 1, 65536,
+            "Most chunks MCMCP keeps loaded at once, for everyone together: the bound on its memory.");
+        chunkMaxHeldPerCaller = configuration.getInt("maxHeldChunksPerCaller", CATEGORY_CHUNKS, 512, 1, 65536,
+            "Most chunks one caller keeps loaded at once. 512 chunks is about 360 x 360 blocks.");
+        chunkHoldIdleSeconds = configuration.getInt("holdIdleSeconds", CATEGORY_CHUNKS, 120, 10, 3600,
+            "A hold nothing has read from or written to for this long is released.");
+        chunkHoldMaxSeconds = configuration.getInt("holdMaxSeconds", CATEGORY_CHUNKS, 900, 60, 3600,
+            "The longest a hold lasts before it must be renewed (server_keep_loaded op=renew).");
+        chunkMaxWaitSeconds = configuration.getInt("maxWaitSeconds", CATEGORY_CHUNKS, 60, 5, 600,
+            "How long a call waits for its chunks to load before giving up with a 'server busy' error.");
+        chunkThrottleMspt = configuration.getInt("throttleMspt", CATEGORY_CHUNKS, 40, 10, 500,
+            "Mean tick time, in milliseconds, above which MCMCP loads at most 2 chunks a tick.");
+        chunkPauseMspt = configuration.getInt("pauseMspt", CATEGORY_CHUNKS, 50, 10, 1000,
+            "Mean tick time above which MCMCP loads nothing new. 50 ms is 20 ticks a second.");
+        chunkPauseHeapPercent = configuration.getInt("pauseHeapPercent", CATEGORY_CHUNKS, 85, 10, 100,
+            "Old-generation heap in use after garbage collection, in percent, above which MCMCP loads "
+                + "nothing new.");
+        chunkShedAfterSeconds = configuration.getInt("shedAfterSeconds", CATEGORY_CHUNKS, 30, 5, 3600,
+            "After loading has been paused this long, MCMCP starts giving back what it holds, the "
+                + "longest-idle hold first, until the server recovers.");
 
         // Orchestrator link
         orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR,
@@ -718,6 +766,54 @@ public class McmcpConfig {
 
     public static boolean isCompanionNotifyOps() {
         return companionNotifyOps;
+    }
+
+    public static int getChunkLoadsPerTick() {
+        return chunkLoadsPerTick;
+    }
+
+    public static int getChunkLoadsPerMinute() {
+        return chunkLoadsPerMinute;
+    }
+
+    public static int getChunkLoadsPerMinutePerCaller() {
+        return chunkLoadsPerMinutePerCaller;
+    }
+
+    public static int getChunkMaxHeld() {
+        return chunkMaxHeld;
+    }
+
+    public static int getChunkMaxHeldPerCaller() {
+        return chunkMaxHeldPerCaller;
+    }
+
+    public static int getChunkHoldIdleSeconds() {
+        return chunkHoldIdleSeconds;
+    }
+
+    public static int getChunkHoldMaxSeconds() {
+        return chunkHoldMaxSeconds;
+    }
+
+    public static int getChunkMaxWaitSeconds() {
+        return chunkMaxWaitSeconds;
+    }
+
+    public static int getChunkThrottleMspt() {
+        return chunkThrottleMspt;
+    }
+
+    public static int getChunkPauseMspt() {
+        return chunkPauseMspt;
+    }
+
+    public static int getChunkPauseHeapPercent() {
+        return chunkPauseHeapPercent;
+    }
+
+    public static int getChunkShedAfterSeconds() {
+        return chunkShedAfterSeconds;
     }
 
     public static boolean isJournalEnabled() {

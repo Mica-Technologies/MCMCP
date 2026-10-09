@@ -113,6 +113,7 @@ public class Mcmcp {
     public void init(FMLInitializationEvent event) {
         proxy.init(event);
         CompanionServer.init();
+        com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.init();
         com.micatechnologies.minecraft.mcmcp.spike.Spike.init(); // PHASE 0 SPIKE — remove
         proxy.registerSideSpecific();
     }
@@ -169,6 +170,7 @@ public class Mcmcp {
             serverEndpoint = null;
         }
         CompanionServer.serverStopping();
+        com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.serverStopping();
         // After the endpoint stops, so no call can start between the close line and the end.
         McmcpEndpoints.closeJournal(McmcpSide.SERVER);
     }

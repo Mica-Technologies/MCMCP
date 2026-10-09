@@ -159,6 +159,22 @@ at the console or in the game.
 
 `/mcmcp reload` also re-checks everyone's companion access.
 
+## `/mcmcp chunks`
+
+```
+/mcmcp chunks [release <id>|release all]
+```
+
+What MCMCP holds loaded, and how the server is doing:
+- the chunk-loading state (`ok`, `throttled` or `paused`), with mean tick time and heap after
+  garbage collection;
+- held chunks against `chunks.maxHeldChunks`;
+- loads in the last minute, and requests waiting;
+- each hold, with its owner and time left.
+
+`release <id>` ends one hold, and `release all` ends every hold. The chunks MCMCP loaded are unloaded
+straight away. See [Chunk loading](tools.md#chunk-loading).
+
 ## `/mcmcp restart`
 
 Stops both endpoints, re-reads the config, and starts whichever should be running. Then prints

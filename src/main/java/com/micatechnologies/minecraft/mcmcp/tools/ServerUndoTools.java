@@ -104,6 +104,7 @@ public final class ServerUndoTools {
         // What has changed since the write, read before anything is written.
         final JsonArray changedAt = new JsonArray();
         final int[] changed = {0};
+        final int[] unloaded = {0};
         for (int from = 0; from < total; from += batch) {
             final int start = from;
             final int end = Math.min(total, from + batch);
@@ -112,6 +113,10 @@ public final class ServerUndoTools {
                 IBlockState[] states = UndoPoints.resolveStates(record);
                 for (int i = start; i < end; i++) {
                     BlockPos pos = new BlockPos(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+                    if (!world.isBlockLoaded(pos)) {
+                        unloaded[0]++;
+                        continue;
+                    }
                     if (world.getBlockState(pos) != states[after[i]]) {
                         changed[0]++;
                         if (changedAt.size() < MAX_LISTED_CONFLICTS) {
@@ -121,6 +126,12 @@ public final class ServerUndoTools {
                 }
                 return null;
             });
+        }
+        if (unloaded[0] > 0) {
+            // Restoring would load those chunks, or generate them. Hold the area first.
+            return ToolResult.error(unloaded[0] + " of the " + total + " blocks this would put back are in "
+                + "chunks that are not loaded, so nothing was restored. Hold the area with server_keep_loaded "
+                + "(op 'list' gives this point's bounds) and restore again.");
         }
         if (changed[0] > 0 && !force) {
             return ToolResult.error(changed[0] + " of the " + total + " blocks this would put back "

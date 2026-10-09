@@ -405,6 +405,12 @@ public final class ServerWorldTools {
                     public JsonObject call() {
                         WorldServer world = requireWorld(dimension);
                         BlockPos pos = new BlockPos(x, y, z);
+                        if (!world.isBlockLoaded(pos)) {
+                            // Writing would load the chunk, or generate it; never this tool's call.
+                            JsonObject refused = new JsonObject();
+                            refused.addProperty("unloaded", true);
+                            return refused;
+                        }
                         JsonObject previous = GameJson.block(world, pos);
                         UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
 
@@ -432,6 +438,11 @@ public final class ServerWorldTools {
                 if (recorder != null) {
                     ServerUndoTools.finish(context, recorder, "server_set_block", dimension, null, null,
                         result, null);
+                }
+                if (result.has("unloaded")) {
+                    return ToolResult.error("x=" + x + ", z=" + z + " is in a chunk that is not loaded, so nothing "
+                        + "was written. Hold it with server_keep_loaded first, or write with server_set_blocks "
+                        + "and load: true.");
                 }
                 return ToolResult.structured(result);
             })

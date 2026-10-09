@@ -43,7 +43,7 @@ public final class CompanionPolicy implements CallFilter {
     /** Every class a player can be granted, in the order they are checked and listed. */
     public static final Set<String> ALL_CLASSES = Collections.unmodifiableSet(new LinkedHashSet<>(
         java.util.Arrays.asList(Principal.CLASS_READ, Principal.CLASS_WRITE, Principal.CLASS_COMMAND,
-            Principal.CLASS_OTHERS, Principal.CLASS_CONSOLE)));
+            Principal.CLASS_LOAD, Principal.CLASS_OTHERS, Principal.CLASS_CONSOLE)));
 
     /** Tool name to the class that unlocks it. Anything absent is never served. */
     static final Map<String, String> CLASSES = new HashMap<>();
@@ -64,6 +64,9 @@ public final class CompanionPolicy implements CallFilter {
         }
         for (String command : new String[] {"server_run_command", "server_tell_player"}) {
             CLASSES.put(command, Principal.CLASS_COMMAND);
+        }
+        for (String load : new String[] {"server_keep_loaded", "server_release_loaded"}) {
+            CLASSES.put(load, Principal.CLASS_LOAD);
         }
         PLAYER_ARGUMENTS.put("server_run_command", "asPlayer");
         PLAYER_ARGUMENTS.put("server_player_state", "player");
@@ -114,6 +117,13 @@ public final class CompanionPolicy implements CallFilter {
             return "Your companion access on this server does not include '" + callClass + "' calls, "
                 + "which '" + tool.getName() + "' is. An operator can grant the " + NODE_PREFIX + callClass
                 + " permission node.";
+        }
+        JsonElement load = arguments.get("load");
+        if (load != null && load.isJsonPrimitive() && load.getAsJsonPrimitive().isBoolean() && load.getAsBoolean()
+            && !principal.has(Principal.CLASS_LOAD)) {
+            return "load: true needs '" + Principal.CLASS_LOAD + "' access, which yours does not include. An "
+                + "operator can grant the " + NODE_PREFIX + Principal.CLASS_LOAD + " permission node; or leave "
+                + "load out to read and write only chunks that are already loaded.";
         }
         return pinPlayer(principal, tool.getName(), arguments);
     }

@@ -29,6 +29,8 @@ public final class Principal {
     public static final String CLASS_WRITE = "write";
     /** Running commands as oneself, and messaging players. */
     public static final String CLASS_COMMAND = "command";
+    /** Keeping chunks loaded: server_keep_loaded, and load: true on a read or write. */
+    public static final String CLASS_LOAD = "load";
     /** Naming a player other than oneself in a tool that takes one. */
     public static final String CLASS_OTHERS = "others";
     /** Running a command with the server console's authority instead of one's own. */

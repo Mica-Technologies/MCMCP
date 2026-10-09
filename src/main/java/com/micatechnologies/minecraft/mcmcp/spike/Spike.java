@@ -48,6 +48,10 @@ public final class Spike {
         return t;
     });
 
+    // Artificial lag: each server tick sleeps this long until lagUntil.
+    public static volatile long lagMillis;
+    public static volatile long lagUntil;
+
     // Tick sampler
     private static volatile long tickStart;
     private static volatile long maxTickNanos;
@@ -124,6 +128,14 @@ public final class Spike {
         public void onTick(TickEvent.ServerTickEvent event) {
             if (event.phase == TickEvent.Phase.START) {
                 tickStart = System.nanoTime();
+                if (System.currentTimeMillis() < lagUntil && lagMillis > 0) {
+                    try {
+                        Thread.sleep(lagMillis);
+                    }
+                    catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
             }
             else if (tickStart != 0) {
                 long d = System.nanoTime() - tickStart;

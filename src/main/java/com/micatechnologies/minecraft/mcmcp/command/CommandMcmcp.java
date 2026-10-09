@@ -39,7 +39,7 @@ import net.minecraft.util.text.event.HoverEvent;
 public class CommandMcmcp extends CommandBase {
 
     private static final List<String> SUBCOMMANDS =
-        Arrays.asList("status", "link", "tools", "sessions", "token", "reload", "restart", "stop", "companion");
+        Arrays.asList("status", "link", "tools", "sessions", "token", "reload", "restart", "stop", "companion", "chunks");
 
     private static final List<String> COMPANION_SUBCOMMANDS =
         Arrays.asList("status", "list", "allow", "revoke", "on", "off");
@@ -51,7 +51,7 @@ public class CommandMcmcp extends CommandBase {
 
     @Override
     public String getUsage(ICommandSender sender) {
-        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop|companion>";
+        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop|companion|chunks>";
     }
 
     /**
@@ -105,6 +105,9 @@ public class CommandMcmcp extends CommandBase {
                 break;
             case "companion":
                 handleCompanion(server, sender, args);
+                break;
+            case "chunks":
+                handleChunks(sender, args);
                 break;
             case "reload":
                 McmcpConfig.reload();
@@ -197,6 +200,37 @@ public class CommandMcmcp extends CommandBase {
                 break;
             default:
                 throw new WrongUsageException("/mcmcp companion <status|list|allow|revoke|on|off>");
+        }
+    }
+
+    /**
+     * {@code /mcmcp chunks [release <id>|all]}: what MCMCP holds loaded, how the server is doing, and a
+     * way for an operator to give any of it back.
+     */
+    private void handleChunks(ICommandSender sender, String[] args) {
+        if (args.length >= 3 && "release".equalsIgnoreCase(args[1])) {
+            if ("all".equalsIgnoreCase(args[2])) {
+                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.releaseAll();
+                reply(sender, TextFormatting.GREEN, "Released every chunk MCMCP held.");
+            }
+            else {
+                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.release(args[2]);
+                reply(sender, TextFormatting.GREEN, "Released " + args[2] + ".");
+            }
+            return;
+        }
+        com.google.gson.JsonObject status = com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.status(null);
+        reply(sender, TextFormatting.AQUA, "MCMCP chunk loading: " + status.get("state").getAsString()
+            + " (mean tick " + status.get("meanTickMs").getAsDouble() + " ms, heap after GC "
+            + status.get("heapPercentAfterGc").getAsLong() + "%)");
+        reply(sender, TextFormatting.WHITE, "  Holding " + status.get("heldChunks").getAsInt() + " of "
+            + status.get("maxHeldChunks").getAsInt() + " chunks; " + status.get("loadsLastMinute").getAsInt()
+            + " loads in the last minute; " + status.get("waitingRequests").getAsInt() + " waiting");
+        for (com.google.gson.JsonElement entry : status.getAsJsonArray("holds")) {
+            com.google.gson.JsonObject hold = entry.getAsJsonObject();
+            reply(sender, TextFormatting.GRAY, "  " + hold.get("id").getAsString() + ": "
+                + hold.get("chunks").getAsInt() + " chunks in dim " + hold.get("dimension").getAsInt() + " for "
+                + hold.get("owner").getAsString() + ", " + hold.get("expiresInSeconds").getAsLong() + " s left");
         }
     }
 
