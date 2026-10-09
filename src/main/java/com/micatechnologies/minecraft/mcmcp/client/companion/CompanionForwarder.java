@@ -7,6 +7,7 @@ import com.micatechnologies.minecraft.mcmcp.companion.CompanionProtocol;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpc;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
@@ -79,8 +80,17 @@ final class CompanionForwarder extends McpDispatcher {
             // The local session tracks the handshake too: the transports read its state.
             session.markInitialized();
         }
+        // A companion call is an agent driving this game too: keep it unthrottled, and show the call on
+        // the in-game activity line, as the client's own dispatcher does for its calls.
+        long activity = 0L;
+        if (McpProtocol.METHOD_TOOLS_CALL.equals(method)) {
+            ToolActivity.noteCall(McmcpSide.CLIENT);
+            activity = ToolActivity.callStarted(McmcpSide.SERVER,
+                Json.getString(Json.getObjectOrEmpty(message, "params"), "name", "server tool"));
+        }
         sender.accept(CompanionHandshake.bytes(envelope(session.getId(), message)));
         if (reply == null) {
+            ToolActivity.callEnded(activity);
             return null;
         }
         try {
@@ -104,6 +114,7 @@ final class CompanionForwarder extends McpDispatcher {
         }
         finally {
             pending.remove(key);
+            ToolActivity.callEnded(activity);
         }
     }
 
