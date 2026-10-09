@@ -454,6 +454,27 @@ Limited to `chunks.maxHeldChunksPerCaller` (512, about 360 × 360 blocks) per ca
 Ends a hold. Chunks MCMCP loaded are unloaded straight away unless a player can see them or
 another hold still needs them.
 
+#### `server_get_tile_entities`
+
+:material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `blocks`, `keys`, `limit`, `cursor`, `load`
+
+Every tile entity in a box, with its **server-side** NBT, in one call. Use it for checking a
+district's signal controllers, alarm devices or elevator controllers. The client's copy of a tile
+entity can lag the server's by minutes.
+
+- `blocks` filters by an id (`csm:controller`), a namespace (`csm:`) or a prefix (`csm:signal_*`).
+- `keys` keeps only the named NBT fields, as dot paths (`tcCp`, `display.Name`). A path through a
+  list applies to every element (`links.x`). Without `keys`, a tag over 8 KB lists its keys
+  instead.
+- The result is paged in a fixed order. When `next` is present, call again with
+  `cursor: next`. `matched` is the total.
+- Unloaded chunks appear in the `chunks` block. `load: true` reads them.
+
+```json
+{"matched": 28, "returned": 28, "tileEntities": [{"x": 2310, "y": 64, "z": -540,
+ "block": "csm:controller", "nbt": {"tcCp": 3, "tcFm": ""}}], "chunks": {...}}
+```
+
 #### `server_find_blocks`
 
 :material-eye: Read-only · `block`, `x`, `y`, `z` required

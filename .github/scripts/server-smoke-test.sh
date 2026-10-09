@@ -511,8 +511,19 @@ echo "==> server_run_commands: many commands, one structured reply"
 RUN_BODY="$(mcp_call 52 server_run_commands "{\"commands\":[\"setblock ${PX} $((PY + 1)) ${PZ} minecraft:glowstone\",\"setblock 0 300 0 minecraft:stone\",\"say batch done\"]}")" \
   || mcp_failure "server_run_commands failed: ${RUN_BODY}"
 case "$RUN_BODY" in
-  *'"ran":3'*'"succeeded":2'*'"failed":1'*) echo "    3 run, the out-of-world one reported as failed" ;;
+  *'"ran":3'*'"i":1,"succeeded":false'*) echo "    3 run, the out-of-world one reported as failed" ;;
   *) mcp_failure "server_run_commands did not report per command: ${RUN_BODY}" ;;
+esac
+
+echo "==> Tile entities: one call reads a box's, filtered, projected and paged"
+TX=$((SPAWN_X + 12)); TY=$((UNDO_Y + 8)); TZ=$((SPAWN_Z + 12))
+mcp_call 53 server_set_blocks "{\"mode\":\"palette\",\"palette\":[\"minecraft:chest\",{\"block\":\"minecraft:standing_sign\",\"nbt\":\"{Text1:\\\"{\\\\\\\"text\\\\\\\":\\\\\\\"Smoke\\\\\\\"}\\\"}\"}],\"origin\":{\"x\":${TX},\"y\":${TY},\"z\":${TZ}},\"cells\":[0,0,0,0,2,0,0,0,4,0,0,1]}" > /dev/null \
+  || mcp_failure "placing tile entities failed"
+TE_BODY="$(mcp_call 54 server_get_tile_entities "{\"x\":${TX},\"y\":${TY},\"z\":${TZ},\"toX\":$((TX + 4)),\"toY\":${TY},\"toZ\":${TZ},\"blocks\":[\"minecraft:chest\"],\"keys\":[\"id\"],\"limit\":1}")" \
+  || mcp_failure "server_get_tile_entities failed: ${TE_BODY}"
+case "$TE_BODY" in
+  *'"matched":2'*'"returned":1'*'"next":1'*) echo "    2 chests matched, paged one at a time, the sign filtered out" ;;
+  *) mcp_failure "server_get_tile_entities did not filter or page: ${TE_BODY}" ;;
 esac
 
 echo "==> Chunk loading: a write far outside the world generates nothing"
