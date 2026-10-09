@@ -13,6 +13,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpPrompt;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpResource;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.RequestJournal;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
@@ -44,6 +45,10 @@ public class McpDispatcher {
     private final String instructions;
     private volatile EndpointAddress address = EndpointAddress.NONE;
 
+    /** Where each tool call is recorded as it starts and ends; null when nothing records. */
+    @Nullable
+    private volatile RequestJournal journal;
+
     public McpDispatcher(McmcpSide side, GameThreadBridge gameThread, long gameThreadTimeoutMillis,
                          String instructions) {
         this.side = side;
@@ -62,6 +67,16 @@ public class McpDispatcher {
      */
     public void setAddress(EndpointAddress address) {
         this.address = address;
+    }
+
+    /** Gives this dispatcher its request journal. Set once during wiring, like {@link #setAddress}. */
+    public void setJournal(@Nullable RequestJournal journal) {
+        this.journal = journal;
+    }
+
+    @Nullable
+    public RequestJournal getJournal() {
+        return journal;
     }
 
     /**
@@ -283,28 +298,54 @@ public class McpDispatcher {
 
         long activity = ToolActivity.callStarted(side, name);
         context.trackActivity(activity);
+        RequestJournal recorder = journal;
+        long started = System.currentTimeMillis();
+        if (recorder != null) {
+            recorder.start(activity, name, arguments,
+                session.isOrchestratorLink() ? "orchestrator" : session.describeClient(), null, started);
+        }
+        String status = "exception";
+        JsonObject reply = null;
+        ToolResult result = null;
         try {
-            ToolResult result = tool.call(context);
-            return withSteeringNote(session, result.toJson(session.getProtocolVersion()));
+            result = tool.call(context);
+            status = result.isError() ? "error" : "ok";
+            reply = withSteeringNote(session, result.toJson(session.getProtocolVersion()));
+            return reply;
         }
         catch (JsonRpcException e) {
             // Cancellation and timeouts stay protocol errors — the client's plumbing needs to see
             // those. Everything else that a handler threw describes a failed *action*, which per
             // spec belongs in the result so the model can read it and adapt.
-            if (e.getCode() == JsonRpcException.REQUEST_CANCELLED
-                || e.getCode() == JsonRpcException.REQUEST_TIMED_OUT) {
+            if (e.getCode() == JsonRpcException.REQUEST_CANCELLED) {
+                status = "cancelled";
                 throw e;
             }
-            return ToolResult.error(e.getMessage()).toJson(session.getProtocolVersion());
+            if (e.getCode() == JsonRpcException.REQUEST_TIMED_OUT) {
+                status = "timeout";
+                throw e;
+            }
+            status = "error";
+            reply = ToolResult.error(e.getMessage()).toJson(session.getProtocolVersion());
+            return reply;
         }
         catch (Exception e) {
             Mcmcp.LOGGER.error("MCMCP tool '" + name + "' threw", e);
             String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            return ToolResult.error("Tool '" + name + "' failed: " + detail)
+            reply = ToolResult.error("Tool '" + name + "' failed: " + detail)
                 .toJson(session.getProtocolVersion());
+            return reply;
         }
         finally {
             ToolActivity.callEnded(activity);
+            if (recorder != null && recorder.isEnabled()) {
+                long now = System.currentTimeMillis();
+                // A second serialisation, paid only while the journal is on: the transports write
+                // the reply themselves and threading a byte count back from each is not worth it.
+                long bytes = reply == null ? -1L : Json.write(reply).length();
+                recorder.end(activity, status, now - started, bytes,
+                    result == null ? null : result.getStructuredContent(), context.timingNotes(), now);
+            }
         }
     }
 

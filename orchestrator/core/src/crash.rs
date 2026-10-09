@@ -11,6 +11,10 @@
 //! Two files are worth finding. Minecraft writes `crash-reports/crash-<time>-<side>.txt` for anything
 //! its own handler catches; the JVM writes `hs_err_pid<pid>.log` into the working directory when the
 //! process dies underneath Minecraft — a native crash, or an allocation failure the game never saw.
+//!
+//! A third, when the game keeps one: MCMCP's request journal (`mcmcp/journal/<side>-requests.log`),
+//! which says which tool call was running when the process went. A game can die with neither of the
+//! other two files, and then the journal is the only thing that rules MCMCP in or out.
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -99,6 +103,83 @@ fn describe(text: &str) -> (Option<String>, Option<String>) {
     (description, exception)
 }
 
+/// The calls the game's request journal recorded as started and never finished, for the run that
+/// `pid` was.
+///
+/// Reads both sides' journals. Only a run whose open line names `pid` counts: the journal outlives
+/// the process, and a run from before this session must not be blamed for its end. `None` when the
+/// game keeps no journal (it is off by default on a client), or none of it is this process's.
+pub fn journal_last_run(game_directory: &Path, pid: Option<i64>) -> Option<Value> {
+    let pid = pid?;
+    let mut sides = Vec::new();
+    for side in ["client", "server"] {
+        let path = game_directory
+            .join("mcmcp")
+            .join("journal")
+            .join(format!("{side}-requests.log"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(run) = scan_journal(&text, pid) {
+            sides.push(json!({
+                "side": side,
+                "endedCleanly": run.ended_cleanly,
+                "unfinishedCount": run.unfinished.len(),
+                // The newest is the one that matters; the rest are counted, not listed.
+                "lastUnfinished": run.unfinished.last(),
+                "path": path.to_string_lossy(),
+            }));
+        }
+    }
+    if sides.is_empty() {
+        None
+    } else {
+        Some(Value::Array(sides))
+    }
+}
+
+struct JournalRun {
+    ended_cleanly: bool,
+    unfinished: Vec<Value>,
+}
+
+/// The last run in one journal file, if it was `pid`'s. A half-written last line is skipped.
+fn scan_journal(text: &str, pid: i64) -> Option<JournalRun> {
+    let lines: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .filter(Value::is_object)
+        .collect();
+    let open = lines
+        .iter()
+        .rposition(|line| line.get("ev").and_then(Value::as_str) == Some("open"))?;
+    if lines[open].get("pid").and_then(Value::as_i64) != Some(pid) {
+        return None;
+    }
+    let mut running: Vec<(i64, Value)> = Vec::new();
+    let mut ended_cleanly = false;
+    for line in &lines[open + 1..] {
+        let id = line.get("id").and_then(Value::as_i64).unwrap_or(-1);
+        match line.get("ev").and_then(Value::as_str) {
+            Some("start") => running.push((
+                id,
+                json!({
+                    "tool": line.get("tool"),
+                    "startedAt": line.get("t"),
+                    "args": line.get("args"),
+                }),
+            )),
+            Some("end") => running.retain(|(started, _)| *started != id),
+            Some("close") => ended_cleanly = true,
+            _ => {}
+        }
+    }
+    Some(JournalRun {
+        ended_cleanly,
+        unfinished: running.into_iter().map(|(_, call)| call).collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +245,43 @@ mod tests {
     #[test]
     fn a_report_with_no_description_line_is_still_listed_without_one() {
         assert_eq!(describe("nothing useful\n"), (None, None));
+    }
+    #[test]
+    fn a_call_the_journal_saw_start_and_never_end_is_reported_for_that_process() {
+        let directory = scratch("journal");
+        std::fs::create_dir_all(directory.join("mcmcp/journal")).unwrap();
+        std::fs::write(
+            directory.join("mcmcp/journal/client-requests.log"),
+            concat!(
+                "{\"t\":\"a\",\"ev\":\"open\",\"pid\":41}\n",
+                "{\"t\":\"b\",\"ev\":\"start\",\"id\":1,\"tool\":\"old\"}\n",
+                "{\"t\":\"c\",\"ev\":\"open\",\"pid\":42}\n",
+                "{\"t\":\"d\",\"ev\":\"start\",\"id\":1,\"tool\":\"client_wait\"}\n",
+                "{\"t\":\"e\",\"ev\":\"end\",\"id\":1,\"status\":\"ok\"}\n",
+                "{\"t\":\"f\",\"ev\":\"start\",\"id\":2,\"tool\":\"client_get_blocks\"}\n",
+                "{\"t\":\"g\",\"ev\":\"end\",\"id\":2,\"sta",
+            ),
+        )
+        .unwrap();
+
+        let runs = journal_last_run(&directory, Some(42)).expect("this process's run");
+        let client = &runs[0];
+        assert_eq!(client["side"], "client");
+        assert_eq!(client["endedCleanly"], false);
+        assert_eq!(client["unfinishedCount"], 1);
+        assert_eq!(client["lastUnfinished"]["tool"], "client_get_blocks");
+    }
+
+    #[test]
+    fn a_journal_from_another_process_is_not_blamed() {
+        let directory = scratch("journal-other");
+        std::fs::create_dir_all(directory.join("mcmcp/journal")).unwrap();
+        std::fs::write(
+            directory.join("mcmcp/journal/server-requests.log"),
+            "{\"t\":\"a\",\"ev\":\"open\",\"pid\":7}\n{\"t\":\"b\",\"ev\":\"start\",\"id\":1,\"tool\":\"x\"}\n",
+        )
+        .unwrap();
+        assert!(journal_last_run(&directory, Some(8)).is_none());
+        assert!(journal_last_run(&directory, None).is_none());
     }
 }

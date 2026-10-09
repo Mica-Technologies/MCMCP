@@ -1111,11 +1111,14 @@ impl Router {
             directory.and_then(|directory| crate::crash::newest_crash_report(directory, session.since()));
         let jvm_error_log =
             directory.and_then(|directory| crate::crash::jvm_error_log(directory, session.info.pid));
+        let journal =
+            directory.and_then(|directory| crate::crash::journal_last_run(directory, session.info.pid));
         Some(json!({
             "endedSecondsAgo": ended_at.elapsed().map(|age| age.as_secs()).unwrap_or(0),
             "pid": session.info.pid,
             "crashReport": crash_report.map(|report| report.to_json()),
             "jvmErrorLog": jvm_error_log.map(|path| path.to_string_lossy().to_string()),
+            "requestJournal": journal,
         }))
     }
 

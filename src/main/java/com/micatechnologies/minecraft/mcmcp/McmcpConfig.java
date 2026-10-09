@@ -49,6 +49,7 @@ public class McmcpConfig {
     private static final String CATEGORY_ORCHESTRATOR = "orchestrator";
     private static final String CATEGORY_DISPLAY = "display";
     private static final String CATEGORY_UNDO = "undo";
+    private static final String CATEGORY_JOURNAL = "journal";
 
     /**
      * Dev-launch overrides injected by {@code addon.gradle}.
@@ -102,6 +103,17 @@ public class McmcpConfig {
     private static boolean allowProcessControl = true;
     private static Set<String> blockedCommands = Collections.emptySet();
 
+    // Request journal
+    private static boolean journalEnabled = false;
+    private static int journalMaxFileMb = 5;
+    private static int journalFiles = 3;
+
+    /**
+     * Whether this is a dedicated server, decided once at load. Several defaults differ there: a
+     * server operator gets the safe choice for a machine other people connect to.
+     */
+    private static boolean dedicatedServer;
+
     // Identity
     private static String instanceId = "";
     private static String instanceSecret = "";
@@ -143,6 +155,7 @@ public class McmcpConfig {
         File configDir = configFile == null ? null : configFile.getParentFile();
         gameDirectory = configDir == null ? null : configDir.getParentFile();
 
+        dedicatedServer = net.minecraftforge.fml.common.FMLCommonHandler.instance().getSide().isServer();
         configuration = new Configuration(configFile);
         configuration.load();
         read();
@@ -257,6 +270,19 @@ public class McmcpConfig {
                 + "each is a file of its own.");
         maxUndoPoints = configuration.getInt("maxUndoPoints", CATEGORY_UNDO, 50, 1, 1000,
             "How many undo points each world keeps. The oldest go first.");
+
+        // Request journal
+        journalEnabled = configuration.getBoolean("enabled", CATEGORY_JOURNAL, dedicatedServer,
+            "Record each tool call as it starts and as it ends, one line each, in "
+                + "mcmcp/journal/<side>-requests.log. After a crash, game_health's previousRun names the "
+                + "calls that started and never finished. Arguments are summarised, never stored whole. "
+                + "On by default on a dedicated server, where it is also the record of what was done and "
+                + "by whom; off by default on a client. Takes effect at once.");
+        journalMaxFileMb = configuration.getInt("maxFileMB", CATEGORY_JOURNAL, 5, 1, 100,
+            "Size at which the journal starts a new file.");
+        journalFiles = configuration.getInt("files", CATEGORY_JOURNAL, 3, 1, 20,
+            "How many journal files are kept, the current one included. The oldest goes when a new one "
+                + "starts; nothing is removed by age.");
 
         // Orchestrator link
         orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR, true,
@@ -580,6 +606,22 @@ public class McmcpConfig {
 
     public static int getMaxLogLines() {
         return maxLogLines;
+    }
+
+    public static boolean isJournalEnabled() {
+        return journalEnabled;
+    }
+
+    public static long getJournalMaxFileBytes() {
+        return journalMaxFileMb * 1024L * 1024L;
+    }
+
+    public static int getJournalFiles() {
+        return journalFiles;
+    }
+
+    public static boolean isDedicatedServer() {
+        return dedicatedServer;
     }
 
     public static boolean isOrchestratorLinkEnabled() {

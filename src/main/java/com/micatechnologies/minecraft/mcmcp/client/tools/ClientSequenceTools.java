@@ -355,6 +355,7 @@ public final class ClientSequenceTools {
         entry.addProperty("tool", step.tool.getName());
 
         ToolResult result;
+        long stepStart = System.currentTimeMillis();
         try {
             result = step.tool.call(context.forPart(step.arguments, step.index + STEP_START, total,
                 step.tool.getName()));
@@ -371,6 +372,12 @@ public final class ClientSequenceTools {
             String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             result = ToolResult.error("Tool '" + step.tool.getName() + "' failed: " + detail);
         }
+
+        // For the request journal: a client_wait is named by what it waited for, since a chunk wait
+        // and a world load are different costs.
+        String waitedFor = Json.getString(step.arguments, "waitFor");
+        context.noteTiming(waitedFor == null ? step.tool.getName() : step.tool.getName() + ":" + waitedFor,
+            System.currentTimeMillis() - stepStart);
 
         JsonObject payload = result.getStructuredContent();
         if (payload == null) {

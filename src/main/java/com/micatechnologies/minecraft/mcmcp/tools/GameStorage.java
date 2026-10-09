@@ -28,6 +28,7 @@ public final class GameStorage {
     public static final String SCREENSHOTS = "screenshots";
     public static final String UNDO = "undo";
     public static final String MARKS = "marks";
+    public static final String JOURNAL = "journal";
 
     public static final String[] KINDS = {DUMPS, SCREENSHOTS, UNDO, MARKS};
 
@@ -69,6 +70,12 @@ public final class GameStorage {
         rows.add(screenshots(game).toJson(SCREENSHOTS, "Screenshots and maps MCMCP named"));
         rows.add(undo(game).toJson(UNDO, "Undo points"));
         rows.add(marks(game).toJson(MARKS, "Marks"));
+        // Reported, not expirable: the journal rotates itself by size and keeps a fixed number of
+        // files, like the orchestrator's own logs, and it is the record a crash is read from.
+        JsonObject journal = journal(game).toJson(JOURNAL, "Request journal");
+        journal.addProperty("expirable", false);
+        journal.addProperty("note", "Rotates by size; journal.files sets how many files are kept");
+        rows.add(journal);
         return rows;
     }
 
@@ -125,6 +132,14 @@ public final class GameStorage {
     private static Usage dumps(File game) {
         Usage usage = new Usage();
         for (File file : files(new File(game, "mcmcp/dumps"))) {
+            usage.add(file.length(), file.lastModified());
+        }
+        return usage;
+    }
+
+    private static Usage journal(File game) {
+        Usage usage = new Usage();
+        for (File file : files(new File(game, "mcmcp/journal"))) {
             usage.add(file.length(), file.lastModified());
         }
         return usage;

@@ -90,8 +90,19 @@ class GameStorageTest {
     void anEmptyGameFolderReportsNothingRatherThanFailing() throws IOException {
         File game = Files.createTempDirectory("mcmcp-storage").toFile();
         JsonArray rows = GameStorage.usage(game);
-        assertEquals(4, rows.size());
+        assertEquals(5, rows.size());
         assertEquals(0, row(rows, "dumps").get("items").getAsInt());
         assertFalse(row(rows, "dumps").has("oldestMs"));
+    }
+
+    @Test
+    void theJournalIsReportedButNeverOfferedForExpiry() throws IOException {
+        File game = Files.createTempDirectory("mcmcp-storage").toFile();
+        file(new File(game, "mcmcp/journal"), "client-requests.log", 300, NOW - DAY);
+        file(new File(game, "mcmcp/journal"), "client-requests.log.1", 200, NOW - 2 * DAY);
+        JsonObject journal = row(GameStorage.usage(game), "journal");
+        assertEquals(500, journal.get("bytes").getAsLong());
+        assertEquals(2, journal.get("items").getAsInt());
+        assertFalse(journal.get("expirable").getAsBoolean());
     }
 }

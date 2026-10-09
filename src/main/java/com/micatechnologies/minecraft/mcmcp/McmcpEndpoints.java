@@ -2,6 +2,8 @@ package com.micatechnologies.minecraft.mcmcp;
 
 import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
+import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
+import com.micatechnologies.minecraft.mcmcp.mcp.RequestJournal;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.link.LinkSettings;
 import com.micatechnologies.minecraft.mcmcp.protocol.EndpointAddress;
@@ -26,7 +28,65 @@ import net.minecraftforge.fml.common.Loader;
  */
 public final class McmcpEndpoints {
 
+    /** One journal per side for the life of the process, so a restarted endpoint keeps writing the same run. */
+    private static final java.util.Map<McmcpSide, RequestJournal> JOURNALS = new java.util.EnumMap<>(McmcpSide.class);
+
     private McmcpEndpoints() {
+    }
+
+    /**
+     * The request journal for {@code side}, opened on first use.
+     *
+     * <p>Process-wide rather than per endpoint: an endpoint restarts with {@code /mcmcp restart} and
+     * a singleplayer server endpoint comes and goes with each world, but a crash is a property of the
+     * process, and the open line that {@code previousRun} looks for should mark the process starting.
+     */
+    public static synchronized RequestJournal journal(McmcpSide side) {
+        RequestJournal journal = JOURNALS.get(side);
+        if (journal == null) {
+            File directory = new File(McmcpPaths.gameDirectory(), "mcmcp/journal");
+            journal = new RequestJournal(directory, side.id(), new RequestJournal.Settings() {
+                @Override
+                public boolean enabled() {
+                    return McmcpConfig.isJournalEnabled();
+                }
+
+                @Override
+                public long maxFileBytes() {
+                    return McmcpConfig.getJournalMaxFileBytes();
+                }
+
+                @Override
+                public int files() {
+                    return McmcpConfig.getJournalFiles();
+                }
+            });
+            final File file = journal.getFile();
+            journal.setOnFailure(() -> Mcmcp.LOGGER.warn("MCMCP stopped writing its request journal at "
+                + file + " after repeated write failures. Tool calls are no longer being recorded."));
+            journal.open(McmcpProcess.pid(), McmcpConstants.MOD_VERSION, System.currentTimeMillis());
+            JOURNALS.put(side, journal);
+        }
+        return journal;
+    }
+
+    /**
+     * Writes one side's clean-exit line, if its journal is open. The server side calls this when the
+     * server stops: on a dedicated server that is the process ending, and in singleplayer it is the
+     * world closing, after which the next world's first call opens a new run.
+     */
+    public static synchronized void closeJournal(McmcpSide side) {
+        RequestJournal journal = JOURNALS.get(side);
+        if (journal != null) {
+            journal.close(System.currentTimeMillis());
+        }
+    }
+
+    /** Writes each journal's clean-exit line. Called from the JVM shutdown hook. */
+    public static synchronized void closeJournals() {
+        for (RequestJournal journal : JOURNALS.values()) {
+            journal.close(System.currentTimeMillis());
+        }
     }
 
     /**
@@ -38,6 +98,7 @@ public final class McmcpEndpoints {
     public static McpEndpoint start(McmcpSide side, GameThreadBridge gameThread) {
         McpEndpointSettings settings = McmcpConfig.settingsFor(side);
         final McpEndpoint endpoint = new McpEndpoint(side, settings, gameThread);
+        endpoint.getDispatcher().setJournal(journal(side));
 
         final ReverseTransport link = McmcpConfig.isOrchestratorLinkEnabled()
             ? attachOrchestratorLink(side, endpoint) : null;

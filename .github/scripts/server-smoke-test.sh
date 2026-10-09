@@ -464,6 +464,31 @@ sed -i "s/B:allowWorldEdits=true/${WORLD_EDITS_WERE:-B:allowWorldEdits=false}/" 
 mcp_call 25 server_run_command '{"command":"mcmcp reload"}' >/dev/null
 
 # ---------------------------------------------------------------------------
+# Request journal
+#
+# On by default on a dedicated server. Every call above should be in it as a start and an end, and
+# game_health must say the journal is on, so an empty unfinished list is never a false all-clear.
+# ---------------------------------------------------------------------------
+
+JOURNAL_FILE="${RUN_DIR}/mcmcp/journal/server-requests.log"
+echo "==> Checking the request journal at ${JOURNAL_FILE}"
+if [ ! -s "$JOURNAL_FILE" ]; then
+  mcp_failure "no request journal at ${JOURNAL_FILE}; it should be on by default on a dedicated server"
+fi
+grep -q '"ev":"open"' "$JOURNAL_FILE" || mcp_failure "the journal has no open line"
+grep -q '"ev":"start".*"tool":"server_get_block"' "$JOURNAL_FILE" \
+  || mcp_failure "the journal has no start line for server_get_block"
+grep -q '"ev":"end".*"status":"ok"' "$JOURNAL_FILE" || mcp_failure "the journal has no successful end line"
+if grep -q '"blocks":\[' "$JOURNAL_FILE"; then
+  mcp_failure "the journal stored a block list whole; arguments must be summarised"
+fi
+HEALTH_BODY="$(mcp_call 29 game_health '{}')" || mcp_failure "game_health failed: ${HEALTH_BODY}"
+case "$HEALTH_BODY" in
+  *'previousRun'*'journal'*'enabled'*) echo "    journal is on, and game_health reports the previous run" ;;
+  *) mcp_failure "game_health did not report previousRun with the journal enabled: ${HEALTH_BODY}" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Orchestrator link
 # ---------------------------------------------------------------------------
 
@@ -585,6 +610,17 @@ if pgrep -f 'net.minecraft.server' > /dev/null 2>&1; then
   mcp_failure "server_stop answered but the server was still running ${stop_waited}s later"
 fi
 echo "    server exited after ${stop_waited}s"
+
+# A clean stop writes the journal's close line; a run without one is what previousRun calls unclean.
+# Written as the server stops, which can trail the reply by a moment where pgrep is unavailable.
+close_waited=0
+while [ "$close_waited" -lt 30 ] && ! tail -1 "$JOURNAL_FILE" | grep -q '"ev":"close"'; do
+  sleep 1
+  close_waited=$((close_waited + 1))
+done
+tail -1 "$JOURNAL_FILE" | grep -q '"ev":"close"' \
+  || mcp_failure "the journal's last line after a clean stop is not a close line: $(tail -1 "$JOURNAL_FILE")"
+echo "    the journal recorded a clean exit"
 
 shutdown_server
 rm -f "$LINK_RESULT"
