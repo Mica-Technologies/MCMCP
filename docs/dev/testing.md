@@ -233,9 +233,42 @@ reports now use `ClientStateTools.freshLookTarget`, which ray-traces from the cu
 `client_looking_at` still reports `objectMouseOver`, because that is what the game will actually act
 on and it is never stale when read standalone.
 
+## Companion end-to-end check
+
+The companion only exists when a player's client is connected to a server running MCMCP, so no
+headless check reaches it. `.github/scripts/companion-check.py` drives the whole path through a
+private orchestrator: a model's call, the orchestrator, the client's virtual `.server` endpoint, the
+game connection, the server's tools, and back. It checks:
+
+- the endpoint appears with `via: companion`;
+- the never-served tools are absent;
+- a hold, a compare-and-set write with an undo point, and change tracking that leaves the agent's own
+  write out;
+- commands running as the caller;
+- player-argument pinning;
+- release.
+
+It also prints the catalogue size.
+
+```bash
+# server: dev defaults, plus McmcpDev on the companion allowlist (config/mcmcp.cfg):
+#   companion { S:allowedPlayers < McmcpDev > }
+./gradlew runServer
+# client: joins it; its orchestrator.orchestratorPort set to the check's port
+DEV_USERNAME=McmcpDev ./gradlew runClient -PmcJoin=127.0.0.1:25565
+python .github/scripts/companion-check.py <state-dir> --link-port 26580
+```
+
+Use the isolated ports from [Testing the desktop app beside the one you use](#testing-the-desktop-app-beside-the-one-you-use)
+when a game and an orchestrator you use every day are running. **Never rebuild while either JVM is
+running.** A `runClient` recompiles into `build/classes`, and a running server that loads a class
+afterwards finds it gone: `NoClassDefFoundError`, in a packet handler, which FML answers by
+disconnecting the player.
+
 ## Adding tests
 
-Anything in `protocol/`, `mcp/` or `json/` should have a unit test. Anything that needs a world does
+Anything in `protocol/`, `mcp/`, `json/`, `perf/`, `companion/` (outside `server/`), or the pure classes
+of `chunkload/` and `regions/` should have a unit test. Anything that needs a world does
 not — put the assertion in the smoke test instead, where a real server can provide one.
 
 Test names are sentences describing the guarantee, not the method under test:
