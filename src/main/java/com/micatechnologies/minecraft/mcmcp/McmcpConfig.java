@@ -170,6 +170,8 @@ public class McmcpConfig {
     private static int maxPackedReadCells = 1_048_576;
     private static int maxSurfaceColumns = 262_144;
     private static int changeLogEntries = 262_144;
+    private static int maxWriteCells = 1_048_576;
+    private static int writeCellsPerMinutePerCaller = 1_000_000;
 
     private McmcpConfig() {
     }
@@ -362,6 +364,13 @@ public class McmcpConfig {
         changeLogEntries = configuration.getInt("changeLogEntries", CATEGORY_LIMITS, 262_144, 1024, 4_194_304,
             "How many block changes server_changes_since remembers; about 50 bytes each. Changes MCMCP makes "
                 + "itself are not stored. Takes effect when the server starts.");
+
+        maxWriteCells = configuration.getInt("maxWriteCells", CATEGORY_LIMITS, 1_048_576, 1024, 16_777_216,
+            "Most cells one palette-mode server_set_blocks call writes. Written in game-thread batches of "
+                + "maxBlockVolume.");
+        writeCellsPerMinutePerCaller = configuration.getInt("writeCellsPerMinutePerCaller", CATEGORY_LIMITS,
+            1_000_000, 1024, 100_000_000, "Most cells one caller (one player's agent, or the endpoint) writes "
+                + "with palette-mode server_set_blocks in any minute.");
 
         // Chunk loading
         configuration.setCategoryComment(CATEGORY_CHUNKS, "How MCMCP loads chunks that are not already in "
@@ -790,6 +799,14 @@ public class McmcpConfig {
 
     public static int getChangeLogEntries() {
         return changeLogEntries;
+    }
+
+    public static int getMaxWriteCells() {
+        return maxWriteCells;
+    }
+
+    public static int getWriteCellsPerMinutePerCaller() {
+        return writeCellsPerMinutePerCaller;
     }
 
     public static int getChunkLoadsPerTick() {

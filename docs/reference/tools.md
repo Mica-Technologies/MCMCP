@@ -683,6 +683,27 @@ one per layer. `batches` in the response says how many it took.
 **Undo.** Each call records what every block it changed was before, and names the record in
 `undoPoint`; `server_undo` puts it back. See below.
 
+**Palette mode.** `mode: "palette"` writes at district scale: up to `limits.maxWriteCells`
+(1,048,576) cells a call, applied in game-thread batches, with one result.
+
+| Argument | Notes |
+| --- | --- |
+| `palette` | Blocks the cells refer to by index: `"mod:block"`, `"mod:block:meta"`, `"mod:block meta"`, or `{block, metadata, nbt}` to set tile-entity data on every cell using that entry (one entry per distinct NBT). `"mcmcp:skip"` writes nothing. |
+| `origin` | `{x, y, z}` the cells are relative to. Default 0, 0, 0. |
+| `cells` | Flat numbers: `dx, dy, dz, paletteIndex` per cell, or five per cell with `expectPalette`. |
+| `indices`, `sizeX`, `sizeY`, `sizeZ` | A dense box instead of `cells`: indices packed exactly as `server_get_blocks` `encoding: "packed"` returns them. A packed read can be written back elsewhere as it is. |
+| `expect` | Write a cell only if it holds this block now. `"mod:block"` matches any metadata. |
+| `expectPalette` | Per-cell expectations: the fifth number of each cell indexes it, and `-1` means none. |
+| `onConflict` | `skip` (default) writes the rest; `abort` writes nothing if any cell conflicts. |
+| `skipIfTileEntity` | Leave cells holding a tile entity (signal heads, controllers, chests). |
+| `neighbourUpdates` | Default true. `false` still updates clients and lighting but notifies no neighbour. Use it for removing wire or track networks without each removal recalculating them. |
+
+The result counts `applied`, `unchanged`, `conflicts`, `skippedTileEntity`, `unloaded` and `failed`.
+`conflictList` holds the first 50 conflicts as `{pos, expected, actual}`, so a generator can see
+exactly which cells a person changed since it last read them, and leave them alone.
+Writes per caller are limited to `limits.writeCellsPerMinutePerCaller` (1,000,000) a minute. Past
+that, the result is a `busy` error with `retryAfterMs`.
+
 !!! warning "Direct writes bypass hooks"
 
     These do not fire block-place events. Claim protection, machinery callbacks and other mods'
@@ -815,6 +836,30 @@ Chat message to every connected player. Worth using before acting on someone's w
 #### `server_tell_player`
 
 Requires `permissions.allowChat` · `player`, `message` required
+
+#### `server_run_commands`
+
+:material-alert: Destructive · `commands` required · optional `asPlayer`, `stopOnError`, `allResults`, `load`
+
+Runs up to 10,000 commands in order in one call, with nothing sent to chat in between. It replaces
+scripts that teleport a player around a region and send commands through chat in groups. The
+result:
+
+```json
+{"commands": 301, "ran": 301, "succeeded": 300, "failed": 1, "ranAs": "server console",
+ "results": [{"i": 150, "succeeded": false, "result": 0, "output": ["Cannot place block outside of the world"]}]}
+```
+
+- **Results.** `results` lists the commands that failed, or all of them with `allResults`.
+- **Blocked commands.** A command on `permissions.blockedCommands` refuses the whole call before
+  anything runs.
+- **Undo.** `/fill` and `/clone` leave one undo point for the call.
+- **Tick time.** Commands run in game-thread slices of at most 25 ms, so a long list never holds
+  up a tick.
+- **Time limit.** A call that runs past two minutes stops and returns `nextIndex`.
+- **Loading.** `load: true` loads the chunks the commands' coordinates name. Relative coordinates
+  resolve against `asPlayer`, or against world spawn for the console.
+- **Through the companion,** commands run as you, as with [`server_run_command`](#server_run_command).
 
 ### Lifecycle
 
