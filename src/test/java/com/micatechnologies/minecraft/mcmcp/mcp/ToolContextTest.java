@@ -57,6 +57,23 @@ class ToolContextTest {
     }
 
     @Test
+    void an_endpoint_caller_is_refused_exactly_when_the_config_switch_is_off() {
+        ToolContext endpoint = context(new McpSession("s", 0L), new JsonObject());
+        assertEquals("edits are off", endpoint.refusal(Capability.WORLD_EDITS, false, "edits are off"));
+        assertNull(endpoint.refusal(Capability.WORLD_EDITS, true, "edits are off"));
+    }
+
+    @Test
+    void a_companion_caller_is_answered_from_their_grants_whatever_the_config_switch_says() {
+        McpSession session = new McpSession("s", 0L);
+        session.setPrincipal(Principal.companion("id", "Builder", java.util.Collections.singleton("write")));
+        ToolContext companion = context(session, new JsonObject());
+        assertNull(companion.refusal(Capability.WORLD_EDITS, false, "edits are off"));
+        String refusal = companion.refusal(Capability.COMMANDS, true, "commands are off");
+        assertEquals(true, refusal != null && refusal.contains("mcmcp.companion.command"), refusal);
+    }
+
+    @Test
     void progress_that_does_not_increase_is_not_sent() throws InterruptedException {
         // The spec has progress increase with every notification; a repeat at a step boundary is
         // what a strict client could treat as a fault.

@@ -421,8 +421,16 @@ public final class CompanionServer {
             refuse(peer, key, message, "You no longer have MCMCP companion access on this server.");
             return;
         }
+        boolean fresh = peer.existingSession(key) == null;
         final McpSession session = peer.session(key, McmcpConfig.getCompanionMaxSessionsPerPlayer());
         session.touch(System.currentTimeMillis());
+        if (fresh && !McpProtocol.METHOD_INITIALIZE.equals(JsonRpc.getMethod(message))) {
+            // A client session this server evicted (past maxSessionsPerPlayer) and the client still
+            // uses. It initialized long ago; treating the new one as initialized beats refusing every
+            // call on it with "not initialized", which the client cannot recover from.
+            session.applyInitialize(McpProtocol.LATEST_VERSION, new JsonObject(), new JsonObject());
+            session.markInitialized();
+        }
         final boolean toolCall = McpProtocol.METHOD_TOOLS_CALL.equals(JsonRpc.getMethod(message));
         if (toolCall && peer.runningCalls.incrementAndGet() > McmcpConfig.getCompanionMaxConcurrentCalls()) {
             peer.runningCalls.decrementAndGet();
