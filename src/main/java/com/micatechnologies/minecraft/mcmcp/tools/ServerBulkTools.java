@@ -609,11 +609,13 @@ public final class ServerBulkTools {
                                 item.addProperty("i", index);
                                 item.addProperty("succeeded", ok);
                                 item.addProperty("result", value);
-                                List<String> lines = new ArrayList<>(sender.getErrors());
+                                // A failure is reported to the sender both as an error and as output.
+                                Set<String> unique = new LinkedHashSet<>(sender.getErrors());
                                 if (thrown != null) {
-                                    lines.add(thrown);
+                                    unique.add(thrown);
                                 }
-                                lines.addAll(sender.getOutput());
+                                unique.addAll(sender.getOutput());
+                                List<String> lines = new ArrayList<>(unique);
                                 if (!lines.isEmpty()) {
                                     item.add("output", Json.arrayOfStrings(lines.size() > 5 ? lines.subList(0, 5) : lines));
                                 }
