@@ -468,6 +468,34 @@ esac
 # rather than at the next autosave.
 # ---------------------------------------------------------------------------
 
+echo "==> Region reads: packed and surface"
+PACKED_BODY="$(mcp_call 44 server_get_blocks "{\"x\":${SPAWN_X},\"y\":$((SPAWN_Y - 4)),\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 31)),\"toY\":$((SPAWN_Y + 3)),\"toZ\":$((SPAWN_Z + 31)),\"encoding\":\"packed\"}")" \
+  || mcp_failure "packed read failed: ${PACKED_BODY}"
+case "$PACKED_BODY" in
+  *'"encoding":"rle-varint+zlib+base64"'*'"count":8192'*) echo "    8,192 cells packed" ;;
+  *) mcp_failure "packed read did not return a packed index array: ${PACKED_BODY}" ;;
+esac
+SURFACE_BODY="$(mcp_call 45 server_get_blocks "{\"x\":${SPAWN_X},\"y\":255,\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 15)),\"toY\":0,\"toZ\":$((SPAWN_Z + 15)),\"mode\":\"surface\"}")" \
+  || mcp_failure "surface read failed: ${SURFACE_BODY}"
+case "$SURFACE_BODY" in
+  *'"mode":"surface"'*'"heights":'*) echo "    surface of 256 columns read" ;;
+  *) mcp_failure "surface read did not return heights: ${SURFACE_BODY}" ;;
+esac
+
+echo "==> Change tracking: MCMCP's own writes are not listed as someone else's"
+TOKEN_BODY="$(mcp_call 46 server_changes_since "{\"x\":${SPAWN_X},\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 15)),\"toZ\":$((SPAWN_Z + 15))}")" \
+  || mcp_failure "server_changes_since failed: ${TOKEN_BODY}"
+CHANGE_TOKEN="$(printf '%s' "$TOKEN_BODY" | grep -o '"token":"[0-9]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$CHANGE_TOKEN" ] || mcp_failure "no change token: ${TOKEN_BODY}"
+mcp_call 47 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:glass\",\"x\":$((SPAWN_X + 5)),\"y\":$((UNDO_Y + 4)),\"z\":$((SPAWN_Z + 5)),\"toX\":$((SPAWN_X + 6)),\"toZ\":$((SPAWN_Z + 6))}" > /dev/null \
+  || mcp_failure "the tracked write failed"
+SINCE_BODY="$(mcp_call 48 server_changes_since "{\"x\":${SPAWN_X},\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 15)),\"toZ\":$((SPAWN_Z + 15)),\"since\":\"${CHANGE_TOKEN}\"}")" \
+  || mcp_failure "server_changes_since with a token failed: ${SINCE_BODY}"
+case "$SINCE_BODY" in
+  *'"count":0'*'"overflow":false'*|*'"overflow":false'*'"count":0'*) echo "    MCMCP's write is not reported as an outside change" ;;
+  *) mcp_failure "change tracking listed MCMCP's own write: ${SINCE_BODY}" ;;
+esac
+
 echo "==> Chunk loading: a write far outside the world generates nothing"
 FAR_BODY="$(mcp_call 40 server_set_blocks '{"mode":"fill","block":"minecraft:glass","x":900000,"y":100,"z":900000,"toX":900001,"toZ":900001}')" \
   || mcp_failure "the far write failed: ${FAR_BODY}"

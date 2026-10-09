@@ -26,6 +26,25 @@ import javax.annotation.Nullable;
  */
 public class ToolContext {
 
+    /**
+     * Told when a tool's game-thread task starts and ends, on the game thread, with who it runs for:
+     * how the change tracker tells MCMCP's own writes from everyone else's without every tool having
+     * to say so.
+     */
+    public interface GameTaskObserver {
+
+        void enter(Principal principal);
+
+        void exit();
+    }
+
+    @Nullable
+    private static volatile GameTaskObserver gameTaskObserver;
+
+    public static void setGameTaskObserver(@Nullable GameTaskObserver observer) {
+        gameTaskObserver = observer;
+    }
+
     /** Distinct step kinds {@link #noteTiming} keeps; the journal line must stay small. */
     private static final int MAX_TIMING_KINDS = 16;
 
@@ -141,8 +160,19 @@ public class ToolContext {
                     ? "The Minecraft client is not ready to accept commands"
                     : "No Minecraft server is currently running");
         }
+        final GameTaskObserver observer = gameTaskObserver;
+        final Principal principal = getPrincipal();
+        Callable<T> observed = observer == null ? task : () -> {
+            observer.enter(principal);
+            try {
+                return task.call();
+            }
+            finally {
+                observer.exit();
+            }
+        };
         try {
-            return gameThread.callOnGameThread(task, gameThreadTimeoutMillis);
+            return gameThread.callOnGameThread(observed, gameThreadTimeoutMillis);
         }
         catch (JsonRpcException e) {
             throw e;

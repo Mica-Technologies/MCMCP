@@ -114,6 +114,7 @@ public class Mcmcp {
         proxy.init(event);
         CompanionServer.init();
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.init();
+        com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.init();
         com.micatechnologies.minecraft.mcmcp.spike.Spike.init(); // PHASE 0 SPIKE — remove
         proxy.registerSideSpecific();
     }
@@ -146,6 +147,7 @@ public class Mcmcp {
     public void serverStarting(FMLServerStartingEvent event) {
         event.registerServerCommand(new CommandMcmcp());
         CompanionServer.serverStarting(event.getServer());
+        com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStarting();
         reportServerExposure(event.getServer().isDedicatedServer());
 
         if (!McmcpConfig.isServerEndpointEnabled()) {
@@ -171,6 +173,7 @@ public class Mcmcp {
         }
         CompanionServer.serverStopping();
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.serverStopping();
+        com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStopping();
         // After the endpoint stops, so no call can start between the close line and the end.
         McmcpEndpoints.closeJournal(McmcpSide.SERVER);
     }

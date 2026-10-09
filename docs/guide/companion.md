@@ -73,7 +73,7 @@ A player needs **both**:
 
 | Node | Unlocks | Default |
 | --- | --- | --- |
-| `mcmcp.companion.read` | `server_get_block(s)`, `server_find_blocks`, `server_nearby_entities`, `server_world_info`, `server_list_players`, `server_player_state`, `server_player_inventory`, `server_tick_stats`, `mcmcp_endpoint_info`, `game_list_mods`, `game_health` | operators |
+| `mcmcp.companion.read` | `server_get_block(s)`, `server_changes_since`, `server_find_blocks`, `server_nearby_entities`, `server_world_info`, `server_list_players`, `server_player_state`, `server_player_inventory`, `server_tick_stats`, `mcmcp_endpoint_info`, `game_list_mods`, `game_health` | operators |
 | `mcmcp.companion.write` | `server_set_block(s)`, `server_undo`, `server_teleport_player` | operators |
 | `mcmcp.companion.command` | `server_run_command` as yourself, `server_tell_player` | operators |
 | `mcmcp.companion.load` | `server_keep_loaded`, `server_release_loaded`, and `load: true` on reads and writes | operators |
