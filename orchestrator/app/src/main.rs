@@ -486,15 +486,31 @@ async fn undo_restore(
     id: String,
     force: bool,
 ) -> Result<Value, String> {
-    let result = state
+    // A server that no longer loads chunks implicitly refuses a restore whose area nobody is near,
+    // and a button cannot hold the area first: ask it to load them. A game built before `load`
+    // existed refuses the unknown argument, and is asked again without it.
+    let mut result = state
         .router
         .call_as_person(
             &instance,
             "server_undo",
-            json!({ "op": "restore", "id": id, "force": force }),
+            json!({ "op": "restore", "id": id, "force": force, "load": true }),
         )
         .await
         .map_err(|error| error.to_string())?;
+    let refused_load =
+        result["isError"] == json!(true) && result.to_string().contains("Unknown argument 'load'");
+    if refused_load {
+        result = state
+            .router
+            .call_as_person(
+                &instance,
+                "server_undo",
+                json!({ "op": "restore", "id": id, "force": force }),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let label = label_of(&state, &instance);
     state.events.note_about(
         Actor::Human,

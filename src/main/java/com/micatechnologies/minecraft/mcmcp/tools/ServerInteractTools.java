@@ -186,8 +186,12 @@ public final class ServerInteractTools {
                     result.addProperty("changed", !result.get("before").equals(result.get("after"))
                         || (wasBeside != null && world.getBlockState(beside) != wasBeside.state)
                         || player.openContainer != before);
-                    if (recorder != null) {
+                    // Only what changed: a lever flip or a chest opened is not worth an undo point, and fifty of
+                    // them would push a real build's point out of the kept fifty.
+                    if (recorder != null && wasAt != null && world.getBlockState(pos) != wasAt.state) {
                         recorder.record(pos, wasAt, world.getBlockState(pos));
+                    }
+                    if (recorder != null && wasBeside != null && world.getBlockState(beside) != wasBeside.state) {
                         recorder.record(beside, wasBeside, world.getBlockState(beside));
                     }
 
