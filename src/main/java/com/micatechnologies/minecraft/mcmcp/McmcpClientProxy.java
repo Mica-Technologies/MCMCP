@@ -76,6 +76,7 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientPerformanceTools.register();
         ClientResources.register();
         ClientPrompts.register();
+        com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.register();
         com.micatechnologies.minecraft.mcmcp.client.spike.SpikeClient.register(); // PHASE 0 SPIKE — remove
         // Not a tool, and not optional: it is the way out of a hung game, which nothing on the client
         // thread can be.
@@ -106,6 +107,17 @@ public class McmcpClientProxy implements McmcpProxy {
     @Nullable
     public McpEndpoint getClientEndpoint() {
         return clientEndpoint;
+    }
+
+    @Override
+    @Nullable
+    public McpEndpoint getCompanionEndpoint() {
+        return com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.endpoint();
+    }
+
+    @Override
+    public com.google.gson.JsonObject companionStatus() {
+        return com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.status();
     }
 
     @Override

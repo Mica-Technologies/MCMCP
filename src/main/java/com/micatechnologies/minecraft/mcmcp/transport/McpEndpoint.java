@@ -58,11 +58,20 @@ public class McpEndpoint implements McpRegistry.ChangeListener {
     private volatile boolean started;
 
     public McpEndpoint(McmcpSide side, McpEndpointSettings settings, GameThreadBridge gameThread) {
+        this(side, settings, new McpDispatcher(side, gameThread, settings.getGameThreadTimeoutMillis(),
+            buildInstructions(side)));
+    }
+
+    /**
+     * An endpoint around a dispatcher built elsewhere. The companion's virtual server endpoint is
+     * one: its dispatcher forwards every message to the server the player is connected to, and the
+     * transports, sessions and orchestrator link around it are exactly an ordinary endpoint's.
+     */
+    public McpEndpoint(McmcpSide side, McpEndpointSettings settings, McpDispatcher dispatcher) {
         this.side = side;
         this.settings = settings;
         this.sessions = new McpSessionManager(settings.getSessionIdleTimeoutMillis(), settings.getMaxSessions());
-        this.dispatcher = new McpDispatcher(side, gameThread, settings.getGameThreadTimeoutMillis(),
-            buildInstructions(side));
+        this.dispatcher = dispatcher;
         this.transports.add(new HttpMcpTransport(settings, dispatcher, sessions));
     }
 
@@ -281,6 +290,10 @@ public class McpEndpoint implements McpRegistry.ChangeListener {
      * that acting takes game-time rather than completing instantly, and that block coordinates are
      * integers while entity positions are not.
      */
+    public static String instructionsFor(McmcpSide side) {
+        return buildInstructions(side);
+    }
+
     private static String buildInstructions(McmcpSide side) {
         StringBuilder text = new StringBuilder();
         text.append("You are connected to a running Minecraft 1.12.2 game through MCMCP.\n\n");

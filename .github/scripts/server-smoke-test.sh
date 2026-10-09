@@ -470,6 +470,17 @@ mcp_call 25 server_run_command '{"command":"mcmcp reload"}' >/dev/null
 # game_health must say the journal is on, so an empty unfinished list is never a false all-clear.
 # ---------------------------------------------------------------------------
 
+# The companion is on by default on a dedicated server, with an empty allowlist. Its channel being
+# registered is what lets players' MCMCP find it; nothing here can join as a player, so the live
+# check of the companion itself is the local two-JVM run in docs/dev/testing.md.
+echo "==> Checking the companion's generated config"
+awk '/^companion \{/,/^\}/' "$CONFIG_FILE" | grep -q 'B:enabled=true' \
+  || mcp_failure "companion.enabled is not on by default on a dedicated server"
+grep -q 'S:allowedPlayers' "$CONFIG_FILE" || mcp_failure "companion.allowedPlayers was not generated"
+grep -q 'Netty.*mcmcp:companion\|MCMCP companion mode' "$LOG" \
+  || mcp_failure "the server never reported its companion mode at startup"
+echo "    companion on, allowlist generated"
+
 JOURNAL_FILE="${RUN_DIR}/mcmcp/journal/server-requests.log"
 echo "==> Checking the request journal at ${JOURNAL_FILE}"
 if [ ! -s "$JOURNAL_FILE" ]; then

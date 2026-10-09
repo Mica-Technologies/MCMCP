@@ -47,6 +47,21 @@ public final class LinkHandshake {
                                    String modVersion,
                                    String minecraftVersion,
                                    @Nullable String endpointUrl) {
+        return hello(identity, side, gameDirectory, modVersion, minecraftVersion, endpointUrl, null);
+    }
+
+    /**
+     * As above, for an endpoint whose tools are reached some other way than in this process.
+     *
+     * @param via {@code "companion"} for the virtual server endpoint, else null and left out
+     */
+    public static JsonObject hello(McmcpIdentity identity,
+                                   String side,
+                                   @Nullable String gameDirectory,
+                                   String modVersion,
+                                   String minecraftVersion,
+                                   @Nullable String endpointUrl,
+                                   @Nullable String via) {
         JsonObject frame = new JsonObject();
         frame.addProperty(LinkProtocol.FIELD_TYPE, LinkProtocol.TYPE_HELLO);
         frame.addProperty(LinkProtocol.FIELD_LINK_PROTOCOL, LinkProtocol.VERSION);
@@ -67,6 +82,9 @@ public final class LinkHandshake {
             frame.addProperty(LinkProtocol.FIELD_PID, pid);
         }
         frame.addProperty(LinkProtocol.FIELD_STARTED_AT, McmcpProcess.startedAtIso());
+        if (via != null) {
+            frame.addProperty(LinkProtocol.FIELD_VIA, via);
+        }
         return frame;
     }
 

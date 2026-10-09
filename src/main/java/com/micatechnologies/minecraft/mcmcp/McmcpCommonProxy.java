@@ -44,6 +44,18 @@ public class McmcpCommonProxy implements McmcpProxy {
 
     @Override
     @Nullable
+    public McpEndpoint getCompanionEndpoint() {
+        return null;
+    }
+
+    @Override
+    @Nullable
+    public com.google.gson.JsonObject companionStatus() {
+        return null;
+    }
+
+    @Override
+    @Nullable
     public String creativeTabLabel(net.minecraft.creativetab.CreativeTabs tab) {
         return null;
     }

@@ -68,6 +68,11 @@ world. They do not fire block-place events, so claim protection, machinery callb
 mod's hooks do not run. That is why they sit behind `permissions.allowWorldEdits`, off by default. On
 a world with protection mods, prefer commands or player actions.
 
+**Without a port: the companion.** A server can offer its server-side tools to chosen players
+without running this endpoint at all. The player's own MCMCP forwards to it over their game
+connection and presents it as the game's server endpoint. That is the default on a dedicated server.
+See [Server companion](companion.md).
+
 ## Running both
 
 They are not alternatives. A singleplayer world with both endpoints enabled is the most capable
@@ -93,6 +98,9 @@ collide.
   option, and it is the default.
 - **Building, world inspection, administration on your own server** → server endpoint. Enable it
   explicitly.
+- **The same, on a live multiplayer server whose operator will not open a port** → the
+  [companion](companion.md): the operator allows your player and you get the server's tools through
+  your own game connection.
 - **Developing against MCMCP, or working in singleplayer** → both.
 - **Anything involving looking at the screen** → client endpoint. There is no other way to get a
   frame.

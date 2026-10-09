@@ -7,6 +7,20 @@ launch with defaults and inline documentation.
 bind address, port and worker pool are fixed at socket-creation time, so a reload that did not rebind
 would silently apply only half the file.
 
+!!! note "Defaults on a dedicated server"
+    A dedicated server's freshly generated config opens nothing. These keys have different defaults
+    there:
+
+    - `enableServerEndpoint`, `enableOrchestratorLink`, `allowCommands` and `allowProcessControl`
+      are `false`.
+    - `companion.enabled` is `true`, with an empty allowlist, so nobody can use it yet.
+    - `journal.enabled` is `true`.
+
+    These are only defaults, used for keys the file doesn't have yet, so an existing config keeps
+    its values. When a dedicated server starts with the endpoint or the link on, MCMCP logs a
+    warning naming the key. A development launch (`-Dmcmcp.dev.autostart`) keeps the old defaults.
+    See [Server companion](../guide/companion.md).
+
 ## `endpoints`
 
 ### `enableClientEndpoint`
@@ -119,7 +133,7 @@ capabilities it does not have.
 
 ### `allowCommands`
 
-`boolean` · default `true`
+`boolean` · default `true` (`false` on a dedicated server)
 
 Tools that run chat commands. On the client endpoint these execute with the player's own permission
 level, exactly as if typed.
@@ -180,7 +194,7 @@ Sending chat messages.
 
 ### `allowProcessControl`
 
-`boolean` · default `true`
+`boolean` · default `true` (`false` on a dedicated server)
 
 Ending the game: [`client_quit`](tools.md#client_quit) on a client,
 [`server_stop`](tools.md#server_stop) on a server.
@@ -244,7 +258,7 @@ The outbound link that lets several instances be driven through one MCP endpoint
 
 ### `enableOrchestratorLink`
 
-`boolean` · default `true`
+`boolean` · default `true` (`false` on a dedicated server)
 
 Connect out to an orchestrator.
 
@@ -322,6 +336,61 @@ placing blocks one at a time. It is off by default because each point is a file 
 Default `50`, range 1–1000
 
 How many undo points each world keeps. The oldest go first.
+
+## `companion`
+
+The server half of the [server companion](../guide/companion.md): players' own MCMCP reaching
+this server's tools through their game connection. Every key here is read live.
+
+### `enabled`
+
+`boolean` · default `true` on a dedicated server, `false` elsewhere
+
+Serve the companion. On a dedicated server it is on, with an empty allowlist, so it is unused until
+an operator names someone. An integrated (singleplayer) server never offers it: its own server
+endpoint already serves the world.
+
+### `allowedPlayers`
+
+`string list` · default empty
+
+Players who may use the companion, one UUID per line. A name is accepted too. An empty list means
+nobody. A player must also hold the `mcmcp.companion.use` permission node, which operators do by
+default. Being an operator is not enough on its own.
+
+### `maxMessageMB`
+
+`integer` 1–256 · default `16`
+
+Largest message a client may send, once decompressed. A client that sends more loses its companion
+session. It is not kicked.
+
+### `maxOpenMessages`
+
+`integer` 1–64 · default `8`
+
+How many messages one client may have partly sent at once.
+
+### `sendBudgetKBPerTick`
+
+`integer` 16–16384 · default `512`
+
+The most sent to one player's companion per tick, about 10 MB/s at the default. Nothing is sent
+while the player's connection reports that it is full.
+
+### `maxQueuedMB`
+
+`integer` 1–1024 · default `32`
+
+The most data waiting to go to one player. A reply that would overfill it becomes a tool error
+naming this setting.
+
+### `maxSessionsPerPlayer`
+
+`integer` 1–16 · default `4`
+
+MCP sessions one player's client may keep open through the companion. The oldest is closed to make
+room.
 
 ## `journal`
 

@@ -1,5 +1,6 @@
 package com.micatechnologies.minecraft.mcmcp;
 
+import com.micatechnologies.minecraft.mcmcp.companion.server.CompanionServer;
 import com.micatechnologies.minecraft.mcmcp.command.CommandMcmcp;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
@@ -56,6 +57,10 @@ import org.apache.logging.log4j.Logger;
      version = McmcpConstants.MOD_VERSION,
      name = McmcpConstants.MOD_NAME,
      acceptedMinecraftVersions = "[1.12.2]",
+     // Any version, or none, on the other side. Without this FML refuses every player whose MCMCP is
+     // missing or differs from the server's, vanilla clients included, the moment a server installs
+     // MCMCP. Whether two MCMCP builds can work together is the companion's hello to decide.
+     acceptableRemoteVersions = "*",
      // No dependencies. MCMCP integrates with other mods by letting them register tools against it,
      // never by requiring them — the mod has to be droppable into any 1.12.2 pack.
      dependencies = "")
@@ -99,6 +104,7 @@ public class Mcmcp {
         CommonResources.register();
         CommonPrompts.register();
         proxy.preInit(event);
+        CompanionServer.preInit();
         com.micatechnologies.minecraft.mcmcp.spike.Spike.preInit(); // PHASE 0 SPIKE — remove
         LOGGER.info(McmcpConstants.MOD_NAME + " " + McmcpConstants.MOD_VERSION + " loaded.");
     }
@@ -106,6 +112,7 @@ public class Mcmcp {
     @EventHandler
     public void init(FMLInitializationEvent event) {
         proxy.init(event);
+        CompanionServer.init();
         com.micatechnologies.minecraft.mcmcp.spike.Spike.init(); // PHASE 0 SPIKE — remove
         proxy.registerSideSpecific();
     }
@@ -137,6 +144,8 @@ public class Mcmcp {
     @EventHandler
     public void serverStarting(FMLServerStartingEvent event) {
         event.registerServerCommand(new CommandMcmcp());
+        CompanionServer.serverStarting();
+        reportServerExposure(event.getServer().isDedicatedServer());
 
         if (!McmcpConfig.isServerEndpointEnabled()) {
             return;
@@ -159,8 +168,40 @@ public class Mcmcp {
             endpoint.stop();
             serverEndpoint = null;
         }
+        CompanionServer.serverStopping();
         // After the endpoint stops, so no call can start between the close line and the end.
         McmcpEndpoints.closeJournal(McmcpSide.SERVER);
+    }
+
+    /**
+     * Says, once at start, what this server exposes, so an operator can see it without reading the
+     * config: what the companion allows, and a warning for anything that listens or dials out.
+     */
+    private static void reportServerExposure(boolean dedicated) {
+        if (!dedicated) {
+            return;
+        }
+        int allowed = McmcpConfig.getCompanionAllowedPlayers().size();
+        if (!McmcpConfig.isCompanionEnabled()) {
+            LOGGER.info("MCMCP companion is off.");
+        }
+        else if (allowed == 0) {
+            LOGGER.info("MCMCP companion mode: nothing listens, and nobody is allowed yet. To let a "
+                + "player's MCMCP use this server's tools: /mcmcp companion allow <player>");
+        }
+        else {
+            LOGGER.info("MCMCP companion mode: nothing listens; " + allowed + " player"
+                + (allowed == 1 ? "" : "s") + " allowed.");
+        }
+        if (McmcpConfig.isServerEndpointEnabled()) {
+            LOGGER.warn("MCMCP: endpoints.enableServerEndpoint is on, so this server runs an MCP endpoint "
+                + "at " + McmcpConfig.settingsFor(McmcpSide.SERVER).describeUrl() + ". Turn it off unless "
+                + "you mean to drive this server through that port.");
+        }
+        if (McmcpConfig.isOrchestratorLinkEnabled()) {
+            LOGGER.warn("MCMCP: orchestrator.enableOrchestratorLink is on, so this server dials an "
+                + "orchestrator. Turn it off unless one runs on this machine for this server.");
+        }
     }
 
     /**
@@ -222,12 +263,16 @@ public class Mcmcp {
         return proxy == null ? null : proxy.getClientEndpoint();
     }
 
-    /** Every endpoint currently running in this process; zero, one or two entries. */
+    /** Every endpoint currently running in this process: the client's, the companion's, the server's. */
     public static List<McpEndpoint> allEndpoints() {
-        List<McpEndpoint> endpoints = new ArrayList<>(2);
+        List<McpEndpoint> endpoints = new ArrayList<>(3);
         McpEndpoint client = getClientEndpoint();
         if (client != null) {
             endpoints.add(client);
+        }
+        McpEndpoint companion = proxy == null ? null : proxy.getCompanionEndpoint();
+        if (companion != null) {
+            endpoints.add(companion);
         }
         McpEndpoint server = serverEndpoint;
         if (server != null) {

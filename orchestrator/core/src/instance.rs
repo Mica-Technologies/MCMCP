@@ -147,6 +147,8 @@ pub struct InstanceInfo {
     /// from one directory apart — see [`Hello::pid`].
     pub pid: Option<i64>,
     pub started_at: Option<String>,
+    /// `companion` for a client's virtual server endpoint; see [`Hello::via`].
+    pub via: Option<String>,
 }
 
 impl InstanceInfo {
@@ -162,6 +164,7 @@ impl InstanceInfo {
             endpoint_url: hello.endpoint_url.clone(),
             pid: hello.pid,
             started_at: hello.started_at.clone(),
+            via: hello.via.clone(),
         }
     }
 
@@ -188,6 +191,9 @@ impl InstanceInfo {
             // identical in every field above, and only one of them is answering.
             "pid": self.pid,
             "startedAt": self.started_at,
+            // Present only on a companion endpoint: its tools run on the server the player is on,
+            // not in this game, and it exists only while the player is connected there.
+            "via": self.via,
         })
     }
 }
@@ -684,6 +690,7 @@ mod tests {
             endpoint_url: Some("http://127.0.0.1:25585/mcp".into()),
             pid: None,
             started_at: None,
+            via: None,
         }
     }
 

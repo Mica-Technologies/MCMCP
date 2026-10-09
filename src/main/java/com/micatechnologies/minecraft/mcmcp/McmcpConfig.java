@@ -5,6 +5,7 @@ import com.micatechnologies.minecraft.mcmcp.link.LinkSettings;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpointSettings;
 import java.io.File;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -50,6 +51,7 @@ public class McmcpConfig {
     private static final String CATEGORY_DISPLAY = "display";
     private static final String CATEGORY_UNDO = "undo";
     private static final String CATEGORY_JOURNAL = "journal";
+    private static final String CATEGORY_COMPANION = "companion";
 
     /**
      * Dev-launch overrides injected by {@code addon.gradle}.
@@ -113,6 +115,15 @@ public class McmcpConfig {
      * server operator gets the safe choice for a machine other people connect to.
      */
     private static boolean dedicatedServer;
+
+    // Server companion
+    private static boolean companionEnabled = false;
+    private static List<String> companionAllowedPlayers = Collections.emptyList();
+    private static int companionMaxMessageMb = 16;
+    private static int companionMaxOpenMessages = 8;
+    private static int companionSendBudgetKbPerTick = 512;
+    private static int companionMaxQueuedMb = 32;
+    private static int companionMaxSessionsPerPlayer = 4;
 
     // Identity
     private static String instanceId = "";
@@ -179,6 +190,7 @@ public class McmcpConfig {
     private static void read() {
         int devBasePort = Integer.getInteger(DEV_PORT_PROPERTY, 25585);
         boolean devAutostart = Boolean.getBoolean(DEV_AUTOSTART_PROPERTY);
+        SideDefaults defaults = new SideDefaults(dedicatedServer, devAutostart);
 
         clientEndpointEnabled = configuration.getBoolean("enableClientEndpoint", CATEGORY_ENDPOINTS, true,
             "Run an MCP endpoint inside the game client.\n"
@@ -187,12 +199,13 @@ public class McmcpConfig {
                 + "inbound port on the server. It can do exactly what the player could do by hand.");
 
         serverEndpointEnabled = configuration.getBoolean("enableServerEndpoint", CATEGORY_ENDPOINTS,
-            devAutostart,
+            defaults.serverEndpoint(),
             "Run an MCP endpoint inside the server (dedicated, or the integrated server behind a "
                 + "singleplayer world).\n"
                 + "This endpoint sees authoritative world state for every player and runs commands with "
                 + "server authority. Off by default: it is a much larger grant than the client endpoint "
-                + "and should be an explicit decision by whoever operates the server.");
+                + "and should be an explicit decision by whoever operates the server. A server that only "
+                + "wants agents reaching it through players' own MCMCP needs none: see the companion section.");
 
         bindAddress = configuration.getString("bindAddress", CATEGORY_ENDPOINTS, "127.0.0.1",
             "Network interface both endpoints bind to.\n"
@@ -272,7 +285,7 @@ public class McmcpConfig {
             "How many undo points each world keeps. The oldest go first.");
 
         // Request journal
-        journalEnabled = configuration.getBoolean("enabled", CATEGORY_JOURNAL, dedicatedServer,
+        journalEnabled = configuration.getBoolean("enabled", CATEGORY_JOURNAL, defaults.journal(),
             "Record each tool call as it starts and as it ends, one line each, in "
                 + "mcmcp/journal/<side>-requests.log. After a crash, game_health's previousRun names the "
                 + "calls that started and never finished. Arguments are summarised, never stored whole. "
@@ -284,8 +297,38 @@ public class McmcpConfig {
             "How many journal files are kept, the current one included. The oldest goes when a new one "
                 + "starts; nothing is removed by age.");
 
+        // Server companion
+        companionEnabled = configuration.getBoolean("enabled", CATEGORY_COMPANION, defaults.companion(),
+            "Let players' own MCMCP reach this server's tools over their game connection, with no MCP "
+                + "port and no orchestrator link on the server. Only players named in allowedPlayers can "
+                + "use it, and only if they also hold the mcmcp.companion.* permission nodes (operators "
+                + "do by default). On by default on a dedicated server, where the empty allowlist keeps it "
+                + "unused until you name someone: /mcmcp companion allow <player>. Takes effect at once.");
+        companionAllowedPlayers = Arrays.asList(configuration.getStringList("allowedPlayers",
+            CATEGORY_COMPANION, new String[0],
+            "Players who may use the companion, by UUID (a name is accepted and resolved to a UUID when "
+                + "the server starts). Empty means nobody. Being an operator is not enough on its own: a "
+                + "player must be listed here as well. Read at once."));
+        companionMaxMessageMb = configuration.getInt("maxMessageMB", CATEGORY_COMPANION, 16, 1, 256,
+            "Largest single message a player's client may send, after decompression. A client that "
+                + "sends more loses its companion session; it is not kicked.");
+        companionMaxOpenMessages = configuration.getInt("maxOpenMessages", CATEGORY_COMPANION, 8, 1, 64,
+            "How many messages one client may have part-sent at once.");
+        companionSendBudgetKbPerTick = configuration.getInt("sendBudgetKBPerTick", CATEGORY_COMPANION, 512,
+            16, 16384,
+            "Most data sent to one player's companion per tick (512 KB is about 10 MB/s). Keeps a large "
+                + "result from crowding out the game's own traffic on that connection.");
+        companionMaxQueuedMb = configuration.getInt("maxQueuedMB", CATEGORY_COMPANION, 32, 1, 1024,
+            "Most data waiting to be sent to one player's companion. A reply that would pass it fails "
+                + "with a tool error instead of growing the queue.");
+        companionMaxSessionsPerPlayer = configuration.getInt("maxSessionsPerPlayer", CATEGORY_COMPANION, 4,
+            1, 16,
+            "MCP sessions one player's client may hold open through the companion at once. The oldest "
+                + "is closed to make room.");
+
         // Orchestrator link
-        orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR, true,
+        orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR,
+            defaults.orchestratorLink(),
             "Connect out to an MCMCP orchestrator, so several running game instances can be driven "
                 + "through one MCP endpoint.\n"
                 + "Harmless when no orchestrator is running: the link retries quietly in the "
@@ -314,7 +357,7 @@ public class McmcpConfig {
                 + "noticed within a few seconds of it being ready.");
 
         // Permissions
-        allowCommands = configuration.getBoolean("allowCommands", CATEGORY_PERMISSIONS, true,
+        allowCommands = configuration.getBoolean("allowCommands", CATEGORY_PERMISSIONS, defaults.endpointCommands(),
             "Allow tools that run chat commands. On the client endpoint these execute with the player's "
                 + "own permission level, exactly as if typed.");
 
@@ -349,7 +392,8 @@ public class McmcpConfig {
         allowChat = configuration.getBoolean("allowChat", CATEGORY_PERMISSIONS, true,
             "Allow sending chat messages as the player. Client endpoint only.");
 
-        allowProcessControl = configuration.getBoolean("allowProcessControl", CATEGORY_PERMISSIONS, true,
+        allowProcessControl = configuration.getBoolean("allowProcessControl", CATEGORY_PERMISSIONS,
+            defaults.endpointProcessControl(),
             "Allow tools that end the game process: client_quit, and server_stop on the server "
                 + "endpoint.\n"
                 + "On by default, and a switch of its own rather than a corner of allowPlayerControl, "
@@ -606,6 +650,56 @@ public class McmcpConfig {
 
     public static int getMaxLogLines() {
         return maxLogLines;
+    }
+
+    public static boolean isCompanionEnabled() {
+        return companionEnabled;
+    }
+
+    /**
+     * Turns the companion on or off and saves the change. Backs {@code /mcmcp companion on|off}.
+     */
+    public static synchronized void setCompanionEnabled(boolean enabled) {
+        companionEnabled = enabled;
+        if (configuration != null) {
+            configuration.get(CATEGORY_COMPANION, "enabled", enabled).set(enabled);
+            configuration.save();
+        }
+    }
+
+    /** The allowlist as written: UUIDs, and any names not yet resolved. */
+    public static List<String> getCompanionAllowedPlayers() {
+        return companionAllowedPlayers;
+    }
+
+    /** Replaces the allowlist and saves it. Backs {@code /mcmcp companion allow|revoke}. */
+    public static synchronized void setCompanionAllowedPlayers(List<String> players) {
+        companionAllowedPlayers = new ArrayList<>(players);
+        if (configuration != null) {
+            configuration.get(CATEGORY_COMPANION, "allowedPlayers", new String[0])
+                .set(players.toArray(new String[0]));
+            configuration.save();
+        }
+    }
+
+    public static int getCompanionMaxMessageBytes() {
+        return companionMaxMessageMb * 1024 * 1024;
+    }
+
+    public static int getCompanionMaxOpenMessages() {
+        return companionMaxOpenMessages;
+    }
+
+    public static int getCompanionSendBudgetBytesPerTick() {
+        return companionSendBudgetKbPerTick * 1024;
+    }
+
+    public static long getCompanionMaxQueuedBytes() {
+        return companionMaxQueuedMb * 1024L * 1024L;
+    }
+
+    public static int getCompanionMaxSessionsPerPlayer() {
+        return companionMaxSessionsPerPlayer;
     }
 
     public static boolean isJournalEnabled() {

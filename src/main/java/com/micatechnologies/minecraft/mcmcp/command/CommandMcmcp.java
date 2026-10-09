@@ -1,5 +1,6 @@
 package com.micatechnologies.minecraft.mcmcp.command;
 
+import com.micatechnologies.minecraft.mcmcp.companion.server.CompanionServer;
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
@@ -120,9 +121,23 @@ public class CommandMcmcp extends CommandBase {
         reply(sender, TextFormatting.AQUA, "MCMCP instance: " + identity.getInstanceName()
             + " (" + identity.getInstanceId() + ")");
 
+        // A dedicated server in companion mode runs no endpoint at all, and that is the point; say
+        // what it does run before the endpoint list says "nothing".
+        net.minecraft.server.MinecraftServer server = sender.getServer();
+        if (server != null && server.isDedicatedServer()) {
+            com.google.gson.JsonObject companion = CompanionServer.status();
+            int allowed = companion.get("allowedPlayers").getAsInt();
+            int connected = companion.getAsJsonArray("players").size();
+            reply(sender, McmcpConfig.isCompanionEnabled() ? TextFormatting.GREEN : TextFormatting.GRAY,
+                "Companion: " + (McmcpConfig.isCompanionEnabled()
+                    ? "on, " + allowed + " allowed, " + connected + " connected"
+                    : "off"));
+        }
+
         List<McpEndpoint> endpoints = Mcmcp.allEndpoints();
         if (endpoints.isEmpty()) {
-            reply(sender, TextFormatting.RED, "No MCMCP endpoint is running.");
+            reply(sender, server != null && server.isDedicatedServer() ? TextFormatting.GRAY : TextFormatting.RED,
+                "No MCMCP endpoint is running.");
             reply(sender, TextFormatting.GRAY, "Client endpoint enabled: "
                 + McmcpConfig.isClientEndpointEnabled() + ", server endpoint enabled: "
                 + McmcpConfig.isServerEndpointEnabled() + ". Check the game log for bind errors.");
