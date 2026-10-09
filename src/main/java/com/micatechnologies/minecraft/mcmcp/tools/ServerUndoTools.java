@@ -49,6 +49,8 @@ public final class ServerUndoTools {
                 .string("id", "restore: the undo point's id, as op 'list' gives it, e.g. 'u1791392863587'.")
                 .bool("force", "restore: put the blocks back even where they have changed since.")
                 .integer("limit", "list: most points returned. Default 20.", 1, 200)
+                .bool("load", "restore: load the point's chunks that are not loaded, and release them "
+                    + "afterwards. Without it, a point whose area is not loaded is refused.")
                 .build())
             .serverOnly()
             .destructive()
@@ -56,7 +58,7 @@ public final class ServerUndoTools {
             .build());
     }
 
-    private static ToolResult handle(ToolContext context) throws IOException {
+    private static ToolResult handle(ToolContext context) throws Exception {
         String op = context.getString("op", "list");
         File folder = context.onGameThread(() -> UndoPoints.folder(ServerWorldTools.requireWorld(0)));
         if ("list".equals(op)) {
@@ -87,7 +89,17 @@ public final class ServerUndoTools {
             return ToolResult.error("There is no undo point '" + id + "' in this world. op 'list' "
                 + "shows the ones there are.");
         }
-        return restore(context, folder, point, context.getBoolean("force", false));
+        final File pointFolder = folder;
+        final JsonObject found = point;
+        JsonObject from = Json.getObject(point, "from");
+        JsonObject to = Json.getObject(point, "to");
+        if (from == null || to == null) {
+            return restore(context, folder, point, context.getBoolean("force", false));
+        }
+        java.util.Set<Long> chunks = com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys.box(
+            Json.getInt(from, "x", 0), Json.getInt(from, "z", 0), Json.getInt(to, "x", 0), Json.getInt(to, "z", 0));
+        return ServerChunkTools.withChunks(context, Json.getInt(point, "dimension", 0), chunks,
+            outcome -> restore(context, pointFolder, found, context.getBoolean("force", false)));
     }
 
     private static ToolResult restore(ToolContext context, File folder, JsonObject point, boolean force)
