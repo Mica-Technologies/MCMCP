@@ -459,6 +459,14 @@ public class ReverseTransport implements McpTransport {
     }
 
     private void submit(final JsonObject message, final OutputStream out, final McpSession session) {
+        // Notifications and replies are handled here, in the order they arrived. On the pool they could
+        // overtake one another: a 'notifications/initialized' handled after the 'tools/list' sent
+        // behind it failed that list with "not initialized", and a 'cancelled' could queue behind the
+        // very work it cancels. Both are cheap and never wait on the game.
+        if (JsonRpc.isNotification(message) || JsonRpc.isResponse(message)) {
+            handleMessage(message, out, session);
+            return;
+        }
         ExecutorService pool = workers;
         if (pool == null) {
             return;

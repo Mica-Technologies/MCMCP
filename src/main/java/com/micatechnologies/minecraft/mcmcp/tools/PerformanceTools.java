@@ -614,6 +614,12 @@ public final class PerformanceTools {
                         return dimensionTickTimes(requireServer());
                     }
                 }));
+                // What MCMCP itself is holding loaded, so its share of a lag spike can be told apart.
+                final String onlyCaller = context.getPrincipal().isCompanion()
+                    ? com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.callerOf(context.getPrincipal())
+                    : null;
+                json.add("chunkGovernor", context.onGameThread(
+                    () -> com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.status(onlyCaller)));
                 return ToolResult.structured(json);
             })
             .build());

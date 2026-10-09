@@ -3,6 +3,8 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -15,6 +17,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import javax.annotation.Nullable;
 import net.minecraft.block.Block;
@@ -92,6 +95,9 @@ public final class ServerBuildTools {
                     "palette", "summary", "list")
                 .bool("includeAir", "Include air in the palette and counts. Defaults to true for "
                     + "'palette' (the index array needs it) and false for 'summary' and 'list'.")
+                .bool("load", "Load the chunks this read needs that are not loaded, and release them "
+                    + "afterwards. Default false: cells in unloaded chunks read as mcmcp:unloaded, and the "
+                    + "'chunks' block says how many chunks that was. See server_keep_loaded.")
                 .required("x", "y", "z")
                 .build())
             .serverOnly()
@@ -126,7 +132,9 @@ public final class ServerBuildTools {
                 }
 
                 final boolean includeAir = context.getBoolean("includeAir", "palette".equals(format));
+                final Set<Long> chunkSet = ChunkKeys.box(minX, minZ, maxX, maxZ);
 
+                return ServerChunkTools.withChunks(context, dimension, chunkSet, outcome -> {
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
                     public JsonObject call() {
@@ -221,10 +229,16 @@ public final class ServerBuildTools {
                         else if ("list".equals(format)) {
                             json.add("blocks", blockList);
                         }
+                        // Always present: an empty read over unloaded chunks must never look like
+                        // empty ground.
+                        json.add("chunks", outcome != null ? outcome.toJson()
+                            : ChunkLoadGovernor.describeUnloaded(world, chunkSet));
+                        ChunkLoadGovernor.touch(dimension, chunkSet);
                         return json;
                     }
                 });
                 return ToolResult.structured(result);
+                });
             })
             .build());
     }
@@ -282,6 +296,9 @@ public final class ServerBuildTools {
                 .string("replaceOnly", "Only write where the existing block matches this namespaced "
                     + "id. Use 'minecraft:air' to build without destroying anything already there.")
                 .integer("dimension", "Dimension id. Defaults to 0.")
+                .bool("load", "Load the chunks this write touches that are not loaded, and release them "
+                    + "afterwards. Default false: cells in unloaded chunks are not written, and are counted "
+                    + "as 'unloaded'. A write never generates terrain.")
                 .build())
             .serverOnly()
             .destructive()
@@ -352,6 +369,11 @@ public final class ServerBuildTools {
                         }
                     }
 
+                    final Set<Long> listChunks = new java.util.LinkedHashSet<>();
+                    for (Placement placement : placements) {
+                        listChunks.add(ChunkKeys.ofBlock(placement.pos.getX(), placement.pos.getZ()));
+                    }
+                    return ServerChunkTools.withChunks(context, dimension, listChunks, outcome -> {
                     final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
                     final int[] area = recorder == null ? null : listArea(placements);
                     final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
@@ -369,11 +391,13 @@ public final class ServerBuildTools {
                         }
                     }, tally);
                     JsonObject json = tally.toJson(dimension, placements.size(), replaceOnlyId);
+                    json.add("chunks", chunksBlock(context, dimension, listChunks, outcome));
                     if (recorder != null) {
                         ServerUndoTools.finish(context, recorder, "server_set_blocks", dimension, area,
                             beforeImage, json, null);
                     }
                     return ToolResult.structured(json);
+                    });
                 }
 
                 // Fill mode.
@@ -413,6 +437,8 @@ public final class ServerBuildTools {
                 }
 
                 final IBlockState state = fillBlock.getStateFromMeta(metadata);
+                final Set<Long> fillChunks = ChunkKeys.box(minX, minZ, maxX, maxZ);
+                return ServerChunkTools.withChunks(context, dimension, fillChunks, outcome -> {
                 final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
                 final int[] area = recorder == null ? null : UndoPoints.imageArea(minX, minZ, maxX, maxZ);
                 final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
@@ -436,13 +462,26 @@ public final class ServerBuildTools {
                 json.addProperty("block", blockId);
                 json.add("from", GameJson.blockPos(new BlockPos(minX, minY, minZ)));
                 json.add("to", GameJson.blockPos(new BlockPos(maxX, maxY, maxZ)));
+                json.add("chunks", chunksBlock(context, dimension, fillChunks, outcome));
                 if (recorder != null) {
                     ServerUndoTools.finish(context, recorder, "server_set_blocks", dimension, area,
                         beforeImage, json, null);
                 }
                 return ToolResult.structured(json);
+                });
             })
             .build());
+    }
+
+    /** The {@code chunks} block of a write: what loading cost, or what was not loaded. */
+    private static JsonObject chunksBlock(com.micatechnologies.minecraft.mcmcp.mcp.ToolContext context,
+                                          final int dimension, final Set<Long> chunks,
+                                          @Nullable final ChunkLoadGovernor.Outcome outcome) {
+        return context.onGameThread(() -> {
+            ChunkLoadGovernor.touch(dimension, chunks);
+            return outcome != null ? outcome.toJson()
+                : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
+        });
     }
 
     /** An {@code nbt} property: an SNBT string or a JSON object. */
@@ -466,6 +505,12 @@ public final class ServerBuildTools {
     private static void place(WorldServer world, BlockPos pos, IBlockState state,
                               @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, Tally tally,
                               @Nullable UndoPoints.Recorder recorder) {
+        if (!world.isBlockLoaded(pos)) {
+            // Writing would load the chunk, or generate it if it never was; neither is this call's to
+            // decide. Counted, so the caller can hold the region or pass load: true.
+            tally.unloaded++;
+            return;
+        }
         if (replaceOnly != null && world.getBlockState(pos).getBlock() != replaceOnly) {
             tally.skipped++;
             return;
@@ -537,6 +582,7 @@ public final class ServerBuildTools {
     private static final class Tally {
         int written;
         int skipped;
+        int unloaded;
         int batches;
         /** Indexed by {@link TileEntityNbt.Outcome#ordinal()}. */
         final int[] nbt = new int[TileEntityNbt.Outcome.values().length];
@@ -555,7 +601,10 @@ public final class ServerBuildTools {
             // block was already there, occasionally an unloaded chunk. Reporting it separately from
             // `skipped` is what lets a model tell "my filter excluded these" from "the world refused
             // these".
-            json.addProperty("unchanged", attempted - skipped - written);
+            json.addProperty("unchanged", attempted - skipped - written - unloaded);
+            if (unloaded > 0) {
+                json.addProperty("unloaded", unloaded);
+            }
             if (batches > 1) {
                 json.addProperty("batches", batches);
             }

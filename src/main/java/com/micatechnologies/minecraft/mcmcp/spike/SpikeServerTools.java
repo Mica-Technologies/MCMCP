@@ -69,6 +69,11 @@ final class SpikeServerTools {
 
     private static ToolResult handle(final ToolContext ctx) {
         final String op = ctx.requireString("op");
+        if ("lag".equals(op)) {
+            Spike.lagMillis = ctx.getInt("flags", 80);
+            Spike.lagUntil = System.currentTimeMillis() + ctx.getInt("x", 20) * 1000L;
+            return ToolResult.text("lagging " + Spike.lagMillis + " ms per tick for " + ctx.getInt("x", 20) + " s");
+        }
         if ("tick_window".equals(op)) {
             JsonObject json = Spike.tickWindow();
             if (ctx.getBoolean("reset", false)) {

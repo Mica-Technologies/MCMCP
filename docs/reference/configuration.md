@@ -407,6 +407,30 @@ player every ten seconds. Every such call is logged and journalled either way.
 MCP sessions one player's client may keep open through the companion. The oldest is closed to make
 room.
 
+## `chunks`
+
+How MCMCP loads chunks that aren't already in memory: [`server_keep_loaded`](tools.md#server_keep_loaded),
+and `load: true` on a read or write. See [Chunk loading](tools.md#chunk-loading). Every key here is
+read live.
+
+| Key | Default | Range | What it bounds |
+| --- | --- | --- | --- |
+| `loadsPerTick` | 8 | 1–64 | Chunks loaded from disk in one tick (about 0.5 ms each for vanilla; at most 2 while throttled). |
+| `loadsPerMinute` | 600 | 20+ | Loads in any minute, everyone together. |
+| `loadsPerMinutePerCaller` | 400 | 20+ | Loads in any minute by one caller: one player's agent, or the endpoint. |
+| `maxHeldChunks` | 1024 | 1–65536 | Chunks MCMCP keeps loaded at once: the bound on its memory. |
+| `maxHeldChunksPerCaller` | 512 | 1–65536 | Chunks one caller keeps loaded (512 is about 360 × 360 blocks). |
+| `holdIdleSeconds` | 120 | 10–3600 | A hold unused for this long is released. |
+| `holdMaxSeconds` | 900 | 60–3600 | The longest lease before a hold must be renewed. |
+| `maxWaitSeconds` | 60 | 5–600 | How long a call waits for its chunks before giving up as busy. |
+| `throttleMspt` | 40 | 10–500 | Mean tick time above which loading slows to 2 a tick. |
+| `pauseMspt` | 50 | 10–1000 | Mean tick time above which nothing new loads (50 ms is 20 TPS). |
+| `pauseHeapPercent` | 85 | 10–100 | Old-generation heap after GC above which nothing new loads. |
+| `shedAfterSeconds` | 30 | 5–3600 | After loading has been paused this long, holds are given back, the longest idle first. |
+
+Loading slows or stops at once when the server gets worse, and only resumes after 10 seconds of
+recovery. Every change of state is logged with the tick time, heap and MCMCP's held count.
+
 ## `journal`
 
 The request journal records each tool call as it starts and as it ends, one line each, in

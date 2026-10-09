@@ -126,6 +126,9 @@ public final class CompanionServer {
             "Write blocks, restore undo points and move players through the MCMCP companion.");
         node(Principal.CLASS_COMMAND, DefaultPermissionLevel.OP,
             "Run commands as yourself, and message players, through the MCMCP companion.");
+        node(Principal.CLASS_LOAD, DefaultPermissionLevel.OP,
+            "Keep chunks loaded through the MCMCP companion (server_keep_loaded, load: true), within the "
+                + "chunk-loading limits in the MCMCP config.");
         node(Principal.CLASS_OTHERS, DefaultPermissionLevel.OP,
             "Name players other than yourself in MCMCP companion tools (state, inventory, teleport, asPlayer).");
         node(Principal.CLASS_CONSOLE, DefaultPermissionLevel.NONE,
@@ -217,6 +220,7 @@ public final class CompanionServer {
             String reason = player == null ? "You left the server." : refusalFor(player);
             if (wasGranted) {
                 peer.closeSessions();
+                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.releaseCaller("player:" + peer.playerId);
                 send(peer, CompanionProtocol.TYPE_BYE, CompanionHandshake.bye(reason));
                 Mcmcp.LOGGER.info("MCMCP companion: " + peer.playerName + " no longer has access: " + reason);
             }
@@ -430,6 +434,12 @@ public final class CompanionServer {
             // call on it with "not initialized", which the client cannot recover from.
             session.applyInitialize(McpProtocol.LATEST_VERSION, new JsonObject(), new JsonObject());
             session.markInitialized();
+        }
+        if (JsonRpc.isNotification(message) || JsonRpc.isResponse(message)) {
+            // In arrival order, on this thread: on the pool an 'initialized' could be overtaken by the
+            // request behind it, and a 'cancelled' could wait behind the call it cancels.
+            handler.dispatch(session, message);
+            return;
         }
         final boolean toolCall = McpProtocol.METHOD_TOOLS_CALL.equals(JsonRpc.getMethod(message));
         if (toolCall && peer.runningCalls.incrementAndGet() > McmcpConfig.getCompanionMaxConcurrentCalls()) {
