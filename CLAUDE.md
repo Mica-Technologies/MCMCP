@@ -39,6 +39,10 @@ export JAVA_HOME="/Users/<user>/Library/Java/JavaVirtualMachines/azul-21.0.x/Con
 bash .github/scripts/server-smoke-test.sh     # boot a server + drive a real MCP handshake
 bash .github/scripts/orchestrator-e2e.sh     # boot a server + drive a real MCP client through the orchestrator
 
+# The server companion end to end: a dev server (McmcpDev on companion.allowedPlayers) and a dev
+# client joined to it, its orchestrator port pointed at the check's. Local only, like the next one.
+python .github/scripts/companion-check.py <state-dir> --link-port 26580
+
 # Two instances at once — the configuration the orchestrator exists for, and the only place
 # aggregation, focus and fan-out are reachable. Local only: it needs a dev CLIENT, which needs a
 # display, so CI cannot run it. Start runServer and runClient, then:
@@ -79,6 +83,32 @@ clock without naming a client class.
 that class-loads any of it dies at startup with Forge's "for invalid side SERVER". **Nothing in
 common code may name these types** — they are reached only through `McmcpClientProxy`. This is the
 single easiest way to break the mod, and the CI smoke test exists largely to catch it.
+
+**`companion/`, and the pure halves of `chunkload/` and `regions/`, import no Minecraft class either.**
+The companion's framing, reassembly limits, outbox pacing, handshake and access policy; the chunk-load
+budget, health state machine and hold ledger; the packed-index codec, change ring and NBT projection.
+These are what can be wrong without anything failing, so they are unit-tested as plain Java. Their
+Forge halves (`companion/server/`, `ChunkLoadGovernor`, `ChangeTracker`) are thin.
+
+### The server companion
+
+A player's MCMCP reaches a server's MCMCP over their game connection (`mcmcp:companion`); nothing on
+the server listens. It is **a transport, not a tool set**: the server runs an ordinary
+`McpDispatcher(SERVER)`, and the client forwards MCP to it unchanged and shows it as a virtual
+`.server` endpoint. Four rules learned the hard way:
+
+- **A client-to-server payload over 32,767 bytes disconnects the player.** Frame everything
+  (`CompanionFrames`).
+- **An exception escaping a custom-payload handler disconnects the player.** Catch everything there.
+- **A payload sent from `ClientConnectedToServerEvent` is dropped silently.** Send on the first tick
+  with a player.
+- **Access is an allowlist of tool classes** (`CompanionPolicy.CLASSES`). A new server tool is not
+  served over the companion until it is given a class. Identity comes from the connection, never
+  the request. `/mcmcp companion allow|revoke|on|off` is refused through a tool call, so an agent
+  cannot widen its own access.
+
+Chunk loads go through `ChunkLoadGovernor` and nowhere else; writes check `isBlockLoaded` and never
+load, because `setBlockState` on an unloaded position loads or generates the chunk.
 
 ### The threading rule
 

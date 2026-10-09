@@ -16,6 +16,10 @@ com.micatechnologies.minecraft.mcmcp
 ├── transport/                Streamable HTTP; endpoint composition
 ├── game/                     Game-thread bridges, side enum, paths, server tick recorder
 ├── perf/                     Profiling arithmetic: windows, call tree, GC log   ← no Minecraft imports
+├── companion/                Companion framing, handshake, access policy        ← no Minecraft imports
+│   └── server/               The companion's server half (Forge channel, peers)
+├── chunkload/                Load budgets, health, holds (pure) + ChunkLoadGovernor (Forge)
+├── regions/                  Packed indices, change ring, NBT projection (pure) + ChangeTracker
 │
 ├── tools/                    Common + server tools, game-state serialisation
 ├── resources/                Common + server resources
@@ -26,6 +30,7 @@ com.micatechnologies.minecraft.mcmcp
     ├── ClientInputLock
     ├── ClientChatRecorder
     ├── ClientFrameRecorder
+    ├── companion/            The companion's client half: forwarder, virtual endpoint
     └── tools/                Client tools, resources, prompts
 ```
 
@@ -254,6 +259,58 @@ other.
 Trees go over the wire as indented text, not JSON — nesting is most of what a tree is, and JSON
 charges for every level — and anything large goes to `mcmcp/dumps/` with its path returned.
 
+## The server companion
+
+A player's MCMCP reaching the MCMCP on the server they are playing on, over their game connection,
+with nothing on the server listening. Operator-facing detail is in [Server companion](../guide/companion.md);
+the parts that matter when changing it:
+
+- **It is a transport, not a tool set.** The server runs an ordinary `McpDispatcher(SERVER)`. The
+  client's `CompanionForwarder` (an `McpDispatcher` subclass) sends each message over the
+  `mcmcp:companion` channel unchanged, and its `McpEndpoint` is started through
+  `McmcpEndpoints.startVirtual`, so it has the HTTP transport and orchestrator link of any server
+  endpoint. The orchestrator sees `<game>.server` with `via: companion`. A new server tool reaches
+  the companion with no companion code, once it is given a class.
+- **Framing.** `companion/CompanionFrames` splits messages under the 32,767-byte client-to-server
+  payload limit. Vanilla throws past it on the netty thread, and FML then **disconnects the player**.
+  `CompanionReassembler` enforces message size, open streams and frame order. `CompanionOutbox` paces
+  replies per tick and waits while the connection is not writable. Nothing in Minecraft
+  back-pressures custom payloads.
+- **Handlers never throw.** An exception escaping a custom-payload handler makes FML end the
+  player's connection. Both halves catch everything and drop only the companion state.
+- **The hello waits for the world.** A payload sent from `ClientConnectedToServerEvent` arrives
+  before the server has a play handler for the player, and the server drops it without a word. The
+  client sends its hello on the first tick with a player.
+- **Identity and access.** The `Principal` comes from the connection's `EntityPlayerMP` and lives on
+  the `McpSession`. `CompanionPolicy` is the `CallFilter`: the dispatcher asks it at list time and
+  call time, it holds the tool-to-class table (an allowlist), and it pins player-naming arguments.
+  Tools ask `ToolContext.refusal(Capability, ...)`: the config switch for an endpoint caller, the
+  grants for a companion one.
+- **Ordering.** Notifications and replies are handled in arrival order on the reading thread, on the
+  companion and the orchestrator link alike. On a worker pool, an `initialized` could be overtaken
+  by the request behind it.
+
+## Chunk loading
+
+Every chunk MCMCP causes to load goes through `chunkload/ChunkLoadGovernor`, on the server thread:
+- it loads from disk with `ChunkProviderServer.loadChunk`, which never generates;
+- it paces loads per tick and per minute;
+- it watches mean tick time and old-generation heap;
+- it holds chunks with Forge tickets, kept under the 25-per-ticket depth Forge silently evicts past;
+- it calls `queueUnload` on release, unless a player can see the chunk or something else forces it.
+
+Writes check `isBlockLoaded` and never load. `setBlockState` on an unloaded position would load the
+chunk, or generate it. The pure parts (`LoadBudget`, `ServerHealth`, `HoldLedger`, `ChunkKeys`) are
+unit-tested.
+
+## Change tracking
+
+`regions/ChangeTracker` puts an `IWorldEventListener` on every server world. It sees every
+client-synced block update. Changes made while an MCMCP tool's game-thread task runs are counted,
+not stored, and `ToolContext.GameTaskObserver` marks those tasks. A `BreakEvent` or `PlaceEvent` in
+the same tick credits a player. Updates written without the client-sync flag, and terrain
+generation, never reach the listener.
+
 ## Configuration snapshots
 
 `McpEndpointSettings` is immutable and built once when an endpoint starts. The transport never reads
@@ -273,9 +330,10 @@ off `allowWorldEdits` should take effect immediately.
 | `preInit` | Config loaded; common tools, resources and prompts registered |
 | `init` | Proxy registers the side-specific catalogue |
 | `postInit` | Client endpoint binds; JVM shutdown hook installed |
-| `FMLServerStartingEvent` | `/mcmcp` registered; server endpoint binds if enabled |
+| `init` (also) | Companion permission nodes registered; chunk-ticket callback set; change tracker hooked |
+| `FMLServerStartingEvent` | `/mcmcp` registered; companion dispatcher built; change ring created; server endpoint binds if enabled |
 | `ServerTickEvent` | Session sweep every 600 ticks |
-| `FMLServerStoppingEvent` | Server endpoint stops |
+| `FMLServerStoppingEvent` | Server endpoint stops; companion peers dropped; every chunk hold released; server journal closed |
 
 Endpoints bind **after** registration, not during it. An endpoint that binds in `preInit` accepts
 calls while registries are still being populated, and the first tool call would observe a
