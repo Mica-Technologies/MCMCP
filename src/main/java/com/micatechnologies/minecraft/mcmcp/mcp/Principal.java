@@ -31,6 +31,8 @@ public final class Principal {
     public static final String CLASS_COMMAND = "command";
     /** Keeping chunks loaded: server_keep_loaded, and load: true on a read or write. */
     public static final String CLASS_LOAD = "load";
+    /** Using items on blocks and activating them without reach: server_use_item_on_block, server_activate_block. */
+    public static final String CLASS_USE = "use";
     /** Naming a player other than oneself in a tool that takes one. */
     public static final String CLASS_OTHERS = "others";
     /** Running a command with the server console's authority instead of one's own. */
@@ -99,6 +101,8 @@ public final class Principal {
             case COMMANDS:
             case CHAT:
                 return has(CLASS_COMMAND);
+            case ITEM_USE:
+                return has(CLASS_USE);
             default:
                 return false;
         }
@@ -113,6 +117,8 @@ public final class Principal {
             case COMMANDS:
             case CHAT:
                 return CLASS_COMMAND;
+            case ITEM_USE:
+                return CLASS_USE;
             default:
                 return null;
         }

@@ -19,6 +19,9 @@ public enum Capability {
     /** Sending chat or messages to players. */
     CHAT,
 
+    /** Using an item on a block, or activating one, as a player and from any distance. */
+    ITEM_USE,
+
     /** Stopping the server or the game. Never granted to a companion caller. */
     PROCESS_CONTROL,
 
