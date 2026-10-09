@@ -40,6 +40,7 @@ public final class CommonTools {
         ServerWorldTools.register();
         ServerBuildTools.register();
         ServerChunkTools.register();
+        ServerRegionTools.register();
         StorageTools.register();
         ServerPlayerTools.register();
         ServerCommandTools.register();

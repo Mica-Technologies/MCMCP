@@ -327,6 +327,9 @@ unclickable from the side it should be clickable from.
 | `format` | `palette` \| `summary` \| `list` | Default `palette`. |
 | `includeAir` | boolean | Defaults true for `palette`, false otherwise. |
 | `load` | boolean | Default false. Load the chunks the read needs, and release them afterwards. See [Chunk loading](#chunk-loading). |
+| `encoding` | `json` \| `packed` | Default `json`. `packed` returns the index array as one short string. |
+| `mode` | `blocks` \| `surface` | Default `blocks`. `surface` reads each column's top block. |
+| `ignore` | string array | Surface mode: blocks to see through, such as leaves or snow layers. Air always is. |
 
 Reads a whole cuboid in one call. **This is how to survey before building.**
 
@@ -347,7 +350,45 @@ Unloaded positions appear in the palette as `mcmcp:unloaded`, never as air. Ever
 `chunks` block saying how many chunks the box covers and how many were loaded, unloaded or never
 generated. A read that comes back empty over unloaded chunks can't be mistaken for empty ground.
 
-Bounded by `limits.maxBlockVolume` (default 32,768).
+Bounded by `limits.maxBlockVolume` (default 32,768) in the `json` encoding.
+
+**Packed.** With `encoding: "packed"` the palette comes back as usual, but the indices are a single
+string. It's run-length encoded as varint pairs (value, run), zlib-deflated, then base64
+(`"encoding": "rle-varint+zlib+base64"`, with `count` values). Terrain is long runs of a few blocks:
+an 80 × 80 × 20 read, 128,000 cells, is about 6 KB. There is no listing cap below
+`limits.maxPackedReadCells` (default 1,048,576). The read runs in game-thread batches, so it never
+holds up a tick.
+
+**Surface.** `mode: "surface"` scans each column down from `max(y, toY)` to `min(y, toY)` and
+returns the first block not in `ignore`. Pass `y: 255, toY: 0` for the whole column. The reply has a
+palette, packed `indices` with one entry per column (`dx + sizeX * dz`), and packed `heights`:
+the y of each top block, `-1` for a column with nothing in range, and `-2` for a column whose chunk
+isn't loaded. Up to `limits.maxSurfaceColumns` (262,144, which is 512 × 512) per call. This is the
+cheapest way to survey a district.
+
+#### `server_changes_since`
+
+:material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `since`, `limit`
+
+Block changes inside a box since a token. Use it to find the cells someone else changed since you
+last read them, instead of reading everything again. Call it without `since` to get a token for
+now. Keep the `token` every reply returns and pass it next time.
+
+```json
+{"token": "99", "overflow": false, "truncated": false, "count": 1,
+ "palette": ["minecraft:cobblestone"], "sources": ["player:Builder"],
+ "changes": [[32, 64, 5, 0, 0]]}
+```
+
+Each change is `[x, y, z, paletteIndex, sourceIndex]`: the block it became, and who made it. The
+source is `player:<name>` when a player placed or broke the block, and `other` for anything else:
+mobs, pistons, falling blocks, mods. **MCMCP's own writes are not listed.** They're counted, not
+stored, so an agent's big build can't push a person's edits out of the record.
+
+- `overflow: true` means the record no longer reaches back to your token
+  (`limits.changeLogEntries`, 262,144 changes). Read the region again.
+- `truncated: true` means more changes matched than `limit`. Ask again from the returned token.
+- Not seen: writes a mod makes without telling clients, and terrain generation.
 
 ### Chunk loading
 

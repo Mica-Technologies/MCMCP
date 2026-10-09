@@ -98,11 +98,24 @@ public final class ServerBuildTools {
                 .bool("load", "Load the chunks this read needs that are not loaded, and release them "
                     + "afterwards. Default false: cells in unloaded chunks read as mcmcp:unloaded, and the "
                     + "'chunks' block says how many chunks that was. See server_keep_loaded.")
+                .enumeration("encoding", "'json' (default) as above. 'packed': palette plus the index array "
+                        + "as one short string (run-length, zlib, base64; see 'encoding' in the reply), with no "
+                        + "listing cap up to limits.maxPackedReadCells. Use it for anything large.",
+                    "json", "packed")
+                .enumeration("mode", "'blocks' (default) reads every cell. 'surface' reads each column's top "
+                        + "block between y and toY that is not in 'ignore', returning palette indices and heights, "
+                        + "both packed. The cheapest way to survey a large area.",
+                    "blocks", "surface")
+                .array("ignore", "surface mode: blocks to see through, e.g. ['minecraft:leaves', "
+                    + "'minecraft:snow_layer']. Air is always ignored.", com.micatechnologies.minecraft.mcmcp.json.Json.obj("type", "string"))
                 .required("x", "y", "z")
                 .build())
             .serverOnly()
             .readOnly()
             .handler(context -> {
+                if (ServerRegionTools.handles(context)) {
+                    return ServerRegionTools.read(context);
+                }
                 final int x1 = context.requireInt("x");
                 final int y1 = context.requireInt("y");
                 final int z1 = context.requireInt("z");

@@ -167,6 +167,9 @@ public class McmcpConfig {
     private static int maxLogLines = 500;
     private static int keepAwakeSeconds = 300;
     private static int keepAwakeFps = 60;
+    private static int maxPackedReadCells = 1_048_576;
+    private static int maxSurfaceColumns = 262_144;
+    private static int changeLogEntries = 262_144;
 
     private McmcpConfig() {
     }
@@ -350,6 +353,15 @@ public class McmcpConfig {
             "Tell online operators in chat when a player's agent changes something through the companion "
                 + "(a write, a command): at most one grey line per player every ten seconds. Every such call "
                 + "is also logged, and every call journalled, whether or not this is on.");
+
+        maxPackedReadCells = configuration.getInt("maxPackedReadCells", CATEGORY_LIMITS, 1_048_576, 4096,
+            16_777_216, "Most cells one server_get_blocks call with encoding 'packed' reads. Read in game-thread "
+                + "batches of maxBlockVolume, so a large read never holds one tick.");
+        maxSurfaceColumns = configuration.getInt("maxSurfaceColumns", CATEGORY_LIMITS, 262_144, 256, 4_194_304,
+            "Most columns one server_get_blocks call with mode 'surface' reads (262,144 is 512 x 512).");
+        changeLogEntries = configuration.getInt("changeLogEntries", CATEGORY_LIMITS, 262_144, 1024, 4_194_304,
+            "How many block changes server_changes_since remembers; about 50 bytes each. Changes MCMCP makes "
+                + "itself are not stored. Takes effect when the server starts.");
 
         // Chunk loading
         configuration.setCategoryComment(CATEGORY_CHUNKS, "How MCMCP loads chunks that are not already in "
@@ -766,6 +778,18 @@ public class McmcpConfig {
 
     public static boolean isCompanionNotifyOps() {
         return companionNotifyOps;
+    }
+
+    public static int getMaxPackedReadCells() {
+        return maxPackedReadCells;
+    }
+
+    public static int getMaxSurfaceColumns() {
+        return maxSurfaceColumns;
+    }
+
+    public static int getChangeLogEntries() {
+        return changeLogEntries;
     }
 
     public static int getChunkLoadsPerTick() {
