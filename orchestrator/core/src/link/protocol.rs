@@ -96,6 +96,11 @@ pub struct Hello {
     /// comparison a person or a model can make by eye.
     #[serde(rename = "startedAt", default)]
     pub started_at: Option<String>,
+    /// How this endpoint's tools are reached, when not in the game's own process: `companion` for
+    /// a client's virtual server endpoint, which forwards to the server the player is connected to.
+    /// Absent for an ordinary endpoint, and from a game built before the companion existed.
+    #[serde(default)]
+    pub via: Option<String>,
 }
 
 impl Hello {

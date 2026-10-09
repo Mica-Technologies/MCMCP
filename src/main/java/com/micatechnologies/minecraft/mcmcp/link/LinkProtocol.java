@@ -77,6 +77,8 @@ public final class LinkProtocol {
     public static final String FIELD_ENDPOINT_URL = "endpointUrl";
     public static final String FIELD_PID = "pid";
     public static final String FIELD_STARTED_AT = "startedAt";
+    /** {@code "companion"} on a virtual server endpoint whose tools are on the server the player is on. */
+    public static final String FIELD_VIA = "via";
 
     // status fields
     public static final String FIELD_GAME_THREAD = "gameThread";

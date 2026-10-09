@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
@@ -114,6 +115,21 @@ public final class CommonTools {
                 limits.addProperty("maxInputTicks", McmcpConfig.getMaxInputTicks());
                 limits.addProperty("maxLogLines", McmcpConfig.getMaxLogLines());
                 info.add("limits", limits);
+
+                // How this endpoint relates to the companion. On a client: whether the server it is
+                // playing on offers one, and why not when it does not. On a server: only whether it is
+                // on — who else uses it is not this caller's business.
+                if (context.getSide().isClient()) {
+                    JsonObject companion = Mcmcp.proxy == null ? null : Mcmcp.proxy.companionStatus();
+                    if (companion != null) {
+                        info.add("companion", companion);
+                    }
+                }
+                else {
+                    JsonObject companion = new JsonObject();
+                    companion.addProperty("enabled", McmcpConfig.isCompanionEnabled());
+                    info.add("companion", companion);
+                }
 
                 return ToolResult.structured(info);
             })

@@ -90,6 +90,7 @@ nav:
       - Connecting a client: guide/connecting.md
       - Client vs server endpoint: guide/endpoints.md
       - Running several instances: guide/orchestrator.md
+      - Server companion: guide/companion.md
       - Security model: guide/security.md
       - Debugging workflows: guide/debugging.md
   - Reference:

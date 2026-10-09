@@ -285,7 +285,7 @@ public class ReverseTransport implements McpTransport {
 
             LinkFraming.writeFrame(out, LinkHandshake.hello(identity, side.id(),
                 helloDetails.getGameDirectory(), helloDetails.getModVersion(),
-                helloDetails.getMinecraftVersion(), helloDetails.getEndpointUrl()));
+                helloDetails.getMinecraftVersion(), helloDetails.getEndpointUrl(), helloDetails.getVia()));
 
             LinkHandshake.Result result = LinkHandshake.parseResponse(LinkFraming.readFrame(in));
             if (!result.isAccepted()) {
@@ -609,5 +609,15 @@ public class ReverseTransport implements McpTransport {
 
         @Nullable
         String getEndpointUrl();
+
+        /**
+         * How this endpoint's tools are reached when that is not "in this process": {@code
+         * "companion"} for the virtual server endpoint that forwards to the server the player is on.
+         * Null for an ordinary endpoint.
+         */
+        @Nullable
+        default String getVia() {
+            return null;
+        }
     }
 }

@@ -54,6 +54,17 @@ public interface McmcpProxy {
     McpEndpoint getClientEndpoint();
 
     /**
+     * The companion's virtual server endpoint: the tools of the server this client is playing on,
+     * forwarded over the game connection. Null on a server, and whenever no companion is available.
+     */
+    @Nullable
+    McpEndpoint getCompanionEndpoint();
+
+    /** What this client knows about the companion on its server, or null on a server. */
+    @Nullable
+    com.google.gson.JsonObject companionStatus();
+
+    /**
      * The label of a creative tab ("tabhvac"), or null on a side that cannot read it.
      * {@code CreativeTabs.getTabLabel} is client-only and stripped from a dedicated server.
      */

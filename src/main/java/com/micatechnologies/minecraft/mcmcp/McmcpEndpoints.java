@@ -7,6 +7,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.RequestJournal;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.link.LinkSettings;
 import com.micatechnologies.minecraft.mcmcp.protocol.EndpointAddress;
+import com.micatechnologies.minecraft.mcmcp.protocol.McpDispatcher;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpoint;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpointSettings;
 import com.micatechnologies.minecraft.mcmcp.transport.ReverseTransport;
@@ -97,11 +98,30 @@ public final class McmcpEndpoints {
     @Nullable
     public static McpEndpoint start(McmcpSide side, GameThreadBridge gameThread) {
         McpEndpointSettings settings = McmcpConfig.settingsFor(side);
-        final McpEndpoint endpoint = new McpEndpoint(side, settings, gameThread);
+        McpEndpoint endpoint = new McpEndpoint(side, settings, gameThread);
         endpoint.getDispatcher().setJournal(journal(side));
+        return start(endpoint, null);
+    }
 
+    /**
+     * Starts an endpoint built around a dispatcher of its own: the companion's virtual server
+     * endpoint, whose dispatcher forwards to the server the player is on. It gets the same HTTP
+     * transport, orchestrator link and address as any other server endpoint, so it appears to an
+     * orchestrator as this game's {@code .server}, exactly as a singleplayer world's would.
+     *
+     * @param via how the endpoint's tools are reached, told to the orchestrator ({@code "companion"})
+     */
+    @Nullable
+    public static McpEndpoint startVirtual(McpDispatcher dispatcher, String via) {
+        McpEndpointSettings settings = McmcpConfig.settingsFor(dispatcher.getSide());
+        return start(new McpEndpoint(dispatcher.getSide(), settings, dispatcher), via);
+    }
+
+    @Nullable
+    private static McpEndpoint start(final McpEndpoint endpoint, @Nullable String via) {
+        McmcpSide side = endpoint.getSide();
         final ReverseTransport link = McmcpConfig.isOrchestratorLinkEnabled()
-            ? attachOrchestratorLink(side, endpoint) : null;
+            ? attachOrchestratorLink(side, endpoint, via) : null;
         // Always set, link or not: a direct endpoint accepts 'instance' naming itself either way,
         // and only the steering note depends on the link being up.
         endpoint.getDispatcher().setAddress(new EndpointAddress(
@@ -127,7 +147,8 @@ public final class McmcpEndpoints {
     }
 
     @Nullable
-    private static ReverseTransport attachOrchestratorLink(McmcpSide side, final McpEndpoint endpoint) {
+    private static ReverseTransport attachOrchestratorLink(McmcpSide side, final McpEndpoint endpoint,
+                                                           @Nullable final String via) {
         LinkSettings linkSettings = McmcpConfig.linkSettings();
         McmcpIdentity identity = McmcpConfig.identity();
 
@@ -172,6 +193,12 @@ public final class McmcpEndpoints {
                     // '/mcmcp restart' the HTTP transport may have bound a port it could not get
                     // the first time, and the stale answer would be worse than none.
                     return endpoint.httpUrlIfRunning();
+                }
+
+                @Override
+                @Nullable
+                public String getVia() {
+                    return via;
                 }
             });
         endpoint.addTransport(link);

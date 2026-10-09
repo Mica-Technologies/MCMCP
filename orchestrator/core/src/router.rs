@@ -140,6 +140,8 @@ struct Retained {
     game: String,
     label: String,
     catalogue: Arc<Catalogue>,
+    /// The departed endpoint's `via`, so its absence can be explained the right way.
+    via: Option<String>,
 }
 
 /// One run of one game, as far as this orchestrator saw it.
@@ -615,6 +617,7 @@ impl Router {
                         game: info.approval_id,
                         label: info.label,
                         catalogue: instance.catalogue(),
+                        via: info.via,
                     },
                 );
             }
@@ -1026,9 +1029,21 @@ impl Router {
             .map(|(id, _)| id.clone())
             .collect();
         let owner = owners.first()?;
+        let via = self
+            .retained
+            .lock()
+            .expect("retained lock")
+            .get(owner)
+            .and_then(|kept| kept.via.clone());
         let mut message = format!("The tool '{name}' belongs to {owner}, which is not running right now.");
         let server_suffix = format!("{}server", instance::ENDPOINT_SEPARATOR);
-        if owner.ends_with(&server_suffix) && focused_info.side.as_str() == "client" {
+        if via.as_deref() == Some("companion") {
+            message.push_str(
+                " It was the MCMCP companion of the multiplayer server this game was playing on, and it \
+                 exists only while the player is connected there and allowed to use it. Reconnect to \
+                 the server; mcmcp_endpoint_info on the client says why the companion is unavailable.",
+            );
+        } else if owner.ends_with(&server_suffix) && focused_info.side.as_str() == "client" {
             message.push_str(
                 " A singleplayer world's server endpoint only exists while a world is open: open \
                  one with client_world_load or client_world_create, then client_wait with \
@@ -2782,6 +2797,7 @@ mod tests {
                 endpoint_url: None,
                 pid: None,
                 started_at: None,
+                via: None,
             },
             sender,
         ));
@@ -2843,6 +2859,7 @@ mod tests {
                 endpoint_url: None,
                 pid: None,
                 started_at: None,
+                via: None,
             },
             sender,
         ));
@@ -3285,6 +3302,18 @@ mod tests {
         pid: i64,
         game_directory: Option<&str>,
     ) -> Arc<Instance> {
+        endpoint_via(id, game, side, tools, pid, game_directory, None)
+    }
+
+    fn endpoint_via(
+        id: &str,
+        game: &str,
+        side: Side,
+        tools: &[&str],
+        pid: i64,
+        game_directory: Option<&str>,
+        via: Option<&str>,
+    ) -> Arc<Instance> {
         let (sender, mut outbound) = tokio::sync::mpsc::channel::<Value>(8);
         let instance = Arc::new(Instance::new(
             InstanceInfo {
@@ -3298,6 +3327,7 @@ mod tests {
                 endpoint_url: None,
                 pid: Some(pid),
                 started_at: Some(format!("start-{pid}")),
+                via: via.map(str::to_string),
             },
             sender,
         ));
@@ -3505,6 +3535,34 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("client_world_load"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_companion_server_that_has_gone_says_to_reconnect_rather_than_open_a_world() {
+        let client = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
+        let server = endpoint_via(
+            "g.server",
+            "g",
+            Side::Server,
+            &["server_get_blocks"],
+            1,
+            None,
+            Some("companion"),
+        );
+        let router = router_of(&[client, Arc::clone(&server)]).await;
+        router.registry.remove("g.server", &server);
+        router
+            .handle_upstream(UpstreamEvent::Disconnected {
+                instance: "g.server".into(),
+            })
+            .await;
+
+        let result = call(&router, json!({"name": "server_get_blocks"})).await;
+        let text = text_of(&result);
+        assert_eq!(result["isError"], json!(true));
+        assert!(text.contains("companion"), "{text}");
+        assert!(text.contains("Reconnect to the server"), "{text}");
+        assert!(!text.contains("client_world_load"), "{text}");
     }
 
     #[tokio::test]

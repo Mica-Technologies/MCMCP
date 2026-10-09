@@ -69,6 +69,11 @@ public class McpDispatcher {
         this.address = address;
     }
 
+    /** This dispatcher's orchestrator-facing identity; see {@link #setAddress}. */
+    public EndpointAddress getAddress() {
+        return address;
+    }
+
     /** Gives this dispatcher its request journal. Set once during wiring, like {@link #setAddress}. */
     public void setJournal(@Nullable RequestJournal journal) {
         this.journal = journal;

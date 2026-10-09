@@ -191,6 +191,7 @@ mod tests {
                 endpoint_url: None,
                 pid: None,
                 started_at: None,
+                via: None,
             },
             sender,
         ))
