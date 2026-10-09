@@ -9,6 +9,8 @@ import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpLogLevel;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpProtocol;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpSession;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import javax.annotation.Nullable;
 
@@ -24,6 +26,9 @@ import javax.annotation.Nullable;
  */
 public class ToolContext {
 
+    /** Distinct step kinds {@link #noteTiming} keeps; the journal line must stay small. */
+    private static final int MAX_TIMING_KINDS = 16;
+
     private final McpSession session;
     private final JsonObject arguments;
     private final GameThreadBridge gameThread;
@@ -38,6 +43,12 @@ public class ToolContext {
 
     /** This call's entry in {@link ToolActivity}, or 0 when the call is not being tracked. */
     private volatile long activityCall;
+
+    /**
+     * Time spent per kind of step, for the request journal's end line. Shared with every
+     * {@link #forPart} context, so a sequence's steps all add to the one call's totals.
+     */
+    private Map<String, long[]> timings = new LinkedHashMap<>();
 
     public ToolContext(McpSession session,
                        JsonObject arguments,
@@ -243,7 +254,7 @@ public class ToolContext {
     public ToolContext forPart(JsonObject partArguments, final double base, final double total,
         @Nullable final String messagePrefix) {
         final ToolContext whole = this;
-        return new ToolContext(session, partArguments, gameThread, cancellation,
+        ToolContext part = new ToolContext(session, partArguments, gameThread, cancellation,
             gameThreadTimeoutMillis, null) {
             @Override
             public void reportProgress(double progress, double partTotal, @Nullable String message) {
@@ -254,6 +265,51 @@ public class ToolContext {
                 whole.reportProgress(base + fraction, total, labelled);
             }
         };
+        part.timings = timings;
+        return part;
+    }
+
+    // ------------------------------------------------------------------
+    // Journal notes
+    // ------------------------------------------------------------------
+
+    /**
+     * Adds {@code millis} to the running total for one kind of step, which the request journal
+     * writes on the call's end line ({@code "steps": {"client_wait:chunksLoaded": {"n": 12, "ms":
+     * 9400}}}). How a long call spent its time — teleports, chunk waits, reply waits — is what tells
+     * whether it is worth moving server-side.
+     */
+    public void noteTiming(String kind, long millis) {
+        synchronized (timings) {
+            long[] total = timings.get(kind);
+            if (total == null) {
+                if (timings.size() >= MAX_TIMING_KINDS) {
+                    return;
+                }
+                total = new long[2];
+                timings.put(kind, total);
+            }
+            total[0]++;
+            total[1] += millis;
+        }
+    }
+
+    /** The noted timings, or null when nothing was noted. */
+    @Nullable
+    public JsonObject timingNotes() {
+        synchronized (timings) {
+            if (timings.isEmpty()) {
+                return null;
+            }
+            JsonObject json = new JsonObject();
+            for (Map.Entry<String, long[]> entry : timings.entrySet()) {
+                JsonObject kind = new JsonObject();
+                kind.addProperty("n", entry.getValue()[0]);
+                kind.addProperty("ms", entry.getValue()[1]);
+                json.add(entry.getKey(), kind);
+            }
+            return json;
+        }
     }
 
     /**

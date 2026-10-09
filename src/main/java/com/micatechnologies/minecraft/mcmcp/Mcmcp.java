@@ -129,6 +129,7 @@ public class Mcmcp {
             @Override
             public void run() {
                 shutdownEndpoints();
+                McmcpEndpoints.closeJournals();
             }
         }, "MCMCP-shutdown"));
     }
@@ -158,6 +159,8 @@ public class Mcmcp {
             endpoint.stop();
             serverEndpoint = null;
         }
+        // After the endpoint stops, so no call can start between the close line and the end.
+        McmcpEndpoints.closeJournal(McmcpSide.SERVER);
     }
 
     /**

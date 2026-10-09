@@ -323,6 +323,39 @@ Default `50`, range 1–1000
 
 How many undo points each world keeps. The oldest go first.
 
+## `journal`
+
+The request journal records each tool call as it starts and as it ends, one line each, in
+`mcmcp/journal/<side>-requests.log` under the game folder. Every line is flushed as it is written, so
+the journal survives a game that dies without a crash report. After such a crash,
+[`game_health`](tools.md#game_health)'s `previousRun` names the calls that started and never finished,
+and the orchestrator's `mcmcp_instances` shows the same under `lastExit.requestJournal`.
+
+Arguments are summarised, never stored whole: scalars as they are (long strings cut), arrays as their
+length, and a box's volume. An end line carries the status, the duration, the reply's size, a few of
+the result's counters, and, for `client_sequence` and `client_run_commands`, the time spent per kind
+of step (`client_wait:chunksLoaded`, `cmd:/tp`, …).
+
+### `enabled`
+
+Default `true` on a dedicated server, `false` on a client · read live
+
+On a dedicated server the journal is also the record of what was done and by whom, so it is on. On a
+client it is off until you want it, for instance while chasing a crash.
+
+### `maxFileMB`
+
+Default `5`, range 1–100
+
+Size at which the journal starts a new file.
+
+### `files`
+
+Default `3`, range 1–20
+
+How many journal files are kept, the current one included. The oldest goes when a new one starts.
+Nothing is removed by age, and `game_storage` reports the journal's size but does not expire it.
+
 ## `limits`
 
 ### `maxSessions`

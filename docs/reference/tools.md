@@ -113,7 +113,9 @@ What MCMCP keeps in this game's folder, and how much room it takes:
 - dumps in `mcmcp/dumps/`;
 - the screenshots and maps it named itself (`screenshots/mcmcp-*.png`);
 - undo points;
-- marks.
+- marks;
+- the [request journal](configuration.md#journal), reported but never expired here: it rotates by
+  size and keeps a fixed number of files.
 
 A screenshot given a name of its own can't be told from a person's, so it is never counted or
 removed.
@@ -153,6 +155,12 @@ and `stalled` carries the thread's state, what it is waiting on and its top fram
 naming any threads the JVM finds deadlocked. A world load, a deadlock and a hang all stop frames
 alike; the stack is what tells them apart. This is answered off the game thread, so it works on a
 client that has stopped answering everything else.
+
+`previousRun` is what the [request journal](configuration.md#journal) recorded about the run before
+this one: `endedCleanly`, the number of `calls`, and `unfinishedCalls`, each with its tool, start time
+and summarised arguments. Its `journal` field says whether recording is `enabled`, `disabled` or
+`failed`; with the journal off there is nothing to read, and `previousRun` says so rather than
+reporting an empty list that would look like an all-clear.
 
 ### `game_heap_histogram`
 

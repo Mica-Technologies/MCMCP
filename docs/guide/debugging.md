@@ -153,6 +153,20 @@ nothing.
 The `diagnose_errors` prompt does the usual first pass for you: recent `ERROR` and `WARN` lines,
 already collected.
 
+## After a game dies with no crash report
+
+Some exits leave nothing: no crash report, no `hs_err_pid` file, a log that simply stops. To tell
+whether MCMCP was in the middle of something, turn on the [request journal](../reference/configuration.md#journal)
+(`journal.enabled`, on by default only on a dedicated server) before the next session. After the
+next such exit, `game_health`'s `previousRun` names any call that started and never finished, with its
+arguments summarised: a 60×13×60 read shows as `"~volume": 46800`. The orchestrator shows the same
+in `mcmcp_instances` under `lastExit.requestJournal`, as soon as the game has gone.
+
+An end line also says how a long call spent its time. For `client_sequence` and
+`client_run_commands` it totals each kind of step, so teleports and chunk waits show up as
+`cmd:/tp` and `client_wait:chunksLoaded`. That is how to tell whether a job is worth moving
+server-side.
+
 ## Performance
 
 ```json

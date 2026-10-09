@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.McmcpEndpoints;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.ServerTickRecorder;
@@ -132,7 +133,10 @@ public final class PerformanceTools {
                 + "a hang all look alike until you read it.\n\n"
                 + "With sample_seconds, also measures that window: GC pauses, and the game thread's "
                 + "CPU share and allocation rate. A high allocation rate is how garbage-heavy code "
-                + "shows up before it becomes a GC pause; compare it before and after a change.")
+                + "shows up before it becomes a GC pause; compare it before and after a change.\n\n"
+                + "'previousRun' is what the request journal recorded about the run before this one: "
+                + "whether it ended cleanly, and any tool calls that started and never finished. Read it "
+                + "after a crash to rule MCMCP in or out; its 'journal' field says whether recording was on.")
             .schema(JsonSchema.object()
                 .integer("sample_seconds", "Measure a window of this many seconds as well. Default 0: "
                     + "totals since JVM start only.", 0, 30)
@@ -224,6 +228,9 @@ public final class PerformanceTools {
                 json.add("disk", disk);
 
                 json.addProperty("uptimeSeconds", uptimeMillis / 1000L);
+                // What the request journal says about the run before this one. Its 'journal' field says
+                // whether anything was recorded at all, so an empty list is never a false all-clear.
+                json.add("previousRun", McmcpEndpoints.journal(context.getSide()).previousRun());
 
                 if (context.getSide().isClient()) {
                     JsonObject clientThread = clientThreadHealth();

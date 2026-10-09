@@ -175,6 +175,7 @@ public final class ClientCommandTools {
                     continue;
                 }
 
+                long commandStart = System.currentTimeMillis();
                 String sent = context.onGameThread(new Callable<String>() {
                     @Override
                     public String call() {
@@ -197,6 +198,8 @@ public final class ClientCommandTools {
                     lastSent = outcome;
                     collectReplies(chat, outcome, replyTimeout);
                 }
+                // Per command word, for the request journal: "/tp" and "/fill" are different costs.
+                context.noteTiming("cmd:" + commandWord(command), System.currentTimeMillis() - commandStart);
 
                 if (stopOnError && ("error".equals(outcome.status)
                     || "unloaded".equals(outcome.status))) {
@@ -262,6 +265,12 @@ public final class ClientCommandTools {
      * Waits for {@code outcome}'s replies: up to {@code timeout} for the first, then until no line
      * has come for {@link #QUIET_MILLIS}.
      */
+    /** The command's first word, "/tp" from "/tp @p 1 2 3". */
+    static String commandWord(String command) {
+        int space = command.indexOf(' ');
+        return space < 0 ? command : command.substring(0, space);
+    }
+
     private static void collectReplies(ClientChatRecorder.Capture chat, Outcome outcome,
         long timeout) throws InterruptedException {
         long start = System.currentTimeMillis();
