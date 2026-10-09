@@ -62,13 +62,14 @@ public final class CompanionPolicy implements CallFilter {
             "server_teleport_player"}) {
             CLASSES.put(write, Principal.CLASS_WRITE);
         }
-        for (String command : new String[] {"server_run_command", "server_tell_player"}) {
+        for (String command : new String[] {"server_run_command", "server_run_commands", "server_tell_player"}) {
             CLASSES.put(command, Principal.CLASS_COMMAND);
         }
         for (String load : new String[] {"server_keep_loaded", "server_release_loaded"}) {
             CLASSES.put(load, Principal.CLASS_LOAD);
         }
         PLAYER_ARGUMENTS.put("server_run_command", "asPlayer");
+        PLAYER_ARGUMENTS.put("server_run_commands", "asPlayer");
         PLAYER_ARGUMENTS.put("server_player_state", "player");
         PLAYER_ARGUMENTS.put("server_player_inventory", "player");
         PLAYER_ARGUMENTS.put("server_teleport_player", "player");
@@ -148,7 +149,7 @@ public final class CompanionPolicy implements CallFilter {
         JsonElement given = arguments.get(argument);
         boolean named = given != null && given.isJsonPrimitive() && !given.getAsString().trim().isEmpty();
         if (!named) {
-            boolean consoleDefault = "server_run_command".equals(toolName);
+            boolean consoleDefault = "server_run_command".equals(toolName) || "server_run_commands".equals(toolName);
             if (consoleDefault && principal.has(Principal.CLASS_CONSOLE)) {
                 return null;
             }

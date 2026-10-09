@@ -496,6 +496,25 @@ case "$SINCE_BODY" in
   *) mcp_failure "change tracking listed MCMCP's own write: ${SINCE_BODY}" ;;
 esac
 
+echo "==> Palette writes: a cell that no longer holds what was expected is not overwritten"
+PX=$((SPAWN_X + 8)); PY=$((UNDO_Y + 6)); PZ=$((SPAWN_Z + 8))
+mcp_call 49 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:air\",\"x\":${PX},\"y\":${PY},\"z\":${PZ},\"toX\":$((PX + 3)),\"toZ\":${PZ}}" > /dev/null
+mcp_call 50 server_set_block "{\"x\":$((PX + 1)),\"y\":${PY},\"z\":${PZ},\"block\":\"minecraft:stone\"}" > /dev/null
+PALETTE_BODY="$(mcp_call 51 server_set_blocks "{\"mode\":\"palette\",\"palette\":[\"minecraft:wool:14\"],\"expect\":\"minecraft:air\",\"origin\":{\"x\":${PX},\"y\":${PY},\"z\":${PZ}},\"cells\":[0,0,0,0,1,0,0,0,2,0,0,0,3,0,0,0]}")" \
+  || mcp_failure "palette write failed: ${PALETTE_BODY}"
+case "$PALETTE_BODY" in
+  *'"applied":3'*'"conflicts":1'*) echo "    3 written, the stone cell left as it was" ;;
+  *) mcp_failure "compare-and-set did not skip the changed cell: ${PALETTE_BODY}" ;;
+esac
+
+echo "==> server_run_commands: many commands, one structured reply"
+RUN_BODY="$(mcp_call 52 server_run_commands "{\"commands\":[\"setblock ${PX} $((PY + 1)) ${PZ} minecraft:glowstone\",\"setblock 0 300 0 minecraft:stone\",\"say batch done\"]}")" \
+  || mcp_failure "server_run_commands failed: ${RUN_BODY}"
+case "$RUN_BODY" in
+  *'"ran":3'*'"succeeded":2'*'"failed":1'*) echo "    3 run, the out-of-world one reported as failed" ;;
+  *) mcp_failure "server_run_commands did not report per command: ${RUN_BODY}" ;;
+esac
+
 echo "==> Chunk loading: a write far outside the world generates nothing"
 FAR_BODY="$(mcp_call 40 server_set_blocks '{"mode":"fill","block":"minecraft:glass","x":900000,"y":100,"z":900000,"toX":900001,"toZ":900001}')" \
   || mcp_failure "the far write failed: ${FAR_BODY}"

@@ -75,7 +75,7 @@ A player needs **both**:
 | --- | --- | --- |
 | `mcmcp.companion.read` | `server_get_block(s)`, `server_changes_since`, `server_find_blocks`, `server_nearby_entities`, `server_world_info`, `server_list_players`, `server_player_state`, `server_player_inventory`, `server_tick_stats`, `mcmcp_endpoint_info`, `game_list_mods`, `game_health` | operators |
 | `mcmcp.companion.write` | `server_set_block(s)`, `server_undo`, `server_teleport_player` | operators |
-| `mcmcp.companion.command` | `server_run_command` as yourself, `server_tell_player` | operators |
+| `mcmcp.companion.command` | `server_run_command` and `server_run_commands` as yourself, `server_tell_player` | operators |
 | `mcmcp.companion.load` | `server_keep_loaded`, `server_release_loaded`, and `load: true` on reads and writes | operators |
 | `mcmcp.companion.others` | naming a player other than yourself in those tools | operators |
 | `mcmcp.companion.command.console` | `server_run_command` with the console's authority | **nobody** |

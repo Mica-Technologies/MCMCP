@@ -284,7 +284,32 @@ public final class ServerBuildTools {
                 + "permissions.allowWorldEdits is enabled in the MCMCP config.")
             .schema(JsonSchema.object()
                 .enumeration("mode", "'fill' writes one block type across a cuboid region. 'list' "
-                    + "applies the explicit placements in the blocks argument.", "fill", "list")
+                    + "applies the explicit placements in the blocks argument. 'palette' writes many cells "
+                    + "compactly: a palette, then cells as numbers, optionally only where each cell still holds "
+                    + "what you expect.", "fill", "list", "palette")
+                .property("palette", paletteSchema())
+                .property("origin", Json.obj("type", "object"))
+                .array("cells", "palette mode: flat numbers, four per cell: dx, dy, dz (from origin), palette "
+                    + "index; five with expectPalette, the fifth its index there or -1 for no expectation.",
+                    Json.obj("type", "integer"))
+                .string("indices", "palette mode, a dense box instead of cells: palette indices packed as "
+                    + "server_get_blocks returns them (rle-varint+zlib+base64), x fastest then z then y from origin, "
+                    + "with sizeX, sizeY, sizeZ. A palette entry 'mcmcp:skip' leaves its cells alone.")
+                .integer("sizeX", "palette mode with indices: box size in x.")
+                .integer("sizeY", "palette mode with indices: box size in y.")
+                .integer("sizeZ", "palette mode with indices: box size in z.")
+                .string("expect", "palette mode: write a cell only if it currently holds this block "
+                    + "('mod:block', or 'mod:block:meta' to match the metadata too).")
+                .array("expectPalette", "palette mode: per-cell expectations, referred to by the cells' fifth "
+                    + "number. A cell whose block differs is a conflict: not written, and listed.",
+                    Json.obj("type", "string"))
+                .enumeration("onConflict", "palette mode: 'skip' (default) writes the rest; 'abort' writes "
+                    + "nothing if any cell conflicts.", "skip", "abort")
+                .bool("skipIfTileEntity", "palette mode: leave cells that hold a tile entity (signal heads, "
+                    + "controllers, chests). Default false.")
+                .bool("neighbourUpdates", "palette mode: notify neighbouring blocks, as a normal placement does. "
+                    + "Default true. false still updates clients and lighting but tells no neighbour, for "
+                    + "removing networks (wires, tracks) without each removal recalculating them.")
                 .string("block", "Namespaced block id for fill mode, e.g. 'minecraft:stone'.")
                 .integer("metadata", "Block metadata for fill mode. Defaults to 0.", 0, 15)
                 .property("nbt", nbtSchema("Fill mode: tile-entity data merged into every block "
@@ -342,7 +367,10 @@ public final class ServerBuildTools {
                 }
 
                 final String mode = context.getString("mode",
-                    context.has("blocks") ? "list" : "fill");
+                    context.has("blocks") ? "list" : context.has("palette") ? "palette" : "fill");
+                if ("palette".equals(mode)) {
+                    return ServerBulkTools.paletteWrite(context);
+                }
 
                 final List<Placement> placements;
                 if ("list".equals(mode)) {
@@ -495,6 +523,22 @@ public final class ServerBuildTools {
             return outcome != null ? outcome.toJson()
                 : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
         });
+    }
+
+    /** The palette of a palette-mode write: block ids, or objects with block, metadata and nbt. */
+    private static JsonObject paletteSchema() {
+        JsonObject item = new JsonObject();
+        JsonArray types = new JsonArray();
+        types.add("string");
+        types.add("object");
+        item.add("type", types);
+        JsonObject schema = new JsonObject();
+        schema.addProperty("type", "array");
+        schema.add("items", item);
+        schema.addProperty("description", "palette mode: the blocks cells refer to by index. Each 'mod:block', "
+            + "'mod:block:meta', 'mod:block meta', or {block, metadata, nbt} to set tile-entity data on every cell "
+            + "using that entry (one entry per distinct NBT). 'mcmcp:skip' writes nothing.");
+        return schema;
     }
 
     /** An {@code nbt} property: an SNBT string or a JSON object. */
