@@ -76,6 +76,7 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientPerformanceTools.register();
         ClientResources.register();
         ClientPrompts.register();
+        com.micatechnologies.minecraft.mcmcp.client.spike.SpikeClient.register(); // PHASE 0 SPIKE — remove
         // Not a tool, and not optional: it is the way out of a hung game, which nothing on the client
         // thread can be.
         ClientWatchdog.start();

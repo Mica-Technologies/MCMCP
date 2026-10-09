@@ -99,12 +99,14 @@ public class Mcmcp {
         CommonResources.register();
         CommonPrompts.register();
         proxy.preInit(event);
+        com.micatechnologies.minecraft.mcmcp.spike.Spike.preInit(); // PHASE 0 SPIKE — remove
         LOGGER.info(McmcpConstants.MOD_NAME + " " + McmcpConstants.MOD_VERSION + " loaded.");
     }
 
     @EventHandler
     public void init(FMLInitializationEvent event) {
         proxy.init(event);
+        com.micatechnologies.minecraft.mcmcp.spike.Spike.init(); // PHASE 0 SPIKE — remove
         proxy.registerSideSpecific();
     }
 
