@@ -124,6 +124,8 @@ public class McmcpConfig {
     private static int companionSendBudgetKbPerTick = 512;
     private static int companionMaxQueuedMb = 32;
     private static int companionMaxSessionsPerPlayer = 4;
+    private static int companionMaxConcurrentCalls = 4;
+    private static boolean companionNotifyOps = true;
 
     // Identity
     private static String instanceId = "";
@@ -325,6 +327,14 @@ public class McmcpConfig {
             1, 16,
             "MCP sessions one player's client may hold open through the companion at once. The oldest "
                 + "is closed to make room.");
+
+        companionMaxConcurrentCalls = configuration.getInt("maxConcurrentCalls", CATEGORY_COMPANION, 4, 1, 16,
+            "Tool calls one player may have running through the companion at once. A call past it is "
+                + "refused with a tool error until one finishes.");
+        companionNotifyOps = configuration.getBoolean("notifyOps", CATEGORY_COMPANION, true,
+            "Tell online operators in chat when a player's agent changes something through the companion "
+                + "(a write, a command): at most one grey line per player every ten seconds. Every such call "
+                + "is also logged, and every call journalled, whether or not this is on.");
 
         // Orchestrator link
         orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR,
@@ -700,6 +710,14 @@ public class McmcpConfig {
 
     public static int getCompanionMaxSessionsPerPlayer() {
         return companionMaxSessionsPerPlayer;
+    }
+
+    public static int getCompanionMaxConcurrentCalls() {
+        return companionMaxConcurrentCalls;
+    }
+
+    public static boolean isCompanionNotifyOps() {
+        return companionNotifyOps;
     }
 
     public static boolean isJournalEnabled() {

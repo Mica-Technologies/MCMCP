@@ -137,6 +137,28 @@ not**: the bind address, port and worker pool are fixed when the socket is creat
 MCMCP config reloaded. Network settings take effect on '/mcmcp restart'.
 ```
 
+## `/mcmcp companion`
+
+```
+/mcmcp companion [status|list|allow <player>|revoke <player>|on|off]
+```
+
+The [server companion](../guide/companion.md).
+
+| Subcommand | Does |
+| --- | --- |
+| `status`, `list` (default) | On or off, the allowlist (with names where the server knows them), and each connected player's grants, sessions and running calls |
+| `allow <player>` | Adds the player, by UUID when the server knows them, and saves the config. Takes effect at once: their client gets the server's tools without rejoining. |
+| `revoke <player>` | Removes them. Anything they had running is stopped and their client stops offering the server's tools. |
+| `on`, `off` | Turns the companion on or off for everyone, at once, and saves the config. |
+
+`allow`, `revoke`, `on` and `off` need operator level 3. They are **refused when they arrive through an
+MCMCP tool call**, for example `server_run_command`. An agent with command access, running as an
+operator, could otherwise widen its own reach or give access to someone else. These are for a person
+at the console or in the game.
+
+`/mcmcp reload` also re-checks everyone's companion access.
+
 ## `/mcmcp restart`
 
 Stops both endpoints, re-reads the config, and starts whichever should be running. Then prints
@@ -160,4 +182,5 @@ The game keeps running. This is the fastest way to cut off access without quitti
 
 ## Tab completion
 
-Subcommand names complete on the first argument.
+Subcommand names complete on the first argument, `companion` subcommands on the second, and online
+player names after `allow` and `revoke`.

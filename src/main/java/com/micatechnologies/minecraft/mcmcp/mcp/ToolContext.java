@@ -89,6 +89,38 @@ public class ToolContext {
         return cancellation;
     }
 
+    /** Who this call runs as: the endpoint caller, or a player through the companion. */
+    public Principal getPrincipal() {
+        return session.getPrincipal();
+    }
+
+    /**
+     * Why this call may not exercise {@code capability}, or null when it may.
+     *
+     * <p>An endpoint caller is answered from the config switch the tool passes in, with the tool's own
+     * message naming it. A companion caller is answered from their grants, and told which permission
+     * node they lack: the config switch is the endpoint's, and naming it would send them looking in the
+     * wrong place.
+     *
+     * @param endpointAllowed the config switch for this capability, for an endpoint caller
+     * @param endpointRefusal what to say to an endpoint caller when the switch is off
+     */
+    @Nullable
+    public String refusal(Capability capability, boolean endpointAllowed, String endpointRefusal) {
+        Principal principal = getPrincipal();
+        if (!principal.isCompanion()) {
+            return endpointAllowed ? null : endpointRefusal;
+        }
+        if (principal.allows(capability)) {
+            return null;
+        }
+        String callClass = Principal.classFor(capability);
+        return callClass == null
+            ? "This is not available through the MCMCP companion."
+            : "Your companion access on this server does not include '" + callClass + "' calls. An "
+                + "operator can grant the mcmcp.companion." + callClass + " permission node.";
+    }
+
     // ------------------------------------------------------------------
     // Game thread access
     // ------------------------------------------------------------------

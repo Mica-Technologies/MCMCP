@@ -9,6 +9,7 @@ import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.json.ArgumentNames;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
+import com.micatechnologies.minecraft.mcmcp.mcp.CallFilter;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpPrompt;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpResource;
@@ -45,6 +46,10 @@ public class McpDispatcher {
     private final String instructions;
     private volatile EndpointAddress address = EndpointAddress.NONE;
 
+    /** Which tools each session may list and call; null lists and runs everything for the side. */
+    @Nullable
+    private volatile CallFilter filter;
+
     /** Where each tool call is recorded as it starts and ends; null when nothing records. */
     @Nullable
     private volatile RequestJournal journal;
@@ -72,6 +77,11 @@ public class McpDispatcher {
     /** This dispatcher's orchestrator-facing identity; see {@link #setAddress}. */
     public EndpointAddress getAddress() {
         return address;
+    }
+
+    /** Gives this dispatcher a per-session tool filter. Set once during wiring. */
+    public void setFilter(@Nullable CallFilter filter) {
+        this.filter = filter;
     }
 
     /** Gives this dispatcher its request journal. Set once during wiring, like {@link #setAddress}. */
@@ -166,12 +176,17 @@ public class McpDispatcher {
                 return handleToolsCall(session, params, requestId, cancellation);
 
             case McpProtocol.METHOD_RESOURCES_LIST:
-                return handleResourcesList();
+                return withholds(session) ? Json.obj("resources", new JsonArray()) : handleResourcesList();
 
             case McpProtocol.METHOD_RESOURCES_TEMPLATES_LIST:
-                return handleResourceTemplatesList();
+                return withholds(session) ? Json.obj("resourceTemplates", new JsonArray())
+                    : handleResourceTemplatesList();
 
             case McpProtocol.METHOD_RESOURCES_READ:
+                if (withholds(session)) {
+                    throw new JsonRpcException(JsonRpcException.RESOURCE_NOT_FOUND,
+                        "Resources are not served to this session");
+                }
                 return handleResourcesRead(session, params, cancellation);
 
             case McpProtocol.METHOD_RESOURCES_SUBSCRIBE:
@@ -181,9 +196,13 @@ public class McpDispatcher {
                 return handleSubscribe(session, params, false);
 
             case McpProtocol.METHOD_PROMPTS_LIST:
-                return handlePromptsList();
+                return withholds(session) ? Json.obj("prompts", new JsonArray()) : handlePromptsList();
 
             case McpProtocol.METHOD_PROMPTS_GET:
+                if (withholds(session)) {
+                    throw new JsonRpcException(JsonRpcException.PROMPT_NOT_FOUND,
+                        "Prompts are not served to this session");
+                }
                 return handlePromptsGet(session, params, cancellation);
 
             case McpProtocol.METHOD_LOGGING_SET_LEVEL:
@@ -195,6 +214,12 @@ public class McpDispatcher {
             default:
                 throw JsonRpcException.methodNotFound(method);
         }
+    }
+
+    /** Whether resources and prompts are withheld from this session by the filter. */
+    private boolean withholds(McpSession session) {
+        CallFilter current = filter;
+        return current != null && !current.servesResourcesAndPrompts(session);
     }
 
     private JsonElement handleInitialize(McpSession session, JsonObject params) {
@@ -255,7 +280,11 @@ public class McpDispatcher {
 
     private JsonElement handleToolsList(McpSession session) {
         JsonArray tools = new JsonArray();
+        CallFilter current = filter;
         for (McpTool tool : McpRegistry.tools(side)) {
+            if (current != null && !current.lists(session, tool)) {
+                continue;
+            }
             tools.add(tool.toListEntry(session.getProtocolVersion()));
         }
         // No nextCursor: the catalogue is tens of entries, not thousands, and pagination that never
@@ -290,6 +319,15 @@ public class McpDispatcher {
         if (unknownArguments != null) {
             return ToolResult.error(unknownArguments).toJson(session.getProtocolVersion());
         }
+        // After the argument-name check, so a pinned argument the filter fills in is never mistaken
+        // for one the caller misspelled.
+        CallFilter current = filter;
+        if (current != null) {
+            String refusal = current.admit(session, tool, arguments);
+            if (refusal != null) {
+                return ToolResult.error(refusal).toJson(session.getProtocolVersion());
+            }
+        }
 
         ToolActivity.noteCall(side);
 
@@ -307,7 +345,8 @@ public class McpDispatcher {
         long started = System.currentTimeMillis();
         if (recorder != null) {
             recorder.start(activity, name, arguments,
-                session.isOrchestratorLink() ? "orchestrator" : session.describeClient(), null, started);
+                session.isOrchestratorLink() ? "orchestrator" : session.describeClient(),
+                session.getPrincipal().toJournal(), started);
         }
         String status = "exception";
         JsonObject reply = null;

@@ -166,6 +166,29 @@ to sanitise it:
 
 A name-only rule is the version of that check that cannot be subtly wrong.
 
+## The server companion
+
+The [companion](companion.md) serves a server's tools to players over their game connections, with
+no port. Its threat model differs from the endpoint's: the caller is a player's client, which is
+code the server does not control.
+
+| Threat | Answer |
+| --- | --- |
+| A client claims to be someone else | Identity comes only from the connection a message arrives on. Nothing in a request names its caller. |
+| An op is allowlisted by accident of being an op | Both keys are needed: the allowlist **and** a `mcmcp.companion.<class>` node. An empty allowlist means nobody. |
+| An agent acts as another player | `asPlayer` and `player` arguments are pinned to the caller unless they hold `mcmcp.companion.others`. |
+| An agent gets console authority | A command with no `asPlayer` runs as the caller. Console authority needs `mcmcp.companion.command.console`, which nobody has by default. `blockedCommands` applies either way. |
+| An agent widens its own access | `/mcmcp companion allow/revoke/on/off` is refused when it comes through a tool call. |
+| A new tool leaks onto a live server | Tools are served by an allowlist of classes. A tool in no class (`server_stop`, `server_save_world`, profilers, log readers, `game_storage`, `server_broadcast`, and anything added later until it is classified) is never listed or run. Resources and prompts are not served. |
+| A client floods the server | Message size, partly sent messages, sessions, concurrent calls and queued reply bytes are all capped. Breaking a cap drops that player's companion, never their connection. |
+| A bug in the companion disconnects players | Packet handlers catch everything. A fault costs the companion session only. |
+| Nobody can tell what an agent did | Every call is in the request journal with the player. Every change is an INFO line in the server log, and a rate-limited notice to online operators. Every write leaves an undo point marked with who made it. |
+
+What the companion does **not** protect against: an agent driving an operator's own client can type
+any command that operator could, `/mcmcp companion` included. That is the client endpoint's design:
+it can do exactly what the player can do by hand. Allowlist players whose clients you trust as much
+as the players themselves.
+
 ## Operational advice
 
 - Leave `bindAddress` at `127.0.0.1`. Tunnel with SSH when you need remote access.
@@ -176,3 +199,5 @@ A name-only rule is the version of that check that cannot be subtly wrong.
 - `/mcmcp sessions` lists who is connected, with client name, version and uptime. Check it if
   something is acting on your world that you did not ask for.
 - `/mcmcp stop` shuts both endpoints down immediately without restarting the game.
+- On a dedicated server, prefer the companion to the server endpoint: nothing listens, and access is
+  per player. `/mcmcp companion off` cuts every agent off at once.
