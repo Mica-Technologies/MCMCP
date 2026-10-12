@@ -758,6 +758,16 @@ impl Router {
         // when the other half of the same game has it. With no instance named and exactly one
         // sibling offering the tool, that sibling is the only reading of the call; it goes there,
         // and the result says so. An explicitly named instance is never second-guessed.
+        // A game that has just linked is listed a moment before its catalogue arrives, and a call in
+        // that moment was told its tool "is not available": true for a few hundred milliseconds,
+        // and read by a model as the tool being gone. Its endpoints get a short wait first.
+        let game = instance.info().approval_id;
+        for endpoint in self.registry.all() {
+            if endpoint.info().approval_id == game && !endpoint.is_ready() {
+                endpoint.wait_ready(CATALOGUE_WAIT).await;
+            }
+        }
+
         let mut rerouted_from: Option<String> = None;
         if requested_instance.is_none() && !instance.catalogue().has_tool(name) {
             let game = instance.info().approval_id;
@@ -2726,6 +2736,9 @@ fn wire_bytes(value: &Value) -> usize {
     }
 }
 
+/// How long a call waits for a just-linked game's catalogue before deciding what it offers.
+const CATALOGUE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Room left in a link frame for the JSON-RPC envelope around a call's params.
 const FRAME_OVERHEAD: usize = 256;
 
@@ -2906,6 +2919,36 @@ mod tests {
             names.iter().any(|name| name.contains("client_move")),
             "the cached surface must survive a link that is still coming up: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_call_to_a_game_whose_catalogue_is_still_coming_waits_for_it() {
+        let (router, alpha, mut outbound) = router_with("alpha");
+        assert!(!alpha.is_ready());
+        let arriving = Arc::clone(&alpha);
+        let instance_side = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            arriving.set_catalogue(Catalogue {
+                tools: vec![json!({ "name": "server_run_command", "description": "run" })],
+                ..Catalogue::default()
+            });
+            let request = outbound
+                .recv()
+                .await
+                .expect("the call is forwarded once the tools are known");
+            arriving.complete(json!({
+                "jsonrpc": "2.0",
+                "id": jsonrpc::id_of(&request).unwrap(),
+                "result": { "content": [{ "type": "text", "text": "ran" }], "isError": false },
+            }));
+        });
+        let result = call(
+            &router,
+            json!({ "name": "server_run_command", "command": "say hi" }),
+        )
+        .await;
+        instance_side.await.unwrap();
+        assert_eq!(result["isError"], false, "{result}");
     }
 
     #[tokio::test]

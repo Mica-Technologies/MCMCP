@@ -414,6 +414,19 @@ impl Instance {
     ///
     /// Aggregation and the roster both consult this rather than counting tools, so an instance
     /// still being brought up cannot be mistaken for one that genuinely offers nothing.
+    /// Waits, up to `limit`, for the catalogue of an instance that has linked but not yet been asked
+    /// what it can do. False when it did not arrive, or the link closed first.
+    pub async fn wait_ready(&self, limit: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        while !self.is_ready() {
+            if !self.is_alive() || tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        true
+    }
+
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
     }
