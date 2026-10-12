@@ -33,9 +33,11 @@ import net.minecraftforge.event.CommandEvent;
  * success, so the tool reported success for commands that never ran (#60).
  *
  * <p>This is that method with one change: the event carries the identity — the player, or the server
- * for console authority — while the command runs with the capturing sender, which delegates every
+ * for console authority — even when the command runs with a capturing sender, which delegates every
  * permission check to the same identity. Nothing is granted that the identity lacked; a mod's veto
- * now judges the right party, and is reported as a failure.
+ * now judges the right party, and is reported as a failure. A player's command runs as the player
+ * itself where it can ({@link PlayerChatCapture}), so commands that need the sender to be a player
+ * work too (#64).
  */
 final class CommandRunner {
 
@@ -64,10 +66,10 @@ final class CommandRunner {
      * Runs {@code rawCommand} (no leading slash needed) on the game thread.
      *
      * @param identity who the command is for: a player, or the server
-     * @param sender   the capturing sender wrapping {@code identity}, which receives the output
+     * @param sender   what the command runs as and reports to: the player itself, its output taken by a
+     *                 {@link PlayerChatCapture}, or a {@link CapturingCommandSender} wrapping the identity
      */
-    static Outcome run(MinecraftServer server, ICommandSender identity, CapturingCommandSender sender,
-                       String rawCommand) {
+    static Outcome run(MinecraftServer server, ICommandSender identity, ICommandSender sender, String rawCommand) {
         ICommandManager manager = server.getCommandManager();
         if (!(manager instanceof CommandHandler)) {
             // A replaced command system (Sponge and the like) is driven only through its own entry.
@@ -133,13 +135,17 @@ final class CommandRunner {
         return new Outcome(succeeded, false);
     }
 
-    /** Says where a cancelling mod's own reason went, which is not to the capturing sender. */
-    static String cancelledMessage(ICommandSender identity) {
+    /**
+     * Says a mod cancelled the command, and where its own reason went: into the output when the
+     * player's chat was captured, otherwise to the identity's chat or the server log.
+     */
+    static String cancelledMessage(ICommandSender identity, boolean chatCaptured) {
         String who = identity instanceof EntityPlayerMP ? identity.getName() : "the server console";
-        String where = identity instanceof EntityPlayerMP ? identity.getName() + "'s chat" : "the server log";
+        String where = chatCaptured ? "is in the output"
+            : "went to " + (identity instanceof EntityPlayerMP ? identity.getName() + "'s chat" : "the server log");
         return "A mod on the server cancelled this command before it ran (Forge's CommandEvent): usually "
             + "a permissions or protection mod refusing it for " + who + ". Its reason, if it gave one, "
-            + "went to " + where + ".";
+            + where + ".";
     }
 
     private static int usernameIndex(@Nullable ICommand command, String[] args) throws CommandException {

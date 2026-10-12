@@ -562,6 +562,9 @@ public final class ServerBulkTools {
             // Succeeded, failed, and of the failures how many a mod cancelled.
             final int[] counts = new int[3];
             final JsonArray results = new JsonArray();
+            // A slice's listed results, {item, lines, sender}, finished once its capture is done.
+            final List<Object[]> pending = new ArrayList<>();
+            final java.util.concurrent.CompletableFuture<?>[] sliceCapture = new java.util.concurrent.CompletableFuture<?>[1];
             final int[] next = {0};
             final boolean[] stopped = {false};
             while (next[0] < commands.size() && !stopped[0]) {
@@ -578,40 +581,48 @@ public final class ServerBulkTools {
                         }
                         origin = player;
                     }
-                    // A slice of at most 25 ms of the tick, so a long list never holds one tick.
-                    long sliceEnd = System.nanoTime() + 25_000_000L;
-                    while (next[0] < commands.size() && System.nanoTime() < sliceEnd && !stopped[0]) {
-                        int index = next[0]++;
-                        String command = commands.get(index);
-                        CapturingCommandSender sender = new CapturingCommandSender(origin);
-                        CommandUndo.Snapshot snapshot = recorder == null ? null : CommandUndo.before(sender, command, recorder);
-                        if (snapshot != null && undo[0] == null) {
-                            undo[0] = snapshot.world.provider.getDimension();
-                            undo[1] = snapshot.area();
-                            undo[2] = undo[1] == null ? null : UndoPoints.drawArea(snapshot.world, (int[]) undo[1]);
-                        }
-                        int value;
-                        boolean cancelled = false;
-                        String thrown = null;
-                        try {
-                            CommandRunner.Outcome ran = CommandRunner.run(server, origin, sender, command);
-                            value = ran.result;
-                            cancelled = ran.cancelled;
-                        }
-                        catch (RuntimeException e) {
-                            value = 0;
-                            thrown = String.valueOf(e.getMessage());
-                        }
-                        if (snapshot != null) {
-                            snapshot.recordChanges(recorder);
-                        }
-                        boolean ok = value != 0 && !cancelled;
-                        counts[ok ? 0 : 1]++;
-                        if (cancelled) {
-                            counts[2]++;
-                        }
-                        if (allResults || !ok) {
-                            if (results.size() < 2000) {
+                    // As the player itself where its connection allows, so commands that need their
+                    // sender to be a player work; each command's chat goes to its own sender (#64).
+                    PlayerChatCapture capture = origin instanceof EntityPlayerMP
+                        ? PlayerChatCapture.attach((EntityPlayerMP) origin) : null;
+                    try {
+                        // A slice of at most 25 ms of the tick, so a long list never holds one tick.
+                        long sliceEnd = System.nanoTime() + 25_000_000L;
+                        while (next[0] < commands.size() && System.nanoTime() < sliceEnd && !stopped[0]) {
+                            int index = next[0]++;
+                            String command = commands.get(index);
+                            CapturingCommandSender sender = new CapturingCommandSender(origin);
+                            if (capture != null) {
+                                capture.into(sender);
+                            }
+                            CommandUndo.Snapshot snapshot = recorder == null ? null : CommandUndo.before(sender, command, recorder);
+                            if (snapshot != null && undo[0] == null) {
+                                undo[0] = snapshot.world.provider.getDimension();
+                                undo[1] = snapshot.area();
+                                undo[2] = undo[1] == null ? null : UndoPoints.drawArea(snapshot.world, (int[]) undo[1]);
+                            }
+                            int value;
+                            boolean cancelled = false;
+                            String thrown = null;
+                            try {
+                                CommandRunner.Outcome ran = CommandRunner.run(server, origin,
+                                    capture != null ? origin : sender, command);
+                                value = ran.result;
+                                cancelled = ran.cancelled;
+                            }
+                            catch (RuntimeException e) {
+                                value = 0;
+                                thrown = String.valueOf(e.getMessage());
+                            }
+                            if (snapshot != null) {
+                                snapshot.recordChanges(recorder);
+                            }
+                            boolean ok = value != 0 && !cancelled;
+                            counts[ok ? 0 : 1]++;
+                            if (cancelled) {
+                                counts[2]++;
+                            }
+                            if ((allResults || !ok) && results.size() + pending.size() < 2000) {
                                 JsonObject item = new JsonObject();
                                 item.addProperty("i", index);
                                 item.addProperty("succeeded", ok);
@@ -622,26 +633,43 @@ public final class ServerBulkTools {
                                 // A failure is reported to the sender both as an error and as output.
                                 Set<String> unique = new LinkedHashSet<>();
                                 if (cancelled) {
-                                    unique.add(CommandRunner.cancelledMessage(origin));
+                                    unique.add(CommandRunner.cancelledMessage(origin, capture != null));
                                 }
-                                unique.addAll(sender.getErrors());
                                 if (thrown != null) {
                                     unique.add(thrown);
                                 }
-                                unique.addAll(sender.getOutput());
-                                List<String> lines = new ArrayList<>(unique);
-                                if (!lines.isEmpty()) {
-                                    item.add("output", Json.arrayOfStrings(lines.size() > 5 ? lines.subList(0, 5) : lines));
-                                }
-                                results.add(item);
+                                // The output is added once the capture has it, after this slice.
+                                pending.add(new Object[] {item, unique, sender});
+                            }
+                            if (!ok && stopOnError) {
+                                stopped[0] = true;
                             }
                         }
-                        if (!ok && stopOnError) {
-                            stopped[0] = true;
+                    }
+                    finally {
+                        if (capture != null) {
+                            sliceCapture[0] = capture.detach();
                         }
                     }
                     return null;
                 });
+                PlayerChatCapture.await(sliceCapture[0]);
+                sliceCapture[0] = null;
+                for (Object[] entry : pending) {
+                    JsonObject item = (JsonObject) entry[0];
+                    @SuppressWarnings("unchecked")
+                    Set<String> unique = (Set<String>) entry[1];
+                    CapturingCommandSender sender = (CapturingCommandSender) entry[2];
+                    Set<String> lines = new LinkedHashSet<>(unique);
+                    lines.addAll(sender.getErrors());
+                    lines.addAll(sender.getOutput());
+                    List<String> listed = new ArrayList<>(lines);
+                    if (!listed.isEmpty()) {
+                        item.add("output", Json.arrayOfStrings(listed.size() > 5 ? listed.subList(0, 5) : listed));
+                    }
+                    results.add(item);
+                }
+                pending.clear();
                 context.reportProgress(next[0], commands.size(), "Ran " + next[0] + " of " + commands.size());
             }
             JsonObject json = new JsonObject();

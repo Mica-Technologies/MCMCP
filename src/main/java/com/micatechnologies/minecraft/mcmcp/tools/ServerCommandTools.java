@@ -91,6 +91,9 @@ public final class ServerCommandTools {
                 // before map}, filled in on the game thread when the command is one of those.
                 final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
                 final Object[] undo = new Object[3];
+                // The command's output, complete once the capture (when it ran as the player) is done.
+                final CapturingCommandSender[] collected = new CapturingCommandSender[1];
+                final java.util.concurrent.CompletableFuture<?>[] captured = new java.util.concurrent.CompletableFuture<?>[1];
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -119,7 +122,24 @@ public final class ServerCommandTools {
                             undo[1] = area;
                             undo[2] = area == null ? null : UndoPoints.drawArea(snapshot.world, area);
                         }
-                        CommandRunner.Outcome outcome = CommandRunner.run(server, origin, sender, command);
+                        collected[0] = sender;
+                        // As the player itself where its connection allows, so a command that needs
+                        // its sender to be a player works; its chat comes back here instead (#64).
+                        PlayerChatCapture capture = origin instanceof EntityPlayerMP
+                            ? PlayerChatCapture.attach((EntityPlayerMP) origin) : null;
+                        CommandRunner.Outcome outcome;
+                        if (capture != null) {
+                            capture.into(sender);
+                            try {
+                                outcome = CommandRunner.run(server, origin, origin, command);
+                            }
+                            finally {
+                                captured[0] = capture.detach();
+                            }
+                        }
+                        else {
+                            outcome = CommandRunner.run(server, origin, sender, command);
+                        }
                         if (snapshot != null) {
                             snapshot.recordChanges(recorder);
                         }
@@ -133,27 +153,30 @@ public final class ServerCommandTools {
                         json.addProperty("succeeded", outcome.succeeded());
                         if (outcome.cancelled) {
                             json.addProperty("cancelled", true);
-                            json.addProperty("error", CommandRunner.cancelledMessage(origin));
+                            json.addProperty("error", CommandRunner.cancelledMessage(origin, capture != null));
                         }
-                        else if (!sender.getErrors().isEmpty()) {
-                            json.addProperty("error", String.join("\n", sender.getErrors()));
-                        }
-
-                        JsonArray lines = new JsonArray();
-                        for (String line : sender.getOutput()) {
-                            lines.add(line);
-                        }
-                        json.add("output", lines);
                         return json;
                     }
                 });
+
+                PlayerChatCapture.await(captured[0]);
+                CapturingCommandSender sender = collected[0];
+                if (!result.has("cancelled") && !sender.getErrors().isEmpty()) {
+                    result.addProperty("error", String.join("\n", sender.getErrors()));
+                }
+                JsonArray lines = new JsonArray();
+                for (String line : sender.getOutput()) {
+                    lines.add(line);
+                }
+                result.add("output", lines);
 
                 if (recorder != null && undo[0] != null) {
                     ServerUndoTools.finish(context, recorder, "server_run_command", (Integer) undo[0],
                         (int[]) undo[1], (java.awt.image.BufferedImage) undo[2], result, null);
                 }
 
-                String output = result.has("cancelled") ? result.get("error").getAsString()
+                String output = result.has("cancelled") ? String.join("\n", result.get("error").getAsString(),
+                        String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json.getStringList(result, "output"))).trim()
                     : result.get("output").getAsJsonArray().size() == 0
                     ? "(the command produced no output)"
                     : String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json

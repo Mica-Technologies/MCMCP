@@ -888,20 +888,22 @@ that player's position.
 Refuses names in `permissions.blockedCommands`.
 
 `succeeded` is Minecraft's own verdict — false whenever the command returned 0. `error` is present
-only when it failed with an error message (the red text a player would see).
-
-**Mods that veto commands.** Forge lets a mod cancel a command before it runs, and permission mods
-(ForgeEssentials, for one) decide by who sent it. MCMCP shows those mods the real sender — the player
-for `asPlayer` (and through the companion), the server for console authority — while it captures the
-output itself, so a command a player could run by hand runs here too. A command a mod does cancel
-comes back `succeeded: false` with `cancelled: true`. Forge reports a cancelled command as a success,
-which once made every command on a ForgeEssentials server look done when none had run. The mod's own
-reason goes to the player's chat or the server log, not to the result.
-
-One vanilla limit of `asPlayer`: a command that acts on "the sender" only when it is a player, such as
-`/gamemode 1` with no target, needs the target named (`/gamemode 1 Steve`). That includes no-ops:
+only when it failed with an error message (the red text a player would see). That includes no-ops:
 `/blockdata` setting a value that is already set fails with `The data tag did not change`, which a
 loop should treat as "already done".
+
+**Running as the player.** With `asPlayer` (and always through the companion) the command runs as
+that player, exactly as if they had typed it, so commands that act on "the sender", such as
+`/gamemode 1` with no target, work. Its feedback is taken from the player's connection while the
+command runs and comes back in `output`, instead of appearing in their chat. That feedback follows
+the `sendCommandFeedback` game rule, as it would for the player.
+
+**Mods that veto commands.** Forge lets a mod cancel a command before it runs, and permission mods
+(ForgeEssentials, for one) decide by who sent it, so MCMCP always shows them the real sender: the
+player, or the server for console authority. A command a mod does cancel comes back
+`succeeded: false` with `cancelled: true`, and the mod's reason, when it gave one to a player, is in
+`output`. Forge reports a cancelled command as a success, which once made every command on a
+ForgeEssentials server look done when none had run.
 
 Two vanilla behaviours worth knowing when scripting tile-entity state:
 

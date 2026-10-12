@@ -61,6 +61,14 @@ public class CapturingCommandSender implements ICommandSender {
 
     @Override
     public void sendMessage(ITextComponent component) {
+        record(component);
+    }
+
+    /**
+     * Keeps one message, from this sender or from {@link PlayerChatCapture} when the command runs as
+     * the real player. Not thread-safe; a capture's messages are read only after it is detached.
+     */
+    public void record(ITextComponent component) {
         // getUnformattedText strips the colour codes and click events that make sense in a chat
         // window and are noise in a tool result.
         output.add(component.getUnformattedText());
