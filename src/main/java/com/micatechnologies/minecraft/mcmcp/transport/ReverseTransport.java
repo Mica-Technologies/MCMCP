@@ -490,7 +490,13 @@ public class ReverseTransport implements McpTransport {
         try {
             JsonObject response = dispatcher.dispatch(session, message);
             if (response != null) {
-                LinkFraming.writeFrame(out, response);
+                try {
+                    LinkFraming.writeFrame(out, response);
+                }
+                catch (LinkFraming.FrameTooLargeException e) {
+                    // Dropping it left the call waiting until the orchestrator gave up on it.
+                    LinkFraming.writeFrame(out, LinkFraming.tooLargeAnswer(id, JsonRpc.getMethod(message), e.getBytes()));
+                }
             }
         }
         catch (IOException e) {
@@ -536,7 +542,13 @@ public class ReverseTransport implements McpTransport {
                     while (running && !connected.isClosed()) {
                         JsonObject message = session.pollOutbound(WRITER_POLL_MILLIS);
                         if (message != null) {
-                            LinkFraming.writeFrame(out, message);
+                            try {
+                                LinkFraming.writeFrame(out, message);
+                            }
+                            catch (LinkFraming.FrameTooLargeException e) {
+                                // One oversized notification is not a dead link.
+                                Mcmcp.LOGGER.warn("MCMCP orchestrator link dropped a message: " + e.getMessage());
+                            }
                         }
                         if (side.isClient()) {
                             StallDetector detector = StallDetector.CLIENT_THREAD;

@@ -87,6 +87,41 @@ class LinkFramingTest {
     }
 
     @Test
+    void anOversizedFrameIsRefusedAsTooLargeWithoutWritingAnything() {
+        JsonObject frame = new JsonObject();
+        StringBuilder payload = new StringBuilder();
+        while (payload.length() <= LinkFraming.MAX_FRAME_BYTES) {
+            payload.append("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+        }
+        frame.addProperty("payload", payload.toString());
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        // Its own type, because nothing was written: the link is still good, unlike a failed write.
+        assertThrows(LinkFraming.FrameTooLargeException.class, () -> LinkFraming.writeFrame(out, frame));
+        assertEquals(0, out.size());
+    }
+
+    @Test
+    void aToolResultTooLargeToSendIsAnsweredAsAToolErrorUnderTheSameId() {
+        JsonObject answer = LinkFraming.tooLargeAnswer(new com.google.gson.JsonPrimitive("orch-7"), "tools/call",
+            9_000_000);
+
+        assertEquals("orch-7", answer.get("id").getAsString());
+        JsonObject result = answer.getAsJsonObject("result");
+        assertTrue(result.get("isError").getAsBoolean());
+        assertTrue(result.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString()
+            .contains("9000000 bytes"));
+    }
+
+    @Test
+    void anyOtherResponseTooLargeToSendIsAnsweredAsAJsonRpcError() {
+        JsonObject answer = LinkFraming.tooLargeAnswer(new com.google.gson.JsonPrimitive(3), "resources/read", 5_000_000);
+
+        assertEquals(3, answer.get("id").getAsInt());
+        assertTrue(answer.has("error"));
+    }
+
+    @Test
     void countsTheLimitInBytesRatherThanCharacters() {
         // Each of these is two bytes in UTF-8. Forty characters is eighty bytes, so a sixty-four
         // byte cap must reject it — a character-counted cap would let it through and permit up to

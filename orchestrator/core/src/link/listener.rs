@@ -254,7 +254,16 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
     // interleaved frames impossible rather than merely unlikely.
     let writer = tokio::spawn(async move {
         while let Some(frame) = outbound_rx.recv().await {
-            if framing::write_frame(&mut write_half, &frame).await.is_err() {
+            // A frame refused for its size is skipped: ending here took the whole link down with
+            // it, and every call in flight on it (#62). The router refuses oversized calls first.
+            let bytes = match framing::encode_frame(&frame) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(%error, "dropped a link frame");
+                    continue;
+                }
+            };
+            if framing::write_encoded(&mut write_half, &bytes).await.is_err() {
                 break;
             }
         }

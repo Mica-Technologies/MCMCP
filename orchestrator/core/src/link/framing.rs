@@ -90,6 +90,15 @@ pub async fn write_frame<W>(writer: &mut W, frame: &Value) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
+    let bytes = encode_frame(frame)?;
+    write_encoded(writer, &bytes).await
+}
+
+/// One frame's bytes, newline included, or an error when it is over [`MAX_FRAME_BYTES`].
+///
+/// Apart from [`write_encoded`] so a writer can tell a frame refused for its size, after which the
+/// link is still good, from a failed write, after which it is not.
+pub fn encode_frame(frame: &Value) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec(frame).context("serialising a link frame")?;
     if bytes.len() + 1 > MAX_FRAME_BYTES {
         bail!(
@@ -98,7 +107,15 @@ where
         );
     }
     bytes.push(b'\n');
-    writer.write_all(&bytes).await.context("writing to the link")?;
+    Ok(bytes)
+}
+
+/// Writes and flushes bytes from [`encode_frame`].
+pub async fn write_encoded<W>(writer: &mut W, bytes: &[u8]) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer.write_all(bytes).await.context("writing to the link")?;
     writer.flush().await.context("flushing the link")?;
     Ok(())
 }

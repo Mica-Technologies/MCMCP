@@ -1,8 +1,11 @@
 package com.micatechnologies.minecraft.mcmcp.link;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
+import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpc;
+import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -45,6 +48,24 @@ public final class LinkFraming {
     public static final int MAX_FRAME_BYTES = 4 * 1024 * 1024;
 
     private LinkFraming() {
+    }
+
+    /**
+     * A frame refused for its size. Nothing was written, so the link is still good — unlike any other
+     * {@link IOException} from {@link #writeFrame} — and the request it answered can still be told why.
+     */
+    public static final class FrameTooLargeException extends IOException {
+
+        private final int bytes;
+
+        FrameTooLargeException(int bytes) {
+            super("Refusing to send a " + bytes + " byte link frame; the limit is " + MAX_FRAME_BYTES);
+            this.bytes = bytes;
+        }
+
+        public int getBytes() {
+            return bytes;
+        }
     }
 
     /**
@@ -127,13 +148,30 @@ public final class LinkFraming {
     public static void writeFrame(OutputStream out, JsonObject frame) throws IOException {
         byte[] bytes = (Json.write(frame) + "\n").getBytes(StandardCharsets.UTF_8);
         if (bytes.length > MAX_FRAME_BYTES) {
-            throw new IOException("Refusing to send a " + bytes.length
-                + " byte link frame; the limit is " + MAX_FRAME_BYTES);
+            throw new FrameTooLargeException(bytes.length);
         }
         synchronized (out) {
             out.write(bytes);
             out.flush();
         }
+    }
+
+    /** The answer sent in place of a response too large for one link frame. */
+    public static JsonObject tooLargeAnswer(@Nullable JsonElement id, @Nullable String method, int bytes) {
+        String text = "The result is " + bytes + " bytes, over the " + MAX_FRAME_BYTES
+            + " one message over the orchestrator link may be, so it was not sent. Ask for less at once: a "
+            + "smaller area, a lower limit, or a file the tool writes instead of an inline payload.";
+        if (!"tools/call".equals(method)) {
+            return JsonRpc.error(id, JsonRpcException.INTERNAL_ERROR, text);
+        }
+        JsonObject result = new JsonObject();
+        JsonArray content = new JsonArray();
+        JsonObject block = Json.obj("type", "text");
+        block.addProperty("text", text);
+        content.add(block);
+        result.add("content", content);
+        result.addProperty("isError", true);
+        return JsonRpc.result(id, result);
     }
 
     /** Whether this frame is an MCP message rather than a link control frame. */

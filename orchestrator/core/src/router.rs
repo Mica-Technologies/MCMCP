@@ -878,15 +878,19 @@ impl Router {
             notes.push(warning);
         }
 
+        // One link frame carries the whole request. Refused here, in words, rather than handed to a
+        // link that cannot send it (#62).
+        let forwarded = Value::Object(forwarded);
+        let request_bytes = wire_bytes(&forwarded);
+        if request_bytes + FRAME_OVERHEAD > crate::link::framing::MAX_FRAME_BYTES {
+            return Ok(tool_error(&oversized_call_message(name, request_bytes)));
+        }
+
         let started = std::time::Instant::now();
         let instance_request_id = instance.mint_request_id();
         let tracking_key = id_key(client_request_id);
         let receiver = match instance
-            .send(
-                instance_request_id.clone(),
-                "tools/call",
-                Some(Value::Object(forwarded)),
-            )
+            .send(instance_request_id.clone(), "tools/call", Some(forwarded))
             .await
         {
             Ok(receiver) => receiver,
@@ -2722,6 +2726,24 @@ fn wire_bytes(value: &Value) -> usize {
     }
 }
 
+/// Room left in a link frame for the JSON-RPC envelope around a call's params.
+const FRAME_OVERHEAD: usize = 256;
+
+/// Why a call too large for one link frame was not sent, and how to split it.
+fn oversized_call_message(tool: &str, bytes: usize) -> String {
+    let limit = crate::link::framing::MAX_FRAME_BYTES;
+    let hint = if tool == "server_set_blocks" {
+        " A list entry is about 75 bytes, so list mode fits about 50,000 placements a call; mode \
+         'palette' packs a cell into a few bytes and fits far more."
+    } else {
+        ""
+    };
+    format!(
+        "This call is {bytes} bytes, over the {limit} one message to a game may be, so nothing was \
+         sent. Split it into smaller calls.{hint}"
+    )
+}
+
 /// A successful response carrying a failure the model must read.
 pub fn tool_error(message: &str) -> Value {
     json!({
@@ -2884,6 +2906,26 @@ mod tests {
             names.iter().any(|name| name.contains("client_move")),
             "the cached surface must survive a link that is still coming up: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_call_too_large_for_the_link_is_refused_in_words_and_never_sent() {
+        let (router, alpha, mut outbound) = router_with("alpha");
+        alpha.set_catalogue(Catalogue {
+            tools: vec![json!({ "name": "server_set_blocks", "description": "write" })],
+            ..Catalogue::default()
+        });
+        let entry = json!({ "x": 1000, "y": 100, "z": -1000, "block": "minecraft:stone", "metadata": 0 });
+        let blocks = vec![entry; 100_000];
+        let result = call(&router, json!({ "name": "server_set_blocks", "blocks": blocks })).await;
+        assert_eq!(result["isError"], true, "{result}");
+        let text = text_of(&result);
+        assert!(
+            text.contains("nothing was sent") && text.contains("palette"),
+            "{text}"
+        );
+        assert!(outbound.try_recv().is_err(), "an oversized call reached the link");
+        drop(alpha);
     }
 
     #[tokio::test]
