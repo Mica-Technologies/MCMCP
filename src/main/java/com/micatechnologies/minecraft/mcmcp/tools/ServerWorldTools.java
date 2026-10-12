@@ -69,8 +69,9 @@ public final class ServerWorldTools {
         McpRegistry.registerTool(McpTool.named("server_get_block")
             .title("Get block")
             .description("Read the block at a world position, including its block state properties, "
-                + "light levels and hardness. Reports loaded=false without reading if the chunk is not "
-                + "loaded, since an unloaded position would otherwise read as empty air.\n\n"
+                + "light levels and hardness. When the chunk is not loaded it reads nothing and says "
+                + "loaded=false, with no block or metadata, since an unloaded position would otherwise "
+                + "read as empty air; pass load: true to load it for the read.\n\n"
                 + "Two fields appear only when they have something to say. 'actualState' is the state "
                 + "the block is really drawn and interacted with, present when it differs from the "
                 + "stored 'state' — blocks that connect or mount to their neighbours keep placeholder "
@@ -78,12 +79,12 @@ public final class ServerWorldTools {
                 + "describes a lone fence as connected on all four sides and cannot distinguish two "
                 + "cases being compared. 'boundingBox' is the block-relative selection box, present "
                 + "when the block is not a full cube.")
-            .schema(JsonSchema.object()
+            .schema(ServerChunkTools.loadArgument(JsonSchema.object()
                 .integer("x", "Block X coordinate.")
                 .integer("y", "Block Y coordinate, 0-255.")
                 .integer("z", "Block Z coordinate.")
-                .integer("dimension", "Dimension id: 0 overworld, -1 nether, 1 end. Defaults to 0.")
-                .bool("nbt", "Also return 'blockEntity': the tile entity's full saved NBT, or "
+                .integer("dimension", "Dimension id: 0 overworld, -1 nether, 1 end. Defaults to 0."))
+                .bool("nbt", "Also return 'blockEntity':the tile entity's full saved NBT, or "
                     + "present=false when the block has none. Off by default; a machine's tag can "
                     + "be kilobytes. A Chisels & Bits block's voxel blob comes decoded, as "
                     + "'chisel': its bit counts by state and the box they fill.")
@@ -103,24 +104,39 @@ public final class ServerWorldTools {
                 final boolean nbt = context.getBoolean("nbt", false);
                 final boolean chiselGrid = context.getBoolean("chisel_grid", false);
 
-                JsonObject block = context.onGameThread(new Callable<JsonObject>() {
-                    @Override
-                    public JsonObject call() {
-                        WorldServer world = requireWorld(dimension);
-                        BlockPos pos = new BlockPos(x, y, z);
-                        JsonObject json = GameJson.block(world, pos);
-                        if (nbt && json.get("loaded").getAsBoolean()) {
-                            json.add("blockEntity", GameJson.blockEntity(world, pos, chiselGrid));
+                final boolean load = context.getBoolean("load", false);
+                return ServerChunkTools.withChunks(context, dimension,
+                    java.util.Collections.singleton(com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys.ofBlock(x, z)),
+                    outcome -> {
+                    JsonObject block = context.onGameThread(new Callable<JsonObject>() {
+                        @Override
+                        public JsonObject call() {
+                            WorldServer world = requireWorld(dimension);
+                            BlockPos pos = new BlockPos(x, y, z);
+                            JsonObject json = GameJson.block(world, pos);
+                            boolean loaded = json.get("loaded").getAsBoolean();
+                            if (nbt && loaded) {
+                                json.add("blockEntity", GameJson.blockEntity(world, pos, chiselGrid));
+                            }
+                            json.addProperty("dimension", dimension);
+                            if (!loaded) {
+                                // Said in words as well: a script that defaults a missing metadata to 0
+                                // writes that 0 back (#61).
+                                json.addProperty("note", load
+                                    ? "The chunk could not be loaded (it may never have been generated); nothing was read."
+                                    : "The chunk is not loaded, so nothing was read: there is no block or metadata "
+                                        + "here. Pass load: true to load it for the read.");
+                                return json;
+                            }
+                            String biome = GameJson.biomeId(world, pos);
+                            if (biome != null) {
+                                json.addProperty("biome", biome);
+                            }
+                            return json;
                         }
-                        json.addProperty("dimension", dimension);
-                        String biome = GameJson.biomeId(world, pos);
-                        if (biome != null) {
-                            json.addProperty("biome", biome);
-                        }
-                        return json;
-                    }
-                });
-                return ToolResult.structured(block);
+                    });
+                    return ToolResult.structured(block);
+                    });
             })
             .build());
     }

@@ -276,7 +276,9 @@ public final class ServerBuildTools {
                 + "bulk volumes first, then apply a list for the detail.\n\n"
                 + "A region or list larger than limits.maxBlockVolume is written in batches of that "
                 + "size, one per game tick, up to " + MAX_BATCHES + " batches — so a large area can be "
-                + "cleared (fill with minecraft:air) in one call. 'nbt' on a placement, or on a fill, "
+                + "cleared (fill with minecraft:air) in one call. One request is at most 4 MB, which in "
+                + "list mode is about 50,000 placements; palette mode packs far more cells into it. "
+                + "'nbt' on a placement, or on a fill, "
                 + "merges tile-entity data into each block after it is placed, as /blockdata does; "
                 + "read it back with server_get_block nbt=true.\n\n"
                 + "Like server_set_block, this writes directly and does not fire block-place events, "
@@ -325,11 +327,12 @@ public final class ServerBuildTools {
                         .integer("x", "Block X coordinate.")
                         .integer("y", "Block Y coordinate, 0-255.")
                         .integer("z", "Block Z coordinate.")
-                        .string("block", "Namespaced block id.")
+                        .string("block", "Namespaced block id. Omit it, with nbt, to keep the block and "
+                            + "metadata already there and only merge the nbt.")
                         .integer("metadata", "Block metadata. Defaults to 0.", 0, 15)
                         .property("nbt", nbtSchema("Tile-entity data merged into this block after "
                             + "it is placed."))
-                        .required("x", "y", "z", "block")
+                        .required("x", "y", "z")
                         .build())
                 .string("replaceOnly", "Only write where the existing block matches this namespaced "
                     + "id. Use 'minecraft:air' to build without destroying anything already there.")
@@ -399,7 +402,7 @@ public final class ServerBuildTools {
                             + "several calls.");
                     }
                     for (Placement placement : placements) {
-                        if (placement.block == null) {
+                        if (placement.block == null && !placement.keepsBlock()) {
                             return ToolResult.error(
                                 BlockIds.describeUnknown(placement.blockId, "place"));
                         }
@@ -425,8 +428,8 @@ public final class ServerBuildTools {
                             WorldServer world = ServerWorldTools.requireWorld(dimension);
                             for (int i = from; i < to; i++) {
                                 Placement placement = placements.get(i);
-                                place(world, placement.pos,
-                                    placement.block.getStateFromMeta(placement.metadata),
+                                place(world, placement.pos, placement.keepsBlock() ? null
+                                        : placement.block.getStateFromMeta(placement.metadata),
                                     placement.nbt, replaceOnly, tally, recorder);
                             }
                         }
@@ -559,7 +562,8 @@ public final class ServerBuildTools {
      * Places one block and merges its tile-entity data, recording what it replaced when a recorder is
      * given. Game thread only.
      */
-    private static void place(WorldServer world, BlockPos pos, IBlockState state,
+    /** Writes one cell; a null {@code state} keeps the block there and only merges {@code nbt}. */
+    private static void place(WorldServer world, BlockPos pos, @Nullable IBlockState state,
                               @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, Tally tally,
                               @Nullable UndoPoints.Recorder recorder) {
         if (!world.isBlockLoaded(pos)) {
@@ -573,7 +577,7 @@ public final class ServerBuildTools {
             return;
         }
         UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
-        boolean changed = world.setBlockState(pos, state, 3);
+        boolean changed = state != null && world.setBlockState(pos, state, 3);
         if (changed) {
             tally.written++;
         }
@@ -700,11 +704,15 @@ public final class ServerBuildTools {
             }
             JsonObject item = element.getAsJsonObject();
             String id = Json.getString(item, "block");
-            if (id == null || id.isEmpty()) {
-                continue;
-            }
             BlockPos pos = new BlockPos(Json.getInt(item, "x", 0), Json.getInt(item, "y", 0),
                 Json.getInt(item, "z", 0));
+            boolean keep = id == null || id.isEmpty();
+            if (keep && (!item.has("nbt") || item.get("nbt").isJsonNull())) {
+                // Skipped silently before, which reads as written to whoever left the block out.
+                throw new IllegalArgumentException("The placement at x=" + pos.getX() + ", y=" + pos.getY()
+                    + ", z=" + pos.getZ() + " has no 'block'. Give one, or give 'nbt' alone to merge it into "
+                    + "the block already there.");
+            }
             NBTTagCompound nbt = null;
             if (item.has("nbt") && !item.get("nbt").isJsonNull()) {
                 try {
@@ -714,7 +722,7 @@ public final class ServerBuildTools {
                         + pos.getY() + ", z=" + pos.getZ() + ": " + e.getMessage());
                 }
             }
-            placements.add(new Placement(pos, id, BlockIds.resolve(id),
+            placements.add(new Placement(pos, keep ? null : id, keep ? null : BlockIds.resolve(id),
                 Math.max(0, Math.min(15, Json.getInt(item, "metadata", 0))), nbt));
         }
         return placements;
@@ -723,18 +731,26 @@ public final class ServerBuildTools {
     private static final class Placement {
 
         final BlockPos pos;
+        /** Null for an nbt-only placement, which keeps the block there. */
+        @Nullable
         final String blockId;
+        @Nullable
         final Block block;
         final int metadata;
         @Nullable
         final NBTTagCompound nbt;
 
-        Placement(BlockPos pos, String blockId, Block block, int metadata, @Nullable NBTTagCompound nbt) {
+        Placement(BlockPos pos, @Nullable String blockId, @Nullable Block block, int metadata,
+                  @Nullable NBTTagCompound nbt) {
             this.pos = pos;
             this.blockId = blockId;
             this.block = block;
             this.metadata = metadata;
             this.nbt = nbt;
+        }
+
+        boolean keepsBlock() {
+            return blockId == null;
         }
     }
 

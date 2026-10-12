@@ -52,7 +52,8 @@ public final class ServerCommandTools {
                 + "'asPlayer' to run it as that player instead, with their permission level and their "
                 + "position as the command's origin — which is what you want for anything using "
                 + "relative coordinates or @s.\n\n"
-                + "'succeeded' is Minecraft's own verdict: false when the command returned 0. "
+                + "'succeeded' is Minecraft's own verdict: false when the command returned 0, or "
+                + "when a mod cancelled it before it ran ('cancelled', e.g. a permissions mod). "
                 + "'error' is set only when it failed with an error message, which includes a "
                 + "no-op — /blockdata writing a value that is already set fails with 'The data tag "
                 + "did not change'. /setblock with a block state replaces the tile entity and loses "
@@ -118,7 +119,7 @@ public final class ServerCommandTools {
                             undo[1] = area;
                             undo[2] = area == null ? null : UndoPoints.drawArea(snapshot.world, area);
                         }
-                        int returnValue = server.getCommandManager().executeCommand(sender, command);
+                        CommandRunner.Outcome outcome = CommandRunner.run(server, origin, sender, command);
                         if (snapshot != null) {
                             snapshot.recordChanges(recorder);
                         }
@@ -128,9 +129,13 @@ public final class ServerCommandTools {
                         json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
                         // Minecraft's convention: 0 means the command did not succeed. It is not an
                         // error code — the reason, when there is one, is in the captured output.
-                        json.addProperty("result", returnValue);
-                        json.addProperty("succeeded", returnValue != 0);
-                        if (!sender.getErrors().isEmpty()) {
+                        json.addProperty("result", outcome.result);
+                        json.addProperty("succeeded", outcome.succeeded());
+                        if (outcome.cancelled) {
+                            json.addProperty("cancelled", true);
+                            json.addProperty("error", CommandRunner.cancelledMessage(origin));
+                        }
+                        else if (!sender.getErrors().isEmpty()) {
                             json.addProperty("error", String.join("\n", sender.getErrors()));
                         }
 
@@ -148,7 +153,8 @@ public final class ServerCommandTools {
                         (int[]) undo[1], (java.awt.image.BufferedImage) undo[2], result, null);
                 }
 
-                String output = result.get("output").getAsJsonArray().size() == 0
+                String output = result.has("cancelled") ? result.get("error").getAsString()
+                    : result.get("output").getAsJsonArray().size() == 0
                     ? "(the command produced no output)"
                     : String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json
                         .getStringList(result, "output"));

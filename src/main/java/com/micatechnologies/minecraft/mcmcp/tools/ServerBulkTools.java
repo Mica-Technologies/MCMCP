@@ -559,7 +559,8 @@ public final class ServerBulkTools {
             final long deadline = System.currentTimeMillis() + 120_000L;
             final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
             final Object[] undo = new Object[3];
-            final int[] counts = new int[2];
+            // Succeeded, failed, and of the failures how many a mod cancelled.
+            final int[] counts = new int[3];
             final JsonArray results = new JsonArray();
             final int[] next = {0};
             final boolean[] stopped = {false};
@@ -590,9 +591,12 @@ public final class ServerBulkTools {
                             undo[2] = undo[1] == null ? null : UndoPoints.drawArea(snapshot.world, (int[]) undo[1]);
                         }
                         int value;
+                        boolean cancelled = false;
                         String thrown = null;
                         try {
-                            value = server.getCommandManager().executeCommand(sender, command);
+                            CommandRunner.Outcome ran = CommandRunner.run(server, origin, sender, command);
+                            value = ran.result;
+                            cancelled = ran.cancelled;
                         }
                         catch (RuntimeException e) {
                             value = 0;
@@ -601,16 +605,26 @@ public final class ServerBulkTools {
                         if (snapshot != null) {
                             snapshot.recordChanges(recorder);
                         }
-                        boolean ok = value != 0;
+                        boolean ok = value != 0 && !cancelled;
                         counts[ok ? 0 : 1]++;
+                        if (cancelled) {
+                            counts[2]++;
+                        }
                         if (allResults || !ok) {
                             if (results.size() < 2000) {
                                 JsonObject item = new JsonObject();
                                 item.addProperty("i", index);
                                 item.addProperty("succeeded", ok);
                                 item.addProperty("result", value);
+                                if (cancelled) {
+                                    item.addProperty("cancelled", true);
+                                }
                                 // A failure is reported to the sender both as an error and as output.
-                                Set<String> unique = new LinkedHashSet<>(sender.getErrors());
+                                Set<String> unique = new LinkedHashSet<>();
+                                if (cancelled) {
+                                    unique.add(CommandRunner.cancelledMessage(origin));
+                                }
+                                unique.addAll(sender.getErrors());
                                 if (thrown != null) {
                                     unique.add(thrown);
                                 }
@@ -635,6 +649,9 @@ public final class ServerBulkTools {
             json.addProperty("ran", next[0]);
             json.addProperty("succeeded", counts[0]);
             json.addProperty("failed", counts[1]);
+            if (counts[2] > 0) {
+                json.addProperty("cancelled", counts[2]);
+            }
             json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
             if (next[0] < commands.size()) {
                 json.addProperty("nextIndex", next[0]);
