@@ -266,19 +266,21 @@ impl Router {
             named == info.id
                 || named.split(instance::ENDPOINT_SEPARATOR).next() == Some(info.approval_id.as_str())
         };
-        self.tasks
+        // Only the newest list counts. Falling through to an older one when the newest is finished
+        // put an abandoned list's leftover task on the game's line, and a leftover 'doing' kept the
+        // line up for good (#63).
+        let list = self
+            .tasks
             .all(false)
             .into_iter()
-            .filter(|list| list.instances.iter().any(|named| belongs(named)))
-            .find_map(|list| {
-                let current = list.current()?;
-                Some(crate::link::protocol::ActivityTask {
-                    list: list.title.clone(),
-                    progress: list.progress(),
-                    title: current.title.clone(),
-                    status: current.status.name().to_string(),
-                })
-            })
+            .find(|list| list.instances.iter().any(|named| belongs(named)))?;
+        let current = list.current()?;
+        Some(crate::link::protocol::ActivityTask {
+            list: list.title.clone(),
+            progress: list.progress(),
+            title: current.title.clone(),
+            status: current.status.name().to_string(),
+        })
     }
 
     /// Records to this log instead of the throwaway in-memory one.
@@ -1178,13 +1180,20 @@ impl Router {
                 .map(|list| (list, String::new())),
             "create" => match text("title") {
                 None => Err("op 'create' needs a 'title'.".into()),
-                Some(title) => self
-                    .tasks
-                    .create(&title, &strings("tasks"), &strings("instances"), authority)
-                    .map(|list| {
-                        let what = format!("created with {} tasks", list.tasks.len());
-                        (list, what)
-                    }),
+                Some(title) => {
+                    // A list that names no game is tied to no activity and no game's line; the
+                    // focused game is nearly always the one meant.
+                    let mut instances = strings("instances");
+                    if instances.is_empty() {
+                        instances.extend(self.registry.focus());
+                    }
+                    self.tasks
+                        .create(&title, &strings("tasks"), &instances, authority)
+                        .map(|list| {
+                            let what = format!("created with {} tasks", list.tasks.len());
+                            (list, what)
+                        })
+                }
             },
             "add" => list_key().and_then(|key| {
                 let added = strings("tasks");
@@ -3080,6 +3089,69 @@ mod tests {
         call(
             &router,
             json!({ "name": "mcmcp_tasks", "op": "archive", "list": "job" }),
+        )
+        .await;
+        router.announce_tasks().await;
+        assert_eq!(
+            outbound.recv().await.expect("a clearing frame")["task"],
+            Value::Null
+        );
+        drop(alpha);
+    }
+
+    #[tokio::test]
+    async fn a_list_created_without_instances_is_tied_to_the_focused_game() {
+        let (router, alpha, mut outbound) = router_with("alpha");
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "create", "title": "Unnamed", "tasks": ["one"] }),
+        )
+        .await;
+        assert_eq!(
+            router.tasks().get("unnamed").unwrap().instances,
+            vec!["alpha".to_string()]
+        );
+        router.announce_tasks().await;
+        assert_eq!(
+            outbound.recv().await.expect("an activity frame")["task"]["title"],
+            "one"
+        );
+        drop(alpha);
+    }
+
+    #[tokio::test]
+    async fn a_finished_list_clears_the_game_line_rather_than_reviving_an_older_one() {
+        let (router, alpha, mut outbound) = router_with("alpha");
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "create", "title": "Abandoned",
+                    "tasks": ["left doing"], "instances": ["alpha"] }),
+        )
+        .await;
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "update", "list": "abandoned",
+                    "updates": [{ "task": "1", "status": "doing" }] }),
+        )
+        .await;
+        // The newer list must be newer by the clock, which orders lists.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "create", "title": "Current",
+                    "tasks": ["only"], "instances": ["alpha"] }),
+        )
+        .await;
+        router.announce_tasks().await;
+        assert_eq!(
+            outbound.recv().await.expect("an activity frame")["task"]["title"],
+            "only"
+        );
+
+        call(
+            &router,
+            json!({ "name": "mcmcp_tasks", "op": "update", "list": "current",
+                    "updates": [{ "task": "1", "status": "done" }] }),
         )
         .await;
         router.announce_tasks().await;

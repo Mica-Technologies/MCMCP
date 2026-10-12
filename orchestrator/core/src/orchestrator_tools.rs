@@ -185,7 +185,7 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                     },
                     "instances": {
                         "type": "array",
-                        "description": "create: the instances the job runs on, so the app shows their activity beside it.",
+                        "description": "create: the instances the job runs on, so the app shows their activity beside it. Defaults to the focused one.",
                         "items": { "type": "string" },
                     },
                     "updates": {

@@ -395,14 +395,18 @@ where one helps. The **Tasks** tab shows every list live.
 
 A task being worked on shows beneath it
 whatever its list's instances are running right now, progress bar included, so the plan and the work
-appear side by side without the agent doing anything extra.
+appear side by side without the agent doing anything extra. A list belongs to the games it names, both
+endpoints of each: one naming a game's client also shows the `server_*` calls that game sends through
+the server companion. A list created without naming any belongs to the game that was focused.
 
 You can edit lists too: change a status, add a task, move a task up or down (hover over it for the
 arrows), or start a list of your own. A task keeps its id when it moves. The agent sees your
 changes the next time it reads the list. Each change, by you or the agent, is a line in the log.
 
 The game shows the task too. While an agent works, a small line at the top of the game's screen
-names the list, its progress, the current task and the tool running. The orchestrator sends the task
+names the list, its progress, the current task and the tool running. It shows the game's most recently
+changed open list only: once that list is finished the line clears, rather than bringing back a task
+left open on an older list. The orchestrator sends the task
 over the link, and `/mcmcp link` prints it. The line is left out of agent screenshots, and
 `display.showActivityBanner` turns it off.
 

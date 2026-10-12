@@ -785,7 +785,7 @@ async function renderTasks() {
 
   const visible = taskLists.filter((list) =>
     (showArchived || !list.archived) &&
-    (!select.value || (list.instances ?? []).includes(select.value)));
+    (!select.value || (list.instances ?? []).some((named) => sameGame(named, select.value))));
   const container = $("task-lists");
   container.innerHTML = "";
   $("tasks-empty").hidden = visible.length > 0;
@@ -904,6 +904,12 @@ function renderTaskList(list) {
   return element;
 }
 
+/* A list naming one endpoint of a game covers the other too, as the game's own task line does: the
+ * server half of a companion game is where its server_* calls run. */
+function sameGame(named, instance) {
+  return named === instance || named.split(".")[0] === String(instance).split(".")[0];
+}
+
 /* Beneath a task being worked on: what its list's instances are running right now. This is what
  * ties the plan to the work without the agent doing anything. */
 function paintTaskActivity() {
@@ -913,7 +919,7 @@ function paintTaskActivity() {
     for (const row of element.querySelectorAll(".task")) {
       const slot = row.querySelector(".task-activity");
       const call = row.dataset.status === "doing"
-        ? activity.running.find((running) => instances.includes(running.instance))
+        ? activity.running.find((running) => instances.some((named) => sameGame(named, running.instance)))
         : null;
       slot.innerHTML = call
         ? `<span>${escapeHtml(call.tool)} ${escapeHtml(progressText(call.progress))}${call.progress?.message ? ` · ${escapeHtml(call.progress.message)}` : ""}</span>${progressBar(call.progress)}`
