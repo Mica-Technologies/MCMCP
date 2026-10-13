@@ -1,6 +1,6 @@
 # Tools
 
-79 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+81 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -392,6 +392,55 @@ stored, so an agent's big build can't push a person's edits out of the record.
   (`limits.changeLogEntries`, 262,144 changes). Read the region again.
 - `truncated: true` means more changes matched than `limit`. Ask again from the returned token.
 - Not seen: writes a mod makes without telling clients, and terrain generation.
+
+#### `server_watch_blocks`
+
+:material-eye: Read-only · `op` (`start` default, `read`, `stop`, `list`)
+
+A timeline of block changes at tick resolution. Use it to time something that animates or cycles,
+such as signals, machines, redstone or doors, instead of polling with `server_get_blocks`, which
+misses anything shorter than the gap between calls.
+
+| Argument | Notes |
+| --- | --- |
+| `x`, `y`, `z`, `toX`, `toY`, `toZ` | `start`: a box to watch, at most 4,096 blocks |
+| `positions` | `start`: `[[x, y, z], ...]` to watch instead of a box |
+| `ticks` | `start`: how long to watch, 1 to 72,000 (an hour) |
+| `properties` | `start`: only these state properties count as a change, e.g. `["color"]`. The block id always counts |
+| `actual` | `start`: watch the state as drawn (`getActualState`), which includes properties worked out from neighbours. Default `true` |
+| `wait` | `start`: wait for the result. Default: when `ticks` fits in about 80 seconds (1,600 ticks) |
+| `id`, `from_change` | `read` and `stop`: the watch, and the first change to return (the last `nextChange`) |
+
+```json
+{"id": "w1791893742476", "startTick": 151419, "endTick": 154419, "sampledTo": 151454,
+ "done": true, "stopReason": "stopped", "changeCount": 3, "nextChange": 3,
+ "palette": ["minecraft:air", "(unloaded)", "minecraft:wool[color=red]", "minecraft:wool[color=yellow]"],
+ "initial": [[30, 100, 5, 0], [900000, 100, 900000, 1]],
+ "changes": [[151425, 30, 100, 5, 0, 2], [151433, 30, 100, 5, 2, 3], [151448, 30, 100, 5, 3, 0]]}
+```
+
+Each change is `[tick, x, y, z, from, to]`, where `from` and `to` index `palette`. `initial` gives
+each position's starting block when a watch has 256 positions or fewer. A watch longer than about
+80 seconds returns its `id` at once; read it as it runs with `op: "read"`, passing `from_change`
+to get only what is new.
+
+The server samples every watched position at the end of every tick and compares state objects, so a
+change is recorded even if it lasted one tick. Unlike `server_changes_since`, a watch sees MCMCP's
+own writes, writes made without telling clients, and properties that exist only in the drawn state.
+It never loads a chunk: an unloaded position reads `(unloaded)`, so a chunk unloading and loading
+again shows in the timeline. Tile-entity data is not watched.
+
+At most 8 watches are kept at once. A watch stops at 20,000 changes (`truncated: true`), keeping
+the start of the timeline. A finished watch can be read for 30 minutes.
+
+#### `server_wait_tick`
+
+:material-eye: Read-only · `tick`, or `modulo` with optional `remainder` · optional `dimension`
+
+Waits until the world's total time reaches a tick, then returns it. `tick` waits for an exact tick.
+`modulo` and `remainder` wait for the next tick where `totalTime % modulo == remainder`, which lines
+an action up with something on a fixed cycle, such as a chunk reload timed to a window of a
+1,800-tick cycle. It waits at most 90 seconds and refuses a tick further away than that.
 
 ### Chunk loading
 

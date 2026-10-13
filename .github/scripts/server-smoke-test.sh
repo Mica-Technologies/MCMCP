@@ -526,6 +526,26 @@ case "$TE_BODY" in
   *) mcp_failure "server_get_tile_entities did not filter or page: ${TE_BODY}" ;;
 esac
 
+echo "==> Watching blocks: a change made during a watch is recorded with its tick"
+WX=$((PX + 2)); WY=$((PY + 2)); WZ=${PZ}
+WATCH_BODY="$(mcp_call 55 server_watch_blocks "{\"x\":${WX},\"y\":${WY},\"z\":${WZ},\"ticks\":2000,\"wait\":false}")" \
+  || mcp_failure "server_watch_blocks start failed: ${WATCH_BODY}"
+WATCH_ID="$(printf '%s' "$WATCH_BODY" | grep -o '"id":"w[0-9]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$WATCH_ID" ] || mcp_failure "no watch id: ${WATCH_BODY}"
+mcp_call 56 server_set_block "{\"x\":${WX},\"y\":${WY},\"z\":${WZ},\"block\":\"minecraft:wool\",\"metadata\":14}" > /dev/null \
+  || mcp_failure "the watched write failed"
+TICK_BODY="$(mcp_call 57 server_wait_tick '{"modulo":2}')" || mcp_failure "server_wait_tick failed: ${TICK_BODY}"
+case "$TICK_BODY" in
+  *'"tick":'*) echo "    waited for the next even tick" ;;
+  *) mcp_failure "server_wait_tick did not return a tick: ${TICK_BODY}" ;;
+esac
+STOP_BODY="$(mcp_call 58 server_watch_blocks "{\"op\":\"stop\",\"id\":\"${WATCH_ID}\"}")" \
+  || mcp_failure "server_watch_blocks stop failed: ${STOP_BODY}"
+case "$STOP_BODY" in
+  *'"changeCount":1'*'wool[color=red]'*) echo "    the red wool was recorded as one change" ;;
+  *) mcp_failure "the watch did not record the write: ${STOP_BODY}" ;;
+esac
+
 echo "==> Chunk loading: a write far outside the world generates nothing"
 FAR_BODY="$(mcp_call 40 server_set_blocks '{"mode":"fill","block":"minecraft:glass","x":900000,"y":100,"z":900000,"toX":900001,"toZ":900001}')" \
   || mcp_failure "the far write failed: ${FAR_BODY}"

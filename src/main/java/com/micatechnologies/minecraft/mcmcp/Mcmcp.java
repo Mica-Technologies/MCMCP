@@ -172,6 +172,7 @@ public class Mcmcp {
         CompanionServer.serverStopping();
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.serverStopping();
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStopping();
+        com.micatechnologies.minecraft.mcmcp.tools.ServerWatchTools.serverStopping();
         // After the endpoint stops, so no call can start between the close line and the end.
         McmcpEndpoints.closeJournal(McmcpSide.SERVER);
     }
