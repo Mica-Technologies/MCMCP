@@ -879,6 +879,11 @@ Returns everything the command printed, plus its integer result. That matters: w
 output, `/tp` failing because the target is offline and `/tp` failing because the coordinates are out
 of range are the same integer.
 
+A dedicated server often has no translation for a mod's message keys. A reply whose key it cannot
+translate comes back as `key(arg, arg, ...)`, for example
+`command.storm.list.entry(Tropical Depression Julian, StormObject, 3, 3, 3156, 2406, 1000,  (dying))`,
+rather than as the bare key with the arguments lost.
+
 A `/fill` or `/clone` leaves an undo point and names it in `undoPoint`, as `server_set_blocks` does.
 See [`server_undo`](#server_undo).
 

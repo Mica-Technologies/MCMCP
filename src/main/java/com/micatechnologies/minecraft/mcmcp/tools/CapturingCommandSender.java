@@ -69,14 +69,15 @@ public class CapturingCommandSender implements ICommandSender {
      * the real player. Not thread-safe; a capture's messages are read only after it is detached.
      */
     public void record(ITextComponent component) {
-        // getUnformattedText strips the colour codes and click events that make sense in a chat
-        // window and are noise in a tool result.
-        output.add(component.getUnformattedText());
+        // Unformatted: the colour codes and click events that make sense in a chat window are noise
+        // in a tool result. CommandText keeps a mod's untranslatable key's arguments (#67).
+        String text = CommandText.plain(component);
+        output.add(text);
         // Red is how the command handler reports a CommandException, whether the command's usage was
         // wrong or it declined to act. It is the only thing that tells a failure apart from a command
         // that ran and returned 0.
         if (component.getStyle().getColor() == TextFormatting.RED) {
-            errors.add(component.getUnformattedText());
+            errors.add(text);
         }
     }
 
