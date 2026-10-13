@@ -22,7 +22,9 @@ import net.minecraft.client.gui.GuiDownloadTerrain;
 import net.minecraft.client.gui.GuiMainMenu;
 import net.minecraft.client.gui.GuiMultiplayer;
 import net.minecraft.client.multiplayer.ServerData;
+import net.minecraft.client.network.NetworkPlayerInfo;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.text.ITextComponent;
 import net.minecraft.server.integrated.IntegratedServer;
 import javax.annotation.Nullable;
 import net.minecraft.world.GameType;
@@ -31,6 +33,7 @@ import net.minecraft.world.WorldType;
 import net.minecraft.world.storage.ISaveFormat;
 import net.minecraft.world.storage.WorldSummary;
 import net.minecraftforge.fml.client.FMLClientHandler;
+import net.minecraftforge.fml.common.ObfuscationReflectionHelper;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -86,6 +89,7 @@ public final class ClientWorldTools {
         registerWorldLoad();
         registerWorldLeave();
         registerRejoin();
+        registerConnect();
     }
 
     private static ISaveFormat saveLoader() {
@@ -424,7 +428,8 @@ public final class ClientWorldTools {
             .title("Leave the current world")
             .description("Disconnect from the current world or server and return to the main menu.\n\n"
                 + "Singleplayer worlds are saved on the way out, the same as choosing 'Save and Quit "
-                + "to Title'. On a multiplayer server this is a normal disconnect.")
+                + "to Title'. On a multiplayer server this is a normal disconnect, the counterpart of "
+                + "client_connect.")
             .schema(JsonSchema.noArguments())
             .clientOnly()
             .handler(context -> {
@@ -637,40 +642,11 @@ public final class ClientWorldTools {
                         + "client_world_leave and client_world_load.");
                 }
 
-                long start = System.currentTimeMillis();
-                leaveLoadedWorld(context);
-                // From the client tick, as the multiplayer screen's Join button runs it.
-                ClientDeferredTasks.runNextTick(new Runnable() {
-                    @Override
-                    public void run() {
-                        FMLClientHandler.instance().connectToServer(
-                            new GuiMultiplayer(new GuiMainMenu()),
-                            new ServerData(server[0], server[1], Boolean.parseBoolean(server[2])));
-                    }
-                }).get(10, TimeUnit.SECONDS);
-
-                long deadline = start + timeoutSeconds * 1000L;
-                JsonObject state;
-                while (true) {
-                    context.getCancellation().throwIfCancelled();
-                    state = context.onGameThread(new Callable<JsonObject>() {
-                        @Override
-                        public JsonObject call() {
-                            return rejoinState(radius);
-                        }
-                    });
-                    if (state.get("ready").getAsBoolean() || state.has("disconnected")
-                        || System.currentTimeMillis() > deadline) {
-                        break;
-                    }
-                    Thread.sleep(100L);
-                }
-
-                state.addProperty("server", server[1]);
-                state.addProperty("elapsedMillis", System.currentTimeMillis() - start);
+                JsonObject state = connectAndWait(context, server[0], server[1],
+                    Boolean.parseBoolean(server[2]), radius, timeoutSeconds);
                 if (state.has("disconnected")) {
-                    return ToolResult.error("Reconnecting to " + server[1] + " failed: the client is "
-                        + "on the disconnected screen. Read why with client_gui_text.");
+                    return ToolResult.error("Reconnecting to " + server[1] + " failed"
+                        + disconnectedText(state)).withStructured(state);
                 }
                 if (!state.get("ready").getAsBoolean()) {
                     return ToolResult.error("The reconnect to " + server[1] + " started, but the "
@@ -684,6 +660,169 @@ public final class ClientWorldTools {
             .build());
     }
 
+    /** The most player names a connect lists; past it, only the count. */
+    private static final int MAX_LISTED_PLAYERS = 50;
+
+    /**
+     * Join a multiplayer server by address (#66).
+     *
+     * <p>Without it, reaching a dedicated server meant clicking Multiplayer, Direct Connect, typing the
+     * address and clicking Join: five calls, only from the main menu, broken by any mod that replaces
+     * the multiplayer screen, and silent about why a connection was refused. This is the Join button's
+     * own call, made directly, followed by {@code client_rejoin}'s wait.
+     */
+    private static void registerConnect() {
+        McpRegistry.registerTool(McpTool.named("client_connect")
+            .title("Join a multiplayer server")
+            .description("Connect to a multiplayer server by address, then wait until the player is in "
+                + "the world and the chunks around them have arrived. Any world or server the client "
+                + "is in is left first. To disconnect, use client_world_leave.\n\n"
+                + "If the server refuses or drops the connection (missing mods, whitelist, wrong "
+                + "version, server down), this fails with the reason the client was given.")
+            .schema(JsonSchema.object()
+                .string("address", "host or host:port, e.g. 'localhost:25565'. The port defaults to "
+                    + "25565.")
+                .integer("radius", "Chunks around the player that must have arrived before this "
+                    + "returns. Default 2.", 0, 4)
+                .integer("timeout_seconds", "Give up waiting after this long. Default 60.", 5,
+                    MAX_REJOIN_SECONDS)
+                .required("address")
+                .build())
+            .clientOnly()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("World control is disabled by "
+                        + "permissions.allowPlayerControl in the MCMCP config.");
+                }
+                final String address = context.requireString("address").trim();
+                if (address.isEmpty() || address.matches(".*\\s.*")) {
+                    return ToolResult.error("'address' is host or host:port, with no spaces; got '"
+                        + address + "'.");
+                }
+                final int radius = context.getBoundedInt("radius", 2, 0, 4);
+                final int timeoutSeconds = context.getBoundedInt("timeout_seconds", 60, 5,
+                    MAX_REJOIN_SECONDS);
+
+                JsonObject state = connectAndWait(context, address, address, false, radius, timeoutSeconds);
+                if (state.has("disconnected")) {
+                    return ToolResult.error("Connecting to " + address + " failed"
+                        + disconnectedText(state)).withStructured(state);
+                }
+                if (!state.get("ready").getAsBoolean()) {
+                    return ToolResult.error("The connection to " + address + " started, but the "
+                        + "world was not ready within " + timeoutSeconds + "s; still waiting for "
+                        + state.get("waitingFor").getAsString() + ". Check with client_gui_state, or "
+                        + "wait with client_wait waitFor 'worldLoaded'.").withStructured(state);
+                }
+                JsonObject players = context.onGameThread(new Callable<JsonObject>() {
+                    @Override
+                    public JsonObject call() {
+                        return playersOnline();
+                    }
+                });
+                state.addProperty("connected", true);
+                state.add("players", players.get("players"));
+                state.add("playerCount", players.get("playerCount"));
+                return ToolResult.text("Connected to " + address + " in "
+                    + state.get("elapsedMillis").getAsLong() + "ms; "
+                    + players.get("playerCount").getAsInt() + " player(s) online.").withStructured(state);
+            })
+            .build());
+    }
+
+    /** {players: [names, up to MAX_LISTED_PLAYERS], playerCount}, from the tab list. Client thread. */
+    private static JsonObject playersOnline() {
+        Minecraft mc = Minecraft.getMinecraft();
+        JsonArray names = new JsonArray();
+        int count = 0;
+        if (mc.getConnection() != null) {
+            for (NetworkPlayerInfo info : mc.getConnection().getPlayerInfoMap()) {
+                if (count++ < MAX_LISTED_PLAYERS) {
+                    names.add(info.getGameProfile().getName());
+                }
+            }
+        }
+        JsonObject json = new JsonObject();
+        json.add("players", names);
+        json.addProperty("playerCount", count);
+        return json;
+    }
+
+    /**
+     * Leaves any world, connects to a server, and waits until the player is in it with the chunks
+     * around them, the connection has failed, or the time is up. Shared by {@code client_rejoin} and
+     * {@code client_connect}.
+     *
+     * @return the last {@link #rejoinState}, plus {@code server} and {@code elapsedMillis}
+     */
+    private static JsonObject connectAndWait(ToolContext context, final String name, final String address,
+        final boolean lan, final int radius, int timeoutSeconds) throws Exception {
+        long start = System.currentTimeMillis();
+        leaveLoadedWorld(context);
+        // From the client tick, as the multiplayer screen's Join button runs it.
+        ClientDeferredTasks.runNextTick(new Runnable() {
+            @Override
+            public void run() {
+                FMLClientHandler.instance().connectToServer(new GuiMultiplayer(new GuiMainMenu()),
+                    new ServerData(name, address, lan));
+            }
+        }).get(10, TimeUnit.SECONDS);
+
+        long deadline = start + timeoutSeconds * 1000L;
+        JsonObject state;
+        while (true) {
+            context.getCancellation().throwIfCancelled();
+            state = context.onGameThread(new Callable<JsonObject>() {
+                @Override
+                public JsonObject call() {
+                    return rejoinState(radius);
+                }
+            });
+            if (state.get("ready").getAsBoolean() || state.has("disconnected")
+                || System.currentTimeMillis() > deadline) {
+                break;
+            }
+            Thread.sleep(100L);
+        }
+        state.addProperty("server", address);
+        state.addProperty("elapsedMillis", System.currentTimeMillis() - start);
+        return state;
+    }
+
+    /** ": <why>", from a failed state's disconnect screen, or a pointer to where to look. */
+    private static String disconnectedText(JsonObject state) {
+        String reason = state.has("reason") ? state.get("reason").getAsString() : "";
+        String message = state.has("message") ? state.get("message").getAsString() : "";
+        String text = (reason + (reason.isEmpty() || message.isEmpty() ? "" : ": ") + message).trim();
+        return text.isEmpty() ? ": the client is on the disconnected screen. See it with client_screenshot."
+            : ": " + text;
+    }
+
+    /**
+     * Why the client was disconnected, from the screen that says so. The title (such as "Failed to
+     * connect to the server") and the message (the kick reason, Forge's list of missing mods, or the
+     * network error) are private, so they are read by SRG name, which Forge maps to the development
+     * name when run unobfuscated. Client thread.
+     */
+    private static void addDisconnectReason(GuiDisconnected screen, JsonObject json) {
+        try {
+            String reason = ObfuscationReflectionHelper.getPrivateValue(GuiDisconnected.class, screen,
+                "field_146306_a");
+            if (reason != null) {
+                json.addProperty("reason", net.minecraft.client.resources.I18n.format(reason));
+            }
+            ITextComponent message = ObfuscationReflectionHelper.getPrivateValue(GuiDisconnected.class,
+                screen, "field_146304_f");
+            if (message != null) {
+                json.addProperty("message", message.getUnformattedText());
+            }
+        }
+        catch (RuntimeException e) {
+            // A screen this build cannot read still reports that the connection failed.
+            json.addProperty("reasonUnavailable", e.toString());
+        }
+    }
+
     /** Whether the rejoin has landed, and if not, what it is still waiting for. Client thread. */
     private static JsonObject rejoinState(int radius) {
         Minecraft mc = Minecraft.getMinecraft();
@@ -692,6 +831,7 @@ public final class ClientWorldTools {
         // Tested by type, never by class name: names are obfuscated in a released jar.
         if (mc.currentScreen instanceof GuiDisconnected) {
             json.addProperty("disconnected", true);
+            addDisconnectReason((GuiDisconnected) mc.currentScreen, json);
             waitingFor = "the connection";
         } else if (mc.world == null || mc.player == null) {
             waitingFor = "the world to load";

@@ -1,6 +1,6 @@
 # Tools
 
-78 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+79 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -2091,7 +2091,23 @@ asked under `startupQueryAnswered`. `continue` may lose blocks and items from mo
 
 Requires `permissions.allowPlayerControl` · no arguments
 
-Back to the main menu, saving on the way out.
+Back to the main menu, saving on the way out. On a multiplayer server it is a normal disconnect, so
+it is also the counterpart of [`client_connect`](#client_connect).
+
+#### `client_connect`
+
+Requires `permissions.allowPlayerControl` · `address`, optional `radius` (0–4, default 2),
+`timeout_seconds` (default 60)
+
+Joins a multiplayer server by address (`host` or `host:port`), and returns once the player is in the
+world and every chunk within `radius` of them has arrived. Any world or server the client is in is
+left first, and it works from any screen. It does not go through the server list, so it is
+unaffected by mods that replace the multiplayer screen.
+
+On success it returns `connected`, `position`, `elapsedMillis`, `playerCount` and up to 50 names in
+`players`. If the server refuses or drops the connection, the call fails with the disconnect
+screen's `reason` and `message`, such as Forge's list of missing mods, a whitelist kick, or
+`Connection refused`.
 
 #### `client_rejoin`
 
