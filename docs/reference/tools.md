@@ -751,7 +751,9 @@ Each `server_set_blocks` call records what every block it changed was before: th
 tile-entity data. `server_set_block` records one too, but only when `undo.recordSingleBlockWrites`
 is on. The record is made as each block changes, for only the blocks that change, so there is no
 extra pass over the region. It is kept in the world's `mcmcp-undo` folder, with a top-down map of
-the area before and after.
+the area before and after. Each world keeps at most `undo.maxUndoPoints` points in at most
+`undo.maxUndoMegabytes` (64 MB by default), and the oldest are removed first, so an agent that
+builds around the clock does not grow the save without limit.
 
 | `op` | Does |
 | --- | --- |

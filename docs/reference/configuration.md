@@ -337,6 +337,15 @@ Default `50`, range 1–1000
 
 How many undo points each world keeps. The oldest go first.
 
+### `maxUndoMegabytes`
+
+Default `64`, range 0–65536 · read live
+
+The most room a world's undo points may take, in megabytes. The oldest points go first, and the
+newest is always kept. A count alone does not bound the folder: one large fill over tile entities
+can outweigh hundreds of small writes, and an agent building around the clock makes many large
+writes. What is kept is always an unbroken run of the newest points. `0` turns the size limit off.
+
 ## `companion`
 
 The server half of the [server companion](../guide/companion.md): players' own MCMCP reaching
@@ -648,6 +657,7 @@ display {
 
 undo {
     B:enableUndoPoints=true
+    I:maxUndoMegabytes=64
     I:maxUndoPoints=50
     B:recordSingleBlockWrites=false
 }

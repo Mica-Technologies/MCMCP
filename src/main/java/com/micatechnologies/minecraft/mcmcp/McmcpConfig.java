@@ -101,6 +101,7 @@ public class McmcpConfig {
     private static boolean undoPointsEnabled = true;
     private static boolean undoSingleBlockWrites = false;
     private static int maxUndoPoints = 50;
+    private static int maxUndoMegabytes = 64;
     private static boolean allowLogAccess = true;
     private static boolean allowChat = true;
     private static boolean allowProcessControl = true;
@@ -305,6 +306,10 @@ public class McmcpConfig {
                 + "each is a file of its own.");
         maxUndoPoints = configuration.getInt("maxUndoPoints", CATEGORY_UNDO, 50, 1, 1000,
             "How many undo points each world keeps. The oldest go first.");
+        maxUndoMegabytes = configuration.getInt("maxUndoMegabytes", CATEGORY_UNDO, 64, 0, 65536,
+            "The most room, in megabytes, a world's undo points may take. The oldest go first; the "
+                + "newest is always kept. A count alone does not bound the folder, because one large "
+                + "fill over tile entities can outweigh hundreds of small writes. 0 for no size limit.");
 
         // Request journal
         journalEnabled = configuration.getBoolean("enabled", CATEGORY_JOURNAL, defaults.journal(),
@@ -681,6 +686,11 @@ public class McmcpConfig {
 
     public static int getMaxUndoPoints() {
         return maxUndoPoints;
+    }
+
+    /** The most megabytes a world's undo points may take, or 0 for no limit. Read live. */
+    public static int getMaxUndoMegabytes() {
+        return maxUndoMegabytes;
     }
 
     public static boolean isShowActivityBanner() {

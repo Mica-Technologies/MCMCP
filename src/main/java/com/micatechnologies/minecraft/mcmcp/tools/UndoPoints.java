@@ -205,7 +205,8 @@ public final class UndoPoints {
     // ------------------------------------------------------------------
 
     /**
-     * Writes an undo point and prunes the oldest beyond {@code undo.maxUndoPoints}. Off the game
+     * Writes an undo point and prunes the oldest beyond {@code undo.maxUndoPoints} and
+     * {@code undo.maxUndoMegabytes}. Off the game
      * thread: {@code record} is plain NBT by now.
      *
      * @param meta id, tool, dimension, blocks, from/to and anything else to list it by
@@ -233,7 +234,7 @@ public final class UndoPoints {
         // The listing file last: an undo point is listed only once everything it names exists.
         Files.write(new File(folder, id + ".json").toPath(),
             Json.write(meta).getBytes(StandardCharsets.UTF_8));
-        prune(folder, McmcpConfig.getMaxUndoPoints());
+        prune(folder, McmcpConfig.getMaxUndoPoints(), McmcpConfig.getMaxUndoMegabytes() * 1024L * 1024L);
     }
 
     /** Every undo point's listing, newest first. */
@@ -297,26 +298,67 @@ public final class UndoPoints {
         return id != null && id.matches("u[0-9]{1,19}");
     }
 
-    /** Keeps the newest {@code keep} points. Ids sort by age, so no file is stat'ed. */
-    static void prune(File folder, int keep) {
-        File[] listings = folder.listFiles((directory, name) -> name.endsWith(".json"));
-        if (listings == null || listings.length <= keep) {
+    /** Every file an undo point is made of. */
+    private static final String[] SUFFIXES = {".json", ".dat", "-before.png", "-after.png"};
+
+    /**
+     * Keeps the newest {@code keep} points, and of those only as many of the newest as fit in
+     * {@code maxBytes} (0 for no size limit). The newest point is kept whatever its size: dropping
+     * the write that was just made would leave nothing to undo it with.
+     *
+     * <p>The size limit is what bounds a world's folder. A count alone does not: one 32,768-block
+     * fill over tile entities can outweigh hundreds of small writes, and an agent building around the
+     * clock makes nothing but large writes.
+     */
+    static void prune(File folder, int keep, long maxBytes) {
+        File[] listings = folder.listFiles((directory, name) -> isId(stripSuffix(name, ".json")));
+        if (listings == null) {
             return;
         }
         List<String> ids = new ArrayList<>();
         for (File listing : listings) {
-            ids.add(listing.getName().substring(0, listing.getName().length() - ".json".length()));
+            ids.add(stripSuffix(listing.getName(), ".json"));
         }
-        Collections.sort(ids, (a, b) -> Long.compare(Long.parseLong(a.substring(1)),
-            Long.parseLong(b.substring(1))));
-        for (String id : ids.subList(0, ids.size() - keep)) {
-            for (String suffix : new String[] {".json", ".dat", "-before.png", "-after.png"}) {
-                File file = new File(folder, id + suffix);
-                if (file.exists() && !file.delete()) {
-                    Mcmcp.LOGGER.warn("MCMCP could not delete old undo file " + file);
-                }
+        // Newest first. Numerically, not as text: u9 is older than u10.
+        Collections.sort(ids, (a, b) -> Long.compare(Long.parseLong(b.substring(1)),
+            Long.parseLong(a.substring(1))));
+        // Once one point does not fit, every older one goes too, small or not: what is kept is always
+        // an unbroken run of the newest writes, never a history with holes in it.
+        long total = 0;
+        boolean full = false;
+        for (int i = 0; i < ids.size(); i++) {
+            String id = ids.get(i);
+            long bytes = size(folder, id);
+            full = full || i >= keep || i > 0 && maxBytes > 0 && total + bytes > maxBytes;
+            if (full) {
+                delete(folder, id);
+            }
+            else {
+                total += bytes;
             }
         }
+    }
+
+    /** The bytes one undo point takes, across all its files. */
+    private static long size(File folder, String id) {
+        long bytes = 0;
+        for (String suffix : SUFFIXES) {
+            bytes += new File(folder, id + suffix).length();
+        }
+        return bytes;
+    }
+
+    private static void delete(File folder, String id) {
+        for (String suffix : SUFFIXES) {
+            File file = new File(folder, id + suffix);
+            if (file.exists() && !file.delete()) {
+                Mcmcp.LOGGER.warn("MCMCP could not delete old undo file " + file);
+            }
+        }
+    }
+
+    private static String stripSuffix(String name, String suffix) {
+        return name.endsWith(suffix) ? name.substring(0, name.length() - suffix.length()) : "";
     }
 
     // ------------------------------------------------------------------
