@@ -223,7 +223,8 @@ public final class CompanionServer {
             String reason = player == null ? "You left the server." : refusalFor(player);
             if (wasGranted) {
                 peer.closeSessions();
-                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.releaseCaller("player:" + peer.playerId);
+                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.releaseCaller("player:" + peer.playerId, true,
+                    "its player lost companion access");
                 send(peer, CompanionProtocol.TYPE_BYE, CompanionHandshake.bye(reason));
                 Mcmcp.LOGGER.info("MCMCP companion: " + peer.playerName + " no longer has access: " + reason);
             }

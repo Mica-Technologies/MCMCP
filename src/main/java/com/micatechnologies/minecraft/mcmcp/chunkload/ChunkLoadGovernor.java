@@ -243,7 +243,7 @@ public final class ChunkLoadGovernor {
                 return;
             }
             QUEUE.remove(request);
-            releaseNow(request.hold.id);
+            releaseNow(request.hold.id, "it gave up waiting");
             request.done.completeExceptionally(new Busy("cancelled".equals(why)
                 ? "The call was cancelled while waiting for chunks to load."
                 : "The server stayed too busy to load " + request.pending.size() + " more chunk(s) within "
@@ -315,27 +315,37 @@ public final class ChunkLoadGovernor {
     }
 
     /** Ends a hold, from any thread. Chunks no hold needs are unforced and, if MCMCP loaded them, unloaded. */
-    public static void release(String holdId) {
+    public static void release(String holdId, String why) {
         MinecraftServer server = ServerThreadBridge.server();
         if (server != null) {
-            server.addScheduledTask(() -> releaseNow(holdId));
+            server.addScheduledTask(() -> releaseNow(holdId, why));
         }
     }
 
-    /** Ends one caller's holds: on logout, when their companion access goes. */
-    public static void releaseCaller(String caller) {
+    /**
+     * Ends one caller's holds. With {@code callsToo} false only the holds the caller asked for are ended
+     * — never a hold another call of theirs is still loading or using, because one account can run
+     * several scripts at once and one cleaning up must not fail the others' reads. Logout and lost
+     * companion access pass true: nothing of theirs should outlive them.
+     */
+    public static void releaseCaller(String caller, boolean callsToo, String why) {
         MinecraftServer server = ServerThreadBridge.server();
         if (server != null) {
             server.addScheduledTask(() -> {
-                for (String id : LEDGER.ownedBy(caller)) {
-                    releaseNow(id);
+                for (String id : LEDGER.ownedBy(caller, callsToo)) {
+                    releaseNow(id, why);
                 }
             });
         }
     }
 
-    /** Server thread. */
-    static void releaseNow(String holdId) {
+    /**
+     * Server thread.
+     *
+     * @param why what released it, finishing "The hold was released before its chunks loaded: …", so a
+     *            call that fails because of it says which path did
+     */
+    static void releaseNow(String holdId, String why) {
         HoldLedger.Hold hold = LEDGER.get(holdId);
         if (hold == null) {
             return;
@@ -344,8 +354,10 @@ public final class ChunkLoadGovernor {
             Request request = it.next();
             if (request.hold.id.equals(holdId)) {
                 it.remove();
-                request.done.completeExceptionally(new Busy("The hold was released before its chunks loaded.",
-                    busy("released", null, 0L)));
+                Mcmcp.LOGGER.info("MCMCP released hold " + holdId + " (" + hold.caller + ") while it was still "
+                    + "loading: " + why + ".");
+                request.done.completeExceptionally(new Busy("The hold was released before its chunks loaded: "
+                    + why + ".", busy("released", null, 0L)));
             }
         }
         WorldServer world = DimensionManager.getWorld(hold.dimension);
@@ -355,9 +367,9 @@ public final class ChunkLoadGovernor {
     }
 
     /** Ends every hold and returns every ticket. Server stopping. */
-    public static void releaseAll() {
+    public static void releaseAll(String why) {
         for (HoldLedger.Hold hold : LEDGER.holds()) {
-            releaseNow(hold.id);
+            releaseNow(hold.id, why);
         }
         for (List<ForgeChunkManager.Ticket> tickets : TICKETS.values()) {
             for (ForgeChunkManager.Ticket ticket : tickets) {
@@ -483,7 +495,7 @@ public final class ChunkLoadGovernor {
             WorldServer world = DimensionManager.getWorld(request.hold.dimension);
             if (world == null) {
                 it.remove();
-                releaseNow(request.hold.id);
+                releaseNow(request.hold.id, "its dimension unloaded");
                 request.done.completeExceptionally(new Busy("Dimension " + request.hold.dimension
                     + " unloaded.", busy("limit", "dimension", 0L)));
                 continue;
@@ -562,14 +574,14 @@ public final class ChunkLoadGovernor {
                     SHED_LOG.remove(0);
                 }
             }
-            releaseNow(id);
+            releaseNow(id, "the server has been struggling and shed it");
             return;
         }
     }
 
     private static void housekeeping(long now) {
         for (String id : LEDGER.expired(now)) {
-            releaseNow(id);
+            releaseNow(id, "it expired");
         }
         // Reconcile: a forced chunk no hold references is a leak; give it back.
         for (HoldLedger.Place place : new ArrayList<>(FORCED.keySet())) {
@@ -751,7 +763,7 @@ public final class ChunkLoadGovernor {
 
     /** Releases what a server's MCMCP held when the server stops. */
     public static void serverStopping() {
-        releaseAll();
+        releaseAll("the server is stopping");
     }
 
     /** On Forge's bus. */
@@ -771,8 +783,8 @@ public final class ChunkLoadGovernor {
         @SubscribeEvent
         public void onLogout(PlayerEvent.PlayerLoggedOutEvent event) {
             String caller = "player:" + event.player.getUniqueID();
-            for (String id : LEDGER.ownedBy(caller)) {
-                releaseNow(id);
+            for (String id : LEDGER.ownedBy(caller, true)) {
+                releaseNow(id, "its player logged out");
             }
         }
     }

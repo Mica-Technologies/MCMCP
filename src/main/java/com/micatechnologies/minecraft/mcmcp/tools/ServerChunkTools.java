@@ -55,7 +55,7 @@ public final class ServerChunkTools {
             return body.run(outcome);
         }
         finally {
-            ChunkLoadGovernor.release(outcome.holdId);
+            ChunkLoadGovernor.release(outcome.holdId, "its call ended");
         }
     }
 
@@ -156,15 +156,15 @@ public final class ServerChunkTools {
                 + "player can see them.")
             .schema(JsonSchema.object()
                 .string("id", "The hold to release.")
-                .bool("all", "Release every hold of yours.")
+                .bool("all", "Release every server_keep_loaded hold of yours. Loads still running for your other calls are left alone.")
                 .build())
             .serverOnly()
             .idempotent()
             .handler(context -> {
                 String caller = ChunkLoadGovernor.callerOf(context.getPrincipal());
                 if (context.getBoolean("all", false)) {
-                    ChunkLoadGovernor.releaseCaller(caller);
-                    return ToolResult.text("Released every hold of yours.");
+                    ChunkLoadGovernor.releaseCaller(caller, false, "server_release_loaded all");
+                    return ToolResult.text("Released every server_keep_loaded hold of yours.");
                 }
                 final String id = context.getString("id", null);
                 if (id == null) {
@@ -185,7 +185,7 @@ public final class ServerChunkTools {
                 if (context.getPrincipal().isCompanion() && !owner.equals(caller)) {
                     return ToolResult.error("Hold '" + id + "' is not yours.");
                 }
-                ChunkLoadGovernor.release(id);
+                ChunkLoadGovernor.release(id, "server_release_loaded");
                 return ToolResult.text("Released " + id + ".");
             })
             .build());

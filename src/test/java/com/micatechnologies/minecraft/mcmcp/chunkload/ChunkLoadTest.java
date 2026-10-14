@@ -183,4 +183,17 @@ class ChunkLoadTest {
         assertEquals(1, ledger.added(0, chunks(3, 4)));
         assertEquals(2, ledger.added(1, chunks(3, 4)), "another dimension is another chunk");
     }
+
+    @Test
+    void releasingAllOfACallersHoldsSparesTheCallsTheyStillHaveRunning() {
+        HoldLedger ledger = new HoldLedger();
+        HoldLedger.Hold call = ledger.create("p", 0, chunks(1), true, 0L, 1L, 1L);
+        HoldLedger.Hold kept = ledger.create("p", 0, chunks(2), false, 0L, 1L, 1L);
+        ledger.add(call);
+        ledger.add(kept);
+        ledger.add(ledger.create("q", 0, chunks(3), false, 0L, 1L, 1L));
+        assertEquals(Arrays.asList(kept.id), ledger.ownedBy("p", false),
+            "another script on the same account cleaning up must not fail this one's read");
+        assertEquals(Arrays.asList(call.id, kept.id), ledger.ownedBy("p", true), "logout ends everything");
+    }
 }

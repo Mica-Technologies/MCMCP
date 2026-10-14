@@ -506,6 +506,10 @@ Limited to `chunks.maxHeldChunksPerCaller` (512, about 360 × 360 blocks) per ca
 Ends a hold. Chunks MCMCP loaded are unloaded straight away unless a player can see them or
 another hold still needs them.
 
+`all: true` ends your `server_keep_loaded` holds only. A read or write still loading chunks for another
+of your calls keeps its own, so one script cleaning up cannot fail another running on the same account.
+A call whose hold is ended while it waits fails with a message naming what ended it.
+
 #### `server_get_tile_entities`
 
 :material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `blocks`, `keys`, `limit`, `cursor`, `load`

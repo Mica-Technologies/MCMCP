@@ -210,11 +210,11 @@ public class CommandMcmcp extends CommandBase {
     private void handleChunks(ICommandSender sender, String[] args) {
         if (args.length >= 3 && "release".equalsIgnoreCase(args[1])) {
             if ("all".equalsIgnoreCase(args[2])) {
-                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.releaseAll();
+                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.releaseAll("an operator ran /mcmcp chunks release all");
                 reply(sender, TextFormatting.GREEN, "Released every chunk MCMCP held.");
             }
             else {
-                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.release(args[2]);
+                com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.release(args[2], "an operator ran /mcmcp chunks release");
                 reply(sender, TextFormatting.GREEN, "Released " + args[2] + ".");
             }
             return;

@@ -217,11 +217,11 @@ public final class HoldLedger {
         return ids;
     }
 
-    /** One caller's holds. */
-    public List<String> ownedBy(String caller) {
+    /** One caller's holds, with or without the temporary holds of their calls still running. */
+    public List<String> ownedBy(String caller, boolean callsToo) {
         List<String> ids = new ArrayList<>();
         for (Hold hold : holds.values()) {
-            if (hold.caller.equals(caller)) {
+            if (hold.caller.equals(caller) && (callsToo || !hold.temporary)) {
                 ids.add(hold.id);
             }
         }
