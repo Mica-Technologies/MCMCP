@@ -1094,7 +1094,8 @@ item in your hotbar and pass `slot`.
 
 The reply counts `attempted`, `ran`, `succeeded`, `changed`, `failed` and `refused`, and lists each
 use's `result` and `changed`. A use outside the build limit, spawn protection or the world border is
-`refused` with the reason. With `readBack`, each use also reports the block `after`, and with
+`refused` with the reason. With `readBack`, each use also reports the block `after` and the block
+`beside` it on the clicked face (where a placement lands), and with
 `readBackKeys` the named tile-entity fields. `lentAfter` gives each lent stack's count at the end.
 `stopOnError` stops at the first failed or refused use. One undo point covers the call.
 
@@ -1775,7 +1776,7 @@ when the player lands.
 #### `client_screenshot`
 
 Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
-`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
 
@@ -1785,6 +1786,15 @@ server, so other players see nothing. The client can only draw chunks it holds, 
 within its render distance. A position outside it is refused. The tool waits up to `settle_ms`
 (default 5000) for the chunk meshes around the new viewpoint to be built. `view.meshesSettled` in
 the result says whether they were.
+
+**A view beyond the render distance.** `bringPlayer: true` moves the player to the camera first, so
+the chunks there load, waits for them, captures, and puts the player back where they were, facing the
+same way and flying or not as before. `view.playerReturnedTo` says where. The move is the server's own
+teleport: the integrated server's in singleplayer, and `server_teleport_player` over the companion on
+a remote server, which needs the player's companion `write` access there. It needs creative or
+spectator mode, because the player hovers at the camera, and a survival player put in the air is
+kicked for flying. While the game window has focus it is refused unless the agent holds
+[`client_input_lock`](#client_input_lock), since then a person may be the one playing.
 
 **`fullbright: true`** lights everything for this one frame, for night and interiors, without
 touching world time. **`fov`** sets the field of view (10–130) for the frame.

@@ -368,6 +368,9 @@ public final class ServerItemUseBatch {
         if (readBack) {
             result.addProperty("after", ServerRegionTools.describe(net.minecraft.block.Block.getStateId(
                 world.getBlockState(use.pos))));
+            // Where a placement lands: the block on the clicked face.
+            result.addProperty("beside", ServerRegionTools.describe(net.minecraft.block.Block.getStateId(
+                world.getBlockState(beside))));
             if (!readBackKeys.isEmpty()) {
                 TileEntity tile = world.getTileEntity(use.pos);
                 if (tile != null) {

@@ -13,6 +13,7 @@ import com.micatechnologies.minecraft.mcmcp.companion.CompanionProtocolException
 import com.micatechnologies.minecraft.mcmcp.companion.CompanionReassembler;
 import com.micatechnologies.minecraft.mcmcp.companion.server.CompanionServer;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
+import com.micatechnologies.minecraft.mcmcp.protocol.McpSession;
 import com.micatechnologies.minecraft.mcmcp.transport.McpEndpoint;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -90,6 +91,68 @@ public final class ClientCompanion {
     @Nullable
     public static McpEndpoint endpoint() {
         return endpoint;
+    }
+
+    /** A session of this client's own on the server, for calls the client makes for itself. */
+    @Nullable
+    private static McpSession ownSession;
+    @Nullable
+    private static CompanionForwarder ownSessionFor;
+    private static final java.util.concurrent.atomic.AtomicLong OWN_IDS = new java.util.concurrent.atomic.AtomicLong(1L);
+
+    /**
+     * Calls one of the server's tools for this client itself, as its player, over the companion: what a
+     * client tool needs the server for (a teleport, say), without the agent making the call.
+     *
+     * @return the call's {@code result}
+     * @throws IllegalStateException when there is no companion access, or the call fails at the protocol level
+     */
+    public static synchronized JsonObject callServerTool(String name, JsonObject arguments, long timeoutMillis) {
+        CompanionForwarder current = forwarder;
+        McpEndpoint local = endpoint;
+        if (current == null || local == null) {
+            throw new IllegalStateException("This client has no companion access on this server (" + detail + "), "
+                + "so it cannot ask the server for " + name + ".");
+        }
+        if (ownSession == null || ownSessionFor != current || local.getSessions().get(ownSession.getId()) == null) {
+            McpSession session = local.getSessions().create();
+            JsonObject params = new JsonObject();
+            params.addProperty("protocolVersion", com.micatechnologies.minecraft.mcmcp.protocol.McpProtocol.LATEST_VERSION);
+            params.add("capabilities", new JsonObject());
+            JsonObject clientInfo = new JsonObject();
+            clientInfo.addProperty("name", "mcmcp-client");
+            clientInfo.addProperty("version", McmcpConstants.MOD_VERSION);
+            params.add("clientInfo", clientInfo);
+            current.dispatch(session, com.micatechnologies.minecraft.mcmcp.protocol.JsonRpc.request(
+                new com.google.gson.JsonPrimitive(OWN_IDS.getAndIncrement()),
+                com.micatechnologies.minecraft.mcmcp.protocol.McpProtocol.METHOD_INITIALIZE, params));
+            current.dispatch(session, com.micatechnologies.minecraft.mcmcp.protocol.JsonRpc.notification(
+                com.micatechnologies.minecraft.mcmcp.protocol.McpProtocol.NOTIFICATION_INITIALIZED, null));
+            ownSession = session;
+            ownSessionFor = current;
+        }
+        JsonObject params = new JsonObject();
+        params.addProperty("name", name);
+        params.add("arguments", arguments);
+        JsonObject reply = current.dispatch(ownSession, com.micatechnologies.minecraft.mcmcp.protocol.JsonRpc.request(
+            new com.google.gson.JsonPrimitive(OWN_IDS.getAndIncrement()),
+            com.micatechnologies.minecraft.mcmcp.protocol.McpProtocol.METHOD_TOOLS_CALL, params));
+        JsonObject result = Json.getObject(reply, "result");
+        if (result == null) {
+            JsonObject error = Json.getObject(reply, "error");
+            throw new IllegalStateException("The server did not run " + name + ": "
+                + Json.getString(error, "message", "no answer"));
+        }
+        return result;
+    }
+
+    /** A tool result's first text block, for an error message. */
+    public static String textOf(JsonObject result) {
+        com.google.gson.JsonArray content = Json.getArray(result, "content");
+        if (content != null && content.size() > 0 && content.get(0).isJsonObject()) {
+            return Json.getString(content.get(0).getAsJsonObject(), "text", "");
+        }
+        return "";
     }
 
     /** For {@code mcmcp_endpoint_info} and {@code client_connection_info}. */

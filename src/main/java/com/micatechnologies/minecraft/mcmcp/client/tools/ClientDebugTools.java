@@ -112,7 +112,9 @@ public final class ClientDebugTools {
                 + "for the server or other players. It can only draw chunks this client holds, so "
                 + "stay within the render distance. 'fullbright' lights everything for this one "
                 + "frame — for night and interiors, without touching world time. Both are put back "
-                + "before the call returns.")
+                + "before the call returns. For a place beyond the render distance, 'bringPlayer' moves "
+                + "the player to the camera for the capture and back afterwards (creative or spectator; "
+                + "with input locked or the window in the background).")
             .schema(JsonSchema.object()
                 .string("name", "File name for the screenshot, without a path. '.png' is appended if "
                     + "missing. Defaults to a timestamped name.")
@@ -137,6 +139,8 @@ public final class ClientDebugTools {
                 .bool("fullbright", "Light everything fully for this frame. Default false.")
                 .integer("settle_ms", "With 'from': most time to let chunk meshes build at the new "
                     + "viewpoint before capturing. Default 5000.", 0, MAX_SETTLE_MILLIS)
+                .bool("bringPlayer", "With 'from': move the player to the camera first, so its chunks load, "
+                    + "and back to where they were, facing the same way, after the capture.")
                 .build())
             .clientOnly()
             .handler(context -> {
@@ -151,10 +155,11 @@ public final class ClientDebugTools {
                     return ToolResult.error("'from' and 'look_at' are each three numbers: [x, y, z].");
                 }
                 if (from == null && (lookAt != null || context.has("yaw") || context.has("pitch")
-                    || context.has("settle_ms"))) {
-                    return ToolResult.error("'look_at', 'yaw', 'pitch' and 'settle_ms' aim a detached "
-                        + "camera, so they need 'from'. Nothing was captured.");
+                    || context.has("settle_ms") || context.has("bringPlayer"))) {
+                    return ToolResult.error("'look_at', 'yaw', 'pitch', 'settle_ms' and 'bringPlayer' aim a "
+                        + "detached camera, so they need 'from'. Nothing was captured.");
                 }
+                final boolean bringPlayer = context.getBoolean("bringPlayer", false);
                 final boolean fullbright = context.getBoolean("fullbright", false);
                 final float fov = context.has("fov")
                     ? (float) Math.max(MIN_FOV, Math.min(MAX_FOV, context.getDouble("fov", 70.0D)))
@@ -199,6 +204,17 @@ public final class ClientDebugTools {
                     else {
                         final double yawArgument = context.getDouble("yaw", Double.NaN);
                         final double pitchArgument = context.getDouble("pitch", Double.NaN);
+                        com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.Trip trip = null;
+                        if (bringPlayer) {
+                            try {
+                                trip = com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.bring(context, from);
+                            }
+                            catch (IllegalStateException e) {
+                                return ToolResult.error(e.getMessage() + " Nothing was captured.");
+                            }
+                        }
+                        final com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.Trip broughtFrom = trip;
+                        try {
                         view = context.onGameThread(new Callable<JsonObject>() {
                             @Override
                             public JsonObject call() {
@@ -238,6 +254,16 @@ public final class ClientDebugTools {
                                     return null;
                                 }
                             });
+                        }
+                        }
+                        finally {
+                            if (broughtFrom != null) {
+                                // Back where they were even if the capture failed.
+                                com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.back(context, broughtFrom);
+                            }
+                        }
+                        if (broughtFrom != null) {
+                            view.add("playerReturnedTo", broughtFrom.toJson());
                         }
                     }
                 }
