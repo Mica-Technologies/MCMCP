@@ -206,8 +206,13 @@ public final class ChunkLoadGovernor {
             throw (Busy) admitted;
         }
         Request request = (Request) admitted;
-        long deadline = started + McmcpConfig.getChunkMaxWaitSeconds() * 1000L;
+        // The wait is measured from the last chunk this request got, not from when it asked: several
+        // calls sharing one player's budget each move slowly, and a read that is still moving is not
+        // stuck (#77).
+        long patience = McmcpConfig.getChunkMaxWaitSeconds() * 1000L;
+        long lastProgress = started;
         int total = request.pending.size();
+        int lastLeft = total;
         while (true) {
             try {
                 Outcome outcome = request.done.get(250L, TimeUnit.MILLISECONDS);
@@ -215,7 +220,13 @@ public final class ChunkLoadGovernor {
                 return outcome;
             }
             catch (TimeoutException waiting) {
-                if (context.getCancellation().isCancelled() || System.currentTimeMillis() > deadline) {
+                long now = System.currentTimeMillis();
+                int leftNow = request.pending.size();
+                if (leftNow < lastLeft) {
+                    lastLeft = leftNow;
+                    lastProgress = now;
+                }
+                if (context.getCancellation().isCancelled() || now - lastProgress > patience) {
                     giveUp(request, context.getCancellation().isCancelled() ? "cancelled" : null);
                 }
                 else if (total > 0) {
@@ -251,9 +262,10 @@ public final class ChunkLoadGovernor {
             releaseNow(request.hold.id, "it gave up waiting");
             request.done.completeExceptionally(new Busy("cancelled".equals(why)
                 ? "The call was cancelled while waiting for chunks to load."
-                : "The server stayed too busy to load " + request.pending.size() + " more chunk(s) within "
-                    + "chunks.maxWaitSeconds (" + McmcpConfig.getChunkMaxWaitSeconds() + " s). Retry after "
-                    + "busy.retryAfterMs.", busy(HEALTH.state() == ServerHealth.State.OK ? "throttled"
+                : "No chunk of this call's " + request.pending.size() + " still to load came in "
+                    + "chunks.maxWaitSeconds (" + McmcpConfig.getChunkMaxWaitSeconds() + " s); " + QUEUE.size()
+                    + " call(s) are waiting for loads. Retry after busy.retryAfterMs, or run long reads as a job, "
+                    + "which waits as long as it needs.", busy(HEALTH.state() == ServerHealth.State.OK ? "throttled"
                     : HEALTH.state().name().toLowerCase(java.util.Locale.ROOT), null,
                     retryAfter(request.hold.caller))));
         });
@@ -495,52 +507,87 @@ public final class ChunkLoadGovernor {
             measure(server, now);
         }
         int perTick = ServerHealth.perTick(HEALTH.state(), McmcpConfig.getChunkLoadsPerTick());
-        for (Iterator<Request> it = QUEUE.iterator(); it.hasNext() && perTick > 0; ) {
-            Request request = it.next();
-            WorldServer world = DimensionManager.getWorld(request.hold.dimension);
-            if (world == null) {
-                it.remove();
-                releaseNow(request.hold.id, "its dimension unloaded");
-                request.done.completeExceptionally(new Busy("Dimension " + request.hold.dimension
-                    + " unloaded.", busy("limit", "dimension", 0L)));
-                continue;
-            }
-            int allowed = BUDGET.allowance(request.hold.caller, request.pending.size(), now, perTick,
-                McmcpConfig.getChunkLoadsPerMinute(), McmcpConfig.getChunkLoadsPerMinutePerCaller());
-            int loads = 0;
-            ChunkProviderServer provider = world.getChunkProvider();
-            while (!request.pending.isEmpty() && loads < allowed) {
-                long chunk = request.pending.pollFirst();
-                int cx = ChunkKeys.x(chunk);
-                int cz = ChunkKeys.z(chunk);
-                HoldLedger.Place place = new HoldLedger.Place(request.hold.dimension, chunk);
-                if (provider.chunkExists(cx, cz)) {
-                    request.outcome.alreadyLoaded++;
-                    force(world, place);
+        // Round robin: each waiting call gets one load in turn until the tick's share is spent, so a
+        // call that asked first cannot starve the ones behind it (#77). A chunk already in memory
+        // costs nothing and does not use a turn.
+        final int tickLimit = perTick;
+        boolean progressed = true;
+        while (perTick > 0 && progressed && !QUEUE.isEmpty()) {
+            progressed = false;
+            for (Iterator<Request> it = QUEUE.iterator(); it.hasNext() && perTick > 0; ) {
+                Request request = it.next();
+                int loads = serve(request, now, 1, tickLimit);
+                if (loads < 0) {
+                    it.remove();
                     continue;
                 }
-                // loadChunk reads a chunk from disk and returns null for one that is not there; it
-                // never generates. provideChunk would.
-                Chunk loaded = provider.loadChunk(cx, cz);
-                loads++;
-                if (loaded == null) {
-                    ungenerated(request.outcome, chunk);
-                    continue;
+                perTick -= loads;
+                progressed |= loads > 0;
+                if (request.pending.isEmpty()) {
+                    it.remove();
+                    request.done.complete(request.outcome);
+                    progressed = true;
                 }
-                request.outcome.loaded++;
-                LEDGER.markLoadedByUs(request.hold.dimension, chunk);
-                force(world, place);
             }
-            BUDGET.record(request.hold.caller, loads, now);
-            perTick -= loads;
-            if (request.pending.isEmpty()) {
-                it.remove();
-                request.done.complete(request.outcome);
-            }
+        }
+        // Whoever went first this tick goes last next tick.
+        if (QUEUE.size() > 1) {
+            QUEUE.addLast(QUEUE.pollFirst());
         }
         if (ticks % 200 == 0) {
             housekeeping(now);
         }
+    }
+
+    /**
+     * Gives one request up to {@code share} loads, plus any of its chunks already in memory. The
+     * budget still counts every load this tick against {@code tickLimit}.
+     *
+     * @return the loads made, or -1 if the request ended (its dimension unloaded) and left the queue
+     */
+    private static int serve(Request request, long now, int share, int tickLimit) {
+        WorldServer world = DimensionManager.getWorld(request.hold.dimension);
+        if (world == null) {
+            releaseNow(request.hold.id, "its dimension unloaded");
+            request.done.completeExceptionally(new Busy("Dimension " + request.hold.dimension
+                + " unloaded.", busy("limit", "dimension", 0L)));
+            return -1;
+        }
+        int allowed = BUDGET.allowance(request.hold.caller, Math.min(share, request.pending.size()), now, tickLimit,
+            McmcpConfig.getChunkLoadsPerMinute(), McmcpConfig.getChunkLoadsPerMinutePerCaller());
+        int loads = 0;
+        ChunkProviderServer provider = world.getChunkProvider();
+        while (!request.pending.isEmpty() && loads < allowed) {
+            long chunk = request.pending.pollFirst();
+            int cx = ChunkKeys.x(chunk);
+            int cz = ChunkKeys.z(chunk);
+            HoldLedger.Place place = new HoldLedger.Place(request.hold.dimension, chunk);
+            if (provider.chunkExists(cx, cz)) {
+                request.outcome.alreadyLoaded++;
+                force(world, place);
+                continue;
+            }
+            // loadChunk reads a chunk from disk and returns null for one that is not there; it
+            // never generates. provideChunk would.
+            Chunk loaded = provider.loadChunk(cx, cz);
+            loads++;
+            if (loaded == null) {
+                ungenerated(request.outcome, chunk);
+                continue;
+            }
+            request.outcome.loaded++;
+            LEDGER.markLoadedByUs(request.hold.dimension, chunk);
+            force(world, place);
+        }
+        // Chunks already in memory cost no load: take them now, whatever the share.
+        while (!request.pending.isEmpty() && provider.chunkExists(ChunkKeys.x(request.pending.peekFirst()),
+            ChunkKeys.z(request.pending.peekFirst()))) {
+            long chunk = request.pending.pollFirst();
+            request.outcome.alreadyLoaded++;
+            force(world, new HoldLedger.Place(request.hold.dimension, chunk));
+        }
+        BUDGET.record(request.hold.caller, loads, now);
+        return loads;
     }
 
     private static void measure(MinecraftServer server, long now) {

@@ -450,12 +450,14 @@ read live.
 | `maxHeldChunksPerCaller` | 512 | 1–65536 | Chunks one caller keeps loaded (512 is about 360 × 360 blocks). |
 | `holdIdleSeconds` | 120 | 10–3600 | A hold unused for this long is released. |
 | `holdMaxSeconds` | 900 | 60–3600 | The longest lease before a hold must be renewed. |
-| `maxWaitSeconds` | 60 | 5–600 | How long a call waits for its chunks before giving up as busy. |
+| `maxWaitSeconds` | 60 | 5–600 | How long a call waits with none of its chunks loading before giving up as busy. A call that is still getting chunks keeps waiting. |
 | `throttleMspt` | 40 | 10–500 | Mean tick time above which loading slows to 2 a tick. |
 | `pauseMspt` | 50 | 10–1000 | Mean tick time above which nothing new loads (50 ms is 20 TPS). |
 | `pauseHeapPercent` | 85 | 10–100 | Old-generation heap after GC above which nothing new loads. |
 | `shedAfterSeconds` | 30 | 5–3600 | After loading has been paused this long, holds are given back, the longest idle first. |
 
+Calls waiting for loads take turns, one chunk each in rotation, so several calls from one player
+all make progress rather than the first starving the rest. A chunk already in memory costs no load.
 Loading slows or stops at once when the server gets worse, and only resumes after 10 seconds of
 recovery. Every change of state is logged with the tick time, heap and MCMCP's held count.
 

@@ -404,7 +404,8 @@ public class McmcpConfig {
         chunkHoldMaxSeconds = configuration.getInt("holdMaxSeconds", CATEGORY_CHUNKS, 900, 60, 3600,
             "The longest a hold lasts before it must be renewed (server_keep_loaded op=renew).");
         chunkMaxWaitSeconds = configuration.getInt("maxWaitSeconds", CATEGORY_CHUNKS, 60, 5, 600,
-            "How long a call waits for its chunks to load before giving up with a 'server busy' error.");
+            "How long a call waits without any of its chunks loading before giving up with a 'server busy' "
+                + "error. Counted from the last chunk it got, so a call that is still moving keeps waiting.");
         chunkThrottleMspt = configuration.getInt("throttleMspt", CATEGORY_CHUNKS, 40, 10, 500,
             "Mean tick time, in milliseconds, above which MCMCP loads at most 2 chunks a tick.");
         chunkPauseMspt = configuration.getInt("pauseMspt", CATEGORY_CHUNKS, 50, 10, 1000,
