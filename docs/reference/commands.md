@@ -1,7 +1,7 @@
 # Commands
 
 ```
-/mcmcp <status|tools|sessions|token|reload|restart|stop>
+/mcmcp <status|link|tools|sessions|token|reload|restart|stop|companion|chunks|estop|jobs|kill>
 ```
 
 One command, seven subcommands. It exists because the failure modes of an embedded network service are
@@ -174,6 +174,40 @@ What MCMCP holds loaded, and how the server is doing:
 
 `release <id>` ends one hold, and `release all` ends every hold. The chunks MCMCP loaded are unloaded
 straight away. See [Chunk loading](tools.md#chunk-loading).
+
+## `/mcmcp estop`
+
+```
+/mcmcp estop [reason]      set the emergency stop
+/mcmcp estop status        what is running, for whom, and the jobs and sessions
+/mcmcp estop reset         lift it
+```
+
+Sets MCMCP's [emergency stop](../guide/jobs.md#the-emergency-stop): writes are refused, running calls
+stop at their next step, jobs pause, and connected clients stop driving their players. The stop is
+saved with the world. `reset` must be typed by a person: it is refused when it arrives through a tool
+call. After a reset, jobs the stop paused stay paused until `/mcmcp jobs resume`.
+
+## `/mcmcp jobs`
+
+```
+/mcmcp jobs [list]
+/mcmcp jobs pause|resume|kill <id|all>
+```
+
+The server's [background jobs](../guide/jobs.md), with their owners and progress. An operator's pause
+holds a job until an operator resumes it.
+
+## `/mcmcp kill`
+
+```
+/mcmcp kill session <id>
+/mcmcp kill player <name>
+```
+
+Closes one MCP session, or one player's companion sessions, and cancels their calls. Session ids are
+in `/mcmcp estop status`. A player's client reconnects on its next call unless you also revoke their
+access with `/mcmcp companion revoke`.
 
 ## `/mcmcp restart`
 

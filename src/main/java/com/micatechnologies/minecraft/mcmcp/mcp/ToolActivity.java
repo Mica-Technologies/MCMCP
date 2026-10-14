@@ -28,6 +28,11 @@ public final class ToolActivity {
         private volatile double total = -1;
         @Nullable
         private volatile String message;
+        /** Who made the call and on which session, for an operator deciding what to stop. */
+        @Nullable
+        private volatile String who;
+        @Nullable
+        private volatile String sessionId;
 
         RunningCall(long id, McmcpSide side, String tool, long startedMillis) {
             this.id = id;
@@ -58,6 +63,36 @@ public final class ToolActivity {
         public String getMessage() {
             return message;
         }
+
+        @Nullable
+        public String getWho() {
+            return who;
+        }
+
+        @Nullable
+        public String getSessionId() {
+            return sessionId;
+        }
+
+        public McmcpSide getSide() {
+            return side;
+        }
+    }
+
+    /** Records who made a call, once it has started. */
+    public static void describe(long id, String who, @Nullable String sessionId) {
+        RunningCall call = RUNNING.get(id);
+        if (call != null) {
+            call.who = who;
+            call.sessionId = sessionId;
+        }
+    }
+
+    /** Every call running, on every side, oldest first. */
+    public static java.util.List<RunningCall> running() {
+        java.util.List<RunningCall> calls = new java.util.ArrayList<>(RUNNING.values());
+        calls.sort((a, b) -> Long.compare(a.id, b.id));
+        return calls;
     }
 
     private static volatile long lastClientCallMillis;

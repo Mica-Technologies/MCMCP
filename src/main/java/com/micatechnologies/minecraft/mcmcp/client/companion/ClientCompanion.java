@@ -239,6 +239,13 @@ public final class ClientCompanion {
             Mcmcp.LOGGER.info("MCMCP companion: " + detail);
             LIFECYCLE.execute(ClientCompanion::stopEndpoint);
         }
+        else if (message.type == CompanionProtocol.TYPE_ESTOP) {
+            JsonObject stop = CompanionHandshake.parse(message.bytes);
+            com.micatechnologies.minecraft.mcmcp.game.Estop.setRemote(stop.has("by")
+                ? com.micatechnologies.minecraft.mcmcp.game.Estop.Stop.fromJson(stop,
+                    com.micatechnologies.minecraft.mcmcp.game.Estop.Source.REMOTE)
+                : null);
+        }
         else if (message.type == CompanionProtocol.TYPE_MCP) {
             CompanionForwarder current = forwarder;
             if (current == null) {
@@ -308,6 +315,8 @@ public final class ClientCompanion {
         @SubscribeEvent
         public void onDisconnect(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
             disconnected();
+            // A stop belongs to the server that set it; leaving that server leaves its stop behind.
+            com.micatechnologies.minecraft.mcmcp.game.Estop.setRemote(null);
         }
 
         @SubscribeEvent

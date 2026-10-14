@@ -75,6 +75,9 @@ echo "==> Starting stub orchestrator on 127.0.0.1:${LINK_PORT}"
 "$PYTHON_BIN" "$STUB_SCRIPT" "$LINK_PORT" "$LINK_RESULT" "$TIMEOUT" &
 STUB_PID=$!
 
+# An emergency stop survives a restart; one left by an earlier local run would refuse every write.
+rm -f "${RUN_DIR}/world/mcmcp-estop.json"
+
 echo "==> Starting dedicated server (timeout ${TIMEOUT}s)"
 ./gradlew runServer \
   -Dhttp.socketTimeout=60000 -Dhttp.connectionTimeout=60000 \
@@ -640,6 +643,55 @@ case "$LIST_BODY" in
   *) mcp_failure "chunks still held after release: ${LIST_BODY}" ;;
 esac
 
+echo "==> Background jobs: an op replay and a paged read run to the end"
+BX=$((SPAWN_X + 24)); BY=$((UNDO_Y + 10)); BZ=$((SPAWN_Z + 24))
+JOB_BODY="$(mcp_call 60 server_job_submit "{\"kind\":\"apply_ops\",\"label\":\"smoke\",\"args\":{\"ops\":[\"fill ${BX} ${BY} ${BZ} $((BX + 3)) ${BY} $((BZ + 3)) minecraft:stone\",\"setblock ${BX} $((BY + 1)) ${BZ} minecraft:torch\"]}}")" \
+  || mcp_failure "server_job_submit failed: ${JOB_BODY}"
+JOB_ID="$(printf '%s' "$JOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$JOB_ID" ] || mcp_failure "no job id: ${JOB_BODY}"
+JOB_STATE=""
+for _ in $(seq 1 30); do
+  JOB_STATE="$(mcp_call 61 server_job_status "{\"id\":\"${JOB_ID}\"}")" || mcp_failure "server_job_status failed: ${JOB_STATE}"
+  case "$JOB_STATE" in *'"state":"done"'*|*'"state":"failed"'*) break ;; esac
+  sleep 1
+done
+case "$JOB_STATE" in
+  *'"state":"done"'*'"lastOp":1'*'"totals":{'*'"attempted":17'*) echo "    ${JOB_ID} replayed both ops in the background" ;;
+  *) mcp_failure "the apply_ops job did not finish: ${JOB_STATE}" ;;
+esac
+READ_JOB="$(mcp_call 62 server_job_submit "{\"kind\":\"get_blocks\",\"args\":{\"x\":${BX},\"y\":${BY},\"z\":${BZ},\"toX\":$((BX + 199)),\"toY\":${BY},\"toZ\":$((BZ + 199)),\"encoding\":\"packed\"}}")" \
+  || mcp_failure "a get_blocks job failed to start: ${READ_JOB}"
+READ_ID="$(printf '%s' "$READ_JOB" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"
+for _ in $(seq 1 30); do
+  READ_STATE="$(mcp_call 63 server_job_status "{\"id\":\"${READ_ID}\"}")" || mcp_failure "status failed: ${READ_STATE}"
+  case "$READ_STATE" in *'"state":"done"'*|*'"state":"failed"'*) break ;; esac
+  sleep 1
+done
+case "$READ_STATE" in
+  *'"state":"done"'*'"parts":2'*'"pages":2'*) ;;
+  *) mcp_failure "the 40,000-cell read did not finish in two pages: ${READ_STATE}" ;;
+esac
+PAGE_BODY="$(mcp_call 64 server_job_status "{\"id\":\"${READ_ID}\",\"page\":1}")" || mcp_failure "page read failed: ${PAGE_BODY}"
+case "$PAGE_BODY" in
+  *'"content":{"region":'*'"result":'*) echo "    a 200 x 200 read came back as two pages" ;;
+  *) mcp_failure "page 1 had no region and result: ${PAGE_BODY}" ;;
+esac
+
+echo "==> Emergency stop: an agent can set it, and then nothing writes"
+ESTOP_BODY="$(mcp_call 65 server_estop '{"reason":"smoke test"}')" || mcp_failure "server_estop failed: ${ESTOP_BODY}"
+STOPPED_BODY="$(mcp_call 66 server_set_block "{\"x\":${BX},\"y\":$((BY + 2)),\"z\":${BZ},\"block\":\"minecraft:stone\"}")" \
+  || mcp_failure "server_set_block during the stop failed at the protocol level: ${STOPPED_BODY}"
+case "$STOPPED_BODY" in
+  *'emergency-stopped'*'"isError":true'*) ;;
+  *) mcp_failure "a write ran during an emergency stop: ${STOPPED_BODY}" ;;
+esac
+STOPPED_LIST="$(mcp_call 67 server_job_list '{}')" || mcp_failure "server_job_list failed: ${STOPPED_LIST}"
+case "$STOPPED_LIST" in
+  *'"estop":'*) echo "    writes refused, reads still answered" ;;
+  *) mcp_failure "server_job_list did not report the stop: ${STOPPED_LIST}" ;;
+esac
+[ -f "${RUN_DIR}/world/mcmcp-estop.json" ] || mcp_failure "the emergency stop was not saved with the world"
+
 sed -i "s/B:allowWorldEdits=true/${WORLD_EDITS_WERE:-B:allowWorldEdits=false}/" "$CONFIG_FILE"
 mcp_call 25 server_run_command '{"command":"mcmcp reload"}' >/dev/null
 
@@ -801,6 +853,7 @@ if pgrep -f 'net.minecraft.server' > /dev/null 2>&1; then
   mcp_failure "server_stop answered but the server was still running ${stop_waited}s later"
 fi
 echo "    server exited after ${stop_waited}s"
+rm -f "${RUN_DIR}/world/mcmcp-estop.json"
 
 # A clean stop writes the journal's close line; a run without one is what previousRun calls unclean.
 # Written as the server stops, which can trail the reply by a moment where pgrep is unavailable.

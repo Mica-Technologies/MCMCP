@@ -97,6 +97,11 @@ public final class McpTool {
         return sides.contains(side);
     }
 
+    /** Whether the tool cannot change anything, as its annotations say. */
+    public boolean isReadOnly() {
+        return readOnly;
+    }
+
     public boolean requiresGameThread() {
         return requiresGameThread;
     }

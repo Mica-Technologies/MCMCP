@@ -399,7 +399,47 @@ public final class CompanionServer {
                 return;
             }
             regrant(peer, server.getPlayerList().getPlayerByUUID(peer.playerId), true);
+            com.micatechnologies.minecraft.mcmcp.game.Estop.Stop stop = com.micatechnologies.minecraft.mcmcp.game.Estop.current();
+            if (stop != null && stop.source == com.micatechnologies.minecraft.mcmcp.game.Estop.Source.LOCAL) {
+                send(peer, CompanionProtocol.TYPE_ESTOP, CompanionHandshake.bytes(stop.toJson()));
+            }
         });
+    }
+
+    /**
+     * Tells every client that has said hello about the server's emergency stop, set or lifted, so
+     * their MCMCP stops driving their players too. Sent whether or not the player has companion
+     * access: an agent driving a player by keyboard needs stopping as much as one using server tools.
+     */
+    public static void broadcastEstop(@Nullable com.micatechnologies.minecraft.mcmcp.game.Estop.Stop stop) {
+        byte[] message = CompanionHandshake.bytes(stop == null ? new JsonObject() : stop.toJson());
+        for (CompanionPeer peer : PEERS.values()) {
+            if (peer.isHelloReceived() && !peer.isBroken()) {
+                send(peer, CompanionProtocol.TYPE_ESTOP, message);
+            }
+        }
+    }
+
+    /** Closes a player's companion sessions, cancelling their calls. @return false if they had none */
+    public static boolean closeSessions(String playerName) {
+        for (CompanionPeer peer : PEERS.values()) {
+            if (peer.playerName.equalsIgnoreCase(playerName)) {
+                peer.closeSessions();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Queues an MCP notification on one player's companion sessions. */
+    public static void notifyPlayer(UUID playerId, JsonObject notification) {
+        CompanionPeer peer = PEERS.get(playerId);
+        if (peer == null) {
+            return;
+        }
+        for (McpSession session : peer.sessions()) {
+            session.enqueue(notification);
+        }
     }
 
     private static void onMcp(final CompanionPeer peer, byte[] bytes) {

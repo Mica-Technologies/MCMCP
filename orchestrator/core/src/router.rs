@@ -2318,6 +2318,22 @@ impl Router {
                 }
                 if let Some(params) = message_params(&forwarded) {
                     self.activity.log(instance_id, params);
+                    // Background jobs and the emergency stop report themselves as log lines with
+                    // structured data; the activity view keeps their latest state for the app.
+                    let logger = params.get("logger").and_then(Value::as_str).unwrap_or_default();
+                    let data = params.get("data");
+                    if logger.ends_with("/mcmcp.jobs") {
+                        if let Some(job) = data.and_then(|data| data.get("job")) {
+                            self.activity.job(instance_id, job);
+                        }
+                    } else if logger.ends_with("/mcmcp.estop") {
+                        let active = data
+                            .and_then(|data| data.get("active"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let stop = data.and_then(|data| data.get("estop")).filter(|_| active);
+                        self.activity.estop(instance_id, stop);
+                    }
                     // A mark is something a person (or an agent) did in the game, so it belongs in the
                     // durable record too — that is how it reaches the flight recorder.
                     if let Some(mark) = params.get("data").and_then(|data| data.get("mark")) {

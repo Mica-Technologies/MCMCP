@@ -48,6 +48,7 @@ public final class CommonTools {
         ServerItemUseBatch.register();
         ServerAreaTools.register();
         ServerApplyOps.register();
+        ServerJobTools.register();
         StorageTools.register();
         ServerPlayerTools.register();
         ServerCommandTools.register();

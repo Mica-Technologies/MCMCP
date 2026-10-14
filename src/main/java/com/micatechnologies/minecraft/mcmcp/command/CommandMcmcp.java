@@ -39,7 +39,8 @@ import net.minecraft.util.text.event.HoverEvent;
 public class CommandMcmcp extends CommandBase {
 
     private static final List<String> SUBCOMMANDS =
-        Arrays.asList("status", "link", "tools", "sessions", "token", "reload", "restart", "stop", "companion", "chunks");
+        Arrays.asList("status", "link", "tools", "sessions", "token", "reload", "restart", "stop", "companion", "chunks",
+            "estop", "jobs", "kill");
 
     private static final List<String> COMPANION_SUBCOMMANDS =
         Arrays.asList("status", "list", "allow", "revoke", "on", "off");
@@ -51,7 +52,7 @@ public class CommandMcmcp extends CommandBase {
 
     @Override
     public String getUsage(ICommandSender sender) {
-        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop|companion|chunks>";
+        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop|companion|chunks|estop|jobs|kill>";
     }
 
     /**
@@ -108,6 +109,15 @@ public class CommandMcmcp extends CommandBase {
                 break;
             case "chunks":
                 handleChunks(sender, args);
+                break;
+            case "estop":
+                handleEstop(sender, args);
+                break;
+            case "jobs":
+                handleJobs(sender, args);
+                break;
+            case "kill":
+                handleKill(sender, args);
                 break;
             case "reload":
                 McmcpConfig.reload();
@@ -201,6 +211,146 @@ public class CommandMcmcp extends CommandBase {
             default:
                 throw new WrongUsageException("/mcmcp companion <status|list|allow|revoke|on|off>");
         }
+    }
+
+    /**
+     * {@code /mcmcp estop [reason]}, {@code /mcmcp estop reset}, {@code /mcmcp estop status}.
+     *
+     * <p>Setting the stop works from anywhere, a tool call included. Lifting it is for a person: an
+     * agent able to run commands as an operator must not be able to undo its own stop.
+     */
+    private void handleEstop(ICommandSender sender, String[] args) {
+        String sub = args.length < 2 ? "" : args[1].toLowerCase(java.util.Locale.ROOT);
+        if ("reset".equals(sub) || "lift".equals(sub)) {
+            if (sender instanceof com.micatechnologies.minecraft.mcmcp.tools.CapturingCommandSender) {
+                reply(sender, TextFormatting.RED, "Lifting the MCMCP emergency stop is for a person at the console "
+                    + "or in the game, not for a tool call.");
+                return;
+            }
+            if (com.micatechnologies.minecraft.mcmcp.game.Estop.lift()) {
+                Mcmcp.LOGGER.warn("MCMCP emergency stop lifted by " + sender.getName() + ".");
+                reply(sender, TextFormatting.GREEN, "MCMCP emergency stop lifted. Jobs it paused stay paused: "
+                    + "/mcmcp jobs resume <id|all>.");
+            }
+            else {
+                reply(sender, TextFormatting.GRAY, "MCMCP is not emergency-stopped.");
+            }
+            return;
+        }
+        if ("status".equals(sub)) {
+            handleEstopStatus(sender);
+            return;
+        }
+        String reason = args.length < 2 ? "" : String.join(" ", Arrays.copyOfRange(args, 1, args.length));
+        if (com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
+            reply(sender, TextFormatting.YELLOW, com.micatechnologies.minecraft.mcmcp.game.Estop.refusal());
+            return;
+        }
+        com.micatechnologies.minecraft.mcmcp.game.Estop.set(sender.getName(), reason);
+        Mcmcp.LOGGER.warn("MCMCP EMERGENCY STOP by " + sender.getName() + ": " + reason);
+        reply(sender, TextFormatting.RED, "MCMCP emergency-stopped. Writes are refused, jobs paused, clients told. "
+            + "'/mcmcp estop status' shows what was running; '/mcmcp estop reset' lifts it.");
+        handleEstopStatus(sender);
+    }
+
+    /** What MCMCP is doing on this server and for whom: the stop, running calls, jobs, sessions. */
+    private void handleEstopStatus(ICommandSender sender) {
+        com.micatechnologies.minecraft.mcmcp.game.Estop.Stop stop = com.micatechnologies.minecraft.mcmcp.game.Estop.current();
+        reply(sender, stop == null ? TextFormatting.GREEN : TextFormatting.RED, stop == null
+            ? "MCMCP is not emergency-stopped."
+            : "MCMCP is emergency-stopped by " + stop.by + " (" + stop.reason + ").");
+        List<com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity.RunningCall> calls =
+            com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity.running();
+        reply(sender, TextFormatting.AQUA, "Running calls (" + calls.size() + "):");
+        for (com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity.RunningCall call : calls) {
+            reply(sender, TextFormatting.GRAY, "  " + call.getTool() + " by " + call.getWho() + ", "
+                + (System.currentTimeMillis() - call.getStartedMillis()) / 1000L + " s"
+                + (call.getSessionId() == null ? "" : ", session " + call.getSessionId()));
+        }
+        handleJobs(sender, new String[] {"jobs", "list"});
+        handleSessions(sender);
+        reply(sender, TextFormatting.GRAY, "Stop one with /mcmcp kill session <id> | player <name>, or /mcmcp jobs kill <id>.");
+    }
+
+    /** {@code /mcmcp jobs [list|pause|resume|kill] [id|all]}. */
+    private void handleJobs(ICommandSender sender, String[] args) {
+        String sub = args.length < 2 ? "list" : args[1].toLowerCase(java.util.Locale.ROOT);
+        List<com.micatechnologies.minecraft.mcmcp.jobs.Job> jobs = com.micatechnologies.minecraft.mcmcp.jobs.JobManager.jobs();
+        if ("list".equals(sub)) {
+            reply(sender, TextFormatting.AQUA, "MCMCP jobs (" + jobs.size() + "):");
+            for (com.micatechnologies.minecraft.mcmcp.jobs.Job job : jobs) {
+                com.google.gson.JsonObject status = job.toJson(false);
+                reply(sender, TextFormatting.GRAY, "  " + job.id + " " + job.kind + (job.label == null ? "" : " '" + job.label + "'")
+                    + " by " + job.owner + ": " + job.state().id() + ", " + status.get("percent").getAsString() + "%"
+                    + (status.has("pausedBy") ? " (paused by " + status.get("pausedBy") + ")" : ""));
+            }
+            return;
+        }
+        if (args.length < 3) {
+            reply(sender, TextFormatting.RED, "/mcmcp jobs " + sub + " <id|all>");
+            return;
+        }
+        if ("resume".equals(sub) && com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
+            reply(sender, TextFormatting.RED, "Lift the emergency stop first: /mcmcp estop reset.");
+            return;
+        }
+        int done = 0;
+        for (com.micatechnologies.minecraft.mcmcp.jobs.Job job : jobs) {
+            if (!"all".equalsIgnoreCase(args[2]) && !job.id.equals(args[2])) {
+                continue;
+            }
+            boolean ok;
+            switch (sub) {
+                case "pause":
+                    ok = job.pause(com.micatechnologies.minecraft.mcmcp.jobs.Job.Hold.OPERATOR);
+                    break;
+                case "resume":
+                    job.resume(com.micatechnologies.minecraft.mcmcp.jobs.Job.Hold.OWNER);
+                    job.resume(com.micatechnologies.minecraft.mcmcp.jobs.Job.Hold.ESTOP);
+                    ok = job.resume(com.micatechnologies.minecraft.mcmcp.jobs.Job.Hold.OPERATOR);
+                    break;
+                case "kill":
+                case "cancel":
+                    ok = job.cancel();
+                    break;
+                default:
+                    reply(sender, TextFormatting.RED, "/mcmcp jobs <list|pause|resume|kill> <id|all>");
+                    return;
+            }
+            if (ok) {
+                done++;
+            }
+        }
+        reply(sender, done > 0 ? TextFormatting.GREEN : TextFormatting.GRAY, sub + ": " + done + " job(s).");
+    }
+
+    /** {@code /mcmcp kill session <id>} closes one MCP session; {@code kill player <name>} a player's companion. */
+    private void handleKill(ICommandSender sender, String[] args) {
+        if (args.length < 3) {
+            reply(sender, TextFormatting.RED, "/mcmcp kill <session <id>|player <name>>");
+            return;
+        }
+        if ("player".equalsIgnoreCase(args[1])) {
+            boolean closed = CompanionServer.closeSessions(args[2]);
+            reply(sender, closed ? TextFormatting.GREEN : TextFormatting.GRAY, closed
+                ? "Closed " + args[2] + "'s companion sessions; their calls are cancelled. They reconnect on their "
+                    + "next call unless their access is revoked (/mcmcp companion revoke)."
+                : args[2] + " has no companion sessions.");
+            return;
+        }
+        if ("session".equalsIgnoreCase(args[1])) {
+            for (McpEndpoint endpoint : Mcmcp.allEndpoints()) {
+                if (endpoint.getSessions().get(args[2]) != null) {
+                    endpoint.getSessions().remove(args[2]);
+                    reply(sender, TextFormatting.GREEN, "Closed session " + args[2] + " on the " + endpoint.getSide().id()
+                        + " endpoint; its calls are cancelled.");
+                    return;
+                }
+            }
+            reply(sender, TextFormatting.GRAY, "No session " + args[2] + ".");
+            return;
+        }
+        reply(sender, TextFormatting.RED, "/mcmcp kill <session <id>|player <name>>");
     }
 
     /**

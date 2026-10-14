@@ -42,6 +42,12 @@ pub const ARGUMENTS_SUMMARY_CHARS: usize = 200;
 /// The longest log message or error kept, in characters.
 const TEXT_CHARS: usize = 500;
 
+/// How long a finished background job stays listed, in milliseconds.
+pub const JOB_KEEP_MS: u64 = 30 * 60 * 1000;
+
+/// How many background jobs are kept per instance, newest first.
+pub const JOB_CAPACITY: usize = 50;
+
 /// A call's handle in the registry, returned by [`Activity::start`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CallId(pub u64);
@@ -123,6 +129,28 @@ pub struct Snapshot {
     pub running: Vec<RunningCall>,
     /// Newest first.
     pub recent: Vec<FinishedCall>,
+    /// Background jobs games have reported, newest first, each with its `instance`.
+    pub jobs: Vec<Value>,
+    /// Instances under an emergency stop, with who set it and why.
+    pub estops: BTreeMap<String, Value>,
+}
+
+/// A background job as a game last reported it.
+#[derive(Debug, Clone)]
+struct JobEntry {
+    instance: String,
+    id: String,
+    status: Value,
+    updated_ms: u64,
+}
+
+impl JobEntry {
+    fn settled(&self) -> bool {
+        matches!(
+            self.status.get("state").and_then(Value::as_str),
+            Some("done" | "failed" | "cancelled" | "interrupted")
+        )
+    }
 }
 
 #[derive(Default)]
@@ -131,6 +159,8 @@ struct Inner {
     running: BTreeMap<CallId, RunningCall>,
     recent: VecDeque<FinishedCall>,
     logs: HashMap<String, VecDeque<LogLine>>,
+    jobs: VecDeque<JobEntry>,
+    estops: BTreeMap<String, Value>,
     generation: u64,
 }
 
@@ -275,6 +305,51 @@ impl Activity {
         self.bump(&mut inner);
     }
 
+    /// Records a background job's status, as the mod sends it in an `mcmcp.jobs` log message.
+    ///
+    /// A job lives on the game, and its runner reports each change; this keeps the latest report per
+    /// job so a display can show long work that no call is waiting on.
+    pub fn job(&self, instance: &str, status: &Value) {
+        let Some(id) = status.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let now = now_millis();
+        let mut inner = self.inner.lock().expect("activity lock");
+        inner
+            .jobs
+            .retain(|job| !(job.instance == instance && job.id == id));
+        inner.jobs.push_front(JobEntry {
+            instance: instance.to_string(),
+            id: id.to_string(),
+            status: status.clone(),
+            updated_ms: now,
+        });
+        inner
+            .jobs
+            .retain(|job| !job.settled() || now.saturating_sub(job.updated_ms) < JOB_KEEP_MS);
+        let mut per_instance: HashMap<String, usize> = HashMap::new();
+        inner.jobs.retain(|job| {
+            let count = per_instance.entry(job.instance.clone()).or_default();
+            *count += 1;
+            *count <= JOB_CAPACITY
+        });
+        self.bump(&mut inner);
+    }
+
+    /// Records an instance's emergency stop: `Some` with who and why when set, `None` when lifted.
+    pub fn estop(&self, instance: &str, stop: Option<&Value>) {
+        let mut inner = self.inner.lock().expect("activity lock");
+        match stop {
+            Some(stop) => {
+                inner.estops.insert(instance.to_string(), stop.clone());
+            }
+            None => {
+                inner.estops.remove(instance);
+            }
+        }
+        self.bump(&mut inner);
+    }
+
     /// Calls in flight and recently finished, optionally for one instance only.
     pub fn snapshot(&self, instance: Option<&str>) -> Snapshot {
         self.snapshot_limited(instance, RECENT_CAPACITY)
@@ -301,6 +376,25 @@ impl Activity {
                 .filter(|call| wanted(&call.instance))
                 .take(recent_limit)
                 .cloned()
+                .collect(),
+            jobs: inner
+                .jobs
+                .iter()
+                .filter(|job| wanted(&job.instance))
+                .map(|job| {
+                    let mut status = job.status.clone();
+                    if let Some(map) = status.as_object_mut() {
+                        map.insert("instance".into(), Value::String(job.instance.clone()));
+                        map.insert("updated_ms".into(), Value::from(job.updated_ms));
+                    }
+                    status
+                })
+                .collect(),
+            estops: inner
+                .estops
+                .iter()
+                .filter(|(name, _)| wanted(name))
+                .map(|(name, stop)| (name.clone(), stop.clone()))
                 .collect(),
         }
     }
@@ -555,6 +649,38 @@ mod tests {
             &json!({ "level": "warning", "data": { "message": "step 3 failed" } }),
         );
         assert_eq!(activity.logs("alpha.client")[0].text, "step 3 failed");
+    }
+
+    #[test]
+    fn a_job_keeps_only_its_latest_report_and_says_which_game_it_runs_on() {
+        let activity = Activity::new();
+        activity.job(
+            "alto.server",
+            &json!({"id": "j1", "state": "running", "percent": 10.0}),
+        );
+        activity.job(
+            "alto.server",
+            &json!({"id": "j1", "state": "running", "percent": 60.0}),
+        );
+        activity.job("dev.server", &json!({"id": "j1", "state": "queued"}));
+        let snapshot = activity.snapshot(Some("alto.server"));
+        assert_eq!(snapshot.jobs.len(), 1, "one job, reported twice, on this game");
+        assert_eq!(snapshot.jobs[0]["percent"], 60.0);
+        assert_eq!(snapshot.jobs[0]["instance"], "alto.server");
+        assert_eq!(
+            activity.snapshot(None).jobs.len(),
+            2,
+            "the same id on another game is another job"
+        );
+    }
+
+    #[test]
+    fn an_emergency_stop_is_listed_until_it_is_lifted() {
+        let activity = Activity::new();
+        activity.estop("alto.server", Some(&json!({"by": "Alice", "reason": "runaway"})));
+        assert_eq!(activity.snapshot(None).estops["alto.server"]["by"], "Alice");
+        activity.estop("alto.server", None);
+        assert!(activity.snapshot(None).estops.is_empty());
     }
 
     #[test]

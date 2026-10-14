@@ -103,6 +103,11 @@ public final class ChunkLoadGovernor {
         MinecraftForge.EVENT_BUS.register(new Events());
     }
 
+    /** Whether the server is too loaded for MCMCP to add work: background jobs wait while it is. */
+    public static boolean struggling() {
+        return HEALTH.state() == ServerHealth.State.PAUSED;
+    }
+
     /** Who a caller is, for budgets and ownership: one key per player, one for the endpoint. */
     public static String callerOf(Principal principal) {
         return principal.isCompanion() ? "player:" + principal.getPlayerId() : "endpoint";
@@ -193,7 +198,7 @@ public final class ChunkLoadGovernor {
      */
     public static Outcome acquire(ToolContext context, final int dimension, final Set<Long> chunks,
                                   final boolean temporary, final long idleMillis, final long maxMillis) throws Busy {
-        final String caller = callerOf(context.getPrincipal());
+        final String caller = context.getHoldCaller() != null ? context.getHoldCaller() : callerOf(context.getPrincipal());
         final long started = System.currentTimeMillis();
         Object admitted = context.onGameThread(() -> admit(caller, dimension, chunks, temporary, idleMillis,
             maxMillis, started));

@@ -63,6 +63,13 @@ public class ToolContext {
     /** This call's entry in {@link ToolActivity}, or 0 when the call is not being tracked. */
     private volatile long activityCall;
 
+    /** Whether this call can change the world: an emergency stop ends it at its next game-thread step. */
+    private volatile boolean mutating;
+
+    /** Who owns the chunk holds this call takes, when not the caller: a background job owns its own. */
+    @Nullable
+    private volatile String holdCaller;
+
     /**
      * Time spent per kind of step, for the request journal's end line. Shared with every
      * {@link #forPart} context, so a sequence's steps all add to the one call's totals.
@@ -85,6 +92,21 @@ public class ToolContext {
 
     public McpSession getSession() {
         return session;
+    }
+
+    /** Marks this call as one an emergency stop must end. Set by the dispatcher for every tool that is not read-only. */
+    public void setMutating(boolean value) {
+        this.mutating = value;
+    }
+
+    /** The key chunk holds are taken under, or null for the caller's own. */
+    @Nullable
+    public String getHoldCaller() {
+        return holdCaller;
+    }
+
+    public void setHoldCaller(@Nullable String value) {
+        this.holdCaller = value;
     }
 
     /** Ties this call's progress to its {@link ToolActivity} entry. Set once, by the dispatcher. */
@@ -154,6 +176,10 @@ public class ToolContext {
      */
     public <T> T onGameThread(Callable<T> task) {
         cancellation.throwIfCancelled();
+        if (mutating && com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
+            throw new JsonRpcException(JsonRpcException.INTERNAL_ERROR,
+                com.micatechnologies.minecraft.mcmcp.game.Estop.refusal());
+        }
         if (!gameThread.isAvailable()) {
             throw new JsonRpcException(JsonRpcException.INTERNAL_ERROR,
                 getSide().isClient()

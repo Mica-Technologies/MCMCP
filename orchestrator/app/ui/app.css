@@ -239,6 +239,9 @@ input.rename {
 }
 .running-call .head { display: flex; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 12.5px; }
 .running-call .tool { color: var(--accent); font-weight: 600; }
+.estop-line { color: var(--danger); font-weight: 600; }
+.job-state-failed, .job-state-cancelled, .job-state-interrupted { color: var(--danger); }
+.job-state-paused { color: var(--text-dim); }
 .running-call .message, .running-call .args { font-family: var(--mono); font-size: 12px; color: var(--text-dim); word-break: break-all; }
 .recent-row { grid-template-columns: 68px minmax(140px, auto) 70px 80px 1fr; cursor: pointer; }
 .recent-row .detail { color: var(--text-dim); word-break: break-word; }

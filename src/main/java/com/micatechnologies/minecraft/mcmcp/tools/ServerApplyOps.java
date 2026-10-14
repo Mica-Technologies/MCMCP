@@ -236,7 +236,7 @@ public final class ServerApplyOps {
         long cap = (long) McmcpConfig.getMaxWriteCells() * 4L;
         if (reach > cap) {
             return ToolResult.error("These ops reach " + reach + " cells; one call replays at most " + cap
-                + " (4 x limits.maxWriteCells). Split the list.");
+                + " (4 x limits.maxWriteCells). Split the list, or submit it as a job with server_job_submit.");
         }
         if (!dryRun) {
             ToolResult overBudget = ServerBulkTools.chargeWrites(context, reach);

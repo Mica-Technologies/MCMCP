@@ -301,7 +301,8 @@ with no tags builds as `NO-GIT-TAG-SET`, which is expected locally; CI tags befo
 Descriptions are mandatory and the builder enforces it — the description is the entire basis on which
 a model decides to call the tool. Set the MCP annotations (`readOnly()`, `destructive()`,
 `idempotent()`) honestly: clients auto-approve read-only tools and gate destructive ones behind human
-confirmation.
+confirmation. `readOnly()` also decides what the emergency stop (`/mcmcp estop`) stops: every tool
+without it is refused while the stop is set, except the few in `McpDispatcher.ESTOP_EXEMPT`.
 
 Publish bounds in the schema. They are load-bearing, not decorative: a model will set a scan radius to
 100000 unless the ceiling is stated.

@@ -343,6 +343,21 @@ half-constructed game.
 singleplayer world, and the endpoint's tools reference that world. Holding the port open past that
 point leaves a live endpoint answering questions about a world that no longer exists.
 
+### Jobs and the emergency stop
+
+`jobs/` runs a long write or read as parts, each an ordinary tool call in a `JobContext`. The context
+carries the job's own cancellation and progress, takes chunk holds as `job:<id>`, and waits before
+every game-thread step while the job is paused or the server is struggling. `Job` and `JobParts`
+import no Minecraft class and are unit-tested. `ServerJobs` is the Forge half: the world folder, the
+`mcmcp.jobs` and `mcmcp.estop` notifications, and the chat line.
+
+`game/Estop` is one JVM-wide state, so in singleplayer the server's stop also stops the client. The
+dispatcher refuses every tool that is not read-only while it is set, except a short list in
+`McpDispatcher.ESTOP_EXEMPT` of tools that only make things stop. `ToolContext.onGameThread` ends a
+mutating call that was already running. A client learns of its server's stop from a companion frame
+(`TYPE_ESTOP`), which an older client ignores. A new tool that changes anything must not be marked
+read-only, or a stop will not stop it.
+
 A failed bind never takes the game down. The overwhelmingly common cause is a port already in use, by
 another game. The transport then binds port 0 (a free port the system chooses) rather than the next
 port up, because the next one up is another side's or another dev launch's default. A script that

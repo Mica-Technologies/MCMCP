@@ -22,7 +22,7 @@ let activePanel = "instances";
 /* The latest activity snapshot, pushed by the backend on every change (at most ten a second). The
  * one place this file keeps a model of server state, and only because progress moves too fast to
  * re-read everything for: cards and the detail view paint from it without touching the rest. */
-let activity = { running: [], recent: [] };
+let activity = { running: [], recent: [], jobs: [], estops: {} };
 /* The endpoint the detail view is showing, and the roster as last read, for its header. */
 let detailInstance = null;
 let lastInstances = [];
@@ -358,10 +358,50 @@ async function renderLog() {
 // Activity
 // ---------------------------------------------------------------------------------
 
+/* An emergency stop on this game, or on the server it is the companion of. */
+function estopFor(instance) {
+  const stops = activity.estops ?? {};
+  const name = Object.keys(stops).find((stopped) => sameGame(stopped, instance));
+  return name ? stops[name] : null;
+}
+
+const SETTLED_JOBS = ["done", "failed", "cancelled", "interrupted"];
+
+/* A job's progress in the shape progressBar and progressText take. */
+function jobProgress(job) {
+  return { progress: job.percent ?? 0, total: 100, message: job.message };
+}
+
+/* One background job as a block: id, label, state, progress, and what it has written so far. */
+function renderJob(job) {
+  const element = document.createElement("div");
+  element.className = "running-call";
+  const totals = job.totals
+    ? Object.entries(job.totals).map(([key, value]) => `${key} ${value}`).join(" · ")
+    : "";
+  const elapsed = job.elapsedMs != null ? ` · ${formatDuration(job.elapsedMs)}` : "";
+  const eta = job.etaMs != null ? ` · ~${formatDuration(job.etaMs)} left` : "";
+  element.innerHTML = `
+    <div class="head">
+      <span class="tool">${escapeHtml(job.kind)} ${escapeHtml(job.label ?? job.id)}</span>
+      <span class="job-state-${escapeHtml(job.state)}">${escapeHtml(job.state)}${job.pausedBy ? ` (${escapeHtml(job.pausedBy.join(", "))})` : ""}
+        · ${job.partsDone}/${job.parts} parts${elapsed}${eta}</span>
+    </div>
+    ${progressBar(jobProgress(job))}
+    ${job.message && !SETTLED_JOBS.includes(job.state) ? `<div class="message">${escapeHtml(job.message)}</div>` : ""}
+    <div class="args">${escapeHtml(job.id)} · ${escapeHtml(job.owner ?? "")} on ${escapeHtml(job.instance)}${job.lastOp != null ? ` · last op ${job.lastOp}` : ""}${totals ? ` · ${escapeHtml(totals)}` : ""}${job.error ? ` · ${escapeHtml(job.error)}` : ""}</div>`;
+  return element;
+}
+
 /* Each card's one line: what is running, or the last thing that ran. */
 function paintCardActivity() {
   for (const line of document.querySelectorAll(".card .activity-line")) {
     const instance = line.closest(".card").dataset.instance;
+    const stop = estopFor(instance);
+    if (stop) {
+      line.innerHTML = `<div class="estop-line">EMERGENCY STOP · ${escapeHtml(stop.by)}: ${escapeHtml(stop.reason)}</div>`;
+      continue;
+    }
     const running = activity.running.filter((call) => call.instance === instance);
     if (running.length > 0) {
       const call = running[running.length - 1];
@@ -371,6 +411,15 @@ function paintCardActivity() {
         <div class="now"><span class="tool">${escapeHtml(call.tool)}</span>
           ${escapeHtml(progressText(call.progress))}${message}${more}</div>
         ${progressBar(call.progress)}`;
+      continue;
+    }
+    const job = (activity.jobs ?? []).find((candidate) =>
+      candidate.instance === instance && !SETTLED_JOBS.includes(candidate.state));
+    if (job) {
+      line.innerHTML = `
+        <div class="now"><span class="tool">job ${escapeHtml(job.label ?? job.id)}</span>
+          ${escapeHtml(job.state)} · ${job.percent ?? 0}%</div>
+        ${progressBar(jobProgress(job))}`;
       continue;
     }
     const last = activity.recent.find((call) => call.instance === instance);
@@ -475,6 +524,17 @@ async function renderDetail() {
 /* What is running and what just finished: repainted on every activity event. */
 function renderDetailActivity() {
   if (!detailInstance) return;
+  const jobs = (activity.jobs ?? []).filter((job) => sameGame(job.instance, detailInstance));
+  const jobList = $("detail-jobs");
+  jobList.innerHTML = jobs.length === 0 ? '<p class="muted">No background jobs.</p>' : "";
+  for (const job of jobs) jobList.appendChild(renderJob(job));
+  const stop = estopFor(detailInstance);
+  if (stop) {
+    const alert = $("detail-alert");
+    alert.hidden = false;
+    alert.textContent = `Emergency stop by ${stop.by}: ${stop.reason}. MCMCP refuses every write on this game until ` +
+      "an operator runs /mcmcp estop reset; paused jobs then wait to be resumed.";
+  }
   const running = activity.running.filter((call) => call.instance === detailInstance);
   const container = $("detail-running");
   container.innerHTML = running.length === 0 ? '<p class="muted">Nothing is running.</p>' : "";
@@ -913,6 +973,14 @@ function sameGame(named, instance) {
 /* Beneath a task being worked on: what its list's instances are running right now. This is what
  * ties the plan to the work without the agent doing anything. */
 function paintTaskActivity() {
+  // Background jobs above the lists: long work no task row may be "doing" yet.
+  const filter = $("task-instance").value;
+  const jobs = (activity.jobs ?? []).filter((job) =>
+    !SETTLED_JOBS.includes(job.state) && (!filter || sameGame(job.instance, filter)));
+  const jobBox = $("task-jobs");
+  jobBox.hidden = jobs.length === 0;
+  jobBox.innerHTML = jobs.length ? "<h2>Background jobs</h2>" : "";
+  for (const job of jobs) jobBox.appendChild(renderJob(job));
   for (const element of document.querySelectorAll(".task-list")) {
     const list = taskLists.find((candidate) => candidate.id === element.dataset.list);
     const instances = list?.instances ?? [];

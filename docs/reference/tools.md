@@ -609,7 +609,57 @@ The counts add up to `attempted` (the cells the ops reach): `written` (or `would
 `unchanged`, `conflicts`, `unloaded`, `refused` and `byPartner`. Lines that could not be replayed
 are listed in `refusedOps` with their line number and reason; the rest still run. `nbt` counts the
 merges, and `bbox` is the box the ops cover. One call reaches at most 4 × `limits.maxWriteCells`
-cells, charged to the writes-per-minute budget, and leaves one undo point. Split a larger list.
+cells, charged to the writes-per-minute budget, and leaves one undo point. Submit a larger list as a
+[job](#server_job_submit).
+
+#### `server_job_submit`
+
+:material-alert: Destructive · `kind`, `args` required · optional `label`
+
+Starts a long write or read as a background job and returns its id at once. `kind` is `apply_ops`,
+`set_blocks`, `get_blocks` or `relight`. `args` are the arguments that tool takes, of any size: the
+server splits them into ordinary calls and works through them at its own pace. See
+[Background jobs](../guide/jobs.md) for how parts are split, paced and retried.
+
+Refused during an emergency stop, and when the caller already has four jobs queued or running.
+
+#### `server_job_status`
+
+:material-eye: Read-only · `id` required · optional `page`
+
+A job's `state` (`queued`, `running`, `paused`, `done`, `failed`, `cancelled` or `interrupted`),
+`partsDone` of `parts`, `percent`, `elapsedMs` and `etaMs`. Also:
+
+- `pausedBy`: `owner`, `operator` or `estop`, while it is paused.
+- `totals`: every part's counts summed.
+- `refused`: the first 100 refusals, each with its `list` and, for an op, its line in the whole list.
+- `lastOp`: for an op replay, the last op finished. Resume an interrupted job from `lastOp + 1`.
+- `pages`: for a `get_blocks` job, how many pages there are. Pass `page` to read one; it comes back
+  in `content` as `{region, result}`.
+
+#### `server_job_list`
+
+:material-eye: Read-only
+
+Your jobs, or every job on the endpoint, each as `server_job_status` describes it without its lists.
+`estop` is present while the server is emergency-stopped.
+
+#### `server_job_cancel`, `server_job_pause`, `server_job_resume`
+
+:material-cog: Idempotent · `id` required
+
+Act on the job's next step. A cancelled job keeps what it already wrote, with its undo points. A
+job paused by an operator is resumed only by an operator (`/mcmcp jobs resume`). Cancel and pause also
+work during an emergency stop; resume does not.
+
+#### `server_estop`
+
+:material-cog: Idempotent · `reason` required
+
+Sets the [emergency stop](../guide/jobs.md#the-emergency-stop): every call that changes the world or
+moves a player is refused, running calls stop at their next step, every job pauses, and connected
+clients stop driving their players. Use it when something is going wrong faster than it can be
+fixed. It cannot lift the stop; only an operator can, with `/mcmcp estop reset`.
 
 #### `server_relight`
 

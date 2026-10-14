@@ -817,6 +817,10 @@ public class McmcpConfig {
         return changeLogEntries;
     }
 
+    public static int getGameThreadTimeoutMillis() {
+        return gameThreadTimeoutMillis;
+    }
+
     public static int getMaxWriteCells() {
         return maxWriteCells;
     }

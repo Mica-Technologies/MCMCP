@@ -46,6 +46,15 @@ public class McpDispatcher {
     private final String instructions;
     private volatile EndpointAddress address = EndpointAddress.NONE;
 
+    /**
+     * Tools that are not read-only but still run during an emergency stop, because each only makes
+     * things stop or let go (stopping a job, setting the stop again, releasing chunk holds, leaving),
+     * or only looks and notes (a screenshot, a mark, a save) — what someone needs to see what happened.
+     */
+    static final java.util.Set<String> ESTOP_EXEMPT = new java.util.HashSet<>(java.util.Arrays.asList(
+        "server_job_cancel", "server_job_pause", "server_estop", "server_release_loaded", "server_stop",
+        "server_save_world", "client_screenshot", "client_marks", "client_world_leave", "client_quit"));
+
     /** Which tools each session may list and call; null lists and runs everything for the side. */
     @Nullable
     private volatile CallFilter filter;
@@ -334,6 +343,12 @@ public class McpDispatcher {
             }
         }
 
+        if (!tool.isReadOnly() && com.micatechnologies.minecraft.mcmcp.game.Estop.active()
+            && !ESTOP_EXEMPT.contains(name)) {
+            return ToolResult.error(com.micatechnologies.minecraft.mcmcp.game.Estop.refusal())
+                .toJson(session.getProtocolVersion());
+        }
+
         ToolActivity.noteCall(side);
 
         ToolContext context = new ToolContext(
@@ -346,6 +361,10 @@ public class McpDispatcher {
 
         long activity = ToolActivity.callStarted(side, name);
         context.trackActivity(activity);
+        context.setMutating(!tool.isReadOnly() && !ESTOP_EXEMPT.contains(name));
+        ToolActivity.describe(activity, session.getPrincipal().isCompanion()
+            ? session.getPrincipal().getPlayerName() + " (companion)"
+            : session.isOrchestratorLink() ? "orchestrator" : session.describeClient(), session.getId());
         RequestJournal recorder = journal;
         long started = System.currentTimeMillis();
         if (recorder != null) {

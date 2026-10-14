@@ -147,6 +147,7 @@ public class Mcmcp {
         event.registerServerCommand(new CommandMcmcp());
         CompanionServer.serverStarting(event.getServer());
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStarting();
+        com.micatechnologies.minecraft.mcmcp.jobs.ServerJobs.serverStarting(event.getServer());
         reportServerExposure(event.getServer().isDedicatedServer());
 
         if (!McmcpConfig.isServerEndpointEnabled()) {
@@ -174,6 +175,7 @@ public class Mcmcp {
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.serverStopping();
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStopping();
         com.micatechnologies.minecraft.mcmcp.tools.ServerWatchTools.serverStopping();
+        com.micatechnologies.minecraft.mcmcp.jobs.ServerJobs.serverStopping();
         // After the endpoint stops, so no call can start between the close line and the end.
         McmcpEndpoints.closeJournal(McmcpSide.SERVER);
     }

@@ -44,6 +44,12 @@ public final class CompanionProtocol {
     /** Either way: the sender is closing a session (with a session key) or the whole link (without). */
     public static final byte TYPE_BYE = 4;
 
+    /**
+     * Server to client: the server's emergency stop, {@code {by, reason, at}} while set and {@code {}}
+     * once lifted. An older client ignores a type it does not know, so this needed no version bump.
+     */
+    public static final byte TYPE_ESTOP = 5;
+
     /** Set on a message's last frame. */
     public static final int FLAG_FIN = 1;
 
