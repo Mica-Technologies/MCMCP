@@ -114,6 +114,7 @@ public class Mcmcp {
         CompanionServer.init();
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.init();
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.init();
+        com.micatechnologies.minecraft.mcmcp.game.EndpointNotices.register();
         proxy.registerSideSpecific();
     }
 

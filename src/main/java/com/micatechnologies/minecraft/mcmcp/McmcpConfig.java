@@ -87,6 +87,7 @@ public class McmcpConfig {
     private static int serverPort = 25586;
     private static String endpointPath = "/mcp";
     private static boolean requireAuth = true;
+    private static boolean portFallback = true;
     private static String authToken = "";
     private static List<String> allowedOrigins =
         Arrays.asList("http://localhost", "http://127.0.0.1");
@@ -242,6 +243,11 @@ public class McmcpConfig {
         serverPort = configuration.getInt("serverPort", CATEGORY_ENDPOINTS, devBasePort + 1, 1024, 65535,
             "TCP port for the server endpoint.\n"
                 + "Must differ from clientPort: a singleplayer world runs both endpoints in one process.");
+
+        portFallback = configuration.getBoolean("portFallback", CATEGORY_ENDPOINTS, true,
+            "When clientPort or serverPort is taken (usually by another game), listen on a free port instead "
+                + "of leaving HTTP off. The port used is logged and shown by mcmcp_instances, and every response "
+                + "carries an Mcmcp-Instance header naming the game that answered.");
 
         endpointPath = configuration.getString("endpointPath", CATEGORY_ENDPOINTS, "/mcp",
             "URL path the MCP endpoint is served from. A liveness probe is served at this path + "
@@ -909,6 +915,7 @@ public class McmcpConfig {
         return McpEndpointSettings.builder()
             .bindAddress(bindAddress)
             .port(side.isClient() ? clientPort : serverPort)
+            .portFallback(portFallback)
             .path(endpointPath)
             .requireAuth(requireAuth)
             .authToken(authToken)

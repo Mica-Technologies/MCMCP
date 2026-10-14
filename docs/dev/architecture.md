@@ -343,5 +343,8 @@ half-constructed game.
 singleplayer world, and the endpoint's tools reference that world. Holding the port open past that
 point leaves a live endpoint answering questions about a world that no longer exists.
 
-A failed bind never takes the game down. The overwhelmingly common cause is a port already in use, and
-the right outcome is a game that runs without MCMCP plus a log line saying exactly what to change.
+A failed bind never takes the game down. The overwhelmingly common cause is a port already in use, by
+another game. The transport then binds port 0 (a free port the system chooses) rather than the next
+port up, because the next one up is another side's or another dev launch's default. A script that
+still uses the configured port reaches the *other* game, so every response is stamped with an
+`Mcmcp-Instance` header for a script to check.

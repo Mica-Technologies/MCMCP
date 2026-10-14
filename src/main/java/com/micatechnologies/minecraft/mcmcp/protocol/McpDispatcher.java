@@ -275,6 +275,11 @@ public class McpDispatcher {
         info.addProperty("name", McmcpConstants.MOD_NAMESPACE + "-" + side.id());
         info.addProperty("title", McmcpConstants.MOD_NAME + " (" + side.id() + ")");
         info.addProperty("version", McmcpConstants.MOD_VERSION);
+        String instance = address.addressableId();
+        if (instance != null) {
+            // The same as the Mcmcp-Instance header, for a client that sees only the body.
+            info.addProperty("instance", instance);
+        }
         return info;
     }
 

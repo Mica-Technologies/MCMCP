@@ -97,16 +97,24 @@ Then `/mcmcp restart`, or restart the server.
 Both bind `127.0.0.1`. A singleplayer world runs both endpoints in one process, which is why they
 need different ports.
 
-If a port is already in use — a second game instance, or a previous one still exiting — MCMCP logs
-the failure and the game continues without that endpoint:
+If a port is already in use (a second game instance, or a previous one still exiting), MCMCP
+listens on a free port instead and logs which one:
 
 ```
-[mcmcp]: MCMCP could not start the client endpoint on http://127.0.0.1:25585/mcp:
-         Address already in use. The game will run without it; change the port in the
-         MCMCP config and use '/mcmcp restart' to try again.
+[mcmcp]: MCMCP server endpoint could not bind port 25586 (Address already in use: bind); another
+         game probably has it, and a script using that port reaches that game, not this one.
+         Using port 61234 instead.
 ```
 
-A failed bind never takes the game down with it.
+The port it took is also shown by `mcmcp_instances` and `/mcmcp status`. A player joining the world
+sees it in chat (in singleplayer, or as an operator). Set `portFallback=false` to leave HTTP off
+instead. A failed bind never takes the game down with it.
+
+!!! warning "The port does not say which game answered"
+    With two games open, a script using the default port reaches whichever game got there first.
+    Every HTTP response carries an `Mcmcp-Instance` header naming the game and side that answered,
+    e.g. `alto-3f2a1c.server`. `initialize` returns the same value as `serverInfo.instance`. A script
+    that writes should check it before its first write.
 
 ## Verifying from outside the game
 

@@ -90,6 +90,14 @@ public class HttpMcpTransport implements McpTransport {
     private static final String HEADER_SESSION_ID = "Mcp-Session-Id";
     private static final String HEADER_PROTOCOL_VERSION = "MCP-Protocol-Version";
 
+    /**
+     * Which game answered, as the orchestrator names it ({@code <game id>.<side>}), on every response.
+     * Ports are only a convention: with two games open the one a script reaches on 25586 may not be
+     * the one it means, and a write sent there lands in the wrong world. A script that checks this
+     * header finds out on its first call.
+     */
+    static final String HEADER_INSTANCE = "Mcmcp-Instance";
+
     private final McpEndpointSettings settings;
     private final McpDispatcher dispatcher;
     private final McpSessionManager sessions;
@@ -100,6 +108,9 @@ public class HttpMcpTransport implements McpTransport {
 
     @Nullable
     private ExecutorService executor;
+
+    /** The port actually bound: the configured one, or a free one if that was taken. */
+    private volatile int boundPort = -1;
 
     public HttpMcpTransport(McpEndpointSettings settings, McpDispatcher dispatcher, McpSessionManager sessions) {
         this.settings = settings;
@@ -119,7 +130,12 @@ public class HttpMcpTransport implements McpTransport {
 
     @Override
     public String describeTarget() {
-        return settings.describeUrl();
+        return server != null ? settings.describeUrl(boundPort) : settings.describeUrl();
+    }
+
+    /** Whether this transport is running on a port other than the configured one. */
+    public boolean fellBack() {
+        return server != null && boundPort != settings.getPort();
     }
 
     /**
@@ -150,9 +166,24 @@ public class HttpMcpTransport implements McpTransport {
                 }
             });
 
-        HttpServer created = HttpServer.create(
-            new InetSocketAddress(settings.getBindAddress(), settings.getPort()),
-            /* backlog */ 0);
+        HttpServer created;
+        try {
+            created = HttpServer.create(new InetSocketAddress(settings.getBindAddress(), settings.getPort()),
+                /* backlog */ 0);
+        }
+        catch (java.net.BindException e) {
+            if (!settings.isPortFallback()) {
+                pool.shutdownNow();
+                throw e;
+            }
+            // Port 0, not the next port up: the next one up is another side's or another dev launch's
+            // default, and taking it moves the collision rather than avoiding it.
+            created = HttpServer.create(new InetSocketAddress(settings.getBindAddress(), 0), /* backlog */ 0);
+            Mcmcp.LOGGER.warn("MCMCP " + sideId + " endpoint could not bind port " + settings.getPort() + " ("
+                + e.getMessage() + "); another game probably has it, and a script using that port reaches "
+                + "that game, not this one. Using port " + created.getAddress().getPort() + " instead.");
+        }
+        boundPort = created.getAddress().getPort();
         created.createContext(settings.getPath(), new McpHandler());
         created.createContext(settings.getPath() + "/health", new HealthHandler());
         created.setExecutor(pool);
@@ -161,7 +192,7 @@ public class HttpMcpTransport implements McpTransport {
         this.executor = pool;
         this.server = created;
 
-        Mcmcp.LOGGER.info("MCMCP " + sideId + " endpoint listening on " + settings.describeUrl());
+        Mcmcp.LOGGER.info("MCMCP " + sideId + " endpoint listening on " + describeTarget());
         if (settings.isExposedBeyondLoopback()) {
             Mcmcp.LOGGER.warn("MCMCP " + sideId + " endpoint is bound to " + settings.getBindAddress()
                 + ", which is reachable from outside this machine. Anyone who can reach it and holds "
@@ -217,6 +248,7 @@ public class HttpMcpTransport implements McpTransport {
                     handlePreflight(exchange);
                     return;
                 }
+                stampInstance(exchange);
                 if (!checkOrigin(exchange) || !checkAuth(exchange)) {
                     return;
                 }
@@ -264,8 +296,13 @@ public class HttpMcpTransport implements McpTransport {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             try {
+                stampInstance(exchange);
                 JsonObject body = new JsonObject();
                 body.addProperty("service", McmcpConstants.MOD_NAMESPACE);
+                String instance = dispatcher.getAddress().addressableId();
+                if (instance != null) {
+                    body.addProperty("instance", instance);
+                }
                 body.addProperty("side", dispatcher.getSide().id());
                 body.addProperty("status", "ok");
                 sendJson(exchange, 200, body);
@@ -546,6 +583,13 @@ public class HttpMcpTransport implements McpTransport {
         return false;
     }
 
+    private void stampInstance(HttpExchange exchange) {
+        String instance = dispatcher.getAddress().addressableId();
+        if (instance != null) {
+            exchange.getResponseHeaders().set(HEADER_INSTANCE, instance);
+        }
+    }
+
     private void applyCorsHeaders(HttpExchange exchange) {
         String origin = firstHeader(exchange, "Origin");
         if (origin == null || !isOriginAllowed(origin)) {
@@ -555,7 +599,7 @@ public class HttpMcpTransport implements McpTransport {
         headers.set("Access-Control-Allow-Origin", origin);
         // Without this the browser can read the body but not the session id, so a browser-based
         // client can complete initialize and then never make a second call.
-        headers.set("Access-Control-Expose-Headers", HEADER_SESSION_ID);
+        headers.set("Access-Control-Expose-Headers", HEADER_SESSION_ID + ", " + HEADER_INSTANCE);
         headers.set("Vary", "Origin");
     }
 

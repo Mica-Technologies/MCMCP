@@ -26,6 +26,7 @@ public final class McpEndpointSettings {
     private final int maxSessions;
     private final int workerThreads;
     private final long gameThreadTimeoutMillis;
+    private final boolean portFallback;
 
     private McpEndpointSettings(Builder builder) {
         this.bindAddress = builder.bindAddress;
@@ -38,6 +39,7 @@ public final class McpEndpointSettings {
         this.maxSessions = builder.maxSessions;
         this.workerThreads = builder.workerThreads;
         this.gameThreadTimeoutMillis = builder.gameThreadTimeoutMillis;
+        this.portFallback = builder.portFallback;
     }
 
     public static Builder builder() {
@@ -50,6 +52,11 @@ public final class McpEndpointSettings {
 
     public int getPort() {
         return port;
+    }
+
+    /** Whether a taken port falls back to a free one rather than leaving HTTP off. */
+    public boolean isPortFallback() {
+        return portFallback;
     }
 
     public String getPath() {
@@ -96,8 +103,13 @@ public final class McpEndpointSettings {
     }
 
     public String describeUrl() {
+        return describeUrl(port);
+    }
+
+    /** The URL on a port other than the configured one: where a fallback actually bound. */
+    public String describeUrl(int actualPort) {
         String host = bindAddress.contains(":") ? "[" + bindAddress + "]" : bindAddress;
-        return "http://" + host + ":" + port + path;
+        return "http://" + host + ":" + actualPort + path;
     }
 
     public static final class Builder {
@@ -121,6 +133,7 @@ public final class McpEndpointSettings {
         private int maxSessions = 8;
         private int workerThreads = 4;
         private long gameThreadTimeoutMillis = 5000L;
+        private boolean portFallback = true;
 
         public Builder bindAddress(String value) {
             this.bindAddress = value;
@@ -185,6 +198,11 @@ public final class McpEndpointSettings {
 
         public Builder gameThreadTimeoutMillis(long value) {
             this.gameThreadTimeoutMillis = Math.max(100L, value);
+            return this;
+        }
+
+        public Builder portFallback(boolean value) {
+            this.portFallback = value;
             return this;
         }
 

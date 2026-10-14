@@ -73,6 +73,15 @@ In a development launch these default from `-Dmcmcp.dev.port`, which is a **base
 endpoint takes it and the server endpoint takes base+1. `runClient` gets 25585/25586 and `runServer`
 gets 25587/25588, so four endpoints across two JVMs never collide.
 
+### `portFallback`
+
+`boolean` · default `true`
+
+When `clientPort` or `serverPort` is taken, usually by another game, listen on a free port chosen by
+the system instead of leaving HTTP off. The port used is logged, shown by `mcmcp_instances`, and told in
+chat to a player joining a singleplayer world. Every response carries an `Mcmcp-Instance` header naming
+the game that answered, so a script can check that it reached the game it meant.
+
 ### `endpointPath`
 
 `string` · default `/mcp`
@@ -607,6 +616,7 @@ endpoints {
     S:bindAddress=127.0.0.1
     I:clientPort=25585
     I:serverPort=25586
+    B:portFallback=true
     S:endpointPath=/mcp
     B:requireAuth=true
     S:authToken=3f9a1c8e5b7d204f6a1e9c3b8d5f2a70
