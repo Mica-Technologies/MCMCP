@@ -528,6 +528,8 @@ esac
 
 echo "==> Watching blocks: a change made during a watch is recorded with its tick"
 WX=$((PX + 2)); WY=$((PY + 2)); WZ=${PZ}
+# The world outlives a local run, so clear what the last run left before watching for a change.
+mcp_call 547 server_set_block "{\"x\":${WX},\"y\":${WY},\"z\":${WZ},\"block\":\"minecraft:air\"}" > /dev/null
 WATCH_BODY="$(mcp_call 55 server_watch_blocks "{\"x\":${WX},\"y\":${WY},\"z\":${WZ},\"ticks\":2000,\"wait\":false}")" \
   || mcp_failure "server_watch_blocks start failed: ${WATCH_BODY}"
 WATCH_ID="$(printf '%s' "$WATCH_BODY" | grep -o '"id":"w[0-9]*"' | head -1 | cut -d'"' -f4)"
