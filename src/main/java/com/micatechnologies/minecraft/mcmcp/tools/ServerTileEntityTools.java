@@ -9,6 +9,7 @@ import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.regions.NbtProjection;
 import java.util.ArrayList;
@@ -29,8 +30,14 @@ import net.minecraft.world.chunk.Chunk;
  */
 public final class ServerTileEntityTools {
 
-    /** Characters of NBT one entity may contribute; larger ones list their keys instead. */
-    private static final int MAX_ENTITY_CHARS = 8192;
+    /** Characters of NBT one entity may contribute by default; larger ones show a summary instead. */
+    private static final int DEFAULT_ENTITY_CHARS = 8192;
+
+    /** The most a caller may raise that to: a CSM signal controller is 11-15k. */
+    private static final int MAX_ENTITY_CHARS = 65536;
+
+    /** Positions one call may name. */
+    private static final int MAX_POSITIONS = 1000;
 
     private ServerTileEntityTools() {
     }
@@ -41,9 +48,11 @@ public final class ServerTileEntityTools {
             .description("Every tile entity in a box with its server-side NBT, in one call: the "
                 + "authoritative state, not the client's copy. Filter by block ('csm:controller', or a "
                 + "namespace 'csm:' or prefix 'csm:signal_*') and keep only the NBT fields you need with "
-                + "'keys' (dot paths, e.g. 'tcCp' or 'Items.id'). Paged: when 'next' is present, call again "
-                + "with cursor = next. Unloaded chunks are listed in the 'chunks' block; pass load: true to "
-                + "read them.")
+                + "'keys' (dot paths, e.g. 'tcCp' or 'Items.id'; index a list with 'tcPh.ph[0]'). Or name "
+                + "exact blocks with 'positions' instead of a box. A tag over maxChars comes back as a "
+                + "summary of its keys and sizes; summary: true asks for that up front. Paged: when 'next' "
+                + "is present, call again with cursor = next. Unloaded chunks are listed in the 'chunks' "
+                + "block; pass load: true to read them.")
             .schema(JsonSchema.object()
                 .integer("x", "X of one corner.")
                 .integer("y", "Y of one corner. Defaults to 0.")
@@ -54,16 +63,31 @@ public final class ServerTileEntityTools {
                 .integer("dimension", "Dimension id. Defaults to 0.")
                 .array("blocks", "Only these blocks: ids, namespaces ending in ':', or prefixes ending in '*'.",
                     Json.obj("type", "string"))
-                .array("keys", "Only these NBT fields, as dot paths. Omit for the whole tag (large tags list "
-                    + "their keys instead).", Json.obj("type", "string"))
+                .array("positions", "Exact blocks to read, instead of a box: [{x, y, z}]. At most "
+                    + MAX_POSITIONS + ". A position with no tile entity says so.",
+                    JsonSchema.object().integer("x", "X.").integer("y", "Y.").integer("z", "Z.").build())
+                .array("keys", "Only these NBT fields, as dot paths; '[n]' or '.n' picks one list element. "
+                    + "Omit for the whole tag.", Json.obj("type", "string"))
+                .integer("maxChars", "Largest tag, after 'keys', to return in full; larger ones come back as "
+                    + "a summary. Default " + DEFAULT_ENTITY_CHARS + ".", 256, MAX_ENTITY_CHARS)
+                .bool("summary", "Return each tag's keys and their sizes in characters instead of the "
+                    + "values, to see what to ask for with 'keys'.")
                 .integer("limit", "Entities per page. Default 200.", 1, 2000)
                 .integer("cursor", "Where to continue from: 'next' from the previous page.")
                 .bool("load", "Load the box's unloaded chunks for this read, and release them afterwards.")
-                .required("x", "z")
                 .build())
             .serverOnly()
             .readOnly()
             .handler(context -> {
+                final List<String> keys = Json.getStringList(context.getArguments(), "keys");
+                final int maxChars = context.getBoundedInt("maxChars", DEFAULT_ENTITY_CHARS, 256, MAX_ENTITY_CHARS);
+                final boolean summary = context.getBoolean("summary", false);
+                if (context.getArguments().has("positions")) {
+                    return readPositions(context, keys, maxChars, summary);
+                }
+                if (!context.getArguments().has("x") || !context.getArguments().has("z")) {
+                    return ToolResult.error("Pass a box (x, z, and optionally y, toX, toY, toZ) or 'positions'.");
+                }
                 final int x1 = context.requireInt("x");
                 final int z1 = context.requireInt("z");
                 final int minX = Math.min(x1, context.getInt("toX", x1));
@@ -74,7 +98,6 @@ public final class ServerTileEntityTools {
                 final int maxY = Math.min(255, Math.max(context.getInt("y", 0), context.getInt("toY", 255)));
                 final int dimension = context.getInt("dimension", 0);
                 final List<String> blocks = Json.getStringList(context.getArguments(), "blocks");
-                final List<String> keys = Json.getStringList(context.getArguments(), "keys");
                 final int limit = context.getBoundedInt("limit", 200, 1, 2000);
                 final int cursor = Math.max(0, context.getInt("cursor", 0));
                 long chunkCount = ChunkKeys.boxCount(minX, minZ, maxX, maxZ);
@@ -111,7 +134,7 @@ public final class ServerTileEntityTools {
                         JsonArray entities = new JsonArray();
                         int end = Math.min(found.size(), cursor + limit);
                         for (int i = cursor; i < end; i++) {
-                            entities.add(describe(world, found.get(i), keys));
+                            entities.add(describe(world, found.get(i), keys, maxChars, summary));
                         }
                         JsonObject result = new JsonObject();
                         result.addProperty("dimension", dimension);
@@ -132,8 +155,63 @@ public final class ServerTileEntityTools {
             .build());
     }
 
+    /** {@code positions} mode: the named blocks, in the order named. */
+    private static ToolResult readPositions(final ToolContext context, final List<String> keys, final int maxChars,
+                                            final boolean summary) throws Exception {
+        JsonArray named = context.getArguments().get("positions").isJsonArray()
+            ? context.getArguments().getAsJsonArray("positions") : new JsonArray();
+        if (named.size() == 0 || named.size() > MAX_POSITIONS) {
+            return ToolResult.error("'positions' takes 1 to " + MAX_POSITIONS + " entries; it had " + named.size() + ".");
+        }
+        final List<BlockPos> positions = new ArrayList<>();
+        final Set<Long> chunks = new java.util.LinkedHashSet<>();
+        for (JsonElement element : named) {
+            if (!element.isJsonObject()) {
+                return ToolResult.error("Each position is an object {x, y, z}.");
+            }
+            JsonObject at = element.getAsJsonObject();
+            if (!at.has("x") || !at.has("y") || !at.has("z")) {
+                return ToolResult.error("Each position needs x, y and z.");
+            }
+            BlockPos pos = new BlockPos(Json.getInt(at, "x", 0), Json.getInt(at, "y", 0), Json.getInt(at, "z", 0));
+            positions.add(pos);
+            chunks.add(ChunkKeys.ofBlock(pos.getX(), pos.getZ()));
+        }
+        final int dimension = context.getInt("dimension", 0);
+        return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
+            JsonObject json = context.onGameThread(() -> {
+                WorldServer world = ServerWorldTools.requireWorld(dimension);
+                JsonArray entities = new JsonArray();
+                int foundCount = 0;
+                for (BlockPos pos : positions) {
+                    TileEntity tile = world.isBlockLoaded(pos) ? world.getTileEntity(pos) : null;
+                    if (tile == null || tile.isInvalid()) {
+                        JsonObject entry = GameJson.blockPos(pos);
+                        entry.addProperty("error", world.isBlockLoaded(pos) ? "No tile entity here."
+                            : "Chunk not loaded; pass load: true.");
+                        entities.add(entry);
+                        continue;
+                    }
+                    foundCount++;
+                    entities.add(describe(world, tile, keys, maxChars, summary));
+                }
+                JsonObject result = new JsonObject();
+                result.addProperty("dimension", dimension);
+                result.addProperty("matched", foundCount);
+                result.addProperty("returned", entities.size());
+                result.add("tileEntities", entities);
+                ChunkLoadGovernor.touch(dimension, chunks);
+                result.add("chunks", outcome != null ? outcome.toJson()
+                    : ChunkLoadGovernor.describeUnloaded(world, chunks));
+                return result;
+            });
+            return ToolResult.structured(json);
+        });
+    }
+
     /** Game thread. */
-    private static JsonObject describe(WorldServer world, TileEntity tile, List<String> keys) {
+    private static JsonObject describe(WorldServer world, TileEntity tile, List<String> keys, int maxChars,
+                                       boolean summary) {
         BlockPos pos = tile.getPos();
         JsonObject entry = GameJson.blockPos(pos);
         ResourceLocation name = world.getBlockState(pos).getBlock().getRegistryName();
@@ -149,14 +227,12 @@ public final class ServerTileEntityTools {
         }
         JsonObject shown = keys.isEmpty() ? nbt : NbtProjection.project(nbt, keys);
         int size = Json.write(shown).length();
-        if (size > MAX_ENTITY_CHARS) {
-            JsonArray names = new JsonArray();
-            for (java.util.Map.Entry<String, JsonElement> field : shown.entrySet()) {
-                names.add(field.getKey());
+        if (summary || size > maxChars) {
+            if (!summary) {
+                entry.addProperty("truncated", true);
             }
-            entry.addProperty("truncated", true);
             entry.addProperty("chars", size);
-            entry.add("keys", names);
+            entry.add("summary", NbtProjection.summary(shown, 3));
         }
         else {
             entry.add("nbt", shown);

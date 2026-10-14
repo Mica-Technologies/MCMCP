@@ -37,6 +37,36 @@ class NbtProjectionTest {
     }
 
     @Test
+    void anIndexPicksOneElementAndBracketsAndDotsMeanTheSame() {
+        JsonObject projected = NbtProjection.project(controller(), Arrays.asList("links[1].x", "links.0.y"));
+        assertEquals("{\"links\":{\"1\":{\"x\":3},\"0\":{\"y\":2}}}", Json.write(projected),
+            "indexed elements come back keyed by index, and two paths into one list merge");
+    }
+
+    @Test
+    void anIndexPastTheEndOfAListIsLeftOut() {
+        assertEquals(0, NbtProjection.project(controller(), Collections.singletonList("links[5].x")).size());
+    }
+
+    @Test
+    void anIndexIntoAListOfListsPicksFromEachLevel() {
+        JsonObject tag = Json.parse("{\"grid\":[[1,2],[3,4]]}").getAsJsonObject();
+        assertEquals("{\"grid\":{\"1\":{\"0\":3}}}",
+            Json.write(NbtProjection.project(tag, Collections.singletonList("grid[1][0]"))));
+    }
+
+    @Test
+    void aSummaryGivesEachPartsSizeWithoutItsContents() {
+        JsonObject summary = NbtProjection.summary(controller(), 2).getAsJsonObject();
+        assertEquals(1, summary.getAsJsonObject("keys").get("tcCp").getAsInt());
+        JsonObject links = summary.getAsJsonObject("keys").getAsJsonObject("links");
+        assertEquals(2, links.get("len").getAsInt());
+        assertTrue(links.getAsJsonObject("each").getAsJsonObject("keys").has("x"),
+            "a list of compounds shows the shape of one element");
+        assertFalse(Json.write(summary).contains("Junction"), "no values, only sizes");
+    }
+
+    @Test
     void aFilterMatchesAnIdANamespaceOrAPrefix() {
         assertTrue(NbtProjection.matches("csm:controller", Collections.singletonList("csm:controller")));
         assertTrue(NbtProjection.matches("csm:controller", Collections.singletonList("csm:")));

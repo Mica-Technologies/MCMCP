@@ -512,16 +512,23 @@ A call whose hold is ended while it waits fails with a message naming what ended
 
 #### `server_get_tile_entities`
 
-:material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `blocks`, `keys`, `limit`, `cursor`, `load`
+:material-eye: Read-only · `x`, `z` or `positions` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `blocks`, `keys`, `maxChars`, `summary`, `limit`, `cursor`, `load`
 
 Every tile entity in a box, with its **server-side** NBT, in one call. Use it for checking a
 district's signal controllers, alarm devices or elevator controllers. The client's copy of a tile
 entity can lag the server's by minutes.
 
 - `blocks` filters by an id (`csm:controller`), a namespace (`csm:`) or a prefix (`csm:signal_*`).
+- `positions` reads exact blocks instead of a box, `[{x, y, z}]`, up to 1,000. Use it for ten
+  controllers spread across a district. A position with no tile entity returns an `error` entry.
 - `keys` keeps only the named NBT fields, as dot paths (`tcCp`, `display.Name`). A path through a
-  list applies to every element (`links.x`). Without `keys`, a tag over 8 KB lists its keys
-  instead.
+  list applies to every element (`links.x`). An index picks one element: `tcPh.ph[0]` or
+  `tcPh.ph.0`. An indexed list comes back as an object keyed by index (`{"ph": {"0": ...}}`).
+- `maxChars` (default 8,192, up to 65,536) is the largest tag returned in full, after `keys`. A
+  larger tag comes back with `truncated: true` and a `summary` instead.
+- `summary: true` returns each tag's shape and sizes instead of its values. Use it to find what to
+  ask for with `keys`. A primitive shows as its size in characters, a compound as
+  `{chars, keys}`, and a list as `{chars, len, each}`.
 - The result is paged in a fixed order. When `next` is present, call again with
   `cursor: next`. `matched` is the total.
 - Unloaded chunks appear in the `chunks` block. `load: true` reads them.

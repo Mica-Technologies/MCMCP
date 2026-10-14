@@ -525,6 +525,12 @@ case "$TE_BODY" in
   *'"matched":2'*'"returned":1'*'"next":1'*) echo "    2 chests matched, paged one at a time, the sign filtered out" ;;
   *) mcp_failure "server_get_tile_entities did not filter or page: ${TE_BODY}" ;;
 esac
+TE_POS_BODY="$(mcp_call 541 server_get_tile_entities "{\"positions\":[{\"x\":${TX},\"y\":${TY},\"z\":${TZ}},{\"x\":$((TX + 1)),\"y\":${TY},\"z\":${TZ}}],\"summary\":true}")" \
+  || mcp_failure "server_get_tile_entities positions failed: ${TE_POS_BODY}"
+case "$TE_POS_BODY" in
+  *'"matched":1'*'"returned":2'*'"summary"'*'No tile entity here'*) echo "    positions: the chest summarised, the empty cell reported" ;;
+  *) mcp_failure "server_get_tile_entities positions/summary wrong: ${TE_POS_BODY}" ;;
+esac
 
 echo "==> Watching blocks: a change made during a watch is recorded with its tick"
 WX=$((PX + 2)); WY=$((PY + 2)); WZ=${PZ}
