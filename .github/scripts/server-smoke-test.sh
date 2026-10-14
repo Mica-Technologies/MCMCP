@@ -532,6 +532,30 @@ case "$TE_POS_BODY" in
   *) mcp_failure "server_get_tile_entities positions/summary wrong: ${TE_POS_BODY}" ;;
 esac
 
+echo "==> Two-part blocks: a door's lower half brings its upper half, and replaces a different door"
+DX=$((SPAWN_X + 16)); DY=$((UNDO_Y + 10)); DZ=$((SPAWN_Z + 16))
+mcp_call 542 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:stone\",\"x\":${DX},\"y\":${DY},\"z\":${DZ}}" > /dev/null
+DOOR_BODY="$(mcp_call 543 server_set_blocks "{\"mode\":\"list\",\"blocks\":[{\"x\":${DX},\"y\":$((DY + 1)),\"z\":${DZ},\"block\":\"minecraft:wooden_door\",\"metadata\":1,\"upper\":9}]}")" \
+  || mcp_failure "placing a door failed: ${DOOR_BODY}"
+case "$DOOR_BODY" in
+  *'"written":1'*'"partnersAdded":1'*) ;;
+  *) mcp_failure "the door was not written as a pair: ${DOOR_BODY}" ;;
+esac
+UPPER_BODY="$(mcp_call 544 server_get_block "{\"x\":${DX},\"y\":$((DY + 2)),\"z\":${DZ}}")" \
+  || mcp_failure "reading the upper half failed: ${UPPER_BODY}"
+case "$UPPER_BODY" in
+  *'wooden_door'*'"metadata":9'*) echo "    the upper half is there, with the hinge asked for" ;;
+  *) mcp_failure "no upper half above the door: ${UPPER_BODY}" ;;
+esac
+SWAP_BODY="$(mcp_call 545 server_set_blocks "{\"mode\":\"palette\",\"palette\":[\"minecraft:iron_door:1\"],\"origin\":{\"x\":${DX},\"y\":$((DY + 1)),\"z\":${DZ}},\"cells\":[0,0,0,0]}")" \
+  || mcp_failure "swapping the door failed: ${SWAP_BODY}"
+SWAPPED_BODY="$(mcp_call 546 server_get_block "{\"x\":${DX},\"y\":$((DY + 2)),\"z\":${DZ}}")" \
+  || mcp_failure "reading the swapped upper half failed: ${SWAPPED_BODY}"
+case "$SWAPPED_BODY" in
+  *'iron_door'*) echo "    a palette write swapped it for an iron door, both halves" ;;
+  *) mcp_failure "the swap left the old upper half: ${SWAP_BODY} / ${SWAPPED_BODY}" ;;
+esac
+
 echo "==> Watching blocks: a change made during a watch is recorded with its tick"
 WX=$((PX + 2)); WY=$((PY + 2)); WZ=${PZ}
 # The world outlives a local run, so clear what the last run left before watching for a change.

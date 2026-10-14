@@ -732,7 +732,7 @@ the area first, or use `server_set_blocks` with `load: true`. `nbt` is merged in
 | `block`, `metadata` | string, integer | Fill mode. |
 | `x`,`y`,`z`,`toX`,`toY`,`toZ` | integer | Fill mode region. |
 | `nbt` | string \| object | Fill mode: tile-entity data merged into every block filled. |
-| `blocks` | array | List mode: `{x, y, z, block, metadata, nbt}` objects. Leave `block` out, with `nbt`, to merge the NBT into the block already there. |
+| `blocks` | array | List mode: `{x, y, z, block, metadata, upper, nbt}` objects. Leave `block` out, with `nbt`, to merge the NBT into the block already there. `upper` is a two-part block's second-half metadata (see below). |
 | `replaceOnly` | string | Only write where the existing block matches this id. |
 | `dimension` | integer | Default 0. |
 | `load` | boolean | Default false. Load the chunks the write touches, and release them afterwards. |
@@ -742,9 +742,19 @@ first, then one list call for the detail.
 
 `replaceOnly: "minecraft:air"` builds without destroying anything already there.
 
-The response separates `skipped` (excluded by `replaceOnly`) from `unchanged` (the world refused the
-write — usually the same block was already there). That distinction is what tells you whether a
-filter or the world stopped you.
+**Counts always add up.** Every cell lands in exactly one count, so they sum to `attempted`:
+
+| Count | Meaning |
+| --- | --- |
+| `written` | The block or its tile-entity data changed. |
+| `unchanged` | It already held exactly that. |
+| `skipped` | Excluded by `replaceOnly`. |
+| `unloaded` | In a chunk that is not loaded. |
+| `refused` | The world would not take it. `refusedAt` lists the first 20 with a `reason`, e.g. a metadata value the block has no state for. |
+| `pairs.byPartner` | The upper half of a door whose lower half, in the same write, wrote it. |
+
+Palette mode reports the same `attempted`, `written`, `unchanged` and `refused`, plus `conflicts`
+and `skippedTileEntity`.
 
 **Unloaded chunks.** Cells in chunks that aren't loaded are **not** written. They're counted as
 `unloaded`, and the `chunks` block lists those chunks. Writing used to load such a chunk, or
@@ -770,6 +780,22 @@ so, and nothing is written.
 holds the tick loop. A larger region or list is written in batches of that size, one task after
 another with ticks between, up to 32 batches per call — so clearing a scene is one call rather than
 one per layer. `batches` in the response says how many it took.
+
+**Two-part blocks.** Doors, tall plants (`minecraft:double_plant`) and beds are written whole, in
+every mode. Written one cell at a time, a door's lower half sees no upper half and drops as an item.
+So both halves are set with no neighbour updates, and neighbours are notified once both are in
+place.
+
+- Give the lower half (a bed's foot) and the other half is placed with it. In list mode, `upper`
+  sets the second half's metadata, e.g. `8 + hinge` for a door. Otherwise it is derived: a door's
+  upper half with the hinge on the left, a plant's top, a bed's head.
+- If the write also lists the upper half in the cell above, that state is used, and the upper
+  entry is counted under `pairs.byPartner` rather than written twice.
+- A different door already in either cell is replaced, and its other half is removed, so no orphan
+  half is left behind.
+- The response's `pairs` object counts `byPartner`, `partnersAdded` (second halves the write did not
+  list) and `oldHalvesCleared`. Any type with a `half` property of `lower`/`upper` counts as a
+  two-part block, which includes mods' doors built on `BlockDoor`.
 
 **Undo.** Each call records what every block it changed was before, and names the record in
 `undoPoint`; `server_undo` puts it back. See below.

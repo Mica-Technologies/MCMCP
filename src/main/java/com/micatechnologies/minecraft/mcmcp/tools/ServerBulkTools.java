@@ -332,11 +332,28 @@ public final class ServerBulkTools {
 
             final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
             final BufferedImage beforeImage = recorder == null ? null : ServerUndoTools.drawImage(context, dimension, area);
+            final boolean[] twoPartEntry = new boolean[palette.size()];
+            boolean anyTwoPart = false;
+            for (int p = 0; p < palette.size(); p++) {
+                IBlockState state = palette.get(p).state;
+                twoPartEntry[p] = state != null && TwoPartBlocks.isTwoPart(state);
+                anyTwoPart |= twoPartEntry[p];
+            }
+            final java.util.Map<Long, IBlockState> twoPart = new java.util.HashMap<>();
+            if (anyTwoPart) {
+                for (int i = 0; i < count; i++) {
+                    if (twoPartEntry[values[i]]) {
+                        twoPart.put(new BlockPos(xs[i], ys[i], zs[i]).toLong(), palette.get(values[i]).state);
+                    }
+                }
+            }
+            final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
             for (int from = 0; from < count; from += batch) {
                 final int start = from;
                 final int end = Math.min(count, from + batch);
                 context.onGameThread(() -> {
                     WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    TwoPartBlocks.Recorder undo = TwoPartBlocks.undo(world, recorder);
                     for (int i = start; i < end; i++) {
                         Entry entry = palette.get(values[i]);
                         if (entry.state == null) {
@@ -355,6 +372,25 @@ public final class ServerBulkTools {
                         }
                         if (skipTileEntities && world.getTileEntity(pos) != null) {
                             tally.skippedTileEntity++;
+                            continue;
+                        }
+                        if (twoPartEntry[values[i]]) {
+                            TwoPartBlocks.Outcome paired = pairs.write(world, pos, entry.state, null, undo);
+                            if (paired == TwoPartBlocks.Outcome.WRITTEN) {
+                                tally.applied++;
+                            }
+                            else if (paired == TwoPartBlocks.Outcome.UNCHANGED) {
+                                tally.unchanged++;
+                            }
+                            else if (paired == TwoPartBlocks.Outcome.DONE_BY_PARTNER) {
+                                tally.byPartner++;
+                            }
+                            else {
+                                tally.failed(pos, entry.id);
+                            }
+                            if (paired != TwoPartBlocks.Outcome.FAILED && entry.nbt != null) {
+                                TileEntityNbt.merge(world, pos, entry.nbt);
+                            }
                             continue;
                         }
                         if (actual == entry.state && entry.nbt == null) {
@@ -390,6 +426,8 @@ public final class ServerBulkTools {
                     context.reportProgress(end, count, "Wrote " + end + " of " + count + " cells");
                 }
             }
+            tally.partners = pairs.partnersWritten;
+            tally.oldHalves = pairs.oldPartnersCleared;
             JsonObject json = tally.toJson(dimension, count);
             json.addProperty("neighbourUpdates", flags == 3);
             json.add("chunks", context.onGameThread(() -> {
@@ -422,6 +460,12 @@ public final class ServerBulkTools {
         int unloaded;
         int failedCount;
         int noTileEntity;
+        /** Second halves of a pair written by their first half's cell. */
+        int byPartner;
+        /** Second halves placed although the write did not list them. */
+        int partners;
+        /** Other doors' halves removed so a new pair could go in. */
+        int oldHalves;
         final JsonArray conflictList = new JsonArray();
         final JsonArray failedList = new JsonArray();
 
@@ -450,6 +494,7 @@ public final class ServerBulkTools {
             JsonObject json = new JsonObject();
             json.addProperty("dimension", dimension);
             json.addProperty("cells", cells);
+            json.addProperty("attempted", cells);
             json.addProperty("applied", applied);
             json.addProperty("written", applied);
             json.addProperty("unchanged", unchanged);
@@ -457,8 +502,16 @@ public final class ServerBulkTools {
             json.addProperty("skippedTileEntity", skippedTileEntity);
             json.addProperty("unloaded", unloaded);
             json.addProperty("failed", failedCount);
+            json.addProperty("refused", failedCount);
             if (noTileEntity > 0) {
                 json.addProperty("nbtWithoutTileEntity", noTileEntity);
+            }
+            if (byPartner + partners + oldHalves > 0) {
+                JsonObject pairs = new JsonObject();
+                pairs.addProperty("byPartner", byPartner);
+                pairs.addProperty("partnersAdded", partners);
+                pairs.addProperty("oldHalvesCleared", oldHalves);
+                json.add("pairs", pairs);
             }
             if (conflictList.size() > 0) {
                 json.add("conflictList", conflictList);

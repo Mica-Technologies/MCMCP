@@ -281,6 +281,10 @@ public final class ServerBuildTools {
                 + "'nbt' on a placement, or on a fill, "
                 + "merges tile-entity data into each block after it is placed, as /blockdata does; "
                 + "read it back with server_get_block nbt=true.\n\n"
+                + "Two-part blocks (doors, tall plants, beds) are written whole: give the lower half "
+                + "(or a bed's foot) and the other half is placed with it, before either is updated, "
+                + "replacing any different door already there. In list mode 'upper' sets the second "
+                + "half's metadata; in any mode an explicit upper half in the cell above is used.\n\n"
                 + "Like server_set_block, this writes directly and does not fire block-place events, "
                 + "so other mods' protection and machinery hooks do not run. Disabled unless "
                 + "permissions.allowWorldEdits is enabled in the MCMCP config.")
@@ -330,6 +334,8 @@ public final class ServerBuildTools {
                         .string("block", "Namespaced block id. Omit it, with nbt, to keep the block and "
                             + "metadata already there and only merge the nbt.")
                         .integer("metadata", "Block metadata. Defaults to 0.", 0, 15)
+                        .integer("upper", "Two-part blocks (doors, tall plants, beds): the second "
+                            + "half's metadata, e.g. 8 + hinge for a door. Omit to derive it.", 0, 15)
                         .property("nbt", nbtSchema("Tile-entity data merged into this block after "
                             + "it is placed."))
                         .required("x", "y", "z")
@@ -406,6 +412,12 @@ public final class ServerBuildTools {
                             return ToolResult.error(
                                 BlockIds.describeUnknown(placement.blockId, "place"));
                         }
+                        if (placement.upper != null && (placement.block == null
+                            || !TwoPartBlocks.canPair(placement.block))) {
+                            return ToolResult.error("The placement at x=" + placement.pos.getX() + ", y="
+                                + placement.pos.getY() + ", z=" + placement.pos.getZ() + " has 'upper', but "
+                                + placement.blockId + " is not a two-part block (door, tall plant or bed).");
+                        }
                         if (placement.pos.getY() < 0 || placement.pos.getY() > 255) {
                             return ToolResult.error("y must be between 0 and 255; got "
                                 + placement.pos.getY() + " at x=" + placement.pos.getX()
@@ -422,18 +434,40 @@ public final class ServerBuildTools {
                     final int[] area = recorder == null ? null : listArea(placements);
                     final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                     final Tally tally = new Tally();
+                    final java.util.Map<Long, IBlockState> twoPart = new java.util.HashMap<>();
+                    for (Placement placement : placements) {
+                        IBlockState state = placement.state();
+                        if (state != null && TwoPartBlocks.isTwoPart(state)) {
+                            twoPart.put(placement.pos.toLong(), state);
+                        }
+                    }
+                    final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, 3);
                     runInBatches(context, placements.size(), batchLimit, new Batch() {
                         @Override
                         public void run(int from, int to) {
                             WorldServer world = ServerWorldTools.requireWorld(dimension);
+                            TwoPartBlocks.Recorder undo = TwoPartBlocks.undo(world, recorder);
                             for (int i = from; i < to; i++) {
                                 Placement placement = placements.get(i);
-                                place(world, placement.pos, placement.keepsBlock() ? null
-                                        : placement.block.getStateFromMeta(placement.metadata),
-                                    placement.nbt, replaceOnly, tally, recorder);
+                                IBlockState state;
+                                try {
+                                    state = placement.state();
+                                }
+                                catch (RuntimeException e) {
+                                    tally.refused(placement.pos, placement.blockId, "metadata " + placement.metadata
+                                        + " is not a valid state: " + e.getMessage());
+                                    continue;
+                                }
+                                if (state != null && twoPart.containsKey(placement.pos.toLong())
+                                    && placePair(world, placement, state, replaceOnly, pairs, undo, tally)) {
+                                    continue;
+                                }
+                                place(world, placement.pos, state, placement.nbt, replaceOnly, tally, recorder);
                             }
                         }
                     }, tally);
+                    tally.partners = pairs.partnersWritten;
+                    tally.oldHalves = pairs.oldPartnersCleared;
                     JsonObject json = tally.toJson(dimension, placements.size(), replaceOnlyId);
                     json.add("chunks", chunksBlock(context, dimension, listChunks, outcome));
                     if (recorder != null) {
@@ -563,6 +597,50 @@ public final class ServerBuildTools {
      * given. Game thread only.
      */
     /** Writes one cell; a null {@code state} keeps the block there and only merges {@code nbt}. */
+    /**
+     * Writes a two-part placement through {@link TwoPartBlocks}.
+     *
+     * @return false when the cell is not two-part after all and should be written as usual
+     */
+    private static boolean placePair(WorldServer world, Placement placement, IBlockState state,
+                                     @Nullable Block replaceOnly, TwoPartBlocks.Writer pairs,
+                                     @Nullable TwoPartBlocks.Recorder undo, Tally tally) {
+        BlockPos pos = placement.pos;
+        if (!world.isBlockLoaded(pos)) {
+            tally.unloaded++;
+            return true;
+        }
+        if (replaceOnly != null && world.getBlockState(pos).getBlock() != replaceOnly) {
+            tally.skipped++;
+            return true;
+        }
+        IBlockState partner = placement.upper == null ? null : placement.block.getStateFromMeta(placement.upper);
+        switch (pairs.write(world, pos, state, partner, undo)) {
+            case NOT_TWO_PART:
+                return false;
+            case WRITTEN:
+                tally.written++;
+                break;
+            case UNCHANGED:
+                tally.unchanged++;
+                break;
+            case DONE_BY_PARTNER:
+                tally.byPartner++;
+                break;
+            case FAILED:
+                tally.refused(pos, placement.blockId, "the pair could not be placed: its other cell is "
+                    + "unloaded, outside the world, or the world did not accept the state");
+                break;
+            default:
+                break;
+        }
+        if (placement.nbt != null) {
+            TileEntityNbt.Outcome outcome = TileEntityNbt.merge(world, pos, placement.nbt);
+            tally.nbt[outcome.ordinal()]++;
+        }
+        return true;
+    }
+
     private static void place(WorldServer world, BlockPos pos, @Nullable IBlockState state,
                               @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, Tally tally,
                               @Nullable UndoPoints.Recorder recorder) {
@@ -577,9 +655,12 @@ public final class ServerBuildTools {
             return;
         }
         UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
-        boolean changed = state != null && world.setBlockState(pos, state, 3);
-        if (changed) {
-            tally.written++;
+        IBlockState actual = world.getBlockState(pos);
+        boolean changed = state != null && actual != state && world.setBlockState(pos, state, 3);
+        if (state != null && actual != state && !changed) {
+            ResourceLocation name = state.getBlock().getRegistryName();
+            tally.refused(pos, name == null ? "unknown" : name.toString(), "the world did not accept the state");
+            return;
         }
         if (nbt != null) {
             TileEntityNbt.Outcome outcome = TileEntityNbt.merge(world, pos, nbt);
@@ -588,6 +669,12 @@ public final class ServerBuildTools {
             if (outcome == TileEntityNbt.Outcome.NO_TILE_ENTITY && tally.noTileEntityAt.size() < 5) {
                 tally.noTileEntityAt.add(GameJson.blockPos(pos));
             }
+        }
+        if (changed) {
+            tally.written++;
+        }
+        else {
+            tally.unchanged++;
         }
         if (recorder != null && changed) {
             recorder.record(pos, was, world.getBlockState(pos));
@@ -645,6 +732,25 @@ public final class ServerBuildTools {
         int skipped;
         int unloaded;
         int batches;
+        /** Second halves of a pair written by their first half's placement. */
+        int byPartner;
+        /** Second halves placed although the write did not list them. */
+        int partners;
+        /** Other doors' halves removed so a new pair could go in. */
+        int oldHalves;
+        int unchanged;
+        int refusedCount;
+        final JsonArray refusedList = new JsonArray();
+
+        void refused(BlockPos pos, @Nullable String id, String reason) {
+            refusedCount++;
+            if (refusedList.size() < 20) {
+                JsonObject item = GameJson.blockPos(pos);
+                item.addProperty("block", id);
+                item.addProperty("reason", reason);
+                refusedList.add(item);
+            }
+        }
         /** Indexed by {@link TileEntityNbt.Outcome#ordinal()}. */
         final int[] nbt = new int[TileEntityNbt.Outcome.values().length];
         final JsonArray noTileEntityAt = new JsonArray();
@@ -658,11 +764,21 @@ public final class ServerBuildTools {
             if (replaceOnlyId != null && !replaceOnlyId.isEmpty()) {
                 json.addProperty("replaceOnly", replaceOnlyId);
             }
-            // written < attempted - skipped means the world rejected some writes: usually the same
-            // block was already there, occasionally an unloaded chunk. Reporting it separately from
-            // `skipped` is what lets a model tell "my filter excluded these" from "the world refused
-            // these".
-            json.addProperty("unchanged", attempted - skipped - written - unloaded);
+            // `skipped` is what a filter excluded, `unchanged` what already held the block, `refused`
+            // what the world would not take. Kept apart, they tell a model which of the three stopped it.
+            // Every cell lands in exactly one of these, so they always add up to attempted (#80).
+            json.addProperty("unchanged", unchanged);
+            json.addProperty("refused", refusedCount);
+            if (byPartner + partners + oldHalves > 0) {
+                JsonObject pairs = new JsonObject();
+                pairs.addProperty("byPartner", byPartner);
+                pairs.addProperty("partnersAdded", partners);
+                pairs.addProperty("oldHalvesCleared", oldHalves);
+                json.add("pairs", pairs);
+            }
+            if (refusedList.size() > 0) {
+                json.add("refusedAt", refusedList);
+            }
             if (unloaded > 0) {
                 json.addProperty("unloaded", unloaded);
             }
@@ -722,8 +838,10 @@ public final class ServerBuildTools {
                         + pos.getY() + ", z=" + pos.getZ() + ": " + e.getMessage());
                 }
             }
+            Integer upper = item.has("upper") && !item.get("upper").isJsonNull()
+                ? Math.max(0, Math.min(15, Json.getInt(item, "upper", 0))) : null;
             placements.add(new Placement(pos, keep ? null : id, keep ? null : BlockIds.resolve(id),
-                Math.max(0, Math.min(15, Json.getInt(item, "metadata", 0))), nbt));
+                Math.max(0, Math.min(15, Json.getInt(item, "metadata", 0))), nbt, upper));
         }
         return placements;
     }
@@ -739,14 +857,23 @@ public final class ServerBuildTools {
         final int metadata;
         @Nullable
         final NBTTagCompound nbt;
+        /** A two-part block's second-half metadata, given rather than derived. */
+        @Nullable
+        final Integer upper;
 
         Placement(BlockPos pos, @Nullable String blockId, @Nullable Block block, int metadata,
-                  @Nullable NBTTagCompound nbt) {
+                  @Nullable NBTTagCompound nbt, @Nullable Integer upper) {
             this.pos = pos;
             this.blockId = blockId;
             this.block = block;
             this.metadata = metadata;
             this.nbt = nbt;
+            this.upper = upper;
+        }
+
+        @Nullable
+        IBlockState state() {
+            return block == null ? null : block.getStateFromMeta(metadata);
         }
 
         boolean keepsBlock() {
