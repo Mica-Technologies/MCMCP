@@ -68,7 +68,7 @@ public final class CompanionPolicy implements CallFilter {
         for (String load : new String[] {"server_keep_loaded", "server_release_loaded"}) {
             CLASSES.put(load, Principal.CLASS_LOAD);
         }
-        for (String use : new String[] {"server_use_item_on_block", "server_activate_block"}) {
+        for (String use : new String[] {"server_use_item_on_block", "server_use_item_on_blocks", "server_activate_block"}) {
             CLASSES.put(use, Principal.CLASS_USE);
         }
         PLAYER_ARGUMENTS.put("server_run_command", "asPlayer");
@@ -78,6 +78,7 @@ public final class CompanionPolicy implements CallFilter {
         PLAYER_ARGUMENTS.put("server_teleport_player", "player");
         PLAYER_ARGUMENTS.put("server_tell_player", "player");
         PLAYER_ARGUMENTS.put("server_use_item_on_block", "player");
+        PLAYER_ARGUMENTS.put("server_use_item_on_blocks", "player");
         PLAYER_ARGUMENTS.put("server_activate_block", "player");
     }
 

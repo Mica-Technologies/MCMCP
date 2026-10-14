@@ -128,17 +128,9 @@ public final class ServerInteractTools {
                         throw new IllegalStateException("That block's chunk is not loaded. Pass load: true, or hold it "
                             + "with server_keep_loaded.");
                     }
-                    // What processTryUseItemOnBlock checks before calling the same method, less reach.
-                    int buildLimit = server.getBuildLimit();
-                    if (!(pos.getY() < buildLimit - 1 || face != EnumFacing.UP && pos.getY() < buildLimit)) {
-                        throw new IllegalStateException("That is above the build limit.");
-                    }
-                    if (server.isBlockProtected(world, pos, player)) {
-                        throw new IllegalStateException("That block is inside spawn protection, which this player "
-                            + "may not change.");
-                    }
-                    if (!world.getWorldBorder().contains(pos)) {
-                        throw new IllegalStateException("That block is outside the world border.");
+                    String refusal = refusalAt(server, world, player, pos, face);
+                    if (refusal != null) {
+                        throw new IllegalStateException(refusal);
                     }
 
                     JsonObject result = new JsonObject();
@@ -207,6 +199,29 @@ public final class ServerInteractTools {
                 }
                 return ToolResult.structured(json);
             });
+    }
+
+    /**
+     * What {@code processTryUseItemOnBlock} checks before the right-click, less reach; null if the click
+     * may go ahead. Game thread.
+     */
+    @javax.annotation.Nullable
+    static String refusalAt(MinecraftServer server, WorldServer world, EntityPlayerMP player, BlockPos pos,
+                            EnumFacing face) {
+        if (!world.isBlockLoaded(pos)) {
+            return "That block's chunk is not loaded. Pass load: true, or hold it with server_keep_loaded.";
+        }
+        int buildLimit = server.getBuildLimit();
+        if (!(pos.getY() < buildLimit - 1 || face != EnumFacing.UP && pos.getY() < buildLimit)) {
+            return "That is above the build limit.";
+        }
+        if (server.isBlockProtected(world, pos, player)) {
+            return "That block is inside spawn protection, which this player may not change.";
+        }
+        if (!world.getWorldBorder().contains(pos)) {
+            return "That block is outside the world border.";
+        }
+        return null;
     }
 
     /** Game thread: the container a click opened, read and clicked in the same moment. */

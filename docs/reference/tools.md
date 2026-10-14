@@ -936,6 +936,33 @@ restored afterwards. The reply has:
 Through the companion, `player` is always you, and the tool needs `mcmcp.companion.use`. Every call
 leaves an undo point for the clicked block and the one beside it.
 
+#### `server_use_item_on_blocks`
+
+:material-alert: Destructive · `player`, `uses` required · optional `item`, `slot`, `readBack`, `readBackKeys`, `stopOnError`, `load`
+
+Many uses of an item in one call, in order: planting a street's trees, or linking a run of
+signals. Each use is the same click as [`server_use_item_on_block`](#server_use_item_on_block).
+`uses` is up to 1,000 `{x, y, z, face, hitX, hitY, hitZ, sneak, item}` objects.
+
+Where the item comes from:
+
+- `item: {id, meta, count, nbt}` lends the player an item for the call. It goes into the selected
+  hotbar slot for each use, and the slot is put back exactly as it was, so the player's inventory
+  never changes. One lent stack lasts the whole call, so a linking tool still has what its first
+  click stored when the second click runs. A stack used up is replaced with a fresh one.
+- `item` on a use lends that item for that use, for mixed presets in one call. The same item given
+  twice is the same stack.
+- `slot` uses the item already in that hotbar slot instead.
+
+Through the companion, lending an item needs creative mode or operator rights. Without them, put the
+item in your hotbar and pass `slot`.
+
+The reply counts `attempted`, `ran`, `succeeded`, `changed`, `failed` and `refused`, and lists each
+use's `result` and `changed`. A use outside the build limit, spawn protection or the world border is
+`refused` with the reason. With `readBack`, each use also reports the block `after`, and with
+`readBackKeys` the named tile-entity fields. `lentAfter` gives each lent stack's count at the end.
+`stopOnError` stops at the first failed or refused use. One undo point covers the call.
+
 #### `server_activate_block`
 
 :material-alert: Destructive · as above, without `slot`
