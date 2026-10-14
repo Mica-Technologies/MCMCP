@@ -538,6 +538,42 @@ entity can lag the server's by minutes.
  "block": "csm:controller", "nbt": {"tcCp": 3, "tcFm": ""}}], "chunks": {...}}
 ```
 
+#### `server_count_blocks`
+
+:material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `include`, `exclude`, `includeAir`, `byState`, `samples`, `limit`, `load`
+
+Counts the blocks in a box by type, on the server, without listing them. Use it for "is anything but
+terrain in this footprint?" or "how many signal heads are in this district?" over up to 4,096
+chunks (about 1,000 × 1,000 blocks) in one call. The server reads the chunk sections directly, in
+short slices with ticks between them.
+
+- `include` and `exclude` take ids, namespaces ending in `:` or prefixes ending in `*`. Pass the
+  natural blocks as `exclude` to find anything placed.
+- Air is not counted unless `includeAir`. `byState` counts each metadata value apart
+  (`minecraft:wool:14`).
+- The reply lists `blocks` most first, each with its `count` and up to `samples` (default 3)
+  positions as `[x, y, z]`. `counted` is the total, and `typesNotListed` says how many types fell
+  past `limit`.
+- Unloaded chunks are not counted and appear in the `chunks` block. `load: true` counts them.
+
+```json
+{"cells": 1048576, "counted": 214, "types": 2, "blocks": [
+ {"block": "minecraft:cobblestone", "count": 210, "samples": [[3261, 70, 1265]]},
+ {"block": "csm:signal_head", "count": 4, "samples": [[3300, 75, 1290]]}], "chunks": {...}}
+```
+
+#### `server_relight`
+
+:material-cog: Idempotent · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `load`
+
+Recomputes block light and sky light over a box, then resends its chunks to the players who have
+them. Bulk writes without neighbour updates leave stale dark patches on new facades and plazas, and
+these stay until something else relights them. Changes no blocks, so it leaves no undo point.
+
+At most 4,194,304 cells a call. Relighting costs far more per cell than reading, so limit `y`
+to the height that was built. It runs in short slices with ticks between them. The reply gives
+`cells` checked, `lightChanged` (cells whose light level changed), `chunksResent` and `millis`.
+
 #### `server_find_blocks`
 
 :material-eye: Read-only · `block`, `x`, `y`, `z` required

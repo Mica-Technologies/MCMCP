@@ -556,6 +556,20 @@ case "$SWAPPED_BODY" in
   *) mcp_failure "the swap left the old upper half: ${SWAP_BODY} / ${SWAPPED_BODY}" ;;
 esac
 
+echo "==> Counting and relighting a box on the server"
+COUNT_BODY="$(mcp_call 548 server_count_blocks "{\"x\":${DX},\"y\":${DY},\"z\":${DZ},\"toY\":$((DY + 2)),\"include\":[\"minecraft:iron_door\",\"minecraft:stone\"]}")" \
+  || mcp_failure "server_count_blocks failed: ${COUNT_BODY}"
+case "$COUNT_BODY" in
+  *'"counted":3'*'"block":"minecraft:iron_door","count":2'*) echo "    2 door halves and the stone under them, nothing else" ;;
+  *) mcp_failure "server_count_blocks counted wrong: ${COUNT_BODY}" ;;
+esac
+RELIGHT_BODY="$(mcp_call 549 server_relight "{\"x\":${DX},\"y\":${DY},\"z\":${DZ},\"toX\":$((DX + 15)),\"toY\":$((DY + 3)),\"toZ\":$((DZ + 15))}")" \
+  || mcp_failure "server_relight failed: ${RELIGHT_BODY}"
+case "$RELIGHT_BODY" in
+  *'"cells":1024'*) echo "    1,024 cells relit" ;;
+  *) mcp_failure "server_relight did not relight the box: ${RELIGHT_BODY}" ;;
+esac
+
 echo "==> Watching blocks: a change made during a watch is recorded with its tick"
 WX=$((PX + 2)); WY=$((PY + 2)); WZ=${PZ}
 # The world outlives a local run, so clear what the last run left before watching for a change.

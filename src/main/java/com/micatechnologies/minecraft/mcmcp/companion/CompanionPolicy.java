@@ -54,11 +54,11 @@ public final class CompanionPolicy implements CallFilter {
     static {
         for (String read : new String[] {"server_get_block", "server_get_blocks", "server_find_blocks",
             "server_nearby_entities", "server_world_info", "server_list_players", "server_player_state",
-            "server_player_inventory", "server_tick_stats", "server_changes_since", "server_watch_blocks", "server_wait_tick", "server_get_tile_entities", "mcmcp_endpoint_info", "game_list_mods",
+            "server_player_inventory", "server_tick_stats", "server_changes_since", "server_watch_blocks", "server_wait_tick", "server_get_tile_entities", "server_count_blocks", "mcmcp_endpoint_info", "game_list_mods",
             "game_health"}) {
             CLASSES.put(read, Principal.CLASS_READ);
         }
-        for (String write : new String[] {"server_set_block", "server_set_blocks", "server_undo",
+        for (String write : new String[] {"server_set_block", "server_set_blocks", "server_undo", "server_relight",
             "server_teleport_player"}) {
             CLASSES.put(write, Principal.CLASS_WRITE);
         }
