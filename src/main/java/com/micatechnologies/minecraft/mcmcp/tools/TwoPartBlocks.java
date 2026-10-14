@@ -97,6 +97,8 @@ final class TwoPartBlocks {
 
         private final Map<Long, IBlockState> given;
         private final int flags;
+        /** Second halves this writer changed while writing their first half. */
+        private final java.util.Set<Long> changedPartners = new java.util.HashSet<>();
         int partnersWritten;
         int oldPartnersCleared;
 
@@ -124,7 +126,9 @@ final class TwoPartBlocks {
             if (isSecondHalf(state)) {
                 IBlockState first = given.get(otherPos.toLong());
                 if (first != null && !isSecondHalf(first) && first.getBlock() == state.getBlock()) {
-                    return Outcome.DONE_BY_PARTNER;
+                    // Written with its first half, now or later in this write; unchanged if it already was.
+                    return changedPartners.contains(pos.toLong()) || world.getBlockState(pos) != state
+                        ? Outcome.DONE_BY_PARTNER : Outcome.UNCHANGED;
                 }
                 // A second half on its own: written quietly, and left to whoever places its first half.
                 return set(world, pos, state, recorder) ? Outcome.WRITTEN : unchangedOrFailed(world, pos, state);
@@ -148,8 +152,11 @@ final class TwoPartBlocks {
             if (world.getBlockState(pos) != state) {
                 return Outcome.FAILED;
             }
-            if (secondChanged && !given.containsKey(otherPos.toLong())) {
-                partnersWritten++;
+            if (secondChanged) {
+                changedPartners.add(otherPos.toLong());
+                if (!given.containsKey(otherPos.toLong())) {
+                    partnersWritten++;
+                }
             }
             if ((flags & 1) != 0) {
                 world.notifyNeighborsOfStateChange(pos, state.getBlock(), true);

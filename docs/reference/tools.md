@@ -562,6 +562,55 @@ short slices with ticks between them.
  {"block": "csm:signal_head", "count": 4, "samples": [[3300, 75, 1290]]}], "chunks": {...}}
 ```
 
+#### `server_apply_ops`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `ops` required · optional `dimension`, `dryRun`, `neighbourUpdates`, `since`, `stopOnRefusal`, `load`
+
+Replays a build generator's command lines on the server and writes only the cells whose final block
+differs from what is there. One call covers a build phase, with no read of the area first: the ops
+travel, not the cells.
+
+`ops` is up to 50,000 lines of:
+
+| Line | Notes |
+| --- | --- |
+| `fill x1 y1 z1 x2 y2 z2 block [data] [mode] [{nbt}]` | `mode` is `replace [filter [filterMeta]]`, `keep`, `destroy`, `hollow` or `outline`. |
+| `setblock x y z block [data] [replace\|keep\|destroy] [{nbt}]` | |
+| `blockdata x y z {nbt}` | Merged into the tile entity, as `/blockdata` does. |
+
+`data` is a metadata number or a state string (`facing=north,half=top`), resolved as `/setblock`
+resolves it. Coordinates must be absolute: a replay has no sender for `~` to be relative to. The
+leading `/` is optional.
+
+How it runs:
+
+1. **Replay.** The ops run in order into an overlay of what each cell will hold. Only `keep` and a
+   `replace` filter read the world, and they see what an earlier op in the list set. A block written
+   over drops any tag an earlier op left on that cell, as a real `/setblock` does.
+2. **Diff and write.** Each cell the ops reached is compared with the world and written only if it
+   differs, from the bottom up so that torches and doors land after their floors. A door's two
+   `setblock` lines are written as one door (see [two-part blocks](#server_set_blocks)).
+3. **Tags.** `{nbt}` and `blockdata` merges run last, in op order, once every block is in place.
+
+Each phase runs in short slices with ticks between them.
+
+Options:
+
+- `neighbourUpdates` defaults to **false**, unlike `server_set_blocks`. A generator's output is
+  already complete, and updates in the middle of a build break half-built things.
+- `dryRun` writes nothing. It returns `wouldWrite` and a `sample` of up to 20 changes as
+  `[x, y, z, from, to]`.
+- `since` is a [`server_changes_since`](#server_changes_since) token. Cells someone else changed
+  after it are left alone and counted as `conflicts`. If the record no longer reaches back that far,
+  the call is refused rather than risking someone's edit.
+- `stopOnRefusal` writes nothing if any line fails to parse or names an unknown block.
+
+The counts add up to `attempted` (the cells the ops reach): `written` (or `wouldWrite`),
+`unchanged`, `conflicts`, `unloaded`, `refused` and `byPartner`. Lines that could not be replayed
+are listed in `refusedOps` with their line number and reason; the rest still run. `nbt` counts the
+merges, and `bbox` is the box the ops cover. One call reaches at most 4 × `limits.maxWriteCells`
+cells, charged to the writes-per-minute budget, and leaves one undo point. Split a larger list.
+
 #### `server_relight`
 
 :material-cog: Idempotent · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `load`

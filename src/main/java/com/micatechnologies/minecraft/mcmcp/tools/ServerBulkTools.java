@@ -262,24 +262,9 @@ public final class ServerBulkTools {
             }
         }
 
-        // Writes per minute, per caller.
-        final String caller = ChunkLoadGovernor.callerOf(context.getPrincipal());
-        long now = System.currentTimeMillis();
-        int perMinute = McmcpConfig.getWriteCellsPerMinutePerCaller();
-        synchronized (WRITE_BUDGET) {
-            WRITE_BUDGET.newTick();
-            if (WRITE_BUDGET.allowance(caller, count, now, Integer.MAX_VALUE, Integer.MAX_VALUE, perMinute) < count) {
-                JsonObject busy = new JsonObject();
-                busy.addProperty("reason", "limit");
-                busy.addProperty("limit", "limits.writeCellsPerMinutePerCaller");
-                busy.addProperty("retryAfterMs", Math.max(1000L,
-                    WRITE_BUDGET.millisUntilRoom(caller, now, Integer.MAX_VALUE, perMinute)));
-                JsonObject structured = new JsonObject();
-                structured.add("busy", busy);
-                return ToolResult.error(count + " more cells would pass the " + perMinute
-                    + " a caller may write in a minute (limits.writeCellsPerMinutePerCaller).").withStructured(structured);
-            }
-            WRITE_BUDGET.record(caller, count, now);
+        ToolResult overBudget = chargeWrites(context, count);
+        if (overBudget != null) {
+            return overBudget;
         }
 
         final boolean abortOnConflict = "abort".equals(context.getString("onConflict", "skip"));
@@ -440,6 +425,35 @@ public final class ServerBulkTools {
             }
             return ToolResult.structured(json);
         });
+    }
+
+    /**
+     * Charges {@code count} cells to the caller's writes-per-minute budget.
+     *
+     * @return null if they fit, or the refusal to return, with busy.retryAfterMs
+     */
+    @Nullable
+    static ToolResult chargeWrites(ToolContext context, long count) {
+        final String caller = ChunkLoadGovernor.callerOf(context.getPrincipal());
+        long now = System.currentTimeMillis();
+        int perMinute = McmcpConfig.getWriteCellsPerMinutePerCaller();
+        int cells = (int) Math.min(Integer.MAX_VALUE, count);
+        synchronized (WRITE_BUDGET) {
+            WRITE_BUDGET.newTick();
+            if (WRITE_BUDGET.allowance(caller, cells, now, Integer.MAX_VALUE, Integer.MAX_VALUE, perMinute) < cells) {
+                JsonObject busy = new JsonObject();
+                busy.addProperty("reason", "limit");
+                busy.addProperty("limit", "limits.writeCellsPerMinutePerCaller");
+                busy.addProperty("retryAfterMs", Math.max(1000L,
+                    WRITE_BUDGET.millisUntilRoom(caller, now, Integer.MAX_VALUE, perMinute)));
+                JsonObject structured = new JsonObject();
+                structured.add("busy", busy);
+                return ToolResult.error(count + " more cells would pass the " + perMinute
+                    + " a caller may write in a minute (limits.writeCellsPerMinutePerCaller).").withStructured(structured);
+            }
+            WRITE_BUDGET.record(caller, cells, now);
+        }
+        return null;
     }
 
     @Nullable

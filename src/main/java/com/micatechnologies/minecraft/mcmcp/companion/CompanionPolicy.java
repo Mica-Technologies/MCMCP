@@ -58,7 +58,7 @@ public final class CompanionPolicy implements CallFilter {
             "game_health"}) {
             CLASSES.put(read, Principal.CLASS_READ);
         }
-        for (String write : new String[] {"server_set_block", "server_set_blocks", "server_undo", "server_relight",
+        for (String write : new String[] {"server_set_block", "server_set_blocks", "server_undo", "server_relight", "server_apply_ops",
             "server_teleport_player"}) {
             CLASSES.put(write, Principal.CLASS_WRITE);
         }

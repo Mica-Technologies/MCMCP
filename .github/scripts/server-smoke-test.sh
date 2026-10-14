@@ -556,6 +556,29 @@ case "$SWAPPED_BODY" in
   *) mcp_failure "the swap left the old upper half: ${SWAP_BODY} / ${SWAPPED_BODY}" ;;
 esac
 
+echo "==> Replaying fill and setblock lines on the server, writing only the difference"
+AX=$((SPAWN_X + 20)); AY=$((UNDO_Y + 10)); AZ=$((SPAWN_Z + 20))
+OPS="[\"fill ${AX} ${AY} ${AZ} $((AX + 2)) ${AY} $((AZ + 2)) minecraft:stone\",\"setblock $((AX + 1)) $((AY + 1)) $((AZ + 1)) minecraft:wooden_door 0\",\"setblock $((AX + 1)) $((AY + 2)) $((AZ + 1)) minecraft:wooden_door 8\",\"fill ${AX} ${AY} ${AZ} $((AX + 2)) ${AY} $((AZ + 2)) minecraft:planks 0 replace minecraft:stone\",\"setblock ${AX} $((AY + 1)) ${AZ} minecraft:glass\",\"say not a build op\"]"
+mcp_call 553 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:air\",\"x\":${AX},\"y\":${AY},\"z\":${AZ},\"toX\":$((AX + 2)),\"toY\":$((AY + 2)),\"toZ\":$((AZ + 2))}" > /dev/null
+DRY_BODY="$(mcp_call 550 server_apply_ops "{\"ops\":${OPS},\"dryRun\":true}")" \
+  || mcp_failure "server_apply_ops dry run failed: ${DRY_BODY}"
+case "$DRY_BODY" in
+  *'"attempted":12'*'"wouldWrite":'*'"refusedOps"'*'"sample"'*) ;;
+  *) mcp_failure "the dry run did not replay the ops: ${DRY_BODY}" ;;
+esac
+APPLY_BODY="$(mcp_call 551 server_apply_ops "{\"ops\":${OPS}}")" \
+  || mcp_failure "server_apply_ops failed: ${APPLY_BODY}"
+case "$APPLY_BODY" in
+  *'"attempted":12,"written":'*'"refused":0'*'"byPartner":1'*) ;;
+  *) mcp_failure "server_apply_ops did not write the replay, door as a pair: ${APPLY_BODY}" ;;
+esac
+AGAIN_BODY="$(mcp_call 552 server_apply_ops "{\"ops\":${OPS}}")" \
+  || mcp_failure "replaying again failed: ${AGAIN_BODY}"
+case "$AGAIN_BODY" in
+  *'"attempted":12,"written":0,"unchanged":12'*) echo "    replayed, door paired, and a second replay wrote nothing" ;;
+  *) mcp_failure "a second replay was not all unchanged: ${AGAIN_BODY}" ;;
+esac
+
 echo "==> Counting and relighting a box on the server"
 COUNT_BODY="$(mcp_call 548 server_count_blocks "{\"x\":${DX},\"y\":${DY},\"z\":${DZ},\"toY\":$((DY + 2)),\"include\":[\"minecraft:iron_door\",\"minecraft:stone\"]}")" \
   || mcp_failure "server_count_blocks failed: ${COUNT_BODY}"
