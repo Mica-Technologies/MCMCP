@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
+import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.math.BlockPos;
@@ -155,6 +156,8 @@ public final class ServerUndoTools {
         final BufferedImage beforeImage = drawImage(context, dimension, area);
         final UndoPoints.Recorder recorder = start(context, false);
         final Map<Integer, NBTTagCompound> tileEntities = UndoPoints.tileEntities(record);
+        final int[] failed = {0};
+        final JsonArray failedAt = new JsonArray();
         for (int from = 0; from < total; from += batch) {
             final int start = from;
             final int end = Math.min(total, from + batch);
@@ -164,7 +167,21 @@ public final class ServerUndoTools {
                 for (int i = start; i < end; i++) {
                     BlockPos pos = new BlockPos(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
                     UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
-                    boolean wrote = world.setBlockState(pos, states[before[i]], 3);
+                    boolean wrote;
+                    try {
+                        wrote = BlockWriteFaults.set(world, pos, states[before[i]], 3, recorder, was);
+                    }
+                    catch (RuntimeException e) {
+                        // A mod hook threw (#81): leave this cell, restore the rest.
+                        failed[0]++;
+                        if (failedAt.size() < 20) {
+                            JsonObject item = GameJson.blockPos(pos);
+                            item.addProperty("reason", BlockWriteFaults.reason(e, pos,
+                                ServerRegionTools.describe(Block.getStateId(states[before[i]]))));
+                            failedAt.add(item);
+                        }
+                        continue;
+                    }
                     NBTTagCompound tileEntity = tileEntities.get(i);
                     if (tileEntity != null
                         && TileEntityNbt.merge(world, pos, tileEntity) == TileEntityNbt.Outcome.APPLIED) {
@@ -186,6 +203,10 @@ public final class ServerUndoTools {
         json.addProperty("blocks", total);
         json.addProperty("changedSince", changed[0]);
         json.addProperty("forced", force && changed[0] > 0);
+        if (failed[0] > 0) {
+            json.addProperty("failed", failed[0]);
+            json.add("failedAt", failedAt);
+        }
         if (recorder != null) {
             String undoneBy = finish(context, recorder, "server_undo", dimension, area, beforeImage, json, id);
             if (undoneBy != null) {

@@ -186,13 +186,24 @@ final class TwoPartBlocks {
         }
 
         private boolean set(World world, BlockPos pos, IBlockState state, @Nullable Recorder recorder) {
-            if (world.getBlockState(pos) == state) {
+            IBlockState old = world.getBlockState(pos);
+            if (old == state) {
                 return false;
             }
             if (recorder != null) {
                 recorder.beforeChange(pos);
             }
-            boolean changed = world.setBlockState(pos, state, QUIET);
+            boolean changed;
+            try {
+                changed = SkyLight.setBlockState(world, pos, state, QUIET);
+            }
+            catch (RuntimeException e) {
+                // A hook threw (#81): what it changed still belongs in the undo point.
+                if (recorder != null && world.getBlockState(pos) != old) {
+                    recorder.afterChange(pos);
+                }
+                throw e;
+            }
             if (changed) {
                 if (recorder != null) {
                     recorder.afterChange(pos);

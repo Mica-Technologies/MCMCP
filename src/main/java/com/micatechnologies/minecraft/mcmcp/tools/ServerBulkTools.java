@@ -340,69 +340,78 @@ public final class ServerBulkTools {
                     WorldServer world = ServerWorldTools.requireWorld(dimension);
                     TwoPartBlocks.Recorder undo = TwoPartBlocks.undo(world, recorder);
                     for (int i = start; i < end; i++) {
-                        Entry entry = palette.get(values[i]);
-                        if (entry.state == null) {
-                            continue;
-                        }
-                        BlockPos pos = new BlockPos(xs[i], ys[i], zs[i]);
-                        if (!world.isBlockLoaded(pos)) {
-                            tally.unloaded++;
-                            continue;
-                        }
-                        IBlockState actual = world.getBlockState(pos);
-                        Expected expected = expectedFor(i, expectAll, expects, expectPalette);
-                        if (expected != null && !expected.matches(actual)) {
-                            tally.conflict(pos, expected, actual);
-                            continue;
-                        }
-                        if (skipTileEntities && world.getTileEntity(pos) != null) {
-                            tally.skippedTileEntity++;
-                            continue;
-                        }
-                        if (twoPartEntry[values[i]]) {
-                            TwoPartBlocks.Outcome paired = pairs.write(world, pos, entry.state, null, undo);
-                            if (paired == TwoPartBlocks.Outcome.WRITTEN) {
-                                tally.applied++;
+                        BlockPos at = new BlockPos(xs[i], ys[i], zs[i]);
+                        try {
+                            Entry entry = palette.get(values[i]);
+                            if (entry.state == null) {
+                                continue;
                             }
-                            else if (paired == TwoPartBlocks.Outcome.UNCHANGED) {
+                            BlockPos pos = at;
+                            if (!world.isBlockLoaded(pos)) {
+                                tally.unloaded++;
+                                continue;
+                            }
+                            IBlockState actual = world.getBlockState(pos);
+                            Expected expected = expectedFor(i, expectAll, expects, expectPalette);
+                            if (expected != null && !expected.matches(actual)) {
+                                tally.conflict(pos, expected, actual);
+                                continue;
+                            }
+                            if (skipTileEntities && world.getTileEntity(pos) != null) {
+                                tally.skippedTileEntity++;
+                                continue;
+                            }
+                            if (twoPartEntry[values[i]]) {
+                                TwoPartBlocks.Outcome paired = pairs.write(world, pos, entry.state, null, undo);
+                                if (paired == TwoPartBlocks.Outcome.WRITTEN) {
+                                    tally.applied++;
+                                }
+                                else if (paired == TwoPartBlocks.Outcome.UNCHANGED) {
+                                    tally.unchanged++;
+                                }
+                                else if (paired == TwoPartBlocks.Outcome.DONE_BY_PARTNER) {
+                                    tally.byPartner++;
+                                }
+                                else {
+                                    tally.failed(pos, entry.id);
+                                }
+                                if (paired != TwoPartBlocks.Outcome.FAILED && entry.nbt != null) {
+                                    TileEntityNbt.merge(world, pos, entry.nbt);
+                                }
+                                continue;
+                            }
+                            if (actual == entry.state && entry.nbt == null) {
                                 tally.unchanged++;
+                                continue;
                             }
-                            else if (paired == TwoPartBlocks.Outcome.DONE_BY_PARTNER) {
-                                tally.byPartner++;
+                            UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
+                            boolean changed = actual != entry.state
+                                && BlockWriteFaults.set(world, pos, entry.state, flags, recorder, was);
+                            if (actual != entry.state && !changed) {
+                                tally.failed(pos, entry.id);
+                                continue;
+                            }
+                            if (entry.nbt != null) {
+                                TileEntityNbt.Outcome merged = TileEntityNbt.merge(world, pos, entry.nbt);
+                                changed |= merged == TileEntityNbt.Outcome.APPLIED;
+                                if (merged == TileEntityNbt.Outcome.NO_TILE_ENTITY) {
+                                    tally.noTileEntity++;
+                                }
+                            }
+                            if (changed) {
+                                tally.applied++;
+                                if (recorder != null) {
+                                    recorder.record(pos, was, world.getBlockState(pos));
+                                }
                             }
                             else {
-                                tally.failed(pos, entry.id);
-                            }
-                            if (paired != TwoPartBlocks.Outcome.FAILED && entry.nbt != null) {
-                                TileEntityNbt.merge(world, pos, entry.nbt);
-                            }
-                            continue;
-                        }
-                        if (actual == entry.state && entry.nbt == null) {
-                            tally.unchanged++;
-                            continue;
-                        }
-                        UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
-                        boolean changed = actual != entry.state && world.setBlockState(pos, entry.state, flags);
-                        if (actual != entry.state && !changed) {
-                            tally.failed(pos, entry.id);
-                            continue;
-                        }
-                        if (entry.nbt != null) {
-                            TileEntityNbt.Outcome merged = TileEntityNbt.merge(world, pos, entry.nbt);
-                            changed |= merged == TileEntityNbt.Outcome.APPLIED;
-                            if (merged == TileEntityNbt.Outcome.NO_TILE_ENTITY) {
-                                tally.noTileEntity++;
+                                tally.unchanged++;
                             }
                         }
-                        if (changed) {
-                            tally.applied++;
-                            if (recorder != null) {
-                                recorder.record(pos, was, world.getBlockState(pos));
-                            }
-                        }
-                        else {
-                            tally.unchanged++;
+                        catch (RuntimeException e) {
+                            // A mod hook threw (#81): this cell is refused, the rest still go in.
+                            Entry failed = palette.get(values[i]);
+                            tally.failed(at, failed.id, BlockWriteFaults.reason(e, at, failed.id));
                         }
                     }
                     return null;
@@ -495,11 +504,18 @@ public final class ServerBulkTools {
         }
 
         void failed(BlockPos pos, String id) {
+            failed(pos, id, null);
+        }
+
+        void failed(BlockPos pos, String id, @Nullable String reason) {
             failedCount++;
             if (failedList.size() < MAX_LISTED) {
                 JsonObject item = new JsonObject();
                 item.add("pos", GameJson.blockPos(pos));
                 item.addProperty("block", id);
+                if (reason != null) {
+                    item.addProperty("reason", reason);
+                }
                 failedList.add(item);
             }
         }

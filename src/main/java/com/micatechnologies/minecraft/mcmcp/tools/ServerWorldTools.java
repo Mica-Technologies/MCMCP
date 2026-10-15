@@ -4,17 +4,24 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.regions.NbtProjection;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.Entity;
+import net.minecraft.init.Blocks;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
@@ -144,28 +151,64 @@ public final class ServerWorldTools {
     private static void registerFindBlocks() {
         McpRegistry.registerTool(McpTool.named("server_find_blocks")
             .title("Find blocks")
-            .description("Search a cubic area for blocks of a given type and return their positions, "
-                + "nearest first. Use this to locate ores, structures or a specific machine rather than "
-                + "reading positions one at a time. Unloaded chunks are skipped, never force-loaded.")
+            .description("Find blocks and return their positions. Two shapes: a cube round x, y, z with "
+                + "'radius', nearest first; or a box, x, y, z to toX, toY, toZ (a building, a district), "
+                + "listing every match with its metadata as [x, y, z, palette index], paged with 'cursor'. "
+                + "'block' is one id; 'blocks' takes several ids, namespaces ending in ':' or prefixes "
+                + "ending in '*', e.g. ['csm:toilet_*', 'csm:urinal_*']. Unloaded chunks are skipped; in box "
+                + "mode pass load: true to search them too.")
             .schema(JsonSchema.object()
                 .string("block", "Namespaced block id to search for, e.g. 'minecraft:diamond_ore'.")
-                .integer("x", "Centre X coordinate.")
-                .integer("y", "Centre Y coordinate.")
-                .integer("z", "Centre Z coordinate.")
-                .integer("radius", "Search radius in blocks. Cost grows with the cube of this value.",
+                .array("blocks", "Several blocks to search for at once: ids, namespaces ending in ':', or "
+                    + "prefixes ending in '*'.", Json.obj("type", "string"))
+                .integer("x", "Centre X, or in box mode one corner's X.")
+                .integer("y", "Centre Y, or in box mode one corner's Y (default 0).")
+                .integer("z", "Centre Z, or in box mode one corner's Z.")
+                .integer("toX", "Box mode: the opposite corner's X.")
+                .integer("toY", "Box mode: the opposite corner's Y. Defaults to 255, or y if y is given.")
+                .integer("toZ", "Box mode: the opposite corner's Z.")
+                .integer("radius", "Cube mode: search radius in blocks. Cost grows with the cube of this value.",
                     1, 128)
                 .integer("dimension", "Dimension id. Defaults to 0.")
-                .integer("limit", "Maximum number of positions to return.", 1, 500)
-                .required("block", "x", "y", "z")
+                .integer("limit", "Positions to return: cube mode up to 500 (default 64); box mode a page, up to "
+                    + ServerAreaTools.MAX_FIND_LIMIT + " (default 1000).", 1, ServerAreaTools.MAX_FIND_LIMIT)
+                .string("cursor", "Box mode: the 'cursor' a previous page returned, to continue from it.")
+                .bool("load", "Box mode: load the box's unloaded chunks for this call, and release them afterwards.")
+                .required("x", "z")
                 .build())
             .serverOnly()
             .readOnly()
             .handler(context -> {
-                final String blockId = context.requireString("block");
-                final Block target = BlockIds.resolve(blockId);
-                if (target == null) {
-                    return ToolResult.error(BlockIds.describeUnknown(blockId, "search for"));
+                List<String> patterns = new ArrayList<>(Json.getStringList(context.getArguments(), "blocks"));
+                String single = context.getString("block", null);
+                if (single != null && !single.trim().isEmpty()) {
+                    patterns.add(single.trim());
                 }
+                if (patterns.isEmpty()) {
+                    return ToolResult.error("Name what to find with 'block', or several with 'blocks'.");
+                }
+                // An exact id that names nothing is a typo; a namespace or prefix may simply match nothing.
+                // Exact ids are matched by their full registry name, so 'stone' finds minecraft:stone.
+                for (int i = 0; i < patterns.size(); i++) {
+                    String pattern = patterns.get(i).trim();
+                    if (pattern.endsWith(":") || pattern.endsWith("*")) {
+                        continue;
+                    }
+                    Block block = BlockIds.resolve(pattern);
+                    if (block == null || block.getRegistryName() == null) {
+                        return ToolResult.error(BlockIds.describeUnknown(pattern, "search for"));
+                    }
+                    patterns.set(i, block.getRegistryName().toString());
+                }
+                if (context.has("toX") || context.has("toY") || context.has("toZ")) {
+                    return ServerAreaTools.findInBox(context, patterns);
+                }
+                if (!context.has("y")) {
+                    return ToolResult.error("Give y with x and z for a cube round a point, or toX/toY/toZ for a box.");
+                }
+                final List<String> targets = patterns;
+                final String blockId = String.join(", ", patterns);
+                final Map<Integer, Boolean> matching = new HashMap<>();
 
                 final int centreX = context.requireInt("x");
                 final int centreY = context.requireInt("y");
@@ -203,8 +246,22 @@ public final class ServerWorldTools {
                                             continue;
                                         }
                                         scanned++;
-                                        if (world.getBlockState(pos).getBlock() == target) {
+                                        IBlockState state = world.getBlockState(pos);
+                                        Boolean match = matching.get(Block.getStateId(state));
+                                        if (match == null) {
+                                            ResourceLocation name = state.getBlock().getRegistryName();
+                                            match = state.getBlock() != Blocks.AIR && NbtProjection.matches(
+                                                name == null ? "unknown" : name.toString(), targets);
+                                            matching.put(Block.getStateId(state), match);
+                                        }
+                                        if (match) {
                                             JsonObject hit = GameJson.blockPos(pos);
+                                            if (targets.size() > 1 || targets.get(0).endsWith(":")
+                                                || targets.get(0).endsWith("*")) {
+                                                ResourceLocation name = state.getBlock().getRegistryName();
+                                                hit.addProperty("block", name == null ? "unknown" : name.toString());
+                                            }
+                                            hit.addProperty("metadata", state.getBlock().getMetaFromState(state));
                                             hit.addProperty("distance",
                                                 Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz) * 100.0D)
                                                     / 100.0D);
@@ -433,7 +490,7 @@ public final class ServerWorldTools {
                         IBlockState state = target.getStateFromMeta(metadata);
                         // Flag 3 = update neighbours + send to clients. Anything less leaves
                         // connected players seeing the old block until they reload the chunk.
-                        boolean changed = world.setBlockState(pos, state, 3);
+                        boolean changed = SkyLight.setBlockState(world, pos, state, 3);
                         boolean wrote = changed;
 
                         JsonObject json = new JsonObject();

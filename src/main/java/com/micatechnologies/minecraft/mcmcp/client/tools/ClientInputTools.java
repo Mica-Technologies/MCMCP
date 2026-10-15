@@ -6,11 +6,13 @@ import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputLock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
 import com.micatechnologies.minecraft.mcmcp.client.ClientKeepAwake;
+import com.micatechnologies.minecraft.mcmcp.client.RawKeyboard;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import java.util.ArrayList;
@@ -33,6 +35,7 @@ import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.event.ForgeEventFactory;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
+import org.lwjgl.input.Keyboard;
 
 /**
  * Driving the player: chat and commands, camera, movement, interaction and hotbar.
@@ -178,6 +181,97 @@ public final class ClientInputTools {
                 : ClientInputScheduler.hold(target, lead, ticks));
         }
         return CompletableFuture.allOf(holds.toArray(new CompletableFuture[0]));
+    }
+
+    private static final int MAX_RAW_KEYS = 8;
+
+    /**
+     * client_key with 'raw': holds keyboard keys in LWJGL's own state (#83). Named bindings resolve to
+     * the key they are bound to now; 'rawKeys' are LWJGL key names. Every key goes down together.
+     */
+    private static ToolResult holdRaw(ToolContext context, Set<String> bindingNames, List<String> rawNames)
+        throws Exception {
+        if (bindingNames.isEmpty() && rawNames.isEmpty()) {
+            return ToolResult.error("Name the keys to hold raw with 'rawKeys' (LWJGL names such as W or SPACE), "
+                + "or with 'key'/'keys'.");
+        }
+        if (bindingNames.size() + rawNames.size() > MAX_RAW_KEYS) {
+            return ToolResult.error("At most " + MAX_RAW_KEYS + " keys can be held raw at once.");
+        }
+        for (String name : bindingNames) {
+            if (!Arrays.asList(KEY_NAMES).contains(name)) {
+                return ToolResult.error("Unknown key '" + name + "'. Use one of: " + String.join(", ", KEY_NAMES)
+                    + ", or name an LWJGL key in 'rawKeys'.");
+            }
+        }
+        final Map<String, Integer> codes = new LinkedHashMap<>();
+        for (String name : rawNames) {
+            String upper = name.trim().toUpperCase(java.util.Locale.ROOT);
+            if (upper.startsWith("KEY_")) {
+                upper = upper.substring(4);
+            }
+            int code = Keyboard.getKeyIndex(upper);
+            if (code == Keyboard.KEY_NONE) {
+                return ToolResult.error("'" + name + "' is not an LWJGL key name. Examples: W, A, S, D, SPACE, "
+                    + "LSHIFT, LCONTROL, RETURN, UP, NUMPAD8, F, 1.");
+            }
+            codes.put(upper, code);
+        }
+        final int ticks = context.getBoundedInt("ticks", 1, 1, McmcpConfig.getMaxInputTicks());
+        final List<String> bindingList = new ArrayList<>(bindingNames);
+        // Resolved first and refused as a plain tool error, so nothing goes down for half a combination.
+        String refusal = context.onGameThread(new Callable<String>() {
+            @Override
+            public String call() {
+                ClientStateTools.requireInWorld();
+                if (!RawKeyboard.available()) {
+                    return "LWJGL's key state cannot be reached in this game, so raw holds are unavailable; "
+                        + "the game log says why.";
+                }
+                for (String name : bindingList) {
+                    int code = binding(name).getKeyCode();
+                    if (code <= 0 || code >= 256) {
+                        return "'" + name + "' is bound to " + (code < 0 ? "a mouse button" : "no key")
+                            + ", which cannot be held raw. Name the keyboard key in 'rawKeys' instead.";
+                    }
+                    codes.put(name + "=" + Keyboard.getKeyName(code), code);
+                }
+                return null;
+            }
+        });
+        if (refusal != null) {
+            return ToolResult.error(refusal);
+        }
+        CompletableFuture<Void> hold = context.onGameThread(new Callable<CompletableFuture<Void>>() {
+            @Override
+            public CompletableFuture<Void> call() {
+                List<CompletableFuture<Void>> holds = new ArrayList<>(codes.size());
+                for (int code : new LinkedHashSet<>(codes.values())) {
+                    holds.add(ClientInputScheduler.holdRaw(code, 0, ticks));
+                }
+                return CompletableFuture.allOf(holds.toArray(new CompletableFuture[0]));
+            }
+        });
+        awaitHold(hold, ticks);
+        List<String> unseen = context.onGameThread(new Callable<List<String>>() {
+            @Override
+            public List<String> call() {
+                List<String> missing = new ArrayList<>();
+                for (Map.Entry<String, Integer> entry : codes.entrySet()) {
+                    if (!RawKeyboard.seen(entry.getValue())) {
+                        missing.add(entry.getKey());
+                    }
+                }
+                return missing;
+            }
+        });
+        String held = "Held raw " + String.join(" + ", codes.keySet()) + " for " + ticks + " tick(s), at the "
+            + "LWJGL level; no keybinding was pressed. ";
+        if (unseen.isEmpty()) {
+            return ToolResult.text(held + "Keyboard.isKeyDown reported every key down, as a mod polling it sees.");
+        }
+        return ToolResult.text(held + "Keyboard.isKeyDown never reported " + String.join(", ", unseen)
+            + " down; a one-tick hold can end before the first check, so hold it longer.");
     }
 
     /**
@@ -587,13 +681,19 @@ public final class ClientInputTools {
                 + "Pass 'keys' to press a combination, such as sneak + use or sprint + jump + forward. "
                 + "Movement, jump, sneak and sprint go down one tick before any action key, so the "
                 + "action happens with them already in effect.\n\n"
-                + "Only the named bindings listed in the schema can be driven — arbitrary key codes "
-                + "are deliberately not accepted, since they could hit any key another mod has bound.")
+                + "Only the named bindings listed in the schema can be driven, unless 'raw' is set.\n\n"
+                + "'raw' holds keyboard keys where LWJGL reports them (Keyboard.isKeyDown) and presses no "
+                + "keybinding: for mods that read the keyboard themselves, such as Immersive Vehicles' "
+                + "driving controls, which never see a keybinding hold. Named keys map to the key they are "
+                + "bound to; 'rawKeys' names any other key.")
             .schema(JsonSchema.object()
                 .enumeration("key", "Which keybinding to press.", KEY_NAMES)
                 .array("keys", "Several keybindings to hold together, instead of 'key'.",
                     JsonSchema.enumItems(KEY_NAMES))
                 .integer("ticks", "How long to hold them, in ticks (20 per second).", 1, 1200)
+                .bool("raw", "Hold the keys at the LWJGL level instead of pressing keybindings.")
+                .array("rawKeys", "LWJGL key names to hold raw, such as W, SPACE, LSHIFT, NUMPAD8 or F; "
+                    + "implies raw. At most " + MAX_RAW_KEYS + ".", Json.obj("type", "string"))
                 .build())
             .clientOnly()
             .handler(context -> {
@@ -610,6 +710,10 @@ public final class ClientInputTools {
                     requested.add(single);
                 }
                 requested.addAll(Json.getStringList(context.getArguments(), "keys"));
+                List<String> rawNames = Json.getStringList(context.getArguments(), "rawKeys");
+                if (context.getBoolean("raw", false) || !rawNames.isEmpty()) {
+                    return holdRaw(context, requested, rawNames);
+                }
                 if (requested.isEmpty()) {
                     return ToolResult.error("Name a keybinding with 'key', or several with 'keys'.");
                 }

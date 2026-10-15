@@ -458,11 +458,18 @@ public final class ServerBuildTools {
                                         + " is not a valid state: " + e.getMessage());
                                     continue;
                                 }
-                                if (state != null && twoPart.containsKey(placement.pos.toLong())
-                                    && placePair(world, placement, state, replaceOnly, pairs, undo, tally)) {
-                                    continue;
+                                try {
+                                    if (state != null && twoPart.containsKey(placement.pos.toLong())
+                                        && placePair(world, placement, state, replaceOnly, pairs, undo, tally)) {
+                                        continue;
+                                    }
+                                    place(world, placement.pos, state, placement.nbt, replaceOnly, tally, recorder);
                                 }
-                                place(world, placement.pos, state, placement.nbt, replaceOnly, tally, recorder);
+                                catch (RuntimeException e) {
+                                    // A mod hook threw (#81): this cell is refused, the rest still go in.
+                                    tally.refused(placement.pos, placement.blockId,
+                                        BlockWriteFaults.reason(e, placement.pos, placement.blockId));
+                                }
                             }
                         }
                     }, tally);
@@ -532,7 +539,13 @@ public final class ServerBuildTools {
                             int x = minX + i % sizeX;
                             int z = minZ + (i / sizeX) % sizeZ;
                             int y = minY + i / (sizeX * sizeZ);
-                            place(world, new BlockPos(x, y, z), state, fillNbt, replaceOnly, tally, recorder);
+                            BlockPos pos = new BlockPos(x, y, z);
+                            try {
+                                place(world, pos, state, fillNbt, replaceOnly, tally, recorder);
+                            }
+                            catch (RuntimeException e) {
+                                tally.refused(pos, blockId, BlockWriteFaults.reason(e, pos, blockId));
+                            }
                         }
                     }
                 }, tally);
@@ -656,7 +669,7 @@ public final class ServerBuildTools {
         }
         UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
         IBlockState actual = world.getBlockState(pos);
-        boolean changed = state != null && actual != state && world.setBlockState(pos, state, 3);
+        boolean changed = state != null && actual != state && BlockWriteFaults.set(world, pos, state, 3, recorder, was);
         if (state != null && actual != state && !changed) {
             ResourceLocation name = state.getBlock().getRegistryName();
             tally.refused(pos, name == null ? "unknown" : name.toString(), "the world did not accept the state");

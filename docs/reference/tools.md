@@ -612,6 +612,12 @@ merges, and `bbox` is the box the ops cover. One call reaches at most 4 × `limi
 cells, charged to the writes-per-minute budget, and leaves one undo point. Submit a larger list as a
 [job](#server_job_submit).
 
+A cell whose block's own code throws while it is written (an old block's `breakBlock`, a new one's
+`onBlockAdded`, a neighbour's update) is refused, and the write goes on. Its reason in `refusedAt`
+names the exception and the class and method that threw, and the server log has the full stack
+trace once per fault. Whatever the hook changed before it threw stays changed, and is in the undo
+point. The same holds for `server_set_blocks` and `server_undo`.
+
 #### `server_job_submit`
 
 :material-alert: Destructive · `kind`, `args` required · optional `label`
@@ -671,19 +677,40 @@ these stay until something else relights them. Changes no blocks, so it leaves n
 
 At most 4,194,304 cells a call. Relighting costs far more per cell than reading, so limit `y`
 to the height that was built. It runs in short slices with ticks between them. The reply gives
-`cells` checked, `lightChanged` (cells whose light level changed), `chunksResent` and `millis`.
+`cells` checked, `lightChanged` (cells whose light level changed), `chunksResent`,
+`openSkyRaised` and `millis`.
+
+Before it relights a chunk, it sets every cell of the box's columns that sees the sky to full sky
+light, from the ground to the top of the world, whatever the box's `y` range. It also corrects any
+column height that disagrees with the blocks (`heightsCorrected`). Vanilla's relight trusts both.
+Vanilla creates a new 16-high section with sky light 0 when the first block written into it lies
+under something. A cell left reading 0 then spreads darkness, and the chunk resend carries it to
+every player as sharp, chunk-aligned black patches. Every write tool now repairs the sections it
+creates, and re-running the relight over an affected box repairs ones written before.
+
+Vanilla does nothing at a cell unless everything within 16 blocks of it is loaded, so with `load`
+the relight also loads one chunk round the box. Cells it still could not relight are counted in
+`skippedUnloadedNeighbours`.
 
 #### `server_find_blocks`
 
-:material-eye: Read-only · `block`, `x`, `y`, `z` required
+:material-eye: Read-only · `x`, `z` required · `block` or `blocks` · optional `y`, `toX`, `toY`, `toZ`, `radius`, `limit`, `cursor`, `load`, `dimension`
 
-Searches expanding shells outward from the centre, so results are nearest-first and hitting the limit
-early returns the closest matches rather than an arbitrary corner of the box.
+Two shapes:
 
-Skips unloaded chunks; never force-loads. Radius bounded by `limits.maxScanRadius`.
+- **Cube**: `x`, `y`, `z` and `radius`. Searches expanding shells outward from the centre, so
+  results are nearest-first and hitting `limit` (at most 500) returns the closest matches. Radius
+  bounded by `limits.maxScanRadius`. Skips unloaded chunks.
+- **Box**: `x`, `y`, `z` to `toX`, `toY`, `toZ`, as for [`server_count_blocks`](#server_count_blocks),
+  up to 4,096 chunks. Lists every match as `[x, y, z, palette index]`. The `palette` gives each
+  entry's `block`, `metadata` and `count` on the page. A page holds about `limit` matches (default
+  1,000, at most 5,000). While `complete` is false, pass the returned `cursor`, with the same box,
+  for the next page. `load: true` searches unloaded chunks too.
 
-An unregistered `block` is an error, never an empty result and never a search for air — see
-[Block ids](#block-ids).
+`blocks` takes several ids, namespaces ending in `:`, or prefixes ending in `*`, e.g.
+`["csm:toilet_*", "csm:urinal_*", "csm:toilet_partition_*"]`. An unregistered exact id is an error,
+never an empty result and never a search for air — see [Block ids](#block-ids). A namespace or
+prefix may match nothing.
 
 #### `server_nearby_entities`
 
@@ -1602,7 +1629,7 @@ Returns the **distance actually travelled**, which is zero if something was in t
 
 #### `client_key`
 
-Requires `permissions.allowPlayerControl` · `key` or `keys`, optional `ticks`
+Requires `permissions.allowPlayerControl` · `key` or `keys`, optional `ticks`, `raw`, `rawKeys`
 
 The general-purpose input tool. Named bindings only: `forward`, `back`, `left`, `right`, `jump`,
 `sneak`, `sprint`, `attack`, `use`, `drop`, `inventory`, `pickBlock`, `swapHands`.
@@ -1613,8 +1640,17 @@ releases. Minecraft handles clicks before it updates the player, so pressed in t
 use would right-click as a player who is not sneaking yet and open the chest it was meant to place
 against.
 
-Arbitrary key codes are deliberately not accepted — they are meaningless to a model, and could hit
+Arbitrary key codes are not accepted for a normal hold. They are meaningless to a model, and could hit
 any key another mod has bound.
+
+**Raw holds.** Some mods read the keyboard themselves with LWJGL's `Keyboard.isKeyDown`, and never
+see a keybinding hold. Immersive Vehicles reads every driving control that way. `raw: true` holds
+the keys in LWJGL's own key state instead, and presses no keybinding. A named key holds the
+keyboard key it is bound to now. `rawKeys` names any keyboard key by its LWJGL name: `W`, `SPACE`,
+`LSHIFT`, `NUMPAD8`, `F`. Up to 8 keys go down together. LWJGL refreshes that state from the
+keyboard every frame, so the hold writes it back at the start of every client tick and render tick,
+ahead of other mods' handlers. Raw holds release like any other: when `ticks` run out, on leaving
+the world, and on an emergency stop. They also work as `client_key` steps in `client_sequence`.
 
 #### `client_interact`
 

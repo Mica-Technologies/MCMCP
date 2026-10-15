@@ -8,6 +8,7 @@ import java.util.concurrent.CompletableFuture;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.fml.common.eventhandler.EventPriority;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import net.minecraftforge.fml.relauncher.Side;
@@ -81,8 +82,22 @@ public final class ClientInputScheduler {
      * @param delayTicks ticks to wait before pressing; 0 presses immediately
      */
     public static CompletableFuture<Void> hold(KeyBinding binding, int delayTicks, int ticks) {
-        PendingRelease pending = new PendingRelease(binding, Math.max(0, delayTicks), Math.max(1, ticks),
-            new CompletableFuture<Void>());
+        return schedule(new PendingRelease(binding, -1, Math.max(0, delayTicks), Math.max(1, ticks),
+            new CompletableFuture<Void>()));
+    }
+
+    /**
+     * Holds a keyboard key down where LWJGL reports it ({@link RawKeyboard}), for mods that poll
+     * {@code Keyboard.isKeyDown} and never see a keybinding. No keybinding is pressed.
+     *
+     * @param keyCode an LWJGL key code, 1 to 255
+     */
+    public static CompletableFuture<Void> holdRaw(int keyCode, int delayTicks, int ticks) {
+        return schedule(new PendingRelease(null, keyCode, Math.max(0, delayTicks), Math.max(1, ticks),
+            new CompletableFuture<Void>()));
+    }
+
+    private static CompletableFuture<Void> schedule(PendingRelease pending) {
         if (pending.delayTicks == 0) {
             pending.press();
         }
@@ -109,7 +124,7 @@ public final class ClientInputScheduler {
                 // A press still waiting on its delay never went down, and releasing it here would
                 // let go of a key the human may be holding.
                 if (pending.pressed) {
-                    KeyBinding.setKeyBindState(pending.binding.getKeyCode(), false);
+                    pending.release();
                 }
             }
             catch (Exception e) {
@@ -130,6 +145,24 @@ public final class ClientInputScheduler {
      * the event bus twice by an accidental second {@code register()}.
      */
     public static class Events {
+
+        /**
+         * Raw holds go back into LWJGL's buffer after each poll, before any other handler reads it;
+         * the client tick for code that polls per tick, the render tick for code that polls per frame.
+         */
+        @SubscribeEvent(priority = EventPriority.HIGHEST)
+        public void onClientTickStart(TickEvent.ClientTickEvent event) {
+            if (event.phase == TickEvent.Phase.START) {
+                RawKeyboard.reassert();
+            }
+        }
+
+        @SubscribeEvent(priority = EventPriority.HIGHEST)
+        public void onRenderTickStart(TickEvent.RenderTickEvent event) {
+            if (event.phase == TickEvent.Phase.START) {
+                RawKeyboard.reassert();
+            }
+        }
 
         @SubscribeEvent
         public void onClientTick(TickEvent.ClientTickEvent event) {
@@ -162,7 +195,7 @@ public final class ClientInputScheduler {
                     if (--pending.remainingTicks > 0) {
                         continue;
                     }
-                    KeyBinding.setKeyBindState(pending.binding.getKeyCode(), false);
+                    pending.release();
                     iterator.remove();
                     if (completed == null) {
                         completed = new ArrayList<>(2);
@@ -184,29 +217,45 @@ public final class ClientInputScheduler {
 
     private static final class PendingRelease {
 
+        /** The binding to press, or null for a raw hold of {@link #rawKeyCode}. */
         final KeyBinding binding;
+        final int rawKeyCode;
         final CompletableFuture<Void> future;
 
         int delayTicks;
         int remainingTicks;
         boolean pressed;
 
-        PendingRelease(KeyBinding binding, int delayTicks, int remainingTicks,
+        PendingRelease(KeyBinding binding, int rawKeyCode, int delayTicks, int remainingTicks,
                        CompletableFuture<Void> future) {
             this.binding = binding;
+            this.rawKeyCode = rawKeyCode;
             this.delayTicks = delayTicks;
             this.remainingTicks = remainingTicks;
             this.future = future;
         }
 
         void press() {
+            pressed = true;
+            if (binding == null) {
+                RawKeyboard.down(rawKeyCode);
+                return;
+            }
             int keyCode = binding.getKeyCode();
             KeyBinding.setKeyBindState(keyCode, true);
             // onTick increments the binding's press counter, which is what isPressed() consumes.
             // Without it, click-style bindings (attack, use) register as "held" but never as
             // "clicked", so Minecraft.runTick never calls clickMouse and nothing happens.
             KeyBinding.onTick(keyCode);
-            pressed = true;
+        }
+
+        void release() {
+            if (binding == null) {
+                RawKeyboard.up(rawKeyCode);
+            }
+            else {
+                KeyBinding.setKeyBindState(binding.getKeyCode(), false);
+            }
         }
     }
 }

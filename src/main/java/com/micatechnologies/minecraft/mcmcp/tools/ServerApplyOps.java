@@ -466,9 +466,16 @@ public final class ServerApplyOps {
                 TwoPartBlocks.Recorder undo = TwoPartBlocks.undo(world, recorder);
                 long started = System.nanoTime();
                 while (cursor[0] < sections.size() && (System.nanoTime() - started < SLICE_NANOS)) {
-                    overlay.visit(sections.get(cursor[0]++), (x, y, z, value) ->
-                        writeCell(world, new BlockPos(x, y, z), Block.getStateById(value - 1), protectedCells, flags,
-                            dryRun, pairs, undo, tally, recorder));
+                    overlay.visit(sections.get(cursor[0]++), (x, y, z, value) -> {
+                        BlockPos pos = new BlockPos(x, y, z);
+                        IBlockState target = Block.getStateById(value - 1);
+                        try {
+                            writeCell(world, pos, target, protectedCells, flags, dryRun, pairs, undo, tally, recorder);
+                        }
+                        catch (RuntimeException e) {
+                            tally.refuse(pos, BlockWriteFaults.reason(e, pos, ServerRegionTools.describe(value - 1)));
+                        }
+                    });
                 }
                 return null;
             });
@@ -530,7 +537,7 @@ public final class ServerApplyOps {
             return;
         }
         UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
-        if (world.setBlockState(pos, target, flags)) {
+        if (BlockWriteFaults.set(world, pos, target, flags, recorder, was)) {
             tally.written++;
             if (recorder != null) {
                 recorder.record(pos, was, world.getBlockState(pos));
