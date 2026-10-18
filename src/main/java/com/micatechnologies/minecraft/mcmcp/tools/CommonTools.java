@@ -45,6 +45,7 @@ public final class CommonTools {
         ServerBulkTools.register();
         ServerTileEntityTools.register();
         ServerEntityTools.register();
+        ServerChiselTools.register();
         ServerInteractTools.register();
         ServerItemUseBatch.register();
         ServerAreaTools.register();

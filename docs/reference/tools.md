@@ -737,6 +737,22 @@ Entities within a radius (default 16, up to 128), with distances. Filter by name
 searches are not bound by `maxScanRadius`; a radius past 128 is cut to it and the reply carries
 `radiusRequested`.
 
+#### `server_chisel_block`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` and Chisels & Bits · `x`, `y`, `z` or `blocks` · optional `palette`, `start`, `layers`, `boxes`, `faces`, `dimension`, `dry_run`, `load`
+
+Sets the bits of Chisels & Bits blocks on the server: no client, no command block, nobody moved. It
+takes the same `palette`, `start`, `layers`, `boxes` and `faces` as
+[`client_chisel_block`](#client_chisel_block), builds the same tag with the same code, writes the
+block and its tile-entity data directly, and reads each block back: `verified: true` means every bit
+is what was asked for.
+
+`blocks: [{x, y, z, start, layers, boxes, faces}]` chisels up to 256 at once, each with its own grids
+and the call's `palette`, under one undo point. The reply counts `written` and `verified` and lists
+the blocks that had a `problem`; signage over a district is one call per street, not one client trip
+per sign. Neighbours are told of each block only once its bits are in. MCMCP names no C&B class; in a
+game without C&B the tool says so.
+
 #### `server_remove_entities`
 
 :material-alert: Destructive · requires `permissions.allowWorldEdits` · `types`, `x`, `y`, `z` required · optional `toX`, `toY`, `toZ`, `dimension`, `includeNamed`, `dryRun`, `load`
@@ -1637,7 +1653,8 @@ optional `palette`, `start`, `layers`, `boxes`, `faces`, `dry_run`, `command_blo
 `timeout_ms`
 
 Sets the bits of a Chisels & Bits block (lettering, logos and relief on a facade), on a server you
-reach only as a player. It builds the 16×16×16 voxel blob and the tile-entity tags around it, then
+reach only as a player. With the server's own endpoint or its companion, use
+[`server_chisel_block`](#server_chisel_block), which needs no client near the block. It builds the 16×16×16 voxel blob and the tile-entity tags around it, then
 places or updates the block through [`client_command_block_run`](#client_command_block_run), with the
 same requirements. Finally it reads the block back from the server and decodes it: `verified: true`
 means every bit is what was asked for.
