@@ -965,6 +965,12 @@ place.
   list) and `oldHalvesCleared`. Any type with a `half` property of `lower`/`upper` counts as a
   two-part block, which includes mods' doors built on `BlockDoor`.
 
+**Neighbour updates.** Every mode notifies the neighbours of each changed cell, as `/setblock`
+does, unless `neighbourUpdates: false`. They are told of the block that was there, as a player's
+placement tells them, and of the block now there, as `/setblock` tells them, because some mods'
+machines react only to one of the two: a redstone block written beside an elevator controller
+powers it.
+
 **Undo.** Each call records what every block it changed was before, and names the record in
 `undoPoint`; `server_undo` puts it back. See below.
 

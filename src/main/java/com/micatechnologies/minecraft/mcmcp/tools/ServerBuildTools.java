@@ -313,9 +313,10 @@ public final class ServerBuildTools {
                     + "nothing if any cell conflicts.", "skip", "abort")
                 .bool("skipIfTileEntity", "palette mode: leave cells that hold a tile entity (signal heads, "
                     + "controllers, chests). Default false.")
-                .bool("neighbourUpdates", "palette mode: notify neighbouring blocks, as a normal placement does. "
-                    + "Default true. false still updates clients and lighting but tells no neighbour, for "
-                    + "removing networks (wires, tracks) without each removal recalculating them.")
+                .bool("neighbourUpdates", "Notify neighbouring blocks, as /setblock and a normal placement "
+                    + "do, so a redstone block written beside a machine powers it. Default true, in every mode. "
+                    + "false still updates clients and lighting but tells no neighbour, for removing networks "
+                    + "(wires, tracks) without each removal recalculating them.")
                 .string("block", "Namespaced block id for fill mode, e.g. 'minecraft:stone'.")
                 .integer("metadata", "Block metadata for fill mode. Defaults to 0.", 0, 15)
                 .property("nbt", nbtSchema("Fill mode: tile-entity data merged into every block "
@@ -360,6 +361,7 @@ public final class ServerBuildTools {
 
                 final int dimension = context.getInt("dimension", 0);
                 final String replaceOnlyId = context.getString("replaceOnly", null);
+                final int flags = context.getBoolean("neighbourUpdates", true) ? 3 : 2 | 16;
                 final int batchLimit = McmcpConfig.getMaxBlockVolume();
                 final long callLimit = (long) batchLimit * MAX_BATCHES;
 
@@ -441,7 +443,7 @@ public final class ServerBuildTools {
                             twoPart.put(placement.pos.toLong(), state);
                         }
                     }
-                    final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, 3);
+                    final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
                     runInBatches(context, placements.size(), batchLimit, new Batch() {
                         @Override
                         public void run(int from, int to) {
@@ -463,7 +465,7 @@ public final class ServerBuildTools {
                                         && placePair(world, placement, state, replaceOnly, pairs, undo, tally)) {
                                         continue;
                                     }
-                                    place(world, placement.pos, state, placement.nbt, replaceOnly, tally, recorder);
+                                    place(world, placement.pos, state, placement.nbt, replaceOnly, flags, tally, recorder);
                                 }
                                 catch (RuntimeException e) {
                                     // A mod hook threw (#81): this cell is refused, the rest still go in.
@@ -541,7 +543,7 @@ public final class ServerBuildTools {
                             int y = minY + i / (sizeX * sizeZ);
                             BlockPos pos = new BlockPos(x, y, z);
                             try {
-                                place(world, pos, state, fillNbt, replaceOnly, tally, recorder);
+                                place(world, pos, state, fillNbt, replaceOnly, flags, tally, recorder);
                             }
                             catch (RuntimeException e) {
                                 tally.refused(pos, blockId, BlockWriteFaults.reason(e, pos, blockId));
@@ -655,7 +657,7 @@ public final class ServerBuildTools {
     }
 
     private static void place(WorldServer world, BlockPos pos, @Nullable IBlockState state,
-                              @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, Tally tally,
+                              @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, int flags, Tally tally,
                               @Nullable UndoPoints.Recorder recorder) {
         if (!world.isBlockLoaded(pos)) {
             // Writing would load the chunk, or generate it if it never was; neither is this call's to
@@ -669,7 +671,7 @@ public final class ServerBuildTools {
         }
         UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
         IBlockState actual = world.getBlockState(pos);
-        boolean changed = state != null && actual != state && BlockWriteFaults.set(world, pos, state, 3, recorder, was);
+        boolean changed = state != null && actual != state && BlockWriteFaults.set(world, pos, state, flags, recorder, was);
         if (state != null && actual != state && !changed) {
             ResourceLocation name = state.getBlock().getRegistryName();
             tally.refused(pos, name == null ? "unknown" : name.toString(), "the world did not accept the state");

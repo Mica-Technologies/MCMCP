@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
@@ -60,11 +61,22 @@ final class BlockWriteFaults {
     /**
      * {@code world.setBlockState} through {@link SkyLight#setBlockState}, except that a cell the
      * write changed before a hook threw still goes into the undo point, so undoing the call restores it. The exception is rethrown.
+     *
+     * <p>With neighbour updates (flag 1) the neighbours are told twice when the block changes.
+     * {@code World.setBlockState} tells them the block that <em>was</em> there, as a player's placement
+     * does; {@code /setblock} tells them the block now there. Some mods' {@code neighborChanged} looks
+     * at that block and reacts only to the second: a redstone block written beside an LDME elevator
+     * controller powered it through {@code /setblock} and not through a write here (#92).
      */
     static boolean set(World world, BlockPos pos, IBlockState state, int flags,
                        @Nullable UndoPoints.Recorder recorder, @Nullable UndoPoints.Before was) {
         try {
-            return SkyLight.setBlockState(world, pos, state, flags);
+            Block before = world.getBlockState(pos).getBlock();
+            boolean changed = SkyLight.setBlockState(world, pos, state, flags);
+            if (changed && (flags & 1) != 0 && before != state.getBlock()) {
+                world.notifyNeighborsRespectDebug(pos, state.getBlock(), false);
+            }
+            return changed;
         }
         catch (RuntimeException e) {
             IBlockState now = world.getBlockState(pos);

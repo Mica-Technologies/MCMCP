@@ -493,7 +493,7 @@ public final class ServerWorldTools {
                         IBlockState state = target.getStateFromMeta(metadata);
                         // Flag 3 = update neighbours + send to clients. Anything less leaves
                         // connected players seeing the old block until they reload the chunk.
-                        boolean changed = SkyLight.setBlockState(world, pos, state, 3);
+                        boolean changed = BlockWriteFaults.set(world, pos, state, 3, null, null);
                         boolean wrote = changed;
 
                         JsonObject json = new JsonObject();
