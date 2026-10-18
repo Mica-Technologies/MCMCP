@@ -111,7 +111,8 @@ public final class ClientDebugTools {
                 + "'yaw'/'pitch'): the frame is rendered from there, without HUD, and nothing changes "
                 + "for the server or other players. It can only draw chunks this client holds, so "
                 + "stay within the render distance. 'fullbright' lights everything for this one "
-                + "frame — for night and interiors, without touching world time. Both are put back "
+                + "frame — for night and interiors, without touching world time; the result's "
+                + "'fullbrightApplied' says whether it took. Both are put back "
                 + "before the call returns. For a place beyond the render distance, 'bringPlayer' moves "
                 + "the player to the camera for the capture and back afterwards (creative or spectator; "
                 + "with input locked or the window in the background).")
@@ -237,6 +238,15 @@ public final class ClientDebugTools {
                                 public JsonObject call() {
                                     // Restored in the same task that reads the frame, so the player
                                     // never sees a frame of the detached view after the capture.
+                                    if (fullbright) {
+                                        // Whether it took, read from the lightmap the frame was drawn
+                                        // with: a no-op fullbright looked exactly like a black cave (#99).
+                                        int darkest = ClientCamera.darkestLight();
+                                        if (darkest >= 0) {
+                                            view.addProperty("darkestLight", darkest);
+                                            view.addProperty("fullbrightApplied", darkest >= 192);
+                                        }
+                                    }
                                     try {
                                         return captureScreenshot(fileName);
                                     }

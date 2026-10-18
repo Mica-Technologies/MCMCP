@@ -1899,7 +1899,11 @@ kicked for flying. While the game window has focus it is refused unless the agen
 [`client_input_lock`](#client_input_lock), since then a person may be the one playing.
 
 **`fullbright: true`** lights everything for this one frame, for night and interiors, without
-touching world time. **`fov`** sets the field of view (10–130) for the frame.
+touching world time. It raises gamma and gives the player night vision on this client only, with
+no particles or icon, taken off again unless they already had it: OptiFine's custom lightmaps and
+shaders ignore gamma but honour night vision. The result says `fullbrightApplied` and
+`darkestLight` (0–255, how bright a cell with no light at all was drawn), so a fullbright that
+did nothing shows. **`fov`** sets the field of view (10–130) for the frame.
 
 All of these are put back in the same client-thread task that reads the frame, so the player never
 sees a frame from the detached camera. If the call dies first, they are put back within a minute

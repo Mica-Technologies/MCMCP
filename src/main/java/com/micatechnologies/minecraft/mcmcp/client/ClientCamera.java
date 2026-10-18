@@ -4,8 +4,11 @@ import java.lang.reflect.Field;
 import java.util.Collections;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.EntityRenderer;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.init.MobEffects;
+import net.minecraft.potion.PotionEffect;
 import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.EnumHandSide;
@@ -114,6 +117,51 @@ public final class ClientCamera {
         }
         if (fullbright) {
             mc.gameSettings.gammaSetting = FULLBRIGHT_GAMMA;
+            // Gamma alone did nothing on AltoTEST (#99): OptiFine's custom lightmaps and shaders work
+            // the light out without vanilla's gamma term. Night vision every one of them honours. Given
+            // on the client only, without particles (so no HUD icon either), and taken back on restore
+            // only if it was not already there.
+            if (mc.player != null && !mc.player.isPotionActive(MobEffects.NIGHT_VISION)) {
+                mc.player.addPotionEffect(new PotionEffect(MobEffects.NIGHT_VISION, NIGHT_VISION_TICKS, 0, false, false));
+                previous.addedNightVision = true;
+            }
+        }
+    }
+
+    /** Long enough that night vision does not flicker as it runs out: it does in its last 200 ticks. */
+    private static final int NIGHT_VISION_TICKS = 1_000_000;
+
+    @Nullable
+    private static final Field LIGHTMAP_COLORS = findLightmapField();
+
+    @Nullable
+    private static Field findLightmapField() {
+        try {
+            return ObfuscationReflectionHelper.findField(EntityRenderer.class, "field_78504_Q");
+        }
+        catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * How bright the lightmap draws a cell with no sky or block light, 0 to 255, or -1 when it cannot
+     * be read. What says whether fullbright took. Client thread only.
+     */
+    public static int darkestLight() {
+        if (LIGHTMAP_COLORS == null) {
+            return -1;
+        }
+        try {
+            int[] colors = (int[]) LIGHTMAP_COLORS.get(Minecraft.getMinecraft().entityRenderer);
+            if (colors == null || colors.length == 0) {
+                return -1;
+            }
+            int argb = colors[0];
+            return Math.max((argb >> 16) & 0xFF, Math.max((argb >> 8) & 0xFF, argb & 0xFF));
+        }
+        catch (IllegalAccessException | RuntimeException e) {
+            return -1;
         }
     }
 
@@ -126,6 +174,9 @@ public final class ClientCamera {
         saved = null;
         Minecraft mc = Minecraft.getMinecraft();
         mc.gameSettings.gammaSetting = previous.gamma;
+        if (previous.addedNightVision && mc.player != null) {
+            mc.player.removeActivePotionEffect(MobEffects.NIGHT_VISION);
+        }
         mc.gameSettings.fovSetting = previous.fov;
         mc.gameSettings.thirdPersonView = previous.thirdPersonView;
         mc.gameSettings.hideGUI = previous.hideGui;
@@ -170,6 +221,7 @@ public final class ClientCamera {
         float fov;
         int thirdPersonView;
         boolean hideGui;
+        boolean addedNightVision;
         long appliedAt;
     }
 
