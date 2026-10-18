@@ -17,6 +17,7 @@
 //! - [`paths`] — where this orchestrator keeps its state on each platform
 
 pub mod activity;
+pub mod caller;
 pub mod catalogue;
 pub mod control;
 pub mod crash;

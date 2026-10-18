@@ -26,6 +26,7 @@ use std::time::SystemTime;
 use tracing::{debug, warn};
 
 use crate::activity::{Activity, CallId, Outcome};
+use crate::caller::Caller;
 use crate::catalogue::{self, ALL_INSTANCES, Aggregate, Contribution, INSTANCE_ARGUMENT};
 use crate::events::{Actor, Event, EventKind, EventLog, Level};
 use crate::instance::{self, Catalogue, Instance, InstanceInfo, UpstreamEvent};
@@ -343,6 +344,12 @@ impl Router {
 
     /// Handles one message from the client. Returns a response, or nothing for a notification.
     pub async fn handle(&self, message: Value) -> Option<Value> {
+        self.handle_from(None, message).await
+    }
+
+    /// [`Router::handle`] for a message from a known connection, whose calls then name it to the
+    /// game in `_meta` (see [`crate::caller`]).
+    pub async fn handle_from(&self, caller: Option<&Caller>, message: Value) -> Option<Value> {
         let id = jsonrpc::id_of(&message);
         let Some(method) = jsonrpc::method_of(&message).map(str::to_string) else {
             // A response to something an *instance* asked, travelling back the other way.
@@ -361,7 +368,7 @@ impl Router {
             "initialize" => Ok(self.handle_initialize(params)),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(self.handle_tools_list().await),
-            "tools/call" => self.handle_tools_call(&id, params).await,
+            "tools/call" => self.handle_tools_call(&id, params, caller).await,
             "resources/list" => Ok(self.handle_resources_list().await),
             "resources/templates/list" => Ok(self.handle_templates_list().await),
             "resources/read" => self.handle_resources_read(params).await,
@@ -682,6 +689,7 @@ impl Router {
         &self,
         client_request_id: &Value,
         params: Option<Value>,
+        caller: Option<&Caller>,
     ) -> anyhow::Result<Value> {
         let params = params.unwrap_or_else(|| json!({}));
         let Some(name) = params.get("name").and_then(Value::as_str) else {
@@ -869,6 +877,16 @@ impl Router {
                 (token, true)
             }
         };
+        // Set here, over anything the client sent under the same key: the game uses it to tell
+        // agents apart, and an agent must not be able to speak as another.
+        match caller {
+            Some(caller) => {
+                meta.insert(crate::caller::META_KEY.into(), caller.to_meta());
+            }
+            None => {
+                meta.remove(crate::caller::META_KEY);
+            }
+        }
         let mut forwarded = Map::new();
         forwarded.insert("name".into(), json!(name));
         forwarded.insert("arguments".into(), Value::Object(arguments));
@@ -3529,6 +3547,8 @@ mod tests {
                         "result": {
                             "content": [{ "type": "text", "text": format!("ran on {ran_on}") }],
                             "isError": false,
+                            // What the game was told about the caller, for the tests that check it.
+                            "echoedCaller": request["params"]["_meta"][crate::caller::META_KEY].clone(),
                         },
                     }));
                 }
@@ -3566,6 +3586,35 @@ mod tests {
             .await
             .expect("a response")["result"]
             .clone()
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_call_names_its_connection_to_the_game_and_a_client_cannot_forge_one() {
+        let client = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
+        let router = router_of(&[Arc::clone(&client)]).await;
+        let caller = Caller::new();
+        caller.observe(&json!({"method": "initialize", "params": {"clientInfo": {"name": "agent-a"}}}));
+        let forged = json!({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {
+                "name": "client_look", "arguments": {},
+                "_meta": { "mcmcp/caller": { "id": "someone-else" } },
+            },
+        });
+
+        let result = router
+            .handle_from(Some(&caller), forged.clone())
+            .await
+            .expect("a response")["result"]
+            .clone();
+        assert_eq!(result["echoedCaller"]["id"], caller.id());
+        assert_eq!(result["echoedCaller"]["name"], "agent-a");
+
+        let anonymous = router.handle(forged).await.expect("a response")["result"].clone();
+        assert!(
+            anonymous["echoedCaller"].is_null(),
+            "no connection, no caller: {anonymous}"
+        );
     }
 
     fn text_of(result: &Value) -> String {

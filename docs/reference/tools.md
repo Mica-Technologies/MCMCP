@@ -1803,7 +1803,7 @@ after about three minutes and returns `nextIndex`.
 
 #### `client_input_lock`
 
-Requires `permissions.allowPlayerControl` · `locked` required, optional `seconds`, `reason`
+Requires `permissions.allowPlayerControl` for `set` · `op` `set` (default, with `locked`) \| `status` \| `wait` · optional `seconds`, `reason`, `exclusive`, `force`, `waitSeconds`
 
 Holds the human's own keyboard and mouse out of the game so a stray movement cannot disturb what a
 model is doing. While locked, nothing from the physical keyboard or mouse reaches the game — no
@@ -1826,6 +1826,20 @@ Three things release it, and a model cannot suppress any of them:
 
 The lock says so on screen and in chat when it engages. Check `locked` in a later result rather than
 assuming you still hold it — nothing notifies a model when a human takes it back.
+
+**Several agents on one client.** The lock records which agent took it: through the orchestrator,
+the agent connection a call came from (see [the orchestrator guide](../guide/orchestrator.md)), and
+for a direct client, its session.
+
+- `op: "status"` reports `{locked, holder, yours, exclusive, secondsLeft, reason}`, and
+  [`client_runtime_info`](#client_runtime_info) carries the same as `inputLock`.
+- `op: "wait"` returns once the client is free or the lock is yours, or after `waitSeconds`
+  (default 60), with `free` saying which.
+- `exclusive: true` keeps the others off: while it is held, every other agent's client tool that is
+  not read-only — movement, clicks, GUI input, commands, screenshots, which can move the player — is
+  refused with a `busy` tool error naming the holder, with `retryAfterMs`. Read-only tools still
+  answer. Another agent's lock or release is refused too, unless it passes `force: true`, which is
+  for a lock known to be abandoned.
 
 #### `client_select_slot`
 

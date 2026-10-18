@@ -102,6 +102,14 @@ mcmcp_tasks                # keep a task list for a job, which you see live in t
 Focus is sticky, you can change it in the app at any time, and without the result saying where it
 came from a model would keep acting on its memory of what was focused.
 
+**Every call says which agent made it.** Each MCP client connection, which in practice is one
+agent session, gets an id, and every call it makes reaches the game with
+`_meta["mcmcp/caller"]: {"id": "c3", "name": "<its clientInfo name>"}`. The orchestrator sets it
+over anything the client sent under that key, so one agent cannot speak as another. Several agents
+driving one game is otherwise invisible to the game; this is what lets
+[`client_input_lock`](../reference/tools.md#client_input_lock) say who holds a client and keep the
+others off.
+
 Read-only tools also accept `instance: "*"`, which runs them on every connected game at once and
 returns the answers together — the fastest way to compare a mod against a control. Tools that change
 anything do not offer it, and are refused if asked.

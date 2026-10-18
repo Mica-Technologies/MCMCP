@@ -76,6 +76,8 @@ pub async fn serve(router: Arc<Router>) -> Result<()> {
         });
     }
 
+    // The one client on stdin, named to the game like any socket client (#94).
+    let caller = Arc::new(crate::caller::Caller::new());
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("reading stdin")? {
         if line.trim().is_empty() {
@@ -97,8 +99,10 @@ pub async fn serve(router: Arc<Router>) -> Result<()> {
 
         let router = Arc::clone(&router);
         let outgoing = outgoing.clone();
+        let caller = Arc::clone(&caller);
+        caller.observe(&message);
         tokio::spawn(async move {
-            if let Some(response) = router.handle(message).await {
+            if let Some(response) = router.handle_from(Some(&caller), message).await {
                 let _ = outgoing.send(response);
             }
         });

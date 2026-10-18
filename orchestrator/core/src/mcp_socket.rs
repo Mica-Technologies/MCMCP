@@ -194,13 +194,17 @@ async fn handle_client(stream: TcpStream, router: Arc<Router>, token: String) ->
         })
     };
 
+    // This connection is one agent; its calls carry that to the game (#94).
+    let caller = Arc::new(crate::caller::Caller::new());
     while let Some(message) = framing::read_frame(&mut reader).await? {
         let router = Arc::clone(&router);
         let outgoing = outgoing.clone();
+        let caller = Arc::clone(&caller);
+        caller.observe(&message);
         // Each request in its own task: a tools/call can take minutes, and a client that cannot
         // ping or cancel while one runs has no way to stop it.
         tokio::spawn(async move {
-            if let Some(response) = router.handle(message).await {
+            if let Some(response) = router.handle_from(Some(&caller), message).await {
                 let _ = outgoing.send(response);
             }
         });

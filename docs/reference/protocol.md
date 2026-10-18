@@ -53,7 +53,7 @@ mean "not supported" and stop clients from ever calling `logging/setLevel` or `c
 | `initialize` | Full. Returns capabilities, `serverInfo` and `instructions`. |
 | `ping` | Full. Allowed before initialization. |
 | `tools/list` | Full. No pagination — the catalogue is tens of entries, and pagination that never triggers is pagination that never gets tested. |
-| `tools/call` | Full, including `_meta.progressToken`. |
+| `tools/call` | Full, including `_meta.progressToken`. On the orchestrator link, `_meta["mcmcp/caller"]` names the agent connection a call came from; a direct client is named by its session. |
 | `resources/list` | Full. |
 | `resources/templates/list` | Full. |
 | `resources/read` | Full. |

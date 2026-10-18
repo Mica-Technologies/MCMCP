@@ -840,7 +840,7 @@ public final class ClientDebugTools {
                 + "directory are identical in every other field MCMCP reports, and only the one that "
                 + "won the port answers — so if a freshly built change appears to have had no "
                 + "effect, check 'process.startedAt' against when you built it before doubting the "
-                + "change.")
+                + "change. 'inputLock' says whether an agent holds client_input_lock, and whether it is you.")
             .schema(JsonSchema.noArguments())
             .clientOnly()
             .readOnly()
@@ -883,6 +883,9 @@ public final class ClientDebugTools {
                         return json;
                     }
                 });
+                // Whether another agent is driving this client right now (#94).
+                result.add("inputLock", com.micatechnologies.minecraft.mcmcp.mcp.InputClaim.get()
+                    .status(context.getCaller(), System.currentTimeMillis()));
                 return ToolResult.structured(result);
             })
             .build());

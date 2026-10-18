@@ -1,6 +1,8 @@
 package com.micatechnologies.minecraft.mcmcp.client;
 
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
+import com.micatechnologies.minecraft.mcmcp.mcp.CallerId;
+import com.micatechnologies.minecraft.mcmcp.mcp.InputClaim;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.GuiIngameMenu;
@@ -183,9 +185,11 @@ public final class ClientInputLock {
      *
      * <p>Must run on the client thread: it unlatches keys and reads the game settings.
      *
-     * @param why shown to the human on screen, so they can tell a task from a stuck agent
+     * @param why       shown to the human on screen, so they can tell a task from a stuck agent
+     * @param holder    the agent taking it, recorded so others can ask and, if exclusive, keep off
+     * @param exclusive whether the client's other input tools refuse other agents meanwhile
      */
-    public static void lock(int seconds, String why) {
+    public static void lock(int seconds, String why, CallerId holder, boolean exclusive) {
         Minecraft mc = Minecraft.getMinecraft();
         boolean wasLocked;
 
@@ -198,6 +202,7 @@ public final class ClientInputLock {
             locked = true;
             expiresAtMillis = System.currentTimeMillis() + seconds * 1000L;
             reason = why == null ? "" : why.trim();
+            InputClaim.get().claimed(holder, reason, exclusive, expiresAtMillis);
             // Not carried over from before the lock: a stale press from minutes ago would release it
             // on the first Escape rather than the second.
             lastEscapeMillis = 0L;
@@ -234,6 +239,7 @@ public final class ClientInputLock {
             expiresAtMillis = 0L;
             reason = "";
             lastEscapeMillis = 0L;
+            InputClaim.get().released();
         }
 
         if (wasLocked) {

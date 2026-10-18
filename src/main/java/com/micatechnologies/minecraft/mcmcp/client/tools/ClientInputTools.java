@@ -10,6 +10,8 @@ import com.micatechnologies.minecraft.mcmcp.client.RawKeyboard;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
+import com.micatechnologies.minecraft.mcmcp.mcp.CallerId;
+import com.micatechnologies.minecraft.mcmcp.mcp.InputClaim;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
@@ -869,17 +871,50 @@ public final class ClientInputTools {
                 + "so it is not a promise that you keep control — check 'locked' in the result of a "
                 + "later call rather than assuming. Nothing tells you when a human releases it.\n\n"
                 + "Lock for as little as the task needs. Somebody is sitting there unable to use their "
-                + "computer, and a lock left on after you finish reads as a crash.")
+                + "computer, and a lock left on after you finish reads as a crash.\n\n"
+                + "Other agents may be driving this client too. op 'status' says whether it is locked, by "
+                + "whom ('yours' when by you) and for how long; op 'wait' waits until it is free. "
+                + "exclusive: true makes the client's other input tools refuse other agents with a "
+                + "'busy' error until your lock ends; another agent's lock or release is refused too, "
+                + "unless it passes force: true.")
             .schema(JsonSchema.object()
-                .bool("locked", "True to take the keyboard and mouse, false to give them back.")
+                .enumeration("op", "'set' (default) takes or gives back the lock as 'locked' says; "
+                    + "'status' only reports; 'wait' waits for it to be free.", "set", "status", "wait")
+                .bool("locked", "set: true to take the keyboard and mouse, false to give them back.")
+                .bool("exclusive", "set: other agents' input calls are refused while you hold it. "
+                    + "Default false.")
+                .bool("force", "set: take or release a lock another agent holds exclusively. Only for a "
+                    + "lock you know is abandoned.")
+                .integer("waitSeconds", "wait: the longest to wait. Default 60.", 1, 600)
                 .integer("seconds", "How long to hold them for, in seconds. Locking again before this "
                     + "runs out extends it. Ignored when releasing.", 1, 7200)
                 .string("reason", "A short phrase shown on screen, so the person watching can tell a "
                     + "task in progress from a stuck agent. For example 'mining the iron vein'.")
-                .required("locked")
                 .build())
             .clientOnly()
             .handler(context -> {
+                final String op = context.getString("op", "set");
+                final CallerId caller = context.getCaller();
+                if ("status".equals(op)) {
+                    return ToolResult.structured(InputClaim.get().status(caller, System.currentTimeMillis()));
+                }
+                if ("wait".equals(op)) {
+                    long deadline = System.currentTimeMillis() + context.getBoundedInt("waitSeconds", 60, 1, 600) * 1000L;
+                    long started = System.currentTimeMillis();
+                    while (true) {
+                        long now = System.currentTimeMillis();
+                        JsonObject status = InputClaim.get().status(caller, now);
+                        boolean free = !status.get("locked").getAsBoolean()
+                            || status.get("yours").getAsBoolean();
+                        if (free || now >= deadline) {
+                            status.addProperty("free", free);
+                            status.addProperty("waitedMillis", now - started);
+                            return ToolResult.structured(status);
+                        }
+                        context.getCancellation().throwIfCancelled();
+                        Thread.sleep(250L);
+                    }
+                }
                 if (!McmcpConfig.isAllowPlayerControl()) {
                     return ToolResult.error("Player control is disabled by "
                         + "permissions.allowPlayerControl in the MCMCP config.");
@@ -895,6 +930,13 @@ public final class ClientInputTools {
                 final int seconds = context.getBoundedInt("seconds", 300, 1,
                     McmcpConfig.getMaxInputLockSeconds());
                 final String why = context.getString("reason", "");
+                final boolean exclusive = context.getBoolean("exclusive", false);
+                long now = System.currentTimeMillis();
+                if (InputClaim.get().heldExclusivelyByAnother(caller, now) && !context.getBoolean("force", false)) {
+                    JsonObject structured = new JsonObject();
+                    structured.add("busy", InputClaim.get().busy(now));
+                    return ToolResult.error(InputClaim.get().refusalFor(caller, now)).withStructured(structured);
+                }
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
@@ -906,7 +948,7 @@ public final class ClientInputTools {
 
                         boolean was = ClientInputLock.isLocked();
                         if (wanted) {
-                            ClientInputLock.lock(seconds, why);
+                            ClientInputLock.lock(seconds, why, caller, exclusive);
                         }
                         else {
                             ClientInputLock.release("released by the model");
@@ -914,6 +956,9 @@ public final class ClientInputTools {
 
                         JsonObject json = lockStatus();
                         json.addProperty("wasLocked", was);
+                        if (wanted) {
+                            json.addProperty("exclusive", exclusive);
+                        }
                         return json;
                     }
                 });

@@ -349,6 +349,22 @@ public class McpDispatcher {
                 .toJson(session.getProtocolVersion());
         }
 
+        // Another agent holds the client's input exclusively (#94). Read-only tools still answer, and
+        // client_input_lock itself decides for its own ops, so an agent can ask or wait.
+        com.micatechnologies.minecraft.mcmcp.mcp.CallerId caller =
+            com.micatechnologies.minecraft.mcmcp.mcp.CallerId.of(session, params);
+        if (side.isClient() && !tool.isReadOnly() && !"client_input_lock".equals(name)) {
+            long now = System.currentTimeMillis();
+            com.micatechnologies.minecraft.mcmcp.mcp.InputClaim claim =
+                com.micatechnologies.minecraft.mcmcp.mcp.InputClaim.get();
+            String busy = claim.refusalFor(caller, now);
+            if (busy != null) {
+                JsonObject structured = new JsonObject();
+                structured.add("busy", claim.busy(now));
+                return ToolResult.error(busy).withStructured(structured).toJson(session.getProtocolVersion());
+            }
+        }
+
         ToolActivity.noteCall(side);
 
         ToolContext context = new ToolContext(
@@ -359,6 +375,7 @@ public class McpDispatcher {
             gameThreadTimeoutMillis,
             extractProgressToken(params));
 
+        context.setCaller(caller);
         long activity = ToolActivity.callStarted(side, name);
         context.trackActivity(activity);
         context.setMutating(!tool.isReadOnly() && !ESTOP_EXEMPT.contains(name));

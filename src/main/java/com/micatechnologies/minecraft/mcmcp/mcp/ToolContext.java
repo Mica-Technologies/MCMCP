@@ -66,6 +66,10 @@ public class ToolContext {
     /** Whether this call can change the world: an emergency stop ends it at its next game-thread step. */
     private volatile boolean mutating;
 
+    /** Which agent made this call. Set by the dispatcher; a part shares its whole's. */
+    @Nullable
+    private volatile CallerId caller;
+
     /** Who owns the chunk holds this call takes, when not the caller: a background job owns its own. */
     @Nullable
     private volatile String holdCaller;
@@ -97,6 +101,16 @@ public class ToolContext {
     /** Marks this call as one an emergency stop must end. Set by the dispatcher for every tool that is not read-only. */
     public void setMutating(boolean value) {
         this.mutating = value;
+    }
+
+    /** Which agent made this call. Never null: a context nobody named is its session's. */
+    public CallerId getCaller() {
+        CallerId known = caller;
+        return known != null ? known : CallerId.of(session, null);
+    }
+
+    public void setCaller(CallerId value) {
+        this.caller = value;
     }
 
     /** The key chunk holds are taken under, or null for the caller's own. */
@@ -354,6 +368,7 @@ public class ToolContext {
             }
         };
         part.timings = timings;
+        part.caller = caller;
         return part;
     }
 
