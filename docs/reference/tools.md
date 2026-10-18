@@ -1153,7 +1153,7 @@ use's `result` and `changed`. A use outside the build limit, spawn protection or
 
 #### `server_activate_block`
 
-:material-alert: Destructive · as above, without `slot`
+:material-alert: Destructive · as above, without `slot`; `player` optional, with `dimension`
 
 Right-clicks a block with an empty hand from any distance: press a button, open a controller, flip a
 lever, open a container. A block reads the hand of the player clicking it, so for the click the
@@ -1161,6 +1161,13 @@ player's selection moves to an empty hotbar slot (the selected one if it is empt
 With no hotbar slot empty, the reply says `handEmpty: false` and the block sees the held item.
 
 [`server_use_item_on_block`](#server_use_item_on_block) refuses an empty slot and points here.
+
+**With nobody online.** Omit `player` and the click is made by MCMCP's own Forge fake player,
+`[MCMCP]`, standing a block out from the clicked face in `dimension` (default 0). A headless
+test on a server nobody has joined can press a call button this way. The result says
+`fakePlayer: true`, because some mods treat fake players differently. The fake player holds
+nothing, and anything a block hands it is discarded. Not through the companion, where `player` is
+always you.
 
 **Containers.** A container opened from more than about eight blocks away is closed by the server
 on the next tick. Anything to do in it must happen in the same call, through `container`:

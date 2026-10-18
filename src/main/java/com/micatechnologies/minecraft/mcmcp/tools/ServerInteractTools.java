@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.mojang.authlib.GameProfile;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
@@ -13,6 +14,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.util.Collections;
 import java.util.Locale;
+import java.util.UUID;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.inventory.Container;
 import net.minecraft.inventory.Slot;
@@ -23,6 +25,7 @@ import net.minecraft.util.EnumFacing;
 import net.minecraft.util.EnumHand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
+import net.minecraftforge.common.util.FakePlayerFactory;
 
 /**
  * Using an item on a block, or activating a block, as a player but from any distance (#57): stringing
@@ -60,7 +63,9 @@ public final class ServerInteractTools {
             "Right-click a block with an empty hand, as that player and from any distance: press a button, "
                 + "open a controller, flip a lever, open a container. The player's selected slot moves to an "
                 + "empty hotbar slot for the click and back; with none empty, 'handEmpty' is false and the "
-                + "block sees the held item. With 'container', read the container that opens "
+                + "block sees the held item. Omit 'player' to click as MCMCP's own fake player, for a "
+                + "server nobody has joined; the result then says fakePlayer: true. With 'container', read "
+                + "the container that opens "
                 + "and press one of its buttons in the same moment — a container opened from afar closes again "
                 + "on the next tick.", false);
     }
@@ -75,7 +80,11 @@ public final class ServerInteractTools {
             .number("hitY", "As hitX, in Y.", 0.0D, 1.0D)
             .number("hitZ", "As hitX, in Z.", 0.0D, 1.0D)
             .bool("sneak", "Click while sneaking. Default false.")
-            .string("player", "The player who clicks. Through the companion, always you.");
+            .string("player", withItem ? "The player who clicks. Through the companion, always you."
+                : "The player who clicks. Through the companion, always you. Omit for MCMCP's fake player.");
+        if (!withItem) {
+            schema = schema.integer("dimension", "With no 'player': the dimension of the block. Default 0.");
+        }
         if (withItem) {
             schema = schema.integer("slot", "Hotbar slot 0-8 holding the item. Default the selected slot.", 0, 8);
         }
@@ -99,8 +108,13 @@ public final class ServerInteractTools {
             return ToolResult.error(denied);
         }
         final String playerName = context.getString("player", null);
-        if (playerName == null || playerName.isEmpty()) {
-            return ToolResult.error("Name the 'player' who clicks.");
+        // An empty-hand click needs no one's inventory, so with nobody named it is made by a Forge fake
+        // player: a headless test can press a button on a server nobody has joined (#104). An item use
+        // still needs a real player's hotbar.
+        final boolean fake = !withItem && (playerName == null || playerName.isEmpty());
+        if (!fake && (playerName == null || playerName.isEmpty())) {
+            return ToolResult.error("Name the 'player' who clicks. To press a block with no player online, use "
+                + "server_activate_block without 'player'.");
         }
         final BlockPos pos = new BlockPos(context.requireInt("x"), context.requireInt("y"), context.requireInt("z"));
         final EnumFacing face = EnumFacing.byName(context.getString("face", "up").toLowerCase(Locale.ROOT));
@@ -115,7 +129,7 @@ public final class ServerInteractTools {
         final JsonObject containerAsk = com.micatechnologies.minecraft.mcmcp.json.Json.getObjectOrEmpty(
             context.getArguments(), "container");
 
-        final int dimension = context.onGameThread(() -> {
+        final int dimension = fake ? context.getInt("dimension", 0) : context.onGameThread(() -> {
             EntityPlayerMP player = requirePlayer(playerName);
             return player.dimension;
         });
@@ -124,7 +138,8 @@ public final class ServerInteractTools {
             Collections.singleton(ChunkKeys.ofBlock(pos.getX(), pos.getZ())), outcome -> {
                 final UndoPoints.Recorder recorder = ServerUndoTools.start(context, true);
                 JsonObject json = context.onGameThread(() -> {
-                    EntityPlayerMP player = requirePlayer(playerName);
+                    EntityPlayerMP player = fake ? fakeClicker(ServerWorldTools.requireWorld(dimension), pos, face)
+                        : requirePlayer(playerName);
                     WorldServer world = player.getServerWorld();
                     MinecraftServer server = ServerThreadBridge.server();
                     if (!world.isBlockLoaded(pos)) {
@@ -138,6 +153,9 @@ public final class ServerInteractTools {
 
                     JsonObject result = new JsonObject();
                     result.addProperty("player", player.getName());
+                    if (fake) {
+                        result.addProperty("fakePlayer", true);
+                    }
                     result.addProperty("distance", Math.round(Math.sqrt(player.getDistanceSq(pos)) * 10.0D) / 10.0D);
                     result.add("before", GameJson.block(world, pos));
                     BlockPos beside = pos.offset(face);
@@ -289,6 +307,27 @@ public final class ServerInteractTools {
                 + "it on the next tick. Anything to do in it belongs in this call's 'container'.");
         }
         return json;
+    }
+
+    /** MCMCP's fake player, so that a mod that treats fake players differently is not mistaken for broken. */
+    private static final GameProfile FAKE_PROFILE = new GameProfile(
+        UUID.nameUUIDFromBytes("mcmcp:fake-player".getBytes(java.nio.charset.StandardCharsets.UTF_8)), "[MCMCP]");
+
+    /**
+     * The fake player, standing a block out from the clicked face and looking at it, with nothing in
+     * hand. Game thread.
+     */
+    private static EntityPlayerMP fakeClicker(WorldServer world, BlockPos pos, EnumFacing face) {
+        EntityPlayerMP player = FakePlayerFactory.get(world, FAKE_PROFILE);
+        double x = pos.getX() + 0.5D + face.getXOffset() * 1.5D;
+        double y = pos.getY() + 0.5D + face.getYOffset() * 1.5D - player.getEyeHeight();
+        double z = pos.getZ() + 0.5D + face.getZOffset() * 1.5D;
+        float yaw = face.getAxis() == EnumFacing.Axis.Y ? 0.0F : face.getOpposite().getHorizontalAngle();
+        float pitch = face == EnumFacing.UP ? 90.0F : face == EnumFacing.DOWN ? -90.0F : 0.0F;
+        player.setLocationAndAngles(x, y, z, yaw, pitch);
+        player.inventory.currentItem = 0;
+        player.inventory.clear();
+        return player;
     }
 
     private static EntityPlayerMP requirePlayer(String name) {

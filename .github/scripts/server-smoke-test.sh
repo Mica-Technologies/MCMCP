@@ -660,6 +660,17 @@ case "$LIST_BODY" in
   *) mcp_failure "chunks still held after release: ${LIST_BODY}" ;;
 esac
 
+echo "==> Activating a block with nobody online: MCMCP's fake player flips a lever"
+LX=$((SPAWN_X + 30)); LY=$((UNDO_Y + 12)); LZ=$((SPAWN_Z + 30))
+mcp_call 560 server_set_blocks "{\"mode\":\"list\",\"blocks\":[{\"x\":${LX},\"y\":${LY},\"z\":${LZ},\"block\":\"minecraft:stone\"},{\"x\":${LX},\"y\":$((LY + 1)),\"z\":${LZ},\"block\":\"minecraft:lever\",\"metadata\":5}]}" > /dev/null \
+  || mcp_failure "could not place the lever"
+LEVER_BODY="$(mcp_call 561 server_activate_block "{\"x\":${LX},\"y\":$((LY + 1)),\"z\":${LZ}}")" \
+  || mcp_failure "server_activate_block with no player failed: ${LEVER_BODY}"
+case "$LEVER_BODY" in
+  *'"fakePlayer":true'*'"changed":true'*|*'"changed":true'*'"fakePlayer":true'*) echo "    the lever flipped, clicked by the fake player" ;;
+  *) mcp_failure "the fake player did not flip the lever: ${LEVER_BODY}" ;;
+esac
+
 echo "==> Background jobs: an op replay and a paged read run to the end"
 BX=$((SPAWN_X + 24)); BY=$((UNDO_Y + 10)); BZ=$((SPAWN_Z + 24))
 JOB_BODY="$(mcp_call 60 server_job_submit "{\"kind\":\"apply_ops\",\"label\":\"smoke\",\"args\":{\"ops\":[\"fill ${BX} ${BY} ${BZ} $((BX + 3)) ${BY} $((BZ + 3)) minecraft:stone\",\"setblock ${BX} $((BY + 1)) ${BZ} minecraft:torch\"]}}")" \
