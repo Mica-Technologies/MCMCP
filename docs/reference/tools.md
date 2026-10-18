@@ -1004,13 +1004,28 @@ place.
   half is left behind.
 - The response's `pairs` object counts `byPartner`, `partnersAdded` (second halves the write did not
   list) and `oldHalvesCleared`. Any type with a `half` property of `lower`/`upper` counts as a
-  two-part block, which includes mods' doors built on `BlockDoor`.
+  two-part block, which includes mods' doors built on `BlockDoor`. So does one with a boolean `upper`
+  or `top` stored in its metadata: CSM's closets, coolers and vending machines, LBE's cabinets. The
+  half with it clear is the lower one. A boolean of that name worked out from neighbours, such as a
+  pipe's connection, is never stored and does not count.
+- In palette mode, a two-part cell's `expectPalette` entry is checked against the world as the call
+  found it. The lower half's write replaces the upper before the upper's own turn, and swapping a
+  cooler's lower half would otherwise find its old upper gone and report a conflict.
 
 **Neighbour updates.** Every mode notifies the neighbours of each changed cell, as `/setblock`
 does, unless `neighbourUpdates: false`. They are told of the block that was there, as a player's
 placement tells them, and of the block now there, as `/setblock` tells them, because some mods'
 machines react only to one of the two: a redstone block written beside an elevator controller
 powers it.
+
+In list and palette mode the updates are held until each game-thread slice of the write is
+complete, so a block several cells big is whole before any of its cells hears of a neighbour. Such
+blocks check their other cells when a neighbour changes and remove themselves when one is missing:
+CSM's 2×2 beds, LBE's casino cabinets. Written cell by cell with updates sent at once, a king bed
+lost its head and a cabinet its top, each reported as written. Every cell is then read back:
+`notKept` and `notKeptAt` list cells the world did not keep, and `itemsDropped` (palette mode)
+counts the item entities that appeared in the box. A block that checks its support the moment it is
+placed, as a torch does, gets no help from this and is reported the same way.
 
 **Undo.** Each call records what every block it changed was before, and names the record in
 `undoPoint`; `server_undo` puts it back. See below.

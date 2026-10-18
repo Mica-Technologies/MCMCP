@@ -70,6 +70,34 @@ final class BlockWriteFaults {
      */
     static boolean set(World world, BlockPos pos, IBlockState state, int flags,
                        @Nullable UndoPoints.Recorder recorder, @Nullable UndoPoints.Before was) {
+        return set(world, pos, state, flags, recorder, was, null);
+    }
+
+    /**
+     * As {@link #set(World, BlockPos, IBlockState, int, UndoPoints.Recorder, UndoPoints.Before)}, but with
+     * neighbour updates (flag 1) held in {@code deferred}, when given, until its slice is complete.
+     */
+    static boolean set(World world, BlockPos pos, IBlockState state, int flags,
+                       @Nullable UndoPoints.Recorder recorder, @Nullable UndoPoints.Before was,
+                       @Nullable DeferredNeighbours deferred) {
+        if (deferred != null && (flags & 1) != 0) {
+            Block before = world.getBlockState(pos).getBlock();
+            boolean changed;
+            try {
+                changed = SkyLight.setBlockState(world, pos, state, flags & ~1);
+            }
+            catch (RuntimeException e) {
+                IBlockState now = world.getBlockState(pos);
+                if (recorder != null && was != null && now != was.state) {
+                    recorder.record(pos, was, now);
+                }
+                throw e;
+            }
+            if (changed) {
+                deferred.add(pos, before, state);
+            }
+            return changed;
+        }
         try {
             Block before = world.getBlockState(pos).getBlock();
             boolean changed = SkyLight.setBlockState(world, pos, state, flags);

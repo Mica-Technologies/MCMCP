@@ -698,6 +698,26 @@ case "$REMOVE_BODY$AFTER_BODY" in
   *) mcp_failure "the villagers were not removed: ${REMOVE_BODY} then ${AFTER_BODY}" ;;
 esac
 
+echo "==> A block that checks its neighbours is whole before it hears from them (#85)"
+# A cactus checks its footing only when a neighbour changes, as CSM's beds and LBE's cabinets check
+# their other cells. Written before the sand under it, with a second cactus on top written in between,
+# it is told of the one above at once, finds no sand, and drops. Held to the end of the slice, both
+# stay. A cactus with no sand at all must be reported as not kept, and its drop counted.
+NX=$((SPAWN_X + 40)); NY=$((UNDO_Y + 20)); NZ=$((SPAWN_Z + 40))
+mcp_call 566 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:air\",\"x\":${NX},\"y\":$((NY - 1)),\"z\":${NZ},\"toX\":$((NX + 7)),\"toY\":$((NY + 2)),\"toZ\":${NZ}}" > /dev/null
+mcp_call 567 server_remove_entities "{\"types\":[\"item\"],\"x\":$((NX - 2)),\"y\":$((NY - 2)),\"z\":$((NZ - 2)),\"toX\":$((NX + 9)),\"toY\":$((NY + 4)),\"toZ\":$((NZ + 2))}" > /dev/null
+CACTUS_BODY="$(mcp_call 568 server_set_blocks "{\"mode\":\"palette\",\"palette\":[\"minecraft:cactus\",\"minecraft:sand\",\"minecraft:stone\"],\"origin\":{\"x\":${NX},\"y\":${NY},\"z\":${NZ}},\"cells\":[0,1,0,0, 0,2,0,0, 0,0,0,1, 0,-1,0,2, 5,1,0,0, 6,1,0,2]}")" \
+  || mcp_failure "the cactus write failed: ${CACTUS_BODY}"
+CACTUS_AT="$(mcp_call 569 server_get_block "{\"x\":${NX},\"y\":$((NY + 1)),\"z\":${NZ}}")"
+case "$CACTUS_AT" in
+  *'minecraft:cactus'*) echo "    the cactus written before its sand stayed" ;;
+  *) mcp_failure "the cactus written before its sand dropped: ${CACTUS_BODY} / ${CACTUS_AT}" ;;
+esac
+case "$CACTUS_BODY" in
+  *'"notKept":1'*'"itemsDropped":1'*) echo "    the cactus with no sand was reported as not kept, and its drop counted" ;;
+  *) mcp_failure "the cactus with no sand was not reported: ${CACTUS_BODY}" ;;
+esac
+
 echo "==> Background jobs: an op replay and a paged read run to the end"
 BX=$((SPAWN_X + 24)); BY=$((UNDO_Y + 10)); BZ=$((SPAWN_Z + 24))
 JOB_BODY="$(mcp_call 60 server_job_submit "{\"kind\":\"apply_ops\",\"label\":\"smoke\",\"args\":{\"ops\":[\"fill ${BX} ${BY} ${BZ} $((BX + 3)) ${BY} $((BZ + 3)) minecraft:stone\",\"setblock ${BX} $((BY + 1)) ${BZ} minecraft:torch\"]}}")" \

@@ -7,6 +7,7 @@ import javax.annotation.Nullable;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockBed;
 import net.minecraft.block.properties.IProperty;
+import net.minecraft.block.properties.PropertyBool;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.init.Blocks;
 import net.minecraft.util.EnumFacing;
@@ -22,9 +23,14 @@ import net.minecraft.world.World;
  * next to it changes. So both halves are set with no neighbour updates, and neighbours are told only
  * once both exist.
  *
- * <p>Two-part means either a block state with a {@code half} property whose values include
- * {@code lower} and {@code upper} (every {@code BlockDoor} and {@code BlockDoublePlant}, and mods'
- * blocks built on them), or a bed. The first half is the lower one, or a bed's foot.
+ * <p>Two-part means a block state with a {@code half} property whose values include {@code lower}
+ * and {@code upper} (every {@code BlockDoor} and {@code BlockDoublePlant}, and mods' blocks built on
+ * them); a stored boolean {@code upper} or {@code top} (CSM's tall furniture, LBE's casino cabinets,
+ * #85); or a bed. The first half is the lower one, or a bed's foot.
+ *
+ * <p>The boolean counts only when it is stored in the metadata. A pipe's "connected on top" is a
+ * boolean called {@code top} too, but it is worked out in {@code getActualState} and never stored, so
+ * it is not mistaken for a half and nothing is written above it.
  *
  * <p>Game thread only.
  */
@@ -59,7 +65,7 @@ final class TwoPartBlocks {
 
     /** Whether a state is one half of a two-part block. */
     static boolean isTwoPart(IBlockState state) {
-        return halfProperty(state) != null || state.getBlock() instanceof BlockBed;
+        return halfProperty(state) != null || upperFlag(state) != null || state.getBlock() instanceof BlockBed;
     }
 
     /** Whether a state is the second half: a door's or plant's upper half, or a bed's head. */
@@ -67,6 +73,10 @@ final class TwoPartBlocks {
         IProperty<?> half = halfProperty(state);
         if (half != null) {
             return "upper".equals(valueName(state, half));
+        }
+        PropertyBool upper = upperFlag(state);
+        if (upper != null) {
+            return state.getValue(upper);
         }
         return state.getBlock() instanceof BlockBed && state.getValue(BlockBed.PART) == BlockBed.EnumPartType.HEAD;
     }
@@ -85,6 +95,10 @@ final class TwoPartBlocks {
         if (first.getBlock() instanceof BlockBed) {
             return first.withProperty(BlockBed.PART, BlockBed.EnumPartType.HEAD);
         }
+        PropertyBool upper = upperFlag(first);
+        if (upper != null) {
+            return first.withProperty(upper, true);
+        }
         return withValue(first, halfProperty(first), "upper");
     }
 
@@ -101,6 +115,9 @@ final class TwoPartBlocks {
         private final java.util.Set<Long> changedPartners = new java.util.HashSet<>();
         int partnersWritten;
         int oldPartnersCleared;
+        /** Where neighbour updates go when they are held to the end of a slice, or null. */
+        @Nullable
+        DeferredNeighbours deferred;
 
         /**
          * @param given the two-part cells in this write, by {@link BlockPos#toLong()}
@@ -158,7 +175,11 @@ final class TwoPartBlocks {
                     partnersWritten++;
                 }
             }
-            if ((flags & 1) != 0) {
+            if ((flags & 1) != 0 && deferred != null) {
+                deferred.add(pos, state.getBlock(), state);
+                deferred.add(otherPos, other.getBlock(), other);
+            }
+            else if ((flags & 1) != 0) {
                 world.notifyNeighborsOfStateChange(pos, state.getBlock(), true);
                 world.notifyNeighborsOfStateChange(otherPos, other.getBlock(), true);
             }
@@ -253,6 +274,34 @@ final class TwoPartBlocks {
             }
         }
         return state;
+    }
+
+    /**
+     * A stored boolean {@code upper} or {@code top}, or null. Stored means the metadata of the state
+     * with it set differs from the state with it clear.
+     */
+    @Nullable
+    @SuppressWarnings("deprecation")
+    static PropertyBool upperFlag(IBlockState state) {
+        for (IProperty<?> property : state.getPropertyKeys()) {
+            if (!(property instanceof PropertyBool)
+                || !"upper".equals(property.getName()) && !"top".equals(property.getName())) {
+                continue;
+            }
+            PropertyBool flag = (PropertyBool) property;
+            Block block = state.getBlock();
+            try {
+                if (block.getMetaFromState(state.withProperty(flag, true))
+                    != block.getMetaFromState(state.withProperty(flag, false))) {
+                    return flag;
+                }
+            }
+            catch (RuntimeException e) {
+                // A mod's getMetaFromState that throws on a state it does not expect: not a pair.
+                return null;
+            }
+        }
+        return null;
     }
 
     /** Whether {@code block} can be written as a pair at all, for a refusal that names it. */

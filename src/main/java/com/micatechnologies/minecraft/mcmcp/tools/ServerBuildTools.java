@@ -281,10 +281,14 @@ public final class ServerBuildTools {
                 + "'nbt' on a placement, or on a fill, "
                 + "merges tile-entity data into each block after it is placed, as /blockdata does; "
                 + "read it back with server_get_block nbt=true.\n\n"
-                + "Two-part blocks (doors, tall plants, beds) are written whole: give the lower half "
+                + "Two-part blocks (doors, tall plants, beds, and blocks with a stored 'upper' or 'top' "
+                + "flag such as CSM's tall furniture) are written whole: give the lower half "
                 + "(or a bed's foot) and the other half is placed with it, before either is updated, "
                 + "replacing any different door already there. In list mode 'upper' sets the second "
-                + "half's metadata; in any mode an explicit upper half in the cell above is used.\n\n"
+                + "half's metadata; in any mode an explicit upper half in the cell above is used. "
+                + "Neighbour updates are held until each slice is written, so a block several cells "
+                + "big (a 2x2 bed) is whole before its cells check each other; cells the world did not "
+                + "keep come back as notKept, and dropped items as itemsDropped.\n\n"
                 + "Like server_set_block, this writes directly and does not fire block-place events, "
                 + "so other mods' protection and machinery hooks do not run. Disabled unless "
                 + "permissions.allowWorldEdits is enabled in the MCMCP config.")
@@ -444,11 +448,16 @@ public final class ServerBuildTools {
                         }
                     }
                     final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
+                    // Neighbour updates held to the end of each slice, so a block several cells big is whole
+                    // before any of its cells hears of a neighbour (#85).
+                    final DeferredNeighbours deferred = (flags & 1) != 0 ? new DeferredNeighbours() : null;
+                    pairs.deferred = deferred;
                     runInBatches(context, placements.size(), batchLimit, new Batch() {
                         @Override
                         public void run(int from, int to) {
                             WorldServer world = ServerWorldTools.requireWorld(dimension);
                             TwoPartBlocks.Recorder undo = TwoPartBlocks.undo(world, recorder);
+                            try {
                             for (int i = from; i < to; i++) {
                                 Placement placement = placements.get(i);
                                 IBlockState state;
@@ -465,7 +474,8 @@ public final class ServerBuildTools {
                                         && placePair(world, placement, state, replaceOnly, pairs, undo, tally)) {
                                         continue;
                                     }
-                                    place(world, placement.pos, state, placement.nbt, replaceOnly, flags, tally, recorder);
+                                    place(world, placement.pos, state, placement.nbt, replaceOnly, flags, tally, recorder,
+                                        deferred);
                                 }
                                 catch (RuntimeException e) {
                                     // A mod hook threw (#81): this cell is refused, the rest still go in.
@@ -473,11 +483,20 @@ public final class ServerBuildTools {
                                         BlockWriteFaults.reason(e, placement.pos, placement.blockId));
                                 }
                             }
+                            }
+                            finally {
+                                if (deferred != null) {
+                                    deferred.flush(world);
+                                }
+                            }
                         }
                     }, tally);
                     tally.partners = pairs.partnersWritten;
                     tally.oldHalves = pairs.oldPartnersCleared;
                     JsonObject json = tally.toJson(dimension, placements.size(), replaceOnlyId);
+                    if (deferred != null) {
+                        deferred.report(json);
+                    }
                     json.add("chunks", chunksBlock(context, dimension, listChunks, outcome));
                     if (recorder != null) {
                         ServerUndoTools.finish(context, recorder, "server_set_blocks", dimension, area,
@@ -543,7 +562,7 @@ public final class ServerBuildTools {
                             int y = minY + i / (sizeX * sizeZ);
                             BlockPos pos = new BlockPos(x, y, z);
                             try {
-                                place(world, pos, state, fillNbt, replaceOnly, flags, tally, recorder);
+                                place(world, pos, state, fillNbt, replaceOnly, flags, tally, recorder, null);
                             }
                             catch (RuntimeException e) {
                                 tally.refused(pos, blockId, BlockWriteFaults.reason(e, pos, blockId));
@@ -658,7 +677,7 @@ public final class ServerBuildTools {
 
     private static void place(WorldServer world, BlockPos pos, @Nullable IBlockState state,
                               @Nullable NBTTagCompound nbt, @Nullable Block replaceOnly, int flags, Tally tally,
-                              @Nullable UndoPoints.Recorder recorder) {
+                              @Nullable UndoPoints.Recorder recorder, @Nullable DeferredNeighbours deferred) {
         if (!world.isBlockLoaded(pos)) {
             // Writing would load the chunk, or generate it if it never was; neither is this call's to
             // decide. Counted, so the caller can hold the region or pass load: true.
@@ -671,7 +690,7 @@ public final class ServerBuildTools {
         }
         UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
         IBlockState actual = world.getBlockState(pos);
-        boolean changed = state != null && actual != state && BlockWriteFaults.set(world, pos, state, flags, recorder, was);
+        boolean changed = state != null && actual != state && BlockWriteFaults.set(world, pos, state, flags, recorder, was, deferred);
         if (state != null && actual != state && !changed) {
             ResourceLocation name = state.getBlock().getRegistryName();
             tally.refused(pos, name == null ? "unknown" : name.toString(), "the world did not accept the state");

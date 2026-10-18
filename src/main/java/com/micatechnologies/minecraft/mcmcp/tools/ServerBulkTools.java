@@ -333,12 +333,39 @@ public final class ServerBulkTools {
                 }
             }
             final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
+            // Expectations of two-part cells are checked against the world as this call found it: the
+            // lower half's pair write replaces the upper before the upper's own turn, and a swapped
+            // cooler's old upper half was otherwise a conflict and left as air (#85).
+            final java.util.Set<Integer> pairConflicts = new java.util.HashSet<>();
+            if (anyTwoPart && (expectAll != null || expects != null)) {
+                context.onGameThread(() -> {
+                    WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    for (int i = 0; i < count; i++) {
+                        if (!twoPartEntry[values[i]]) {
+                            continue;
+                        }
+                        Expected expected = expectedFor(i, expectAll, expects, expectPalette);
+                        BlockPos pos = new BlockPos(xs[i], ys[i], zs[i]);
+                        if (expected != null && world.isBlockLoaded(pos) && !expected.matches(world.getBlockState(pos))) {
+                            pairConflicts.add(i);
+                        }
+                    }
+                    return null;
+                });
+            }
+            final DeferredNeighbours deferred = (flags & 1) != 0 ? new DeferredNeighbours() : null;
+            pairs.deferred = deferred;
+            final net.minecraft.util.math.AxisAlignedBB written = new net.minecraft.util.math.AxisAlignedBB(
+                minOf(xs) - 1, minOf(ys) - 1, minOf(zs) - 1, maxOf(xs) + 2, maxOf(ys) + 2, maxOf(zs) + 2);
+            final java.util.Set<Integer> itemsBefore = context.onGameThread(
+                () -> DeferredNeighbours.itemsIn(ServerWorldTools.requireWorld(dimension), written));
             for (int from = 0; from < count; from += batch) {
                 final int start = from;
                 final int end = Math.min(count, from + batch);
                 context.onGameThread(() -> {
                     WorldServer world = ServerWorldTools.requireWorld(dimension);
                     TwoPartBlocks.Recorder undo = TwoPartBlocks.undo(world, recorder);
+                    try {
                     for (int i = start; i < end; i++) {
                         BlockPos at = new BlockPos(xs[i], ys[i], zs[i]);
                         try {
@@ -353,7 +380,9 @@ public final class ServerBulkTools {
                             }
                             IBlockState actual = world.getBlockState(pos);
                             Expected expected = expectedFor(i, expectAll, expects, expectPalette);
-                            if (expected != null && !expected.matches(actual)) {
+                            boolean conflict = twoPartEntry[values[i]] ? pairConflicts.contains(i)
+                                : expected != null && !expected.matches(actual);
+                            if (conflict) {
                                 tally.conflict(pos, expected, actual);
                                 continue;
                             }
@@ -386,7 +415,7 @@ public final class ServerBulkTools {
                             }
                             UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
                             boolean changed = actual != entry.state
-                                && BlockWriteFaults.set(world, pos, entry.state, flags, recorder, was);
+                                && BlockWriteFaults.set(world, pos, entry.state, flags, recorder, was, deferred);
                             if (actual != entry.state && !changed) {
                                 tally.failed(pos, entry.id);
                                 continue;
@@ -414,6 +443,12 @@ public final class ServerBulkTools {
                             tally.failed(at, failed.id, BlockWriteFaults.reason(e, at, failed.id));
                         }
                     }
+                    }
+                    finally {
+                        if (deferred != null) {
+                            deferred.flush(world);
+                        }
+                    }
                     return null;
                 });
                 if (count > batch) {
@@ -424,6 +459,14 @@ public final class ServerBulkTools {
             tally.oldHalves = pairs.oldPartnersCleared;
             JsonObject json = tally.toJson(dimension, count);
             json.addProperty("neighbourUpdates", flags == 3);
+            if (deferred != null) {
+                deferred.report(json);
+            }
+            int dropped = context.onGameThread(
+                () -> DeferredNeighbours.itemsDropped(ServerWorldTools.requireWorld(dimension), written, itemsBefore));
+            if (dropped > 0) {
+                json.addProperty("itemsDropped", dropped);
+            }
             json.add("chunks", context.onGameThread(() -> {
                 ChunkLoadGovernor.touch(dimension, chunks);
                 return outcome != null ? outcome.toJson()
@@ -434,6 +477,22 @@ public final class ServerBulkTools {
             }
             return ToolResult.structured(json);
         });
+    }
+
+    private static int minOf(int[] values) {
+        int min = Integer.MAX_VALUE;
+        for (int value : values) {
+            min = Math.min(min, value);
+        }
+        return min;
+    }
+
+    private static int maxOf(int[] values) {
+        int max = Integer.MIN_VALUE;
+        for (int value : values) {
+            max = Math.max(max, value);
+        }
+        return max;
     }
 
     /**
