@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
+import javax.annotation.Nullable;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.ResourceLocation;
@@ -145,8 +146,7 @@ public final class ServerTileEntityTools {
                         }
                         result.add("tileEntities", entities);
                         ChunkLoadGovernor.touch(dimension, chunks);
-                        result.add("chunks", outcome != null ? outcome.toJson()
-                            : ChunkLoadGovernor.describeUnloaded(world, chunks));
+                        result.add("chunks", chunksBlock(world, chunks, outcome));
                         return result;
                     });
                     return ToolResult.structured(json);
@@ -201,12 +201,30 @@ public final class ServerTileEntityTools {
                 result.addProperty("returned", entities.size());
                 result.add("tileEntities", entities);
                 ChunkLoadGovernor.touch(dimension, chunks);
-                result.add("chunks", outcome != null ? outcome.toJson()
-                    : ChunkLoadGovernor.describeUnloaded(world, chunks));
+                result.add("chunks", chunksBlock(world, chunks, outcome));
                 return result;
             });
             return ToolResult.structured(json);
         });
+    }
+
+    /**
+     * The read's {@code chunks} block. A chunk loaded only for this read is unloaded again after it, so
+     * its tile entities tick only while a read holds it: a controller watched that way re-serves
+     * phases and starves side streets, and looks broken (#88). Said, when it happened. Game thread.
+     */
+    private static JsonObject chunksBlock(WorldServer world, Set<Long> chunks,
+                                          @Nullable ChunkLoadGovernor.Outcome outcome) {
+        if (outcome == null) {
+            return ChunkLoadGovernor.describeUnloaded(world, chunks);
+        }
+        JsonObject json = outcome.toJson();
+        if (json.get("loaded").getAsInt() > 0) {
+            json.addProperty("note", "Some chunks were loaded only for this read and are unloaded after it: their "
+                + "tile entities do not tick in between, so time-driven state (a controller's cycle) will not "
+                + "advance between reads. Hold the region with server_keep_loaded to keep it ticking.");
+        }
+        return json;
     }
 
     /** Game thread. */

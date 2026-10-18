@@ -4,12 +4,15 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import java.lang.reflect.Field;
+import javax.annotation.Nullable;
 import net.minecraft.nbt.NBTBase;
 import net.minecraft.nbt.NBTPrimitive;
 import net.minecraft.nbt.NBTTagByteArray;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagIntArray;
 import net.minecraft.nbt.NBTTagList;
+import net.minecraft.nbt.NBTTagLongArray;
 import net.minecraft.nbt.NBTTagString;
 
 /**
@@ -23,11 +26,16 @@ import net.minecraft.nbt.NBTTagString;
  * <p>Bounded, because a tag is third-party data of any size: a modded machine can carry a whole
  * inventory, and a map-like block a 16,384-byte colour array. Arrays and lists past
  * {@link #MAX_ELEMENTS} are cut and say so, since a result that silently stops is read as complete.
+ * The callers bound the whole tag as well ({@code maxChars}), and fall back to a summary of its keys.
+ *
+ * <p>Every numeric array, long arrays included, comes out as a JSON list of numbers. Long arrays used
+ * to come out as their SNBT text, cut at 256 characters: a traffic controller's green-state list was
+ * unreadable, and a watcher iterating it got characters instead of numbers (#88).
  */
 public final class NbtJson {
 
     /** Longest array or list written out in full. */
-    static final int MAX_ELEMENTS = 256;
+    static final int MAX_ELEMENTS = 4096;
 
     private static final int TAG_BYTE = 1;
     private static final int TAG_LONG = 4;
@@ -83,6 +91,19 @@ public final class NbtJson {
             }
             return json;
         }
+        if (tag instanceof NBTTagLongArray) {
+            long[] values = longs((NBTTagLongArray) tag);
+            if (values != null) {
+                if (values.length > MAX_ELEMENTS) {
+                    return elided("long[]", values.length);
+                }
+                JsonArray json = new JsonArray();
+                for (long value : values) {
+                    json.add(value);
+                }
+                return json;
+            }
+        }
         if (tag instanceof NBTPrimitive) {
             NBTPrimitive primitive = (NBTPrimitive) tag;
             int id = tag.getId();
@@ -98,12 +119,45 @@ public final class NbtJson {
                     : new JsonPrimitive(value);
             }
         }
-        // NBTTagLongArray, which 1.12.2 gives no accessor for, and anything a later version adds.
-        // Its own text form is still an answer, cut like everything else here.
+        // Anything a later version adds. Its own text form is still an answer, cut like everything else.
         String text = tag.toString();
-        return new JsonPrimitive(text.length() > MAX_ELEMENTS
-            ? text.substring(0, MAX_ELEMENTS) + "… (" + text.length() + " characters)"
+        return new JsonPrimitive(text.length() > MAX_TEXT
+            ? text.substring(0, MAX_TEXT) + "… (" + text.length() + " characters)"
             : text);
+    }
+
+    /** Longest text form of an unknown tag written out. */
+    private static final int MAX_TEXT = 1024;
+
+    @Nullable
+    private static volatile Field longArrayData;
+
+    /**
+     * A long array's values. 1.12.2 gives NBTTagLongArray no accessor; its one field is found by type,
+     * which needs neither its dev name nor its SRG name. Null if that ever fails.
+     */
+    @Nullable
+    static long[] longs(NBTTagLongArray tag) {
+        try {
+            Field field = longArrayData;
+            if (field == null) {
+                for (Field candidate : NBTTagLongArray.class.getDeclaredFields()) {
+                    if (candidate.getType() == long[].class) {
+                        candidate.setAccessible(true);
+                        field = candidate;
+                        break;
+                    }
+                }
+                if (field == null) {
+                    return null;
+                }
+                longArrayData = field;
+            }
+            return (long[]) field.get(tag);
+        }
+        catch (ReflectiveOperationException | RuntimeException e) {
+            return null;
+        }
     }
 
     private static JsonObject elided(String type, int length) {

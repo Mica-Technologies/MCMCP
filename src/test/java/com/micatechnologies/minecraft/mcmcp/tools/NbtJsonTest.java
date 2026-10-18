@@ -8,6 +8,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
+import net.minecraft.nbt.NBTTagLongArray;
 import net.minecraft.nbt.NBTTagString;
 import org.junit.jupiter.api.Test;
 
@@ -74,5 +75,22 @@ class NbtJsonTest {
         String written = Json.write(NbtJson.toJson(tag));
 
         assertEquals("{\"ratio\":\"NaN\"}", written);
+    }
+
+    @Test
+    void a_long_array_reads_as_a_list_of_numbers_in_full_like_an_int_array() {
+        // A CSM controller's green-state list: it came back as SNBT text cut at 256 characters (#88).
+        long[] greens = new long[60];
+        for (int i = 0; i < greens.length; i++) {
+            greens[i] = -140182632268417L - i;
+        }
+        NBTTagCompound tag = new NBTTagCompound();
+        tag.setTag("gS", new NBTTagLongArray(greens));
+
+        JsonArray json = NbtJson.toJson(tag).getAsJsonObject().getAsJsonArray("gS");
+
+        assertEquals(60, json.size());
+        assertEquals(-140182632268417L, json.get(0).getAsLong());
+        assertEquals(-140182632268476L, json.get(59).getAsLong());
     }
 }

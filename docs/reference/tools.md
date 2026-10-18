@@ -283,8 +283,8 @@ have different ids.
 `nbt: true` adds `blockEntity` — the tile entity's saved tag, as
 `{"source": "server", "nbt": {...}}`, or `{"present": false}` when the block has none. Off by default,
 because a machine's tag can run to kilobytes. NBT's number widths are dropped (`3b` reads as `3`);
-arrays and lists past 256 entries are cut to `{"elided": "int[]", "length": N}` rather than ending
-silently; and a tag over 32 KB comes back as its top-level `keys` with `truncated: true`. The tile
+byte, int and long arrays all read as lists of numbers; arrays and lists past 4,096 entries are cut
+to `{"elided": "long[]", "length": N}` rather than ending silently; and a tag over 32 KB comes back as its top-level `keys` with `truncated: true`. The tile
 entity is looked up without creating one, so the read stays a read.
 
 On a Chisels & Bits block the voxel blob in `X` is decoded into `blockEntity.chisel`: `bits` counts
