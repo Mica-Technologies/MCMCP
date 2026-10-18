@@ -76,9 +76,12 @@ public final class ServerChunkTools {
             .description("Keep the chunks under a block box loaded with no player nearby, so reads and "
                 + "writes there need no teleport. op 'hold' (default) loads what is not loaded, at a "
                 + "rationed pace, and returns once it is all in memory, with a hold id. Chunks never "
-                + "generated are listed and left alone. A hold ends when nothing has used it for "
-                + "chunks.holdIdleSeconds, at its lease, on server_release_loaded, or when you leave the "
-                + "server; reading or writing in it, or op 'renew', keeps it. op 'list' shows your holds.\n\n"
+                + "generated are listed and left alone. A hold ends when nothing has used it for its "
+                + "idleSeconds, at the end of its lease (maxSeconds, up to chunks.holdLongestLeaseSeconds, 4 "
+                + "hours by default), on server_release_loaded, or when you leave the server. Reading or "
+                + "writing in it renews the idle timer but not the lease; op 'renew' renews both. A read "
+                + "inside a hold whose lease ends within two minutes says so (holdLeaseEndsInSeconds). For a "
+                + "long test nothing reads during, pass a long idleSeconds. op 'list' shows your holds.\n\n"
                 + "Limited per caller (chunks.maxHeldChunksPerCaller, 512 by default, about 360 x 360 "
                 + "blocks) and for the server. When the server is busy the call fails with a structured "
                 + "'busy' block carrying retryAfterMs: wait that long and retry.")
@@ -91,7 +94,9 @@ public final class ServerChunkTools {
                 .integer("dimension", "Dimension id. Defaults to 0.")
                 .string("id", "renew: the hold to extend.")
                 .integer("maxSeconds", "hold, renew: the lease, from now, in seconds. Defaults to "
-                    + "chunks.holdMaxSeconds.", 60, 3600)
+                    + "chunks.holdMaxSeconds (900); at most chunks.holdLongestLeaseSeconds.", 60, 86400)
+                .integer("idleSeconds", "hold, renew: release the hold after this long with no read or "
+                    + "write in it. Defaults to chunks.holdIdleSeconds (120); at most the lease.", 10, 86400)
                 .build())
             .serverOnly()
             .handler(context -> {
@@ -102,20 +107,27 @@ public final class ServerChunkTools {
                     JsonObject status = context.onGameThread(() -> ChunkLoadGovernor.status(everyone ? null : caller));
                     return ToolResult.structured(status);
                 }
-                long maxMillis = Math.min(McmcpConfig.getChunkHoldMaxSeconds(),
-                    context.getBoundedInt("maxSeconds", McmcpConfig.getChunkHoldMaxSeconds(), 60, 3600)) * 1000L;
+                int longest = McmcpConfig.getChunkHoldLongestLeaseSeconds();
+                int requested = context.getInt("maxSeconds", McmcpConfig.getChunkHoldMaxSeconds());
+                long maxMillis = Math.max(60, Math.min(longest, requested)) * 1000L;
+                long idleMillis = Math.max(10L, Math.min(maxMillis / 1000L,
+                    context.getInt("idleSeconds", McmcpConfig.getChunkHoldIdleSeconds()))) * 1000L;
                 if ("renew".equals(op)) {
                     final String id = context.getString("id", null);
                     if (id == null) {
                         return ToolResult.error("op 'renew' needs 'id': a hold id from op 'hold' or 'list'.");
                     }
-                    String refusal = context.onGameThread(() -> ChunkLoadGovernor.renew(id, caller, maxMillis));
+                    String refusal = context.onGameThread(() -> ChunkLoadGovernor.renew(id, caller, maxMillis,
+                        context.has("idleSeconds") ? idleMillis : -1L));
                     if (refusal != null) {
                         return ToolResult.error(refusal);
                     }
                     JsonObject json = new JsonObject();
                     json.addProperty("id", id);
                     json.addProperty("renewedForSeconds", maxMillis / 1000L);
+                    if (requested > longest) {
+                        json.addProperty("maxSecondsRequested", requested);
+                    }
                     return ToolResult.structured(json);
                 }
                 if (!context.has("x") || !context.has("z")) {
@@ -135,7 +147,7 @@ public final class ServerChunkTools {
                 ChunkLoadGovernor.Outcome outcome;
                 try {
                     outcome = ChunkLoadGovernor.acquire(context, dimension, ChunkKeys.box(x1, z1, x2, z2), false,
-                        McmcpConfig.getChunkHoldIdleSeconds() * 1000L, maxMillis);
+                        idleMillis, maxMillis);
                 }
                 catch (ChunkLoadGovernor.Busy busy) {
                     return busy.toResult();
@@ -144,8 +156,11 @@ public final class ServerChunkTools {
                 json.addProperty("id", outcome.holdId);
                 json.addProperty("dimension", dimension);
                 json.add("chunks", outcome.toJson());
-                json.addProperty("idleSeconds", McmcpConfig.getChunkHoldIdleSeconds());
+                json.addProperty("idleSeconds", idleMillis / 1000L);
                 json.addProperty("leaseSeconds", maxMillis / 1000L);
+                if (requested > longest) {
+                    json.addProperty("maxSecondsRequested", requested);
+                }
                 return ToolResult.structured(json);
             })
             .build());

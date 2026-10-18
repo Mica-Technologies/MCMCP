@@ -74,6 +74,9 @@ public final class ChunkLoadGovernor {
     /** At most this many ungenerated or unloaded chunk coordinates are listed in a result. */
     private static final int MAX_LISTED = 16;
 
+    /** A read inside a hold whose lease ends within this says so. */
+    private static final long LEASE_WARNING_MILLIS = 120_000L;
+
     private static final HoldLedger LEDGER = new HoldLedger();
     private static final LoadBudget BUDGET = new LoadBudget();
     private static final ServerHealth HEALTH = new ServerHealth();
@@ -427,10 +430,11 @@ public final class ChunkLoadGovernor {
     /**
      * Extends a hold's idle timer and lease; {@code maxMillis} counts from now. Server thread.
      *
+     * @param idleMillis a new idle timeout, or a negative number to keep the hold's own
      * @return null, or why it could not
      */
     @Nullable
-    public static String renew(String holdId, String caller, long maxMillis) {
+    public static String renew(String holdId, String caller, long maxMillis, long idleMillis) {
         HoldLedger.Hold hold = LEDGER.get(holdId);
         if (hold == null || hold.temporary) {
             return "There is no hold '" + holdId + "'.";
@@ -441,6 +445,9 @@ public final class ChunkLoadGovernor {
         long now = System.currentTimeMillis();
         hold.lastUsedMillis = now;
         hold.maxMillis = (now - hold.createdMillis) + maxMillis;
+        if (idleMillis >= 0L) {
+            hold.idleMillis = idleMillis;
+        }
         return null;
     }
 
@@ -792,6 +799,14 @@ public final class ChunkLoadGovernor {
         if (unloaded > 0) {
             json.addProperty("note", "Cells in unloaded chunks were not read. Pass load: true, or hold the "
                 + "region with server_keep_loaded, to read them.");
+        }
+        // Reading in a hold renews its idle timer, never its lease, so a long test is told before its
+        // region unloads under it rather than after (#91).
+        long leaseLeft = LEDGER.leaseEndsAtMillis(dimension, chunks) - System.currentTimeMillis();
+        if (leaseLeft < LEASE_WARNING_MILLIS) {
+            json.addProperty("holdLeaseEndsInSeconds", Math.max(0L, leaseLeft / 1000L));
+            json.addProperty("holdNote", "A hold over these chunks ends soon. Extend it with server_keep_loaded "
+                + "op 'renew' if you still need them.");
         }
         return json;
     }

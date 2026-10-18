@@ -206,6 +206,22 @@ public final class HoldLedger {
         }
     }
 
+    /**
+     * When the soonest lease ends among the lasting holds containing any of these chunks: what a read
+     * there warns about, since using a hold renews its idle timer but never its lease.
+     *
+     * @return the time, or {@link Long#MAX_VALUE} when no lasting hold contains them
+     */
+    public long leaseEndsAtMillis(int dimension, Set<Long> chunks) {
+        long soonest = Long.MAX_VALUE;
+        for (Hold hold : holds.values()) {
+            if (!hold.temporary && hold.dimension == dimension && !Collections.disjoint(hold.chunks, chunks)) {
+                soonest = Math.min(soonest, hold.createdMillis + hold.maxMillis);
+            }
+        }
+        return soonest;
+    }
+
     /** Holds whose idle timer or lease has run out. Temporary holds end with their call, not here. */
     public List<String> expired(long nowMillis) {
         List<String> ids = new ArrayList<>();

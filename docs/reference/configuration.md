@@ -449,7 +449,8 @@ read live.
 | `maxHeldChunks` | 1024 | 1–65536 | Chunks MCMCP keeps loaded at once: the bound on its memory. |
 | `maxHeldChunksPerCaller` | 512 | 1–65536 | Chunks one caller keeps loaded (512 is about 360 × 360 blocks). |
 | `holdIdleSeconds` | 120 | 10–3600 | A hold unused for this long is released. |
-| `holdMaxSeconds` | 900 | 60–3600 | The longest lease before a hold must be renewed. |
+| `holdMaxSeconds` | 900 | 60–3600 | The lease a hold gets when it asks for none. |
+| `holdLongestLeaseSeconds` | 14400 | 60–86400 | The longest lease a hold may ask for with `maxSeconds`. The idle release still applies. |
 | `maxWaitSeconds` | 60 | 5–600 | How long a call waits with none of its chunks loading before giving up as busy. A call that is still getting chunks keeps waiting. |
 | `throttleMspt` | 40 | 10–500 | Mean tick time above which loading slows to 2 a tick. |
 | `pauseMspt` | 50 | 10–1000 | Mean tick time above which nothing new loads (50 ms is 20 TPS). |

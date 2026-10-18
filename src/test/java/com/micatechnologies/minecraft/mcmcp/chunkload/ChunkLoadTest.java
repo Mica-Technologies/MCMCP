@@ -160,6 +160,18 @@ class ChunkLoadTest {
     }
 
     @Test
+    void aReadKnowsWhenTheSoonestLeaseOverItsChunksEnds() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("p", 0, chunks(1, 2), false, 0L, 120_000L, 900_000L));
+        ledger.add(ledger.create("q", 0, chunks(2, 3), false, 100_000L, 120_000L, 14_400_000L));
+        ledger.add(ledger.create("p", 0, chunks(4), true, 0L, 1L, 1L));
+        assertEquals(900_000L, ledger.leaseEndsAtMillis(0, chunks(2)), "the sooner of two overlapping holds");
+        assertEquals(14_500_000L, ledger.leaseEndsAtMillis(0, chunks(3)));
+        assertEquals(Long.MAX_VALUE, ledger.leaseEndsAtMillis(0, chunks(4)), "a call's own hold has no lease");
+        assertEquals(Long.MAX_VALUE, ledger.leaseEndsAtMillis(1, chunks(1)), "another dimension");
+    }
+
+    @Test
     void aCallsTemporaryHoldNeverExpiresByTimeAndIsShedLast() {
         HoldLedger ledger = new HoldLedger();
         HoldLedger.Hold call = ledger.create("p", 0, chunks(1), true, 0L, 1L, 1L);

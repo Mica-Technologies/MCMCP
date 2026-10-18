@@ -487,14 +487,17 @@ When the governor refuses or gives up, the call returns a tool error whose struc
 | `x`, `z`, `toX`, `toZ` | integer | `hold`: the block box. |
 | `dimension` | integer | Default 0. |
 | `id` | string | `renew`: the hold to extend. |
-| `maxSeconds` | integer 60–3600 | The lease from now. Default `chunks.holdMaxSeconds`. |
+| `maxSeconds` | integer 60–86400 | The lease from now. Default `chunks.holdMaxSeconds` (900), at most `chunks.holdLongestLeaseSeconds` (4 hours). A longer request is cut and the reply carries `maxSecondsRequested`. |
+| `idleSeconds` | integer 10–86400 | Release after this long with no read or write inside. Default `chunks.holdIdleSeconds` (120), at most the lease. |
 
 Holds the chunks under a box loaded with no player nearby, and returns once they're in memory:
-`{id, chunks, idleSeconds, leaseSeconds}`. A hold ends after `chunks.holdIdleSeconds` with no
-reads or writes inside it, or at the end of its lease, on
-[`server_release_loaded`](#server_release_loaded), or when its owner leaves the server. Reading
-or writing inside it, or `renew`, keeps it going. `list` shows the governor's state and your
-holds.
+`{id, chunks, idleSeconds, leaseSeconds}`. A hold ends after its `idleSeconds` with no reads or
+writes inside it, at the end of its lease, on [`server_release_loaded`](#server_release_loaded), or
+when its owner leaves the server. Reading or writing inside it renews the idle timer but never the
+lease; `renew` renews both. A read inside a hold whose lease ends within two minutes carries
+`holdLeaseEndsInSeconds` in its `chunks` block, so a long test hears of it before its region
+unloads. For a test that reads nothing for minutes at a time, pass a long `idleSeconds`. `list`
+shows the governor's state and your holds.
 
 Limited to `chunks.maxHeldChunksPerCaller` (512, about 360 × 360 blocks) per caller and
 `chunks.maxHeldChunks` server-wide. Work a larger area in pieces.

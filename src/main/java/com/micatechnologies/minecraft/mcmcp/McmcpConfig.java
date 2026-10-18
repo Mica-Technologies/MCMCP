@@ -138,6 +138,7 @@ public class McmcpConfig {
     private static int chunkMaxHeldPerCaller = 512;
     private static int chunkHoldIdleSeconds = 120;
     private static int chunkHoldMaxSeconds = 900;
+    private static int chunkHoldLongestLeaseSeconds = 14400;
     private static int chunkMaxWaitSeconds = 60;
     private static int chunkThrottleMspt = 40;
     private static int chunkPauseMspt = 50;
@@ -402,7 +403,13 @@ public class McmcpConfig {
         chunkHoldIdleSeconds = configuration.getInt("holdIdleSeconds", CATEGORY_CHUNKS, 120, 10, 3600,
             "A hold nothing has read from or written to for this long is released.");
         chunkHoldMaxSeconds = configuration.getInt("holdMaxSeconds", CATEGORY_CHUNKS, 900, 60, 3600,
-            "The longest a hold lasts before it must be renewed (server_keep_loaded op=renew).");
+            "The lease a hold gets when it does not ask for one: how long it lasts before it must be\n"
+                + "renewed (server_keep_loaded op=renew).");
+        // A separate key rather than a wider holdMaxSeconds: Forge writes every default into the file, so
+        // an existing install would keep its 900 whatever the new default said (#91).
+        chunkHoldLongestLeaseSeconds = configuration.getInt("holdLongestLeaseSeconds", CATEGORY_CHUNKS, 14400,
+            60, 86400, "The longest lease a hold may ask for with maxSeconds, for long tests. The idle\n"
+                + "release (holdIdleSeconds, or the hold's own idleSeconds) still applies.");
         chunkMaxWaitSeconds = configuration.getInt("maxWaitSeconds", CATEGORY_CHUNKS, 60, 5, 600,
             "How long a call waits without any of its chunks loading before giving up with a 'server busy' "
                 + "error. Counted from the last chunk it got, so a call that is still moving keeps waiting.");
@@ -857,6 +864,11 @@ public class McmcpConfig {
 
     public static int getChunkHoldMaxSeconds() {
         return chunkHoldMaxSeconds;
+    }
+
+    /** The longest lease a hold may ask for; never shorter than the default lease. */
+    public static int getChunkHoldLongestLeaseSeconds() {
+        return Math.max(chunkHoldMaxSeconds, chunkHoldLongestLeaseSeconds);
     }
 
     public static int getChunkMaxWaitSeconds() {
