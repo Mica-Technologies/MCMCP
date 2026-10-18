@@ -8,6 +8,7 @@ import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.client.ClientActivityBanner;
 import com.micatechnologies.minecraft.mcmcp.client.ClientCamera;
+import com.micatechnologies.minecraft.mcmcp.client.TileEntityCoverage;
 import com.micatechnologies.minecraft.mcmcp.client.ClientChatRecorder;
 import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
@@ -230,8 +231,9 @@ public final class ClientDebugTools {
                             // A tick for the lightmap to pick up the new gamma, frames for the camera.
                             ClientFrameClock.await(2, 1, 3000L);
                             if (from != null) {
-                                settleChunkMeshes(context,
-                                    context.getBoundedInt("settle_ms", 5000, 0, MAX_SETTLE_MILLIS), view);
+                                int settleMillis = context.getBoundedInt("settle_ms", 5000, 0, MAX_SETTLE_MILLIS);
+                                settleChunkMeshes(context, settleMillis, view);
+                                settleTileEntities(context, settleMillis, view);
                             }
                             capture = context.onGameThread(new Callable<JsonObject>() {
                                 @Override
@@ -534,6 +536,34 @@ public final class ClientDebugTools {
         // One more frame after the last mesh lands, so it is in the frame that is read.
         ClientFrameClock.await(2, 0, 2000L);
         view.addProperty("meshesSettled", settled);
+    }
+
+    /**
+     * Makes sure the tile entities in view will be drawn, and says how many are (#96).
+     *
+     * <p>A settled mesh can still be missing its tile entities: see {@link TileEntityCoverage}. Those
+     * missing have their render chunks rebuilt and the meshes are let settle once more.
+     */
+    private static void settleTileEntities(ToolContext context, int settleMillis, JsonObject view)
+        throws Exception {
+        TileEntityCoverage.Result first = context.onGameThread(() -> TileEntityCoverage.check(Minecraft.getMinecraft()));
+        if (!first.checked) {
+            return;
+        }
+        TileEntityCoverage.Result last = first;
+        if (!first.missing.isEmpty()) {
+            context.onGameThread(() -> {
+                TileEntityCoverage.rebuild(Minecraft.getMinecraft(), first.missing);
+                return null;
+            });
+            settleChunkMeshes(context, Math.max(1000, settleMillis), view);
+            last = context.onGameThread(() -> TileEntityCoverage.check(Minecraft.getMinecraft()));
+        }
+        JsonObject json = last.toJson();
+        if (!first.missing.isEmpty()) {
+            json.addProperty("rebuilt", first.missing.size());
+        }
+        view.add("tileEntities", json);
     }
 
     /** Forge canonicalises the file it hands the event, so compare like with like. */

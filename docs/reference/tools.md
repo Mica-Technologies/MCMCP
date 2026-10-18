@@ -1889,6 +1889,13 @@ within its render distance. A position outside it is refused. The tool waits up 
 (default 5000) for the chunk meshes around the new viewpoint to be built. `view.meshesSettled` in
 the result says whether they were.
 
+A settled mesh can still lack the blocks a tile entity renderer draws (signal heads, chests, signs):
+a chunk the client was just sent can compile before its tile entities exist, and then draws without
+them until it is rebuilt. So the capture then checks every tile entity with a renderer in draw
+distance of the camera against the renderer's lists, rebuilds the chunks of any missing, and lets
+them settle again. `view.tileEntities` reports `inRange`, `drawn`, and `rebuilt`, `missing` and
+`missingAt` when there were any.
+
 **A view beyond the render distance.** `bringPlayer: true` moves the player to the camera first, so
 the chunks there load, waits for them, captures, and puts the player back where they were, facing the
 same way and flying or not as before. `view.playerReturnedTo` says where. The move is the server's own
