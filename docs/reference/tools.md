@@ -1237,7 +1237,7 @@ Requires `permissions.allowChat` · `player`, `message` required
 
 #### `server_run_commands`
 
-:material-alert: Destructive · `commands` required · optional `asPlayer`, `stopOnError`, `allResults`, `load`
+:material-alert: Destructive · `commands` required · optional `asPlayer`, `stopOnError`, `allResults`, `maxOutputLines`, `load`
 
 Runs up to 10,000 commands in order in one call, with nothing sent to chat in between. It replaces
 scripts that teleport a player around a region and send commands through chat in groups. The
@@ -1251,6 +1251,9 @@ result:
 - **Results.** `results` lists the commands that failed, or all of them with `allResults`. A
   command a mod cancelled is a failure with `cancelled: true`, and the top level counts them in
   `cancelled` (see [`server_run_command`](#server_run_command)).
+- **Output.** Each listed command keeps its first `maxOutputLines` lines (default 20, up to 500);
+  one with more carries `outputTruncated`, the number dropped, so a cut report never reads as a
+  command that stopped partway.
 - **Blocked commands.** A command on `permissions.blockedCommands` refuses the whole call before
   anything runs.
 - **Undo.** `/fill` and `/clone` leave one undo point for the call.

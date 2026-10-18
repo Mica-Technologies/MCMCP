@@ -576,6 +576,8 @@ public final class ServerBulkTools {
                 .string("asPlayer", "Run as this connected player. Omit for console authority.")
                 .bool("stopOnError", "Stop at the first command that does not succeed. Default false.")
                 .bool("allResults", "List every command's result, not just the ones that failed. Default false.")
+                .integer("maxOutputLines", "Output lines kept per listed command. Default 20; a command "
+                    + "with more says how many were dropped in outputTruncated.", 1, 500)
                 .bool("load", "Load the chunks the commands' coordinates name, and release them afterwards.")
                 .required("commands")
                 .build())
@@ -613,6 +615,7 @@ public final class ServerBulkTools {
         final String asPlayer = context.getString("asPlayer", null);
         final boolean stopOnError = context.getBoolean("stopOnError", false);
         final boolean allResults = context.getBoolean("allResults", false);
+        final int maxOutputLines = context.getBoundedInt("maxOutputLines", 20, 1, 500);
 
         // The chunks the commands name, for load: true.
         final int[] base = context.onGameThread(() -> {
@@ -748,7 +751,13 @@ public final class ServerBulkTools {
                     lines.addAll(sender.getOutput());
                     List<String> listed = new ArrayList<>(lines);
                     if (!listed.isEmpty()) {
-                        item.add("output", Json.arrayOfStrings(listed.size() > 5 ? listed.subList(0, 5) : listed));
+                        // Cut at five lines without a word, a builder's 18-line report read as a command that
+                        // stopped after its first step (#103).
+                        item.add("output", Json.arrayOfStrings(listed.size() > maxOutputLines
+                            ? listed.subList(0, maxOutputLines) : listed));
+                        if (listed.size() > maxOutputLines) {
+                            item.addProperty("outputTruncated", listed.size() - maxOutputLines);
+                        }
                     }
                     results.add(item);
                 }
