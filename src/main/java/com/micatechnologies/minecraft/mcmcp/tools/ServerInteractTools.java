@@ -53,11 +53,14 @@ public final class ServerInteractTools {
             "Use the item in a hotbar slot on a block, as that player and from any distance: the click a "
                 + "span-wire tool, a track tool or a door needs. Runs the game's own right-click path, so "
                 + "protection mods still decide and a placement is a real placement; only reach is lifted. "
-                + "The item must already be in the player's hotbar. Returns the block before and after, the "
-                + "block on the clicked face after, and the item afterwards.", true);
+                + "The item must already be in the player's hotbar; to press a button or a lever with an empty "
+                + "hand, use server_activate_block. Returns the block before and after, the block on the "
+                + "clicked face after, and the item afterwards.", true);
         register("server_activate_block", "Activate a block",
-            "Right-click a block with an empty hand, as that player and from any distance: open a "
-                + "controller, flip a lever, open a container. With 'container', read the container that opens "
+            "Right-click a block with an empty hand, as that player and from any distance: press a button, "
+                + "open a controller, flip a lever, open a container. The player's selected slot moves to an "
+                + "empty hotbar slot for the click and back; with none empty, 'handEmpty' is false and the "
+                + "block sees the held item. With 'container', read the container that opens "
                 + "and press one of its buttons in the same moment — a container opened from afar closes again "
                 + "on the next tick.", false);
     }
@@ -149,11 +152,22 @@ public final class ServerInteractTools {
                         if (withItem && slot >= 0) {
                             player.inventory.currentItem = slot;
                         }
+                        if (!withItem) {
+                            // A block's onBlockActivated reads the player's hand, not the stack passed in, so
+                            // an empty-hand press selects an empty slot (#87). Only the selection moves: an
+                            // item the block hands over lands in that slot and stays.
+                            int empty = emptyHotbarSlot(player);
+                            if (empty >= 0) {
+                                player.inventory.currentItem = empty;
+                            }
+                            result.addProperty("handEmpty", empty >= 0);
+                        }
                         player.setSneaking(sneak);
                         ItemStack stack = withItem ? player.getHeldItem(EnumHand.MAIN_HAND) : ItemStack.EMPTY;
                         if (withItem && stack.isEmpty()) {
                             throw new IllegalStateException("Hotbar slot " + player.inventory.currentItem
-                                + " is empty. Put the item in the player's hotbar first.");
+                                + " is empty. Put the item in the player's hotbar first, or use "
+                                + "server_activate_block to press the block with an empty hand.");
                         }
                         result.addProperty("item", stack.isEmpty() ? "empty hand" : String.valueOf(stack.getItem().getRegistryName()));
                         outcomeResult = player.interactionManager.processRightClickBlock(player, world, stack,
@@ -199,6 +213,19 @@ public final class ServerInteractTools {
                 }
                 return ToolResult.structured(json);
             });
+    }
+
+    /** The selected hotbar slot if it is empty, else the first empty one, else -1. Game thread. */
+    private static int emptyHotbarSlot(EntityPlayerMP player) {
+        if (player.inventory.getStackInSlot(player.inventory.currentItem).isEmpty()) {
+            return player.inventory.currentItem;
+        }
+        for (int i = 0; i < 9; i++) {
+            if (player.inventory.getStackInSlot(i).isEmpty()) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /**

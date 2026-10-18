@@ -1142,8 +1142,12 @@ use's `result` and `changed`. A use outside the build limit, spawn protection or
 
 :material-alert: Destructive · as above, without `slot`
 
-Right-clicks a block with an empty hand from any distance: open a controller, flip a lever, open a
-container.
+Right-clicks a block with an empty hand from any distance: press a button, open a controller, flip a
+lever, open a container. A block reads the hand of the player clicking it, so for the click the
+player's selection moves to an empty hotbar slot (the selected one if it is empty) and back again.
+With no hotbar slot empty, the reply says `handEmpty: false` and the block sees the held item.
+
+[`server_use_item_on_block`](#server_use_item_on_block) refuses an empty slot and points here.
 
 **Containers.** A container opened from more than about eight blocks away is closed by the server
 on the next tick. Anything to do in it must happen in the same call, through `container`:
