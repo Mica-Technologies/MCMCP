@@ -1,6 +1,5 @@
 package com.micatechnologies.minecraft.mcmcp.client.tools;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
@@ -13,6 +12,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.tools.ChiselBlob;
+import com.micatechnologies.minecraft.mcmcp.tools.ChiselGrid;
 import com.micatechnologies.minecraft.mcmcp.tools.ChiselNbt;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import com.micatechnologies.minecraft.mcmcp.tools.ServerBuildTools;
@@ -21,7 +21,6 @@ import io.netty.buffer.Unpooled;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -186,7 +185,7 @@ public final class ClientCommandBlockTools {
         }
         run.json.addProperty("commandChars", command.length());
 
-        final int[] requested = intTriple(context.getArguments(), "command_block");
+        final int[] requested = ChiselGrid.intTriple(context.getArguments(), "command_block");
         if (context.has("command_block") && requested == null) {
             return run.refuse("command_block must be three integers [x, y, z].");
         }
@@ -438,23 +437,6 @@ public final class ClientCommandBlockTools {
         }
     }
 
-    @Nullable
-    private static int[] intTriple(JsonObject arguments, String name) {
-        JsonElement element = arguments.get(name);
-        if (element == null || !element.isJsonArray() || element.getAsJsonArray().size() != 3) {
-            return null;
-        }
-        int[] values = new int[3];
-        for (int i = 0; i < 3; i++) {
-            JsonElement value = element.getAsJsonArray().get(i);
-            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
-                return null;
-            }
-            values[i] = value.getAsInt();
-        }
-        return values;
-    }
-
     // ------------------------------------------------------------------
     // client_set_block_nbt
     // ------------------------------------------------------------------
@@ -543,10 +525,6 @@ public final class ClientCommandBlockTools {
     // client_chisel_block
     // ------------------------------------------------------------------
 
-    private static final JsonPrimitive STRING_ARRAY = new JsonPrimitive("array");
-
-    private static final String[] FACES = {"north", "south", "west", "east", "up", "down"};
-
     private static void registerChiselBlock() {
         JsonObject coord = Json.obj("type", new JsonPrimitive("integer"));
         McpRegistry.registerTool(McpTool.named("client_chisel_block")
@@ -566,13 +544,13 @@ public final class ClientCommandBlockTools {
                 .integer("x", "Block X.")
                 .integer("y", "Block Y, 0-255.")
                 .integer("z", "Block Z.")
-                .property("palette", paletteSchema())
+                .property("palette", ChiselGrid.paletteSchema())
                 .string("start", "What the bits are before edits: 'empty' (air, default), "
                     + "'existing' (the block there now: its bits if chiseled, or all of it if a "
                     + "plain block), or a palette key to fill with.")
                 .array("layers", "Every bit: 16 layers, y 0 (bottom) first, each 16 strings, z 0 "
                     + "(north) first, each 16 characters, x 0 (west) first. Shorter rows and "
-                    + "missing layers leave the rest unchanged.", Json.obj("type", STRING_ARRAY))
+                    + "missing layers leave the rest unchanged.", Json.obj("type", ChiselGrid.STRING_ARRAY))
                 .array("boxes", "Fill boxes of bits, inclusive corners.", JsonSchema.object()
                     .array("from", "[x, y, z], each 0-15.", coord)
                     .array("to", "[x, y, z], each 0-15.", coord)
@@ -581,7 +559,7 @@ public final class ClientCommandBlockTools {
                     .build())
                 .array("faces", "Draw on a side of the block.", JsonSchema.object()
                     .enumeration("face", "The side, by the direction it faces. 'up' and 'down' are "
-                        + "drawn as on a map: top row north, left column west.", FACES)
+                        + "drawn as on a map: top row north, left column west.", ChiselGrid.FACES)
                     .stringArray("rows", "Up to 16 strings of up to 16 characters, top row "
                         + "first, left to right as seen from outside.")
                     .integer("depth", "How many bits deep each character goes. Default 1.", 1, 16)
@@ -594,17 +572,6 @@ public final class ClientCommandBlockTools {
             .destructive()
             .handler(ClientCommandBlockTools::chisel)
             .build());
-    }
-
-    private static JsonObject paletteSchema() {
-        JsonObject schema = new JsonObject();
-        schema.addProperty("type", "object");
-        schema.addProperty("description", "Single-character keys to block states, e.g. {\"#\": "
-            + "\"minecraft:stone\", \"r\": \"minecraft:wool[color=red]\"}. '.' and ' ' are "
-            + "reserved.");
-        schema.add("additionalProperties", Json.obj("type",
-            new JsonPrimitive("string")));
-        return schema;
     }
 
     private static ToolResult chisel(ToolContext context) throws Exception {
@@ -664,29 +631,12 @@ public final class ClientCommandBlockTools {
             @Override
             public Map<Character, IBlockState> call() {
                 Minecraft mc = ClientStateTools.requireInWorld();
-                Map<Character, IBlockState> keys = new HashMap<>();
-                keys.put('.', Blocks.AIR.getDefaultState());
-                JsonObject given = Json.getObjectOrEmpty(args, "palette");
-                for (Map.Entry<String, JsonElement> entry : given.entrySet()) {
-                    String key = entry.getKey();
-                    if (key.length() != 1 || key.equals(".") || key.equals(" ")) {
-                        drawError[0] = "Palette key '" + key + "' must be one character other "
-                            + "than '.' or ' '.";
-                        return null;
-                    }
-                    if (!entry.getValue().isJsonPrimitive()) {
-                        drawError[0] = "Palette key '" + key + "' must name a block state.";
-                        return null;
-                    }
-                    try {
-                        // Through its numeric id and back: a bit is stored as that id, so a
-                        // property it cannot hold (a stair's shape) would never read back.
-                        IBlockState state = ChiselNbt.parseState(entry.getValue().getAsString());
-                        keys.put(key.charAt(0), Block.getStateById(Block.getStateId(state)));
-                    } catch (IllegalArgumentException e) {
-                        drawError[0] = "Palette key '" + key + "': " + e.getMessage();
-                        return null;
-                    }
+                Map<Character, IBlockState> keys;
+                try {
+                    keys = ChiselGrid.palette(args);
+                } catch (IllegalArgumentException e) {
+                    drawError[0] = e.getMessage();
+                    return null;
                 }
                 if ("existing".equals(start)) {
                     if (cells[0] == null) {
@@ -711,24 +661,14 @@ public final class ClientCommandBlockTools {
             return ToolResult.error(drawError[0]);
         }
 
-        String drawn = draw(args, palette, cells);
+        String drawn = ChiselGrid.draw(args, palette, cells);
         if (drawn != null) {
             return ToolResult.error(drawn);
         }
 
         // States to a palette and indices, then the tag.
         final List<IBlockState> states = new ArrayList<>();
-        final int[] indices = new int[ChiselBlob.VOXELS];
-        Map<IBlockState, Integer> indexOf = new HashMap<>();
-        for (int i = 0; i < cells.length; i++) {
-            Integer index = indexOf.get(cells[i]);
-            if (index == null) {
-                index = states.size();
-                indexOf.put(cells[i], index);
-                states.add(cells[i]);
-            }
-            indices[i] = index;
-        }
+        final int[] indices = ChiselGrid.index(cells, states);
         ChiselNbt.Built built = context.onGameThread(new Callable<ChiselNbt.Built>() {
             @Override
             public ChiselNbt.Built call() {
@@ -750,15 +690,7 @@ public final class ClientCommandBlockTools {
         summary.addProperty("block", built.blobBytes == 0 ? "minecraft:air" : built.blockId);
         summary.addProperty("blobBytes", built.blobBytes);
         summary.addProperty("commandChars", command.length());
-        JsonObject counts = new JsonObject();
-        int[] tally = new int[states.size()];
-        for (int index : indices) {
-            tally[index]++;
-        }
-        for (int i = 0; i < states.size(); i++) {
-            counts.addProperty(ChiselNbt.stateName(states.get(i)), tally[i]);
-        }
-        summary.add("bits", counts);
+        summary.add("bits", ChiselGrid.counts(states, indices));
         if (command.length() > MAX_COMMAND_CHARS) {
             return ToolResult.error("The block's data comes to a " + command.length()
                 + "-character command; a command block holds " + MAX_COMMAND_CHARS + ". Use fewer "
@@ -778,138 +710,6 @@ public final class ClientCommandBlockTools {
             checkBits(context, pos, cells, run.json);
         }
         return run.toResult();
-    }
-
-    /** Applies layers, boxes and faces to {@code cells}; an error message, or null. */
-    @Nullable
-    static String draw(JsonObject args, Map<Character, IBlockState> palette, IBlockState[] cells) {
-        JsonElement layers = args.get("layers");
-        if (layers != null) {
-            if (!layers.isJsonArray() || layers.getAsJsonArray().size() > 16) {
-                return "layers must be an array of at most 16 layers.";
-            }
-            JsonArray ys = layers.getAsJsonArray();
-            for (int y = 0; y < ys.size(); y++) {
-                if (!ys.get(y).isJsonArray() || ys.get(y).getAsJsonArray().size() > 16) {
-                    return "layers[" + y + "] must be an array of at most 16 strings.";
-                }
-                JsonArray rows = ys.get(y).getAsJsonArray();
-                for (int z = 0; z < rows.size(); z++) {
-                    String row = rows.get(z).getAsString();
-                    if (row.length() > 16) {
-                        return "layers[" + y + "][" + z + "] is " + row.length()
-                            + " characters; at most 16.";
-                    }
-                    for (int x = 0; x < row.length(); x++) {
-                        String bad = put(palette, cells, row.charAt(x), x, y, z);
-                        if (bad != null) {
-                            return "layers[" + y + "][" + z + "]: " + bad;
-                        }
-                    }
-                }
-            }
-        }
-
-        JsonArray boxes = Json.getArray(args, "boxes");
-        for (int i = 0; boxes != null && i < boxes.size(); i++) {
-            JsonObject box = boxes.get(i).getAsJsonObject();
-            int[] from = intTriple(box, "from");
-            int[] to = intTriple(box, "to");
-            String key = Json.getString(box, "key", "");
-            if (from == null || to == null || !inBlock(from) || !inBlock(to)) {
-                return "boxes[" + i + "]: from and to must be [x, y, z] with each 0-15.";
-            }
-            if (key.length() != 1) {
-                return "boxes[" + i + "]: key must be one character.";
-            }
-            for (int x = Math.min(from[0], to[0]); x <= Math.max(from[0], to[0]); x++) {
-                for (int y = Math.min(from[1], to[1]); y <= Math.max(from[1], to[1]); y++) {
-                    for (int z = Math.min(from[2], to[2]); z <= Math.max(from[2], to[2]); z++) {
-                        String bad = put(palette, cells, key.charAt(0), x, y, z);
-                        if (bad != null) {
-                            return "boxes[" + i + "]: " + bad;
-                        }
-                    }
-                }
-            }
-        }
-
-        JsonArray faces = Json.getArray(args, "faces");
-        for (int i = 0; faces != null && i < faces.size(); i++) {
-            JsonObject face = faces.get(i).getAsJsonObject();
-            String side = Json.getString(face, "face", "");
-            List<String> rows = Json.getStringList(face, "rows");
-            int depth = Json.getInt(face, "depth", 1);
-            if (Arrays.asList(FACES).indexOf(side) < 0) {
-                return "faces[" + i + "]: face must be one of north, south, west, east, up, down.";
-            }
-            if (rows.size() > 16 || depth < 1 || depth > 16) {
-                return "faces[" + i + "]: at most 16 rows, and depth 1-16.";
-            }
-            for (int r = 0; r < rows.size(); r++) {
-                String row = rows.get(r);
-                if (row.length() > 16) {
-                    return "faces[" + i + "].rows[" + r + "] is " + row.length()
-                        + " characters; at most 16.";
-                }
-                for (int c = 0; c < row.length(); c++) {
-                    for (int d = 0; d < depth; d++) {
-                        int[] xyz = faceToBlock(side, r, c, d);
-                        String bad = put(palette, cells, row.charAt(c), xyz[0], xyz[1], xyz[2]);
-                        if (bad != null) {
-                            return "faces[" + i + "].rows[" + r + "]: " + bad;
-                        }
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Where row {@code r}, column {@code c}, {@code d} bits in from the {@code face} side lands, for
-     * someone outside that side looking at it: rows run top to bottom, columns left to right.
-     * {@code up} and {@code down} read as a map, north at the top.
-     */
-    static int[] faceToBlock(String face, int r, int c, int d) {
-        int top = 15 - r;
-        switch (face) {
-            case "north": // looking south: left is east
-                return new int[]{15 - c, top, d};
-            case "south": // looking north: left is west
-                return new int[]{c, top, 15 - d};
-            case "west": // looking east: left is north
-                return new int[]{d, top, c};
-            case "east": // looking west: left is south
-                return new int[]{15 - d, top, 15 - c};
-            case "up":
-                return new int[]{c, 15 - d, r};
-            default: // down
-                return new int[]{c, d, r};
-        }
-    }
-
-    @Nullable
-    private static String put(Map<Character, IBlockState> palette, IBlockState[] cells, char key,
-        int x, int y, int z) {
-        if (key == ' ') {
-            return null;
-        }
-        IBlockState state = palette.get(key);
-        if (state == null) {
-            return "'" + key + "' is not a palette key.";
-        }
-        cells[ChiselBlob.index(x, y, z)] = state;
-        return null;
-    }
-
-    private static boolean inBlock(int[] xyz) {
-        for (int value : xyz) {
-            if (value < 0 || value > 15) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /** Reads the block back from the server and counts bits that are not what was written. */
