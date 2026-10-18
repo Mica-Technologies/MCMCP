@@ -737,6 +737,24 @@ Entities within a radius (default 16, up to 128), with distances. Filter by name
 searches are not bound by `maxScanRadius`; a radius past 128 is cut to it and the reply carries
 `radiusRequested`.
 
+#### `server_remove_entities`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `types`, `x`, `y`, `z` required · optional `toX`, `toY`, `toZ`, `dimension`, `includeNamed`, `dryRun`, `load`
+
+Removes every entity of the given types in a block box: the villagers a test summoned, the items a
+removed bed dropped. `types` takes ids (`minecraft:villager`; a bare name is vanilla's, and `item`
+is a dropped item), namespaces ending in `:`, or patterns with `*`; `*` alone is every type.
+
+- **Players are never removed.** Named entities are kept unless `includeNamed: true`, and counted
+  in `keptNamed`, so a wide box does not take somebody's pet.
+- **Removed outright**, with no death and no drops. On a server nobody is near, vanilla has stopped
+  ticking entities (see [`server_world_info`](#server_world_info)), and a killed entity is only
+  taken out of the world by the entity tick that is not running: `/kill` and selectors found
+  nothing, and a villager at 0 health stayed. This works regardless.
+- `dryRun: true` reports `wouldRemove` and removes nothing. The reply counts `byType` and lists the
+  first 20 positions. At most 1,024 chunks and 10,000 entities a call. Not undoable.
+- `load: true` loads the box's unloaded chunks for the call.
+
 #### `server_world_info`
 
 :material-eye: Read-only · no arguments

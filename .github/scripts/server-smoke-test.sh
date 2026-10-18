@@ -680,6 +680,24 @@ case "$LEVER_BODY" in
   *) mcp_failure "the fake player did not flip the lever: ${LEVER_BODY}" ;;
 esac
 
+echo "==> Removing entities with nobody near: two summoned villagers go, nothing else"
+mcp_call 562 server_run_commands "{\"commands\":[\"summon minecraft:villager ${LX} $((LY + 1)) $((LZ + 2)) {NoAI:1b}\",\"summon minecraft:villager $((LX + 1)) $((LY + 1)) $((LZ + 2)) {NoAI:1b}\"]}" > /dev/null \
+  || mcp_failure "could not summon the villagers"
+DRY_BODY="$(mcp_call 563 server_remove_entities "{\"types\":[\"villager\"],\"x\":$((LX - 2)),\"y\":${LY},\"z\":${LZ},\"toX\":$((LX + 3)),\"toY\":$((LY + 3)),\"toZ\":$((LZ + 4)),\"dryRun\":true}")" \
+  || mcp_failure "server_remove_entities dry run failed: ${DRY_BODY}"
+case "$DRY_BODY" in
+  *'"wouldRemove":2'*) echo "    a dry run counts both" ;;
+  *) mcp_failure "the dry run did not count two villagers: ${DRY_BODY}" ;;
+esac
+REMOVE_BODY="$(mcp_call 564 server_remove_entities "{\"types\":[\"villager\"],\"x\":$((LX - 2)),\"y\":${LY},\"z\":${LZ},\"toX\":$((LX + 3)),\"toY\":$((LY + 3)),\"toZ\":$((LZ + 4))}")" \
+  || mcp_failure "server_remove_entities failed: ${REMOVE_BODY}"
+AFTER_BODY="$(mcp_call 565 server_remove_entities "{\"types\":[\"villager\"],\"x\":$((LX - 2)),\"y\":${LY},\"z\":${LZ},\"toX\":$((LX + 3)),\"toY\":$((LY + 3)),\"toZ\":$((LZ + 4)),\"dryRun\":true}")" \
+  || mcp_failure "the check after removing failed: ${AFTER_BODY}"
+case "$REMOVE_BODY$AFTER_BODY" in
+  *'"removed":2'*'"wouldRemove":0'*) echo "    both removed, none left" ;;
+  *) mcp_failure "the villagers were not removed: ${REMOVE_BODY} then ${AFTER_BODY}" ;;
+esac
+
 echo "==> Background jobs: an op replay and a paged read run to the end"
 BX=$((SPAWN_X + 24)); BY=$((UNDO_Y + 10)); BZ=$((SPAWN_Z + 24))
 JOB_BODY="$(mcp_call 60 server_job_submit "{\"kind\":\"apply_ops\",\"label\":\"smoke\",\"args\":{\"ops\":[\"fill ${BX} ${BY} ${BZ} $((BX + 3)) ${BY} $((BZ + 3)) minecraft:stone\",\"setblock ${BX} $((BY + 1)) ${BZ} minecraft:torch\"]}}")" \
