@@ -297,7 +297,7 @@ public final class ServerWorldTools {
                 .integer("x", "Centre X coordinate.")
                 .integer("y", "Centre Y coordinate.")
                 .integer("z", "Centre Z coordinate.")
-                .integer("radius", "Search radius in blocks.", 1, 128)
+                .integer("radius", "Search radius in blocks. Default 16.", 1, GameJson.MAX_ENTITY_RADIUS)
                 .integer("dimension", "Dimension id. Defaults to 0.")
                 .string("type", "Namespaced entity type to filter by, e.g. 'minecraft:zombie'. "
                     + "Omit to return every entity.")
@@ -309,7 +309,8 @@ public final class ServerWorldTools {
                 final double centreX = context.requireDouble("x");
                 final double centreY = context.requireDouble("y");
                 final double centreZ = context.requireDouble("z");
-                final int radius = context.getBoundedInt("radius", 16, 1, McmcpConfig.getMaxScanRadius());
+                final int requested = context.getInt("radius", 16);
+                final int radius = context.getBoundedInt("radius", 16, 1, GameJson.MAX_ENTITY_RADIUS);
                 final int dimension = context.getInt("dimension", 0);
                 final String typeFilter = context.getString("type", null);
 
@@ -340,6 +341,9 @@ public final class ServerWorldTools {
                         JsonObject json = new JsonObject();
                         json.addProperty("dimension", dimension);
                         json.addProperty("radius", radius);
+                        if (requested != radius) {
+                            json.addProperty("radiusRequested", requested);
+                        }
                         json.addProperty("count", array.size());
                         json.add("entities", array);
                         return json;

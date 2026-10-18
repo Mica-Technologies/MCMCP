@@ -516,7 +516,8 @@ public class McmcpConfig {
                 + "short enough that a stuck endpoint is noticed.");
 
         maxScanRadius = configuration.getInt("maxScanRadius", CATEGORY_LIMITS, 32, 1, 128,
-            "Largest radius, in blocks, that world- and entity-scanning tools will search.\n"
+            "Largest radius, in blocks, that block-scanning tools will search. Entity searches are\n"
+                + "not bound by it: they cost the chunks they cross, not the cube of the radius.\n"
                 + "Scans run on the game thread, and cost grows with the cube of this number. 32 is "
                 + "already 260,000 blocks per call.");
 

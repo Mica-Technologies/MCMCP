@@ -717,7 +717,9 @@ prefix may match nothing.
 
 :material-eye: Read-only · `x`, `y`, `z` required · optional `radius`, `dimension`, `type`
 
-Entities within a radius, with distances. Filter by namespaced type.
+Entities within a radius (default 16, up to 128), with distances. Filter by namespaced type. Entity
+searches are not bound by `maxScanRadius`; a radius past 128 is cut to it and the reply carries
+`radiusRequested`.
 
 #### `server_world_info`
 

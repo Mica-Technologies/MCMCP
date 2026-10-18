@@ -2,7 +2,6 @@ package com.micatechnologies.minecraft.mcmcp.client.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.client.ClientKeepAwake;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -279,14 +278,16 @@ public final class ClientStateTools {
                 + "mobs, other players, dropped items, vehicles. Limited to the client's entity "
                 + "tracking range, which is smaller than the server's view.")
             .schema(JsonSchema.object()
-                .integer("radius", "Search radius in blocks around the player.", 1, 128)
+                .integer("radius", "Search radius in blocks around the player. Default 16.", 1,
+                    GameJson.MAX_ENTITY_RADIUS)
                 .string("type", "Namespaced entity type to filter by, e.g. 'minecraft:zombie'. Omit "
                     + "to return every entity.")
                 .build())
             .clientOnly()
             .readOnly()
             .handler(context -> {
-                final int radius = context.getBoundedInt("radius", 16, 1, McmcpConfig.getMaxScanRadius());
+                final int requested = context.getInt("radius", 16);
+                final int radius = context.getBoundedInt("radius", 16, 1, GameJson.MAX_ENTITY_RADIUS);
                 final String typeFilter = context.getString("type", null);
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
@@ -312,6 +313,9 @@ public final class ClientStateTools {
 
                         JsonObject json = new JsonObject();
                         json.addProperty("radius", radius);
+                        if (requested != radius) {
+                            json.addProperty("radiusRequested", requested);
+                        }
                         json.addProperty("count", array.size());
                         json.add("entities", array);
                         return json;

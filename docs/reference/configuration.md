@@ -543,7 +543,7 @@ take several ticks; 5 seconds is generous for that and short enough that a stuck
 
 `integer` 1–128 · default `32`
 
-Largest radius that world- and entity-scanning tools search. Scans run on the game thread and cost
+Largest radius that block-scanning tools search. Scans run on the game thread and cost
 grows with the cube: 32 is already 260,000 block reads per call.
 
 ### `maxBlockVolume`

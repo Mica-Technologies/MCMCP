@@ -353,6 +353,13 @@ public final class GameJson {
     // ------------------------------------------------------------------
 
     /**
+     * The furthest an entity search reaches. Entities are listed per chunk, so a search costs the
+     * chunks it crosses, not the cube of its radius as a block scan does: {@code limits.maxScanRadius}
+     * is for block scans and does not apply (#89).
+     */
+    public static final int MAX_ENTITY_RADIUS = 128;
+
+    /**
      * Describes an entity.
      *
      * <p>{@code type} is the registry id where one exists. Players have no entity-registry entry in
