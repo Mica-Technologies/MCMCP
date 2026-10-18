@@ -38,6 +38,8 @@ public final class HoldLedger {
         public long lastUsedMillis;
         public long idleMillis;
         public long maxMillis;
+        /** Shed after every other lasting hold: small and bounded in time, like a watch's (#98). */
+        public boolean pinned;
 
         Hold(String id, String caller, int dimension, Set<Long> chunks, boolean temporary,
              long nowMillis, long idleMillis, long maxMillis) {
@@ -246,11 +248,12 @@ public final class HoldLedger {
 
     /**
      * The order to give holds back in when the server is struggling: the longest-idle first, then the
-     * oldest. Calls in progress (temporary holds) last of all — they end soon on their own.
+     * oldest. Pinned holds after those, and calls in progress (temporary holds) last of all — they end
+     * soon on their own.
      */
     public List<String> shedOrder() {
         List<Hold> sorted = new ArrayList<>(holds.values());
-        sorted.sort(Comparator.<Hold>comparingInt(hold -> hold.temporary ? 1 : 0)
+        sorted.sort(Comparator.<Hold>comparingInt(hold -> hold.temporary ? 2 : hold.pinned ? 1 : 0)
             .thenComparingLong(hold -> hold.lastUsedMillis)
             .thenComparingLong(hold -> hold.createdMillis));
         List<String> ids = new ArrayList<>();

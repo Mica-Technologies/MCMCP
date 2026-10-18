@@ -186,6 +186,19 @@ class ChunkLoadTest {
     }
 
     @Test
+    void aWatchsPinnedHoldIsShedAfterEveryOtherLastingHoldEvenWhenIdlest() {
+        HoldLedger ledger = new HoldLedger();
+        HoldLedger.Hold watch = ledger.create("p", 0, chunks(1), false, 0L, 300_000L, 300_000L);
+        watch.pinned = true;
+        HoldLedger.Hold region = ledger.create("p", 0, chunks(2), false, 10_000L, 120_000L, 900_000L);
+        HoldLedger.Hold call = ledger.create("p", 0, chunks(3), true, 0L, 1L, 1L);
+        ledger.add(watch);
+        ledger.add(region);
+        ledger.add(call);
+        assertEquals(Arrays.asList(region.id, watch.id, call.id), ledger.shedOrder());
+    }
+
+    @Test
     void perCallerCountsAreSeparateAndAddedCountsOnlyNewChunks() {
         HoldLedger ledger = new HoldLedger();
         ledger.add(ledger.create("p1", 0, chunks(1, 2), false, 0L, 1L, 1L));

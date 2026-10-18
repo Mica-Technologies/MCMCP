@@ -409,6 +409,7 @@ misses anything shorter than the gap between calls.
 | `properties` | `start`: only these state properties count as a change, e.g. `["color"]`. The block id always counts |
 | `actual` | `start`: watch the state as drawn (`getActualState`), which includes properties worked out from neighbours. Default `true` |
 | `wait` | `start`: wait for the result. Default: when `ticks` fits in about 80 seconds (1,600 ticks) |
+| `hold` | `start`: keep the watched chunks loaded for the watch's span. Default `false` |
 | `id`, `from_change` | `read` and `stop`: the watch, and the first change to return (the last `nextChange`) |
 
 ```json
@@ -429,6 +430,15 @@ change is recorded even if it lasted one tick. Unlike `server_changes_since`, a 
 own writes, writes made without telling clients, and properties that exist only in the drawn state.
 It never loads a chunk: an unloaded position reads `(unloaded)`, so a chunk unloading and loading
 again shows in the timeline. Tile-entity data is not watched.
+
+**Watching with nobody near.** `hold: true` takes a [`server_keep_loaded`](#server_keep_loaded) hold
+over the watched chunks for the watch's span, plus two minutes of slack, and gives it back when the
+watch ends. The start result names it in `hold`. When the server is struggling, that hold is shed
+only after every other hold, since it is small and ends on its own. If a watched chunk unloads
+anyway, the watch stops at that tick with `stopReason: "unloaded"`, rather than record void
+`(unloaded)` changes for the rest of its span.
+
+The timeline is in `structuredContent`; a client that reads only `content` gets a one-line summary.
 
 At most 8 watches are kept at once. A watch stops at 20,000 changes (`truncated: true`), keeping
 the start of the timeline. A finished watch can be read for 30 minutes.

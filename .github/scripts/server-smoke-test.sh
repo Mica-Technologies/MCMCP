@@ -618,8 +618,12 @@ echo "==> Watching blocks: a change made during a watch is recorded with its tic
 WX=$((PX + 2)); WY=$((PY + 2)); WZ=${PZ}
 # The world outlives a local run, so clear what the last run left before watching for a change.
 mcp_call 547 server_set_block "{\"x\":${WX},\"y\":${WY},\"z\":${WZ},\"block\":\"minecraft:air\"}" > /dev/null
-WATCH_BODY="$(mcp_call 55 server_watch_blocks "{\"x\":${WX},\"y\":${WY},\"z\":${WZ},\"ticks\":2000,\"wait\":false}")" \
+WATCH_BODY="$(mcp_call 55 server_watch_blocks "{\"x\":${WX},\"y\":${WY},\"z\":${WZ},\"ticks\":2000,\"wait\":false,\"hold\":true}")" \
   || mcp_failure "server_watch_blocks start failed: ${WATCH_BODY}"
+case "$WATCH_BODY" in
+  *'"hold":"h'*) echo "    the watch holds its chunk for its span" ;;
+  *) mcp_failure "a watch with hold: true took no hold: ${WATCH_BODY}" ;;
+esac
 WATCH_ID="$(printf '%s' "$WATCH_BODY" | grep -o '"id":"w[0-9]*"' | head -1 | cut -d'"' -f4)"
 [ -n "$WATCH_ID" ] || mcp_failure "no watch id: ${WATCH_BODY}"
 mcp_call 56 server_set_block "{\"x\":${WX},\"y\":${WY},\"z\":${WZ},\"block\":\"minecraft:wool\",\"metadata\":14}" > /dev/null \

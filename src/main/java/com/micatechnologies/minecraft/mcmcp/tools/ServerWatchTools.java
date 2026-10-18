@@ -3,6 +3,9 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -103,6 +106,9 @@ public final class ServerWatchTools {
         final Set<String> properties;
         final boolean actual;
         volatile long finishedAtMillis;
+        /** The hold over the watched chunks when the watch took one, released when it ends. */
+        @Nullable
+        volatile String holdId;
 
         Watch(BlockWatchLog log, BlockPos[] positions, IBlockState[] last, @Nullable Set<String> properties,
               boolean actual) {
@@ -180,19 +186,42 @@ public final class ServerWatchTools {
             return;
         }
         long tick = clock.getTotalWorldTime();
+        boolean lost = false;
         for (int i = 0; i < watch.positions.length; i++) {
             IBlockState state = read(world, watch.positions[i], watch.actual);
             if (state != watch.last[i]) {
+                lost |= state == null && watch.holdId != null;
                 watch.last[i] = state;
                 watch.log.sample(tick, i, key(state, watch.properties));
             }
         }
         watch.log.sampled(tick);
+        if (lost) {
+            // A held watch whose chunk unloaded anyway (its hold shed under load, most likely): what
+            // follows would be void, so it says so and stops rather than recording '(unloaded)' (#98).
+            watch.log.stop(tick, "unloaded");
+        }
         if (tick >= watch.log.endTick()) {
             watch.log.stop(tick, "done");
         }
         if (watch.log.isDone()) {
             watch.finishedAtMillis = System.currentTimeMillis();
+            releaseHold(watch, true);
+        }
+    }
+
+    /** Gives back a watch's hold, once. {@code now} on the server thread, else queued for it. */
+    private static void releaseHold(Watch watch, boolean now) {
+        String id = watch.holdId;
+        if (id == null) {
+            return;
+        }
+        watch.holdId = null;
+        if (now) {
+            ChunkLoadGovernor.releaseNow(id, "its watch ended");
+        }
+        else {
+            ChunkLoadGovernor.release(id, "its watch ended");
         }
     }
 
@@ -255,7 +284,12 @@ public final class ServerWatchTools {
                 + "Each change is [tick, x, y, z, from, to], indexes into 'palette', whose entries "
                 + "read 'modid:block[prop=value]'. 'properties' limits what counts as a change to "
                 + "those property names (the block id always counts). Never loads chunks: an "
-                + "unloaded position reads '(unloaded)'. Tile-entity data is not watched.")
+                + "unloaded position reads '(unloaded)'. Tile-entity data is not watched.\n\n"
+                + "hold: true keeps the watched chunks loaded for the watch's span, with no player near "
+                + "(see server_keep_loaded), shed under load only after every other hold, and gives them "
+                + "back when the watch ends. If one unloads anyway, the watch stops with stopReason "
+                + "'unloaded' at that tick. The timeline is in structuredContent; content carries a "
+                + "one-line summary.")
             .schema(JsonSchema.object()
                 .enumeration("op", "What to do. Default 'start'.", "start", "read", "stop", "list")
                 .integer("x", "start: X of one corner of the box.")
@@ -273,6 +307,7 @@ public final class ServerWatchTools {
                     + "change, e.g. ['color']. Default: all of them.")
                 .bool("actual", "start: watch the state as drawn (getActualState), which includes "
                     + "properties worked out from neighbours. Default true.")
+                .bool("hold", "start: keep the watched chunks loaded for the watch's span. Default false.")
                 .bool("wait", "start: wait for the watch to finish before returning (at most 90 "
                     + "seconds). Default: wait when 'ticks' fits in about 80 seconds.")
                 .string("id", "read, stop: the watch.")
@@ -297,6 +332,7 @@ public final class ServerWatchTools {
                         if ("stop".equals(op)) {
                             watch.log.stop(currentTick(context, watch.log.dimension()), "stopped");
                             watch.finishedAtMillis = System.currentTimeMillis();
+                            releaseHold(watch, false);
                         }
                         return result(watch, context.getBoundedInt("from_change", 0, 0, MAX_CHANGES));
                     }
@@ -363,6 +399,29 @@ public final class ServerWatchTools {
             return ToolResult.error("A watch takes at most " + MAX_POSITIONS + " positions.");
         }
 
+        // Held before the first sample, so the watch starts with its chunks in memory.
+        ChunkLoadGovernor.Outcome held = null;
+        if (context.getBoolean("hold", false)) {
+            Set<Long> chunks = new java.util.LinkedHashSet<>();
+            for (BlockPos pos : positions) {
+                chunks.add(ChunkKeys.ofBlock(pos.getX(), pos.getZ()));
+            }
+            // The span at 20 ticks a second, and two minutes of slack for a server running behind.
+            long leaseMillis = Math.min(ticks / 20L + 120L, McmcpConfig.getChunkHoldLongestLeaseSeconds()) * 1000L;
+            try {
+                held = ChunkLoadGovernor.acquire(context, dimension, chunks, false, leaseMillis, leaseMillis);
+            }
+            catch (ChunkLoadGovernor.Busy busy) {
+                return busy.toResult();
+            }
+            final String holdId = held.holdId;
+            context.onGameThread(() -> {
+                ChunkLoadGovernor.pin(holdId);
+                return null;
+            });
+        }
+        final ChunkLoadGovernor.Outcome hold = held;
+
         final String id = "w" + LAST_ID.updateAndGet(last -> Math.max(last + 1, System.currentTimeMillis()));
         Watch watch = context.onGameThread(new Callable<Watch>() {
             @Override
@@ -384,8 +443,12 @@ public final class ServerWatchTools {
                 return new Watch(log, at, states, properties, actual);
             }
         });
+        if (hold != null) {
+            watch.holdId = hold.holdId;
+        }
         String refused = add(watch);
         if (refused != null) {
+            releaseHold(watch, false);
             return ToolResult.error(refused);
         }
 
@@ -397,6 +460,10 @@ public final class ServerWatchTools {
             json.remove("changes");
             json.addProperty("note", "Watching. Read it with op 'read' and this id; it finishes at tick "
                 + watch.log.endTick() + ".");
+            if (hold != null) {
+                json.addProperty("hold", hold.holdId);
+                json.add("chunks", hold.toJson());
+            }
             return ToolResult.structured(json);
         }
         long deadline = System.currentTimeMillis() + MAX_WAIT_SECONDS * 1000L;

@@ -373,6 +373,14 @@ public final class ChunkLoadGovernor {
         return ids;
     }
 
+    /** Marks a hold to be shed only after every other lasting hold. Server thread. */
+    public static void pin(String holdId) {
+        HoldLedger.Hold hold = LEDGER.get(holdId);
+        if (hold != null) {
+            hold.pinned = true;
+        }
+    }
+
     /** Who owns a hold, or null if there is no such hold. Server thread. */
     @Nullable
     public static String ownerOf(String holdId) {
