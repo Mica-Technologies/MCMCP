@@ -635,8 +635,12 @@ case "$HOLD_BODY" in
   *'"inBox":'*) echo "    held as ${HOLD_ID}" ;;
   *) mcp_failure "the hold reported no chunks block: ${HOLD_BODY}" ;;
 esac
-mcp_call 42 server_release_loaded "{\"id\":\"${HOLD_ID}\"}" > /dev/null || mcp_failure "server_release_loaded failed"
-sleep 1
+RELEASE_BODY="$(mcp_call 42 server_release_loaded "{\"id\":\"${HOLD_ID}\"}")" \
+  || mcp_failure "server_release_loaded failed: ${RELEASE_BODY}"
+case "$RELEASE_BODY" in
+  *'"released":["'"${HOLD_ID}"'"]'*) echo "    release answered with JSON naming ${HOLD_ID}" ;;
+  *) mcp_failure "server_release_loaded did not return its released ids as JSON: ${RELEASE_BODY}" ;;
+esac
 LIST_BODY="$(mcp_call 43 server_keep_loaded '{"op":"list"}')" || mcp_failure "op list failed: ${LIST_BODY}"
 case "$LIST_BODY" in
   *'"heldChunks":0'*) echo "    released; MCMCP holds nothing" ;;

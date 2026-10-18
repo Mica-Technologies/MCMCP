@@ -504,7 +504,8 @@ Limited to `chunks.maxHeldChunksPerCaller` (512, about 360 × 360 blocks) per ca
 :material-cog: Idempotent · `id`, or `all: true`
 
 Ends a hold. Chunks MCMCP loaded are unloaded straight away unless a player can see them or
-another hold still needs them.
+another hold still needs them. Returns `{released: [ids], heldChunks}`, `heldChunks` being what you
+still hold.
 
 `all: true` ends your `server_keep_loaded` holds only. A read or write still loading chunks for another
 of your calls keeps its own, so one script cleaning up cannot fail another running on the same account.

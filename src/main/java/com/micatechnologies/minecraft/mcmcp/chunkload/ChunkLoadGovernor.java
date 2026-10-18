@@ -357,12 +357,38 @@ public final class ChunkLoadGovernor {
     }
 
     /**
+     * Ends one caller's own holds now, never the temporary holds of their calls still running. Server
+     * thread.
+     *
+     * @return the ids ended
+     */
+    public static List<String> releaseCallerNow(String caller, String why) {
+        List<String> ids = LEDGER.ownedBy(caller, false);
+        for (String id : ids) {
+            releaseNow(id, why);
+        }
+        return ids;
+    }
+
+    /** Who owns a hold, or null if there is no such hold. Server thread. */
+    @Nullable
+    public static String ownerOf(String holdId) {
+        HoldLedger.Hold hold = LEDGER.get(holdId);
+        return hold == null ? null : hold.caller;
+    }
+
+    /** Distinct chunks one caller holds. Server thread. */
+    public static int heldChunks(String caller) {
+        return LEDGER.heldChunks(caller);
+    }
+
+    /**
      * Server thread.
      *
      * @param why what released it, finishing "The hold was released before its chunks loaded: …", so a
      *            call that fails because of it says which path did
      */
-    static void releaseNow(String holdId, String why) {
+    public static void releaseNow(String holdId, String why) {
         HoldLedger.Hold hold = LEDGER.get(holdId);
         if (hold == null) {
             return;

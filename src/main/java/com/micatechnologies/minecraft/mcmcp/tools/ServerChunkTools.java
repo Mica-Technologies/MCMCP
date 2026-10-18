@@ -4,11 +4,14 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import javax.annotation.Nullable;
 
@@ -153,7 +156,7 @@ public final class ServerChunkTools {
             .title("Release a held region")
             .description("End a hold from server_keep_loaded, or all of yours. Chunks no other hold needs are "
                 + "handed back to the server, and the ones MCMCP loaded are unloaded straight away unless a "
-                + "player can see them.")
+                + "player can see them. Returns the ids released and how many chunks you still hold.")
             .schema(JsonSchema.object()
                 .string("id", "The hold to release.")
                 .bool("all", "Release every server_keep_loaded hold of yours. Loads still running for your other calls are left alone.")
@@ -163,31 +166,33 @@ public final class ServerChunkTools {
             .handler(context -> {
                 String caller = ChunkLoadGovernor.callerOf(context.getPrincipal());
                 if (context.getBoolean("all", false)) {
-                    ChunkLoadGovernor.releaseCaller(caller, false, "server_release_loaded all");
-                    return ToolResult.text("Released every server_keep_loaded hold of yours.");
+                    return ToolResult.structured(context.onGameThread(() -> released(caller,
+                        ChunkLoadGovernor.releaseCallerNow(caller, "server_release_loaded all"))));
                 }
                 final String id = context.getString("id", null);
                 if (id == null) {
                     return ToolResult.error("Pass 'id', or all: true.");
                 }
-                String owner = context.onGameThread(() -> {
-                    JsonObject status = ChunkLoadGovernor.status(null);
-                    for (com.google.gson.JsonElement hold : status.getAsJsonArray("holds")) {
-                        if (id.equals(hold.getAsJsonObject().get("id").getAsString())) {
-                            return hold.getAsJsonObject().get("owner").getAsString();
-                        }
-                    }
-                    return null;
-                });
+                String owner = context.onGameThread(() -> ChunkLoadGovernor.ownerOf(id));
                 if (owner == null) {
                     return ToolResult.error("There is no hold '" + id + "'.");
                 }
                 if (context.getPrincipal().isCompanion() && !owner.equals(caller)) {
                     return ToolResult.error("Hold '" + id + "' is not yours.");
                 }
-                ChunkLoadGovernor.release(id, "server_release_loaded");
-                return ToolResult.text("Released " + id + ".");
+                return ToolResult.structured(context.onGameThread(() -> {
+                    ChunkLoadGovernor.releaseNow(id, "server_release_loaded");
+                    return released(caller, Collections.singletonList(id));
+                }));
             })
             .build());
+    }
+
+    /** What server_release_loaded did. Server thread. */
+    private static JsonObject released(String caller, List<String> ids) {
+        JsonObject json = new JsonObject();
+        json.add("released", Json.arrayOfStrings(ids));
+        json.addProperty("heldChunks", ChunkLoadGovernor.heldChunks(caller));
+        return json;
     }
 }
