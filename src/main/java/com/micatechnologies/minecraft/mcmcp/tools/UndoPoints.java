@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -301,14 +302,21 @@ public final class UndoPoints {
     /** Every file an undo point is made of. */
     private static final String[] SUFFIXES = {".json", ".dat", "-before.png", "-after.png"};
 
+    /** The listing field naming who made a point: a companion player, or the agent that called. */
+    public static final String OWNER = "owner";
+
     /**
-     * Keeps the newest {@code keep} points, and of those only as many of the newest as fit in
-     * {@code maxBytes} (0 for no size limit). The newest point is kept whatever its size: dropping
-     * the write that was just made would leave nothing to undo it with.
+     * Keeps each owner's newest {@code keep} points, and of all those only as many of the newest as
+     * fit in {@code maxBytes} (0 for no size limit). The newest point is kept whatever its size:
+     * dropping the write that was just made would leave nothing to undo it with.
      *
-     * <p>The size limit is what bounds a world's folder. A count alone does not: one 32,768-block
-     * fill over tile entities can outweigh hundreds of small writes, and an agent building around the
-     * clock makes nothing but large writes.
+     * <p>The count is per owner (#95). One ring for the whole server let four agents building at once
+     * push each other's points out within minutes: a 25-phase market build had lost its first 20 by
+     * the time it finished. Points with no owner, from before owners were recorded, count as one.
+     *
+     * <p>The size limit is global, and is what bounds a world's folder. A count alone does not: one
+     * 32,768-block fill over tile entities can outweigh hundreds of small writes, and an agent
+     * building around the clock makes nothing but large writes.
      */
     static void prune(File folder, int keep, long maxBytes) {
         File[] listings = folder.listFiles((directory, name) -> isId(stripSuffix(name, ".json")));
@@ -324,18 +332,35 @@ public final class UndoPoints {
             Long.parseLong(a.substring(1))));
         // Once one point does not fit, every older one goes too, small or not: what is kept is always
         // an unbroken run of the newest writes, never a history with holes in it.
+        // Per owner the same holds: an owner's points past its newest 'keep' are its oldest.
         long total = 0;
         boolean full = false;
+        Map<String, Integer> kept = new HashMap<>();
         for (int i = 0; i < ids.size(); i++) {
             String id = ids.get(i);
             long bytes = size(folder, id);
-            full = full || i >= keep || i > 0 && maxBytes > 0 && total + bytes > maxBytes;
-            if (full) {
+            String owner = ownerOf(folder, id);
+            int ownerKept = kept.getOrDefault(owner, 0);
+            full = full || i > 0 && maxBytes > 0 && total + bytes > maxBytes;
+            if (full || ownerKept >= keep) {
                 delete(folder, id);
             }
             else {
                 total += bytes;
+                kept.put(owner, ownerKept + 1);
             }
+        }
+    }
+
+    /** Who made a point, from its listing; empty when it does not say or cannot be read. */
+    private static String ownerOf(File folder, String id) {
+        try {
+            JsonElement json = Json.parse(new String(Files.readAllBytes(new File(folder, id + ".json").toPath()),
+                StandardCharsets.UTF_8));
+            return json != null && json.isJsonObject() ? Json.getString(json.getAsJsonObject(), OWNER, "") : "";
+        }
+        catch (IOException | RuntimeException e) {
+            return "";
         }
     }
 

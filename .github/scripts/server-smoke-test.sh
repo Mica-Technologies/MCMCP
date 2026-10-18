@@ -447,6 +447,11 @@ case "$LIST_BODY" in
   *"\"id\":\"${UNDO_ID}\""*) echo "    listed" ;;
   *) mcp_failure "server_undo list did not include ${UNDO_ID}: ${LIST_BODY}" ;;
 esac
+MINE_BODY="$(mcp_call 221 server_undo '{"op":"list","by":"me"}')" || mcp_failure "server_undo list by me failed: ${MINE_BODY}"
+case "$MINE_BODY" in
+  *"\"id\":\"${UNDO_ID}\""*'"yours":true'*) echo "    listed as this caller's own with by: me" ;;
+  *) mcp_failure "server_undo list by me did not include ${UNDO_ID} as yours: ${MINE_BODY}" ;;
+esac
 
 RESTORE_BODY="$(mcp_call 23 server_undo "{\"op\":\"restore\",\"id\":\"${UNDO_ID}\"}")" \
   || mcp_failure "server_undo restore failed: ${RESTORE_BODY}"

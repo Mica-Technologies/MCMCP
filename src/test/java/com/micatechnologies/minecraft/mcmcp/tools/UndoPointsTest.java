@@ -89,6 +89,30 @@ class UndoPointsTest {
         deleteFolder(folder);
     }
 
+    @Test
+    void eachWriterKeepsItsOwnNewestPointsSoABusyOneCannotEvictAnother() throws IOException {
+        File folder = Files.createTempDirectory("mcmcp-undo-test").toFile();
+        // A quiet builder's two points, then a busy agent's four after them (#95).
+        owned(folder, "u1", "orchestrator:c1");
+        owned(folder, "u2", "orchestrator:c1");
+        for (int i = 3; i <= 6; i++) {
+            owned(folder, "u" + i, "orchestrator:c2");
+        }
+        UndoPoints.prune(folder, 2, 0);
+        String[] left = folder.list();
+        Arrays.sort(left);
+        assertArrayEquals(new String[] {"u1.dat", "u1.json", "u2.dat", "u2.json",
+            "u5.dat", "u5.json", "u6.dat", "u6.json"}, left);
+        deleteFolder(folder);
+    }
+
+    /** An undo point made by {@code owner}. */
+    private static void owned(File folder, String id, String owner) throws IOException {
+        Files.write(new File(folder, id + ".json").toPath(),
+            ("{\"id\":\"" + id + "\",\"owner\":\"" + owner + "\"}").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Files.write(new File(folder, id + ".dat").toPath(), new byte[10]);
+    }
+
     /** An undo point whose .dat is {@code bytes} long. */
     private static void point(File folder, String id, int bytes) throws IOException {
         assertTrue(new File(folder, id + ".json").createNewFile());

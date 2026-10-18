@@ -44,12 +44,21 @@ public final class ServerUndoTools {
                 + "shows them newest first, with the tool, time, block count and area. op 'restore' "
                 + "puts the old blocks and their tile-entity data back. It refuses when any of those "
                 + "blocks has changed since the write, naming where, unless 'force' is true. A "
-                + "restore leaves an undo point of its own, so it can be undone too.")
+                + "restore leaves an undo point of its own, so it can be undone too.\n\n"
+                + "Each writer (a companion player, or an agent connection) keeps its own newest "
+                + "undo.maxUndoPoints, so other agents' writes do not push yours out; op 'list' filters "
+                + "with by ('me', or part of a writer's name), since (epoch ms) and a box (x, z, toX, toZ).")
             .schema(JsonSchema.object()
                 .enumeration("op", "What to do. Defaults to 'list'.", "list", "restore")
                 .string("id", "restore: the undo point's id, as op 'list' gives it, e.g. 'u1791392863587'.")
                 .bool("force", "restore: put the blocks back even where they have changed since.")
                 .integer("limit", "list: most points returned. Default 20.", 1, 200)
+                .string("by", "list: only points by this writer: 'me', or part of the 'by' name.")
+                .number("since", "list: only points made at or after this time, epoch milliseconds.")
+                .integer("x", "list: with z, toX, toZ, only points whose area meets this box.")
+                .integer("z", "list: see x.")
+                .integer("toX", "list: see x.")
+                .integer("toZ", "list: see x.")
                 .bool("load", "restore: load the point's chunks that are not loaded, and release them "
                     + "afterwards. Without it, a point whose area is not loaded is refused.")
                 .build())
@@ -64,14 +73,40 @@ public final class ServerUndoTools {
         File folder = context.onGameThread(() -> UndoPoints.folder(ServerWorldTools.requireWorld(0)));
         if ("list".equals(op)) {
             int limit = context.getBoundedInt("limit", 20, 1, 200);
+            String owner = ownerOf(context);
+            String by = context.getString("by", null);
+            long since = (long) context.getDouble("since", 0.0D);
+            int[] box = null;
+            if (context.has("x") || context.has("z") || context.has("toX") || context.has("toZ")) {
+                if (!context.has("x") || !context.has("z")) {
+                    return ToolResult.error("An area filter needs x and z (and toX, toZ for a box).");
+                }
+                int x = context.requireInt("x");
+                int z = context.requireInt("z");
+                int toX = context.getInt("toX", x);
+                int toZ = context.getInt("toZ", z);
+                box = new int[] {Math.min(x, toX), Math.min(z, toZ), Math.max(x, toX), Math.max(z, toZ)};
+            }
             List<JsonObject> points = UndoPoints.list(folder);
             JsonArray array = new JsonArray();
-            for (JsonObject point : points.subList(0, Math.min(limit, points.size()))) {
-                array.add(point);
+            int matched = 0;
+            for (JsonObject point : points) {
+                if (!listed(point, owner, by, since, box)) {
+                    continue;
+                }
+                matched++;
+                if (array.size() < limit) {
+                    point.addProperty("yours", owner.equals(Json.getString(point, UndoPoints.OWNER, "")));
+                    array.add(point);
+                }
             }
             JsonObject json = new JsonObject();
             json.addProperty("enabled", McmcpConfig.isUndoPointsEnabled());
             json.addProperty("total", points.size());
+            if (by != null || since > 0L || box != null) {
+                json.addProperty("matched", matched);
+            }
+            json.addProperty("keptPerWriter", McmcpConfig.getMaxUndoPoints());
             json.add("points", array);
             return ToolResult.structured(json);
         }
@@ -286,10 +321,11 @@ public final class ServerUndoTools {
             if (undoes != null) {
                 meta.addProperty("undoes", undoes);
             }
-            if (context.getPrincipal().isCompanion()) {
-                // Who made the write, on a server where several players' agents may be building.
-                meta.addProperty("by", context.getPrincipal().getPlayerName());
-            }
+            // Who made the write, on a server where several players' agents may be building. Each
+            // owner keeps its own undo.maxUndoPoints, so one busy agent cannot evict another (#95).
+            meta.addProperty(UndoPoints.OWNER, ownerOf(context));
+            meta.addProperty("by", context.getPrincipal().isCompanion() ? context.getPrincipal().getPlayerName()
+                : context.getCaller().label());
             BufferedImage afterImage = beforeImage == null ? null : drawImage(context, dimension, area);
             UndoPoints.save(folder, meta, (NBTTagCompound) taken[1], beforeImage, afterImage);
             result.addProperty("undoPoint", id);
@@ -300,6 +336,44 @@ public final class ServerUndoTools {
             result.addProperty("undoPointError", String.valueOf(e.getMessage()));
             return null;
         }
+    }
+
+    /** The owner key a write's undo point is kept under. */
+    static String ownerOf(ToolContext context) {
+        return context.getPrincipal().isCompanion() ? "player:" + context.getPrincipal().getPlayerId()
+            : context.getCaller().id();
+    }
+
+    /** Whether a point passes op list's filters. */
+    private static boolean listed(JsonObject point, String owner, @Nullable String by, long since,
+                                  @Nullable int[] box) {
+        if (by != null) {
+            boolean matches = "me".equalsIgnoreCase(by)
+                ? owner.equals(Json.getString(point, UndoPoints.OWNER, ""))
+                : Json.getString(point, "by", "").toLowerCase(java.util.Locale.ROOT)
+                    .contains(by.toLowerCase(java.util.Locale.ROOT));
+            if (!matches) {
+                return false;
+            }
+        }
+        if (since > 0L && Json.getLong(point, "at", 0L) < since) {
+            return false;
+        }
+        if (box != null) {
+            JsonObject from = Json.getObject(point, "from");
+            JsonObject to = Json.getObject(point, "to");
+            if (from == null || to == null) {
+                return false;
+            }
+            int minX = Math.min(Json.getInt(from, "x", 0), Json.getInt(to, "x", 0));
+            int maxX = Math.max(Json.getInt(from, "x", 0), Json.getInt(to, "x", 0));
+            int minZ = Math.min(Json.getInt(from, "z", 0), Json.getInt(to, "z", 0));
+            int maxZ = Math.max(Json.getInt(from, "z", 0), Json.getInt(to, "z", 0));
+            if (maxX < box[0] || minX > box[2] || maxZ < box[1] || minZ > box[3]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** The map area of an undo point, from its listing's bounds. */

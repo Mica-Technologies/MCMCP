@@ -1016,7 +1016,7 @@ that, the result is a `busy` error with `retryAfterMs`.
 
 #### `server_undo`
 
-:material-alert: Destructive · `op`, optional `id`, `force`, `limit`
+:material-alert: Destructive · `op`, optional `id`, `force`, `limit`, `by`, `since`, `x`/`z`/`toX`/`toZ`
 
 Lists the undo points block writes left, or puts one back.
 
@@ -1024,13 +1024,15 @@ Each `server_set_blocks` call records what every block it changed was before: th
 tile-entity data. `server_set_block` records one too, but only when `undo.recordSingleBlockWrites`
 is on. The record is made as each block changes, for only the blocks that change, so there is no
 extra pass over the region. It is kept in the world's `mcmcp-undo` folder, with a top-down map of
-the area before and after. Each world keeps at most `undo.maxUndoPoints` points in at most
-`undo.maxUndoMegabytes` (64 MB by default), and the oldest are removed first, so an agent that
-builds around the clock does not grow the save without limit.
+the area before and after. Each point names its writer in `by`: the companion player, or the agent
+connection that called. Each writer keeps its newest `undo.maxUndoPoints` points, so several agents
+building at once do not push each other's history out. All of them together stay within
+`undo.maxUndoMegabytes` (64 MB by default), the oldest removed first, so an agent that builds around
+the clock does not grow the save without limit.
 
 | `op` | Does |
 | --- | --- |
-| `list` (default) | The points, newest first: `id`, `tool`, `at`, `blocks`, `from`/`to`, image paths, and `restoredBy` or `undoes` |
+| `list` (default) | The points, newest first: `id`, `tool`, `at`, `blocks`, `from`/`to`, `by`, `yours`, image paths, and `restoredBy` or `undoes`. Filter with `by` (`"me"`, or part of a writer's name), `since` (epoch ms) and a box (`x`, `z`, `toX`, `toZ`), which the point's area must meet |
 | `restore` | Puts point `id` back. Requires `permissions.allowWorldEdits` |
 
 A restore first checks that every block it would put back is still what the write left. If any has

@@ -344,7 +344,9 @@ placing blocks one at a time. It is off by default because each point is a file 
 
 Default `50`, range 1–1000
 
-How many undo points each world keeps. The oldest go first.
+How many undo points each writer keeps in a world: each companion player, and each agent
+connection (see [`server_undo`](tools.md#server_undo)). A writer's oldest go first, so one busy
+agent's writes never push out another's.
 
 ### `maxUndoMegabytes`
 
