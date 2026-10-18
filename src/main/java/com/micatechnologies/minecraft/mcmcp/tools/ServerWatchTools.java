@@ -484,7 +484,8 @@ public final class ServerWatchTools {
                 + "unlike the time of day) reaches a tick, then return it. Either 'tick' for an exact "
                 + "tick, or 'modulo' and 'remainder' for the next tick where totalTime % modulo == "
                 + "remainder, to line an action up with something on a fixed cycle. Waits at most "
-                + "90 seconds.")
+                + "90 seconds. World time advances even in a dimension that has stopped ticking its "
+                + "machines for want of a player; the result carries a 'warning' when it has.")
             .schema(JsonSchema.object()
                 .number("tick", "Wait until total time reaches this tick.")
                 .integer("modulo", "Wait for the next tick where total time % modulo == remainder.", 2,
@@ -557,6 +558,11 @@ public final class ServerWatchTools {
                     }
                 }
                 json.addProperty("waitedMillis", System.currentTimeMillis() - started);
+                // Waiting is how a caller lets a machine run; say so when nothing in the dimension ran (#101).
+                String idle = context.onGameThread(() -> WorldIdle.warning(ServerWorldTools.requireWorld(dimension)));
+                if (idle != null) {
+                    json.addProperty("warning", idle);
+                }
                 return ToolResult.structured(json);
             })
             .build());

@@ -587,7 +587,9 @@ public final class PerformanceTools {
                 + "minutes: mean, median, p95, p99 and max. A tick has a 50 ms budget. A high mean is "
                 + "steady load; a low median with a high max is a hitch, and the mean in "
                 + "server_world_info hides that. Measure before and after a change to see its cost. "
-                + "'dimensions' splits the last 100 ticks by dimension.")
+                + "'dimensions' splits the last 100 ticks by dimension, and says entitiesTicking: false for "
+                + "one vanilla has stopped ticking for want of a player or forced chunk: healthy TPS there "
+                + "does not mean its machines are running.")
             .schema(JsonSchema.noArguments())
             .serverOnly()
             .readOnly()
@@ -644,6 +646,10 @@ public final class PerformanceTools {
             json.addProperty("dim", entry.getKey());
             json.addProperty("meanMs", DurationWindow.millis(total / (double) Math.max(1, entry.getValue().length)));
             json.addProperty("maxMs", DurationWindow.millis(max));
+            WorldServer world = net.minecraftforge.common.DimensionManager.getWorld(entry.getKey());
+            if (world != null) {
+                WorldIdle.describe(world, json);
+            }
             dimensions.add(json);
         }
         return dimensions;

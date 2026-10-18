@@ -363,6 +363,19 @@ for dim in body["result"]["structuredContent"]["dimensions"]:
 ' 2>&1)" || mcp_failure "could not read the overworld spawn point from server_world_info: ${WORLD_BODY}"
 read -r SPAWN_X SPAWN_Y SPAWN_Z <<< "$SPAWN"
 
+# No player ever joins this server, so the overworld stops ticking tile entities 300 ticks after it
+# starts (#101). The idle count is read by reflection; -1 would mean the field was not found.
+printf '%s' "$WORLD_BODY" | "$PYTHON_BIN" -c '
+import json, sys
+body = json.load(sys.stdin)
+for dim in body["result"]["structuredContent"]["dimensions"]:
+    assert "entitiesTicking" in dim, dim
+    idle = dim.get("idleTicks", 0)
+    assert idle != -1, "the idle tick count could not be read"
+    assert dim["entitiesTicking"] == (idle < 300), dim
+' || mcp_failure "server_world_info did not report entitiesTicking consistently: ${WORLD_BODY}"
+echo "    every dimension reports entitiesTicking"
+
 echo "==> tools/call server_get_block at spawn (${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z})"
 BLOCK_BODY="$(curl -fsS --max-time 10 \
   -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \

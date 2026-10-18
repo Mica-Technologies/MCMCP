@@ -442,6 +442,9 @@ Waits until the world's total time reaches a tick, then returns it. `tick` waits
 an action up with something on a fixed cycle, such as a chunk reload timed to a window of a
 1,800-tick cycle. It waits at most 90 seconds and refuses a tick further away than that.
 
+World time advances even where nothing else does: when the dimension has
+[stopped ticking](#server_world_info) for want of a player, the result carries a `warning`.
+
 ### Chunk loading
 
 A server only has chunks in memory near players, and MCMCP never loads one implicitly. A read
@@ -731,6 +734,14 @@ searches are not bound by `maxScanRadius`; a radius past 128 is cut to it and th
 Server identity, mean tick time, derived TPS, and per-dimension time, weather, difficulty, loaded
 chunk count, entity count and spawn point.
 
+Each dimension also says `entitiesTicking`, and `idleTicks` while it is empty. Vanilla stops ticking
+every entity and tile entity in a dimension that has had no player and no forced chunk for 300
+ticks (15 seconds), and nothing else shows it: TPS stays at 20, world time advances, reads find the
+chunks loaded and `/blockdata` succeeds. A machine tested on a server nobody has joined does nothing,
+and looks broken. A forced chunk keeps the dimension ticking, so
+[`server_keep_loaded`](#server_keep_loaded) over the area under test is the fix. A dimension that has
+stopped adds a line to `warnings`.
+
 Worth checking before an expensive scan: ticks are 50 ms apart, so a mean above 50 ms means the
 server is already behind and every scheduled task is queued behind it.
 
@@ -754,7 +765,9 @@ coincidence in time, reported because it is very probably the explanation, not b
 A window is omitted when the server has not been up
 long enough for it to differ from the one before it. `dimensions` splits the last 100 ticks by
 dimension — mean and worst — which is the only thing that says *which world* a slow tick belongs to
-without running a profile.
+without running a profile. Each also says `entitiesTicking` (see
+[`server_world_info`](#server_world_info)): a healthy tick in a dimension that has stopped ticking
+its machines is fast because it does nothing.
 
 ```json
 {"last5s": {"samples": 100, "meanMs": 5.4, "minMs": 3.98, "medianMs": 4.9, "p95Ms": 9.1,

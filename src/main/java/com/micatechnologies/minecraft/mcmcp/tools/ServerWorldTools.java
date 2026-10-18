@@ -357,8 +357,10 @@ public final class ServerWorldTools {
         McpRegistry.registerTool(McpTool.named("server_world_info")
             .title("Server and world info")
             .description("Report server identity, tick performance, and the state of every loaded "
-                + "dimension: time of day, weather, difficulty, loaded chunk and entity counts. Check "
-                + "tick performance here before running expensive scans.")
+                + "dimension: time of day, weather, difficulty, loaded chunk and entity counts, and "
+                + "entitiesTicking: false for a dimension vanilla has stopped ticking because no player or "
+                + "forced chunk has been in it for 15 seconds. Check tick performance here before running "
+                + "expensive scans.")
             .schema(JsonSchema.noArguments())
             .serverOnly()
             .readOnly()
@@ -393,6 +395,7 @@ public final class ServerWorldTools {
                                 / 100.0D);
 
                         JsonArray dimensions = new JsonArray();
+                        JsonArray warnings = new JsonArray();
                         for (WorldServer world : server.worlds) {
                             if (world == null) {
                                 continue;
@@ -401,10 +404,18 @@ public final class ServerWorldTools {
                             dimension.addProperty("loadedChunks",
                                 world.getChunkProvider().getLoadedChunkCount());
                             dimension.addProperty("entities", world.loadedEntityList.size());
+                            WorldIdle.describe(world, dimension);
                             dimension.add("spawnPoint", GameJson.blockPos(world.getSpawnPoint()));
                             dimensions.add(dimension);
+                            String idle = WorldIdle.warning(world);
+                            if (idle != null) {
+                                warnings.add(idle);
+                            }
                         }
                         json.add("dimensions", dimensions);
+                        if (warnings.size() > 0) {
+                            json.add("warnings", warnings);
+                        }
                         return json;
                     }
                 });
