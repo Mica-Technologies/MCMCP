@@ -107,7 +107,7 @@ public final class ServerAreaTools {
             .title("Count blocks in a region")
             .description("Count the blocks in a box by type, on the server, without listing them: 'how many "
                 + "X are here' or 'is anything but terrain in this footprint' over a whole district in one "
-                + "call. 'include' and 'exclude' take ids, namespaces ending in ':' or prefixes ending in '*'. "
+                + "call. 'include' and 'exclude' take ids, namespaces ending in ':' or patterns with '*' anywhere. "
                 + "Returns counts per block id, most first, with a few sample positions of each. Air is left "
                 + "out unless includeAir. Unloaded chunks are listed and not counted; pass load: true to count "
                 + "them.")

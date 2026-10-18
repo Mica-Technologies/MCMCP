@@ -75,4 +75,19 @@ class NbtProjectionTest {
         assertFalse(NbtProjection.matches("minecraft:chest", Arrays.asList("csm:", "railcraft:")));
         assertTrue(NbtProjection.matches("anything", Collections.emptyList()), "no filter means every block");
     }
+
+    @Test
+    void aWildcardMatchesAnywhereInAFilterNotOnlyAtTheEnd() {
+        assertTrue(NbtProjection.matches("csm:lift_car_panel_2", Collections.singletonList("*car_panel*")));
+        assertTrue(NbtProjection.matches("csm:lift_car_panel_2", Collections.singletonList("csm:*panel*")));
+        assertTrue(NbtProjection.matches("csm:lift_car_panel", Collections.singletonList("*_panel")));
+        assertTrue(NbtProjection.matches("csm:a_b", Collections.singletonList("csm:*_*")));
+        assertFalse(NbtProjection.matches("ldme:lift_car_panel", Collections.singletonList("csm:*panel*")),
+            "the namespace before the wildcard still has to match");
+        assertFalse(NbtProjection.matches("csm:lift_car_panel_2", Collections.singletonList("*_panel")),
+            "a pattern without a trailing '*' must reach the end of the id");
+        assertTrue(NbtProjection.isPattern("*x*"));
+        assertTrue(NbtProjection.isPattern("csm:"));
+        assertFalse(NbtProjection.isPattern("csm:controller"));
+    }
 }

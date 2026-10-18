@@ -154,13 +154,13 @@ public final class ServerWorldTools {
             .description("Find blocks and return their positions. Two shapes: a cube round x, y, z with "
                 + "'radius', nearest first; or a box, x, y, z to toX, toY, toZ (a building, a district), "
                 + "listing every match with its metadata as [x, y, z, palette index], paged with 'cursor'. "
-                + "'block' is one id; 'blocks' takes several ids, namespaces ending in ':' or prefixes "
-                + "ending in '*', e.g. ['csm:toilet_*', 'csm:urinal_*']. Unloaded chunks are skipped; in box "
+                + "'block' is one id; 'blocks' takes several ids, namespaces ending in ':' or patterns "
+                + "with '*' anywhere, e.g. ['csm:toilet_*', '*car_panel*']. Unloaded chunks are skipped; in box "
                 + "mode pass load: true to search them too.")
             .schema(JsonSchema.object()
                 .string("block", "Namespaced block id to search for, e.g. 'minecraft:diamond_ore'.")
                 .array("blocks", "Several blocks to search for at once: ids, namespaces ending in ':', or "
-                    + "prefixes ending in '*'.", Json.obj("type", "string"))
+                    + "patterns with '*' anywhere ('*car_panel*').", Json.obj("type", "string"))
                 .integer("x", "Centre X, or in box mode one corner's X.")
                 .integer("y", "Centre Y, or in box mode one corner's Y (default 0).")
                 .integer("z", "Centre Z, or in box mode one corner's Z.")
@@ -191,7 +191,7 @@ public final class ServerWorldTools {
                 // Exact ids are matched by their full registry name, so 'stone' finds minecraft:stone.
                 for (int i = 0; i < patterns.size(); i++) {
                     String pattern = patterns.get(i).trim();
-                    if (pattern.endsWith(":") || pattern.endsWith("*")) {
+                    if (NbtProjection.isPattern(pattern)) {
                         continue;
                     }
                     Block block = BlockIds.resolve(pattern);
@@ -256,8 +256,7 @@ public final class ServerWorldTools {
                                         }
                                         if (match) {
                                             JsonObject hit = GameJson.blockPos(pos);
-                                            if (targets.size() > 1 || targets.get(0).endsWith(":")
-                                                || targets.get(0).endsWith("*")) {
+                                            if (targets.size() > 1 || NbtProjection.isPattern(targets.get(0))) {
                                                 ResourceLocation name = state.getBlock().getRegistryName();
                                                 hit.addProperty("block", name == null ? "unknown" : name.toString());
                                             }

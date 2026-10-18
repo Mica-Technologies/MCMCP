@@ -61,7 +61,7 @@ public final class ServerTileEntityTools {
                 .integer("toY", "Y of the opposite corner. Defaults to 255.")
                 .integer("toZ", "Z of the opposite corner. Defaults to z.")
                 .integer("dimension", "Dimension id. Defaults to 0.")
-                .array("blocks", "Only these blocks: ids, namespaces ending in ':', or prefixes ending in '*'.",
+                .array("blocks", "Only these blocks: ids, namespaces ending in ':', or patterns with '*' anywhere.",
                     Json.obj("type", "string"))
                 .array("positions", "Exact blocks to read, instead of a box: [{x, y, z}]. At most "
                     + MAX_POSITIONS + ". A position with no tile entity says so.",

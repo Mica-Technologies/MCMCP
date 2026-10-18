@@ -548,7 +548,7 @@ terrain in this footprint?" or "how many signal heads are in this district?" ove
 chunks (about 1,000 × 1,000 blocks) in one call. The server reads the chunk sections directly, in
 short slices with ticks between them.
 
-- `include` and `exclude` take ids, namespaces ending in `:` or prefixes ending in `*`. Pass the
+- `include` and `exclude` take ids, namespaces ending in `:` or patterns with `*` anywhere. Pass the
   natural blocks as `exclude` to find anything placed.
 - Air is not counted unless `includeAir`. `byState` counts each metadata value apart
   (`minecraft:wool:14`).
@@ -708,10 +708,10 @@ Two shapes:
   1,000, at most 5,000). While `complete` is false, pass the returned `cursor`, with the same box,
   for the next page. `load: true` searches unloaded chunks too.
 
-`blocks` takes several ids, namespaces ending in `:`, or prefixes ending in `*`, e.g.
+`blocks` takes several ids, namespaces ending in `:`, or patterns with `*` anywhere, e.g.
 `["csm:toilet_*", "csm:urinal_*", "csm:toilet_partition_*"]`. An unregistered exact id is an error,
 never an empty result and never a search for air — see [Block ids](#block-ids). A namespace or
-prefix may match nothing.
+pattern may match nothing.
 
 #### `server_nearby_entities`
 

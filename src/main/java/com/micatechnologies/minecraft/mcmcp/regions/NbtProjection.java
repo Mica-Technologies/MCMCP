@@ -171,8 +171,10 @@ public final class NbtProjection {
     }
 
     /**
-     * Whether a block id matches a filter entry: an exact id ({@code "csm:controller"}) or a
-     * namespace or prefix ending in {@code ':'} or {@code '*'} ({@code "csm:"}, {@code "csm:signal_*"}).
+     * Whether a block id matches a filter entry: an exact id ({@code "csm:controller"}), a namespace
+     * ending in {@code ':'} ({@code "csm:"}), or a glob with {@code '*'} anywhere in it
+     * ({@code "csm:signal_*"}, {@code "*car_panel*"}, {@code "csm:*panel*"}). A {@code '*'} used to
+     * work only at the end, and anywhere else silently matched nothing (#90).
      */
     public static boolean matches(String blockId, @Nullable List<String> filters) {
         if (filters == null || filters.isEmpty()) {
@@ -180,11 +182,46 @@ public final class NbtProjection {
         }
         for (String filter : filters) {
             String f = filter.trim();
-            if (f.endsWith("*") ? blockId.startsWith(f.substring(0, f.length() - 1))
+            if (f.indexOf('*') >= 0 ? glob(f, blockId)
                 : f.endsWith(":") ? blockId.startsWith(f) : blockId.equals(f)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** Whether a filter entry is a pattern rather than one exact id. */
+    public static boolean isPattern(String filter) {
+        String f = filter.trim();
+        return f.endsWith(":") || f.indexOf('*') >= 0;
+    }
+
+    /** {@code '*'} matches any run of characters, including none; everything else matches itself. */
+    static boolean glob(String pattern, String text) {
+        int p = 0;
+        int t = 0;
+        int star = -1;
+        int resume = 0;
+        while (t < text.length()) {
+            if (p < pattern.length() && pattern.charAt(p) == '*') {
+                star = p++;
+                resume = t;
+            }
+            else if (p < pattern.length() && pattern.charAt(p) == text.charAt(t)) {
+                p++;
+                t++;
+            }
+            else if (star >= 0) {
+                p = star + 1;
+                t = ++resume;
+            }
+            else {
+                return false;
+            }
+        }
+        while (p < pattern.length() && pattern.charAt(p) == '*') {
+            p++;
+        }
+        return p == pattern.length();
     }
 }
