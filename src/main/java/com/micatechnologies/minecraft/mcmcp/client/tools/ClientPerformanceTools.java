@@ -93,12 +93,15 @@ public final class ClientPerformanceTools {
             .handler(context -> {
                 int sampleSeconds = context.getBoundedInt("sample_seconds", 0, 0, 30);
                 JsonObject json = new JsonObject();
+                final long since;
                 if (sampleSeconds > 0) {
                     long startedNanos = System.nanoTime();
+                    since = startedNanos;
                     PerformanceTools.sleepCancellable(context, sampleSeconds * 1000L);
                     json.add("sampled", frameWindow(startedNanos));
                 } else {
                     long now = System.nanoTime();
+                    since = now - 60_000_000_000L;
                     JsonObject recent = frameWindow(now - 5_000_000_000L);
                     JsonObject minute = frameWindow(now - 60_000_000_000L);
                     json.add("last5s", recent);
@@ -117,6 +120,7 @@ public final class ClientPerformanceTools {
                         result.addProperty("fpsLimit", game.limitFramerate);
                         result.addProperty("vsync", game.enableVsync);
                         result.addProperty("renderDistanceChunks", game.renderDistanceChunks);
+                        ClientStateTools.addMeasuredWindow(json, Minecraft.getMinecraft(), since);
                         return result;
                     }
                 });
@@ -215,7 +219,10 @@ public final class ClientPerformanceTools {
                             String rendered = PerformanceTools.renderSections(
                                 Minecraft.getMinecraft().profiler, meanFrameMs, minPercent, maxDepth);
                             restoreDebugFlags();
-                            return "# percent of frame, ~ms per frame (mean frame " + meanFrameMs + " ms)\n"
+                            String warning = com.micatechnologies.minecraft.mcmcp.perf.TickClock.CLIENT_FRAMES
+                                .throttledSince(startedNanos) ? "# WARNING: " + ClientStateTools.throttleWarning() + "\n"
+                                : "";
+                            return warning + "# percent of frame, ~ms per frame (mean frame " + meanFrameMs + " ms)\n"
                                 + rendered;
                         }
                     });
@@ -353,6 +360,7 @@ public final class ClientPerformanceTools {
                             json.addProperty("frames", frames);
                             json.addProperty("timerOverheadMicrosPerCall",
                                 DurationWindow.micros(measureTimerOverheadNanos()));
+                            ClientStateTools.addMeasuredWindow(json, Minecraft.getMinecraft(), startedNanos);
                             return json;
                         }
                     });

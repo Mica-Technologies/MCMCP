@@ -428,7 +428,8 @@ public final class PerformanceTools {
                     : new SlowTickFilter(tree, onlyOverMillis * 1_000_000L, !includeIdle);
                 String resolvedName = threadName;
                 long attempts = 0L;
-                long deadline = System.nanoTime() + durationSeconds * 1_000_000_000L;
+                long sampleStartedNanos = System.nanoTime();
+                long deadline = sampleStartedNanos + durationSeconds * 1_000_000_000L;
                 while (System.nanoTime() < deadline) {
                     context.getCancellation().throwIfCancelled();
                     ThreadInfo info = threadBean.getThreadInfo(threadId, Integer.MAX_VALUE);
@@ -462,6 +463,13 @@ public final class PerformanceTools {
                         slowTicks.ticksSeen());
                     result.addProperty(context.getSide().isClient() ? "framesKept" : "ticksKept",
                         slowTicks.ticksKept());
+                }
+                if (context.getSide().isClient() && clock.throttledSince(sampleStartedNanos)) {
+                    // A sample of a client held to a few frames a second is mostly the frame limiter's
+                    // wait (#102). Common code, so the client's window state is not named here.
+                    result.addProperty("warning", "The client was throttled (under 20 fps) during this sample, "
+                        + "so it is mostly the frame limiter's wait. Bring the client forward, or call client_view "
+                        + "with grabInputFocus true and pauseOnLostFocus false, and sample again.");
                 }
                 result.add("hottestFrames", tree.hottestFrames(top));
                 result.add("byPackage", tree.byOwner(top));

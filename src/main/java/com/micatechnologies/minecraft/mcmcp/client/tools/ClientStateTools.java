@@ -139,9 +139,6 @@ public final class ClientStateTools {
             .build());
     }
 
-    /** Below this many frames a second, chunk loading and every client-thread hop visibly lag. */
-    private static final int THROTTLED_FPS = 20;
-
     /**
      * Whether the game is running at a rate an agent can rely on. Client thread only.
      *
@@ -159,8 +156,36 @@ public final class ClientStateTools {
         if (ClientKeepAwake.isHolding()) {
             json.addProperty("keepAwakeReplacedLimit", ClientKeepAwake.replacedLimit());
         }
-        json.addProperty("throttled", fps < THROTTLED_FPS || mc.gameSettings.limitFramerate < THROTTLED_FPS);
+        json.addProperty("throttled", ClientKeepAwake.isThrottled(mc));
+        // What a throttled client was doing, so the next one can be explained: a 2 fps client with its
+        // frame limit at 120 was seen and could not be reproduced (#102).
+        json.addProperty("displayActive", Display.isActive());
+        json.addProperty("gamePaused", mc.isGamePaused());
+        if (mc.currentScreen != null) {
+            json.addProperty("screen", mc.currentScreen.getClass().getSimpleName());
+        }
         return json;
+    }
+
+    /**
+     * Adds the window state to a measurement, and a warning when the client was throttled at any point
+     * since {@code sinceNanos}: a profile of a client held to a few frames a second measures the
+     * throttle, and its per-frame figures can look fine while its FPS and percentiles mean nothing
+     * (#102). Client thread only.
+     */
+    public static void addMeasuredWindow(JsonObject into, Minecraft mc, long sinceNanos) {
+        into.add("window", windowState(mc));
+        if (com.micatechnologies.minecraft.mcmcp.perf.TickClock.CLIENT_FRAMES.throttledSince(sinceNanos)) {
+            into.addProperty("warning", throttleWarning());
+        }
+    }
+
+    /** The warning a measurement of a throttled client carries. */
+    public static String throttleWarning() {
+        return "The client was throttled (under " + ClientKeepAwake.THROTTLED_FPS + " fps, or its frame limit "
+            + "was) during this measurement, so frame rates and percentiles describe the throttle, not the game. "
+            + "Check 'window', bring the client forward or call client_view with grabInputFocus true and "
+            + "pauseOnLostFocus false, and measure again.";
     }
 
     /**

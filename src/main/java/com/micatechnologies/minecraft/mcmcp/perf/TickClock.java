@@ -21,6 +21,20 @@ public final class TickClock {
 
     private volatile long lastNanos;
     private volatile long count;
+    private volatile long throttledAtNanos = Long.MIN_VALUE;
+
+    /**
+     * Called by the owning game thread whenever it finds itself throttled: a client in the background
+     * held to a few frames a second. A profile taken then measures the throttle, not the game (#102).
+     */
+    public void throttled(long nowNanos) {
+        throttledAtNanos = nowNanos;
+    }
+
+    /** Whether the thread was seen throttled at or after {@code sinceNanos}. */
+    public boolean throttledSince(long sinceNanos) {
+        return throttledAtNanos != Long.MIN_VALUE && throttledAtNanos - sinceNanos >= 0L;
+    }
 
     /** Called by the owning game thread only. */
     public void completed(long tookNanos) {

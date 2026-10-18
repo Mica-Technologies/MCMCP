@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp.client;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity;
+import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import net.minecraft.client.Minecraft;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -78,10 +79,23 @@ public final class ClientKeepAwake {
         return replacedLimit;
     }
 
+    /** Below this many frames a second, chunk loading and every client-thread hop visibly lag. */
+    public static final int THROTTLED_FPS = 20;
+
+    /** Whether the client is running at a rate an agent cannot rely on. Client thread only. */
+    public static boolean isThrottled(Minecraft mc) {
+        return Minecraft.getDebugFPS() < THROTTLED_FPS || mc.gameSettings.limitFramerate < THROTTLED_FPS;
+    }
+
     private static void apply() {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.gameSettings == null) {
             return;
+        }
+        // Noted every tick and frame, so a profile can say it measured a throttled client at any point
+        // of its window, not only at its end (#102).
+        if (mc.world != null && isThrottled(mc)) {
+            TickClock.CLIENT_FRAMES.throttled(System.nanoTime());
         }
         int current = mc.gameSettings.limitFramerate;
         if (isActive()) {

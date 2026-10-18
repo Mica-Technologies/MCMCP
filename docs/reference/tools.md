@@ -1314,7 +1314,8 @@ time and weather, what the crosshair is on, and render distance.
 `fps`, the `frameLimit`, whether MCMCP is keeping the client awake (`keepAwake`, and
 `keepAwakeReplacedLimit` when it is overriding a lower limit), and `throttled`. A throttled client
 loads and draws chunks slowly. Without this, a slow chunk and an empty one look the same from a
-survey. See [`keepAwakeSeconds`](configuration.md#keepawakeseconds).
+survey. `displayActive` (LWJGL's own idea of focus), `gamePaused` and the open `screen` say what a
+throttled client was doing. See [`keepAwakeSeconds`](configuration.md#keepawakeseconds).
 
 #### `client_looking_at`
 
@@ -2023,6 +2024,13 @@ into its chunk's vertex buffer and drawn with everything else in the chunk; ther
 call to time. Its cost appears as `terrain` and `updatechunks` in
 [`client_profile_sections`](#client_profile_sections), and the way to measure one is the blunt one:
 [`client_frame_stats`](#client_frame_stats) before and after placing a few hundred.
+
+**A throttled client.** A client in the background can be held to a few frames a second, and a
+profile taken then measures the throttle: its per-frame figures can look fine while its FPS and
+percentiles mean nothing. `client_frame_stats` and `client_profile_rendering` carry the
+[`window`](#client_player_state) block, and they, `client_profile_sections` and a client-side
+`game_cpu_sample` carry a `warning` when the client was throttled at any point in the window they
+measured.
 
 #### `client_frame_stats`
 
