@@ -43,7 +43,8 @@ public final class CompanionPolicy implements CallFilter {
     /** Every class a player can be granted, in the order they are checked and listed. */
     public static final Set<String> ALL_CLASSES = Collections.unmodifiableSet(new LinkedHashSet<>(
         java.util.Arrays.asList(Principal.CLASS_READ, Principal.CLASS_WRITE, Principal.CLASS_COMMAND,
-            Principal.CLASS_LOAD, Principal.CLASS_USE, Principal.CLASS_OTHERS, Principal.CLASS_CONSOLE)));
+            Principal.CLASS_LOAD, Principal.CLASS_USE, Principal.CLASS_PROFILE, Principal.CLASS_OTHERS,
+            Principal.CLASS_CONSOLE)));
 
     /** Tool name to the class that unlocks it. Anything absent is never served. */
     static final Map<String, String> CLASSES = new HashMap<>();
@@ -71,6 +72,12 @@ public final class CompanionPolicy implements CallFilter {
         }
         for (String use : new String[] {"server_use_item_on_block", "server_use_item_on_blocks", "server_activate_block"}) {
             CLASSES.put(use, Principal.CLASS_USE);
+        }
+        // What is eating a live server's tick could only be answered with Spark, uploading the profile
+        // to a third-party service and decoding its protobuf by hand (#100).
+        for (String profile : new String[] {"game_cpu_sample", "server_profile_ticking", "server_profile_sections",
+            "server_census"}) {
+            CLASSES.put(profile, Principal.CLASS_PROFILE);
         }
         PLAYER_ARGUMENTS.put("server_run_command", "asPlayer");
         PLAYER_ARGUMENTS.put("server_run_commands", "asPlayer");

@@ -33,6 +33,11 @@ public final class Principal {
     public static final String CLASS_LOAD = "load";
     /** Using items on blocks and activating them without reach: server_use_item_on_block, server_activate_block. */
     public static final String CLASS_USE = "use";
+    /**
+     * Profiling the server: game_cpu_sample, server_profile_ticking, server_profile_sections,
+     * server_census. Its own class because a profile costs the server tick time while it runs.
+     */
+    public static final String CLASS_PROFILE = "profile";
     /** Naming a player other than oneself in a tool that takes one. */
     public static final String CLASS_OTHERS = "others";
     /** Running a command with the server console's authority instead of one's own. */

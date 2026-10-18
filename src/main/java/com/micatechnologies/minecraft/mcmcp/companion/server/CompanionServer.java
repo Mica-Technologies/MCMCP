@@ -132,6 +132,9 @@ public final class CompanionServer {
         node(Principal.CLASS_USE, DefaultPermissionLevel.OP,
             "Use items on blocks and activate blocks from any distance through the MCMCP companion "
                 + "(server_use_item_on_block, server_activate_block). Protection mods still apply.");
+        node(Principal.CLASS_PROFILE, DefaultPermissionLevel.OP,
+            "Profile the server through the MCMCP companion (game_cpu_sample, server_profile_ticking, "
+                + "server_profile_sections, server_census). A profile costs tick time while it runs.");
         node(Principal.CLASS_OTHERS, DefaultPermissionLevel.OP,
             "Name players other than yourself in MCMCP companion tools (state, inventory, teleport, asPlayer).");
         node(Principal.CLASS_CONSOLE, DefaultPermissionLevel.NONE,

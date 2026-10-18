@@ -47,13 +47,27 @@ class CompanionPolicyTest {
 
     @Test
     void aToolInNoClassIsNeitherListedNorRunEvenWithEveryGrant() {
-        McpSession everything = session("read", "write", "command", "others", "command.console");
+        McpSession everything = session("read", "write", "command", "load", "use", "profile", "others",
+            "command.console");
         for (String name : new String[] {"server_stop", "server_save_world", "game_read_log", "game_storage",
-            "server_broadcast", "game_cpu_sample", "server_profile_ticking", "a_tool_added_next_year"}) {
+            "server_broadcast", "game_heap_histogram", "a_tool_added_next_year"}) {
             assertFalse(policy.lists(everything, tool(name)), name);
             assertNotNull(policy.admit(everything, tool(name), new JsonObject()), name);
         }
         assertFalse(policy.servesResourcesAndPrompts(everything));
+    }
+
+    @Test
+    void theProfilersNeedTheirOwnNodeAndReadAloneDoesNotReachThem() {
+        McpSession reader = session("read");
+        McpSession profiler = session("profile");
+        for (String name : new String[] {"game_cpu_sample", "server_profile_ticking", "server_profile_sections",
+            "server_census"}) {
+            assertFalse(policy.lists(reader, tool(name)), name);
+            assertNotNull(policy.admit(reader, tool(name), new JsonObject()), name);
+            assertTrue(policy.lists(profiler, tool(name)), name);
+            assertNull(policy.admit(profiler, tool(name), new JsonObject()), name);
+        }
     }
 
     @Test

@@ -78,11 +78,13 @@ A player needs **both**:
 | `mcmcp.companion.command` | `server_run_command` and `server_run_commands` as yourself, `server_tell_player` | operators |
 | `mcmcp.companion.use` | `server_use_item_on_block`, `server_use_item_on_blocks`, `server_activate_block` (as yourself, any distance; protection mods still apply) | operators |
 | `mcmcp.companion.load` | `server_keep_loaded`, `server_release_loaded`, and `load: true` on reads and writes | operators |
+| `mcmcp.companion.profile` | `game_cpu_sample` (the server thread), `server_profile_ticking`, `server_profile_sections`, `server_census`. Their own node because a profile costs the server tick time while it runs | operators |
 | `mcmcp.companion.others` | naming a player other than yourself in those tools | operators |
 | `mcmcp.companion.command.console` | `server_run_command` with the console's authority | **nobody** |
 
 Anything not in the table is never served through the companion: `server_stop`, `server_save_world`,
-`server_broadcast`, the profilers, the log readers, `game_storage`, and resources and prompts. A
+`server_broadcast`, `game_heap_histogram` (which can pause the server for a full collection), the
+log readers, `game_storage`, and resources and prompts. A
 player's `tools/list` shows only the tools their grants unlock.
 
 - **As whom.** The player's identity always comes from the connection a request arrives on, never
