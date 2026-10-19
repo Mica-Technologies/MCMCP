@@ -143,6 +143,36 @@ public final class ScreenshotImages {
         return (int) Math.round(width * (double) height / 750.0D);
     }
     /**
+     * Whether a frame is one dark colour: brightness spread below a few levels in 255 and dark on
+     * average, over a grid of samples. A view the renderer had not built comes out exactly so (#115),
+     * and a careless reader takes it for the scene. A night sky or a dark room still has stars,
+     * torches or edges, so it spreads more than this.
+     */
+    public static boolean isBlankDark(BufferedImage image) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+        if (width == 0 || height == 0) {
+            return true;
+        }
+        double sum = 0.0D;
+        double squares = 0.0D;
+        int samples = 0;
+        for (int gy = 0; gy < 24; gy++) {
+            for (int gx = 0; gx < 32; gx++) {
+                int rgb = image.getRGB(Math.min(width - 1, gx * width / 32 + width / 64),
+                    Math.min(height - 1, gy * height / 24 + height / 48));
+                double luma = 0.299D * ((rgb >> 16) & 0xFF) + 0.587D * ((rgb >> 8) & 0xFF) + 0.114D * (rgb & 0xFF);
+                sum += luma;
+                squares += luma * luma;
+                samples++;
+            }
+        }
+        double mean = sum / samples;
+        double spread = Math.sqrt(Math.max(0.0D, squares / samples - mean * mean));
+        return mean < 40.0D && spread < 3.0D;
+    }
+
+    /**
      * A crop as pixels {x, y, width, height}, clamped to the frame: fractions when all four are 0-1,
      * pixels otherwise. Null when nothing of it is inside the frame.
      */

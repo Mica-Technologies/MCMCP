@@ -2098,7 +2098,13 @@ aimed at `look_at: [x, y, z]` or by `yaw`/`pitch`, without the HUD or hand. Noth
 server, so other players see nothing. The client can only draw chunks it holds, so the camera must be
 within its render distance. A position outside it is refused. The tool waits up to `settle_ms`
 (default 5000) for the chunk meshes around the new viewpoint to be built. `view.meshesSettled` in
-the result says whether they were.
+the result says whether they were. Settled means the client holds the chunks within two of the
+camera's and its build queue has stayed empty across frames after they arrived; an empty queue alone
+is not enough, since chunks still on their way from the server are not queued yet. When some never
+arrived, `view.chunksMissingAtCamera` says how many.
+
+A frame that comes out one dark colour carries a `warning`, in its text and structured result: it is
+almost never the scene. The file is kept; check it before trusting it.
 
 A settled mesh can still lack the blocks a tile entity renderer draws (signal heads, chests, signs):
 a chunk the client was just sent can compile before its tile entities exist, and then draws without

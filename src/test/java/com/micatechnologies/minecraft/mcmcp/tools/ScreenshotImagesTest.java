@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -91,6 +92,32 @@ class ScreenshotImagesTest {
         double small = ScreenshotImages.approximateTokens(640, 360);
 
         assertEquals(large, small * 4.0D, 4.0D);
+    }
+
+    @Test
+    void anUnrenderedBlackFrameIsBlankButANightSceneWithAnyDetailIsNot() {
+        BufferedImage black = new BufferedImage(854, 480, BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = black.createGraphics();
+        g.setColor(new java.awt.Color(6, 6, 9));
+        g.fillRect(0, 0, 854, 480);
+        g.dispose();
+        assertTrue(ScreenshotImages.isBlankDark(black));
+
+        BufferedImage night = new BufferedImage(854, 480, BufferedImage.TYPE_INT_RGB);
+        g = night.createGraphics();
+        g.setColor(new java.awt.Color(6, 6, 9));
+        g.fillRect(0, 0, 854, 480);
+        g.setColor(new java.awt.Color(60, 50, 30));
+        g.fillRect(0, 300, 854, 180);
+        g.dispose();
+        assertFalse(ScreenshotImages.isBlankDark(night), "a dark scene with a lit floor is not blank");
+
+        BufferedImage sky = new BufferedImage(854, 480, BufferedImage.TYPE_INT_RGB);
+        g = sky.createGraphics();
+        g.setColor(new java.awt.Color(120, 167, 255));
+        g.fillRect(0, 0, 854, 480);
+        g.dispose();
+        assertFalse(ScreenshotImages.isBlankDark(sky), "a plain bright sky is uniform but not dark");
     }
 
     @Test

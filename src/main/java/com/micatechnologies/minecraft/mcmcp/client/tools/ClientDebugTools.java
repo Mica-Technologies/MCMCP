@@ -251,8 +251,8 @@ public final class ClientDebugTools {
                             ClientFrameClock.await(2, 1, 3000L);
                             if (from != null) {
                                 int settleMillis = context.getBoundedInt("settle_ms", 5000, 0, MAX_SETTLE_MILLIS);
-                                settleChunkMeshes(context, settleMillis, view);
-                                settleTileEntities(context, settleMillis, view);
+                                settleChunkMeshes(context, settleMillis, view, from);
+                                settleTileEntities(context, settleMillis, view, from);
                             }
                             capture = context.onGameThread(new Callable<JsonObject>() {
                                 @Override
@@ -315,6 +315,15 @@ public final class ClientDebugTools {
                 // A crop is written beside the full frame and becomes the path returned: an image is
                 // charged by area wherever it is read, inline or from the file, so the part under test
                 // at full resolution costs a fraction of the frame. The full frame stays, as fullPath.
+                // A frame of one dark colour is almost never the scene: a view the renderer had not
+                // built came out so, reported as settled (#115). Said, not refused: the file is real.
+                String blankWarning = null;
+                BufferedImage written = ImageIO.read(file);
+                if (written != null && ScreenshotImages.isBlankDark(written)) {
+                    blankWarning = "The frame is one dark colour: the view was probably not rendered"
+                        + (from != null ? " (chunks round the camera not built; try a longer settle_ms, or "
+                        + "client_wait chunksRendered near it first)" : "") + ". Check it before trusting it.";
+                }
                 JsonObject cropped = null;
                 String shownPath = savedPath;
                 if (crop != null) {
@@ -352,6 +361,9 @@ public final class ClientDebugTools {
 
                 JsonObject structured = new JsonObject();
                 structured.addProperty("path", shownPath);
+                if (blankWarning != null) {
+                    structured.addProperty("warning", blankWarning);
+                }
                 if (cropped != null) {
                     structured.add("crop", cropped);
                 }
@@ -379,7 +391,8 @@ public final class ClientDebugTools {
                             : "")
                         + (capture.has("redirected")
                             ? " (a mod's ScreenshotEvent handler moved it there)"
-                            : ""))
+                            : "")
+                        + (blankWarning != null ? ". WARNING: " + blankWarning : ""))
                     .withStructured(structured);
                 if (linkable) {
                     result.withContent(McpContent.resourceLink(
@@ -645,26 +658,56 @@ public final class ClientDebugTools {
      * drawn from there are built over the following frames. Captured at once, a view from a new
      * point shows holes where buildings are. Records in {@code view} whether it settled.
      */
-    private static void settleChunkMeshes(ToolContext context, int settleMillis, JsonObject view)
-        throws Exception {
+    private static void settleChunkMeshes(ToolContext context, int settleMillis, JsonObject view,
+                                          final double[] camera) throws Exception {
         long deadline = System.currentTimeMillis() + settleMillis;
         boolean settled = false;
+        int missing = 0;
+        int quietPolls = 0;
         while (true) {
-            settled = context.onGameThread(new Callable<Boolean>() {
+            // An empty build queue is not a built view. Right after bringPlayer moves the player a
+            // hundred blocks, the chunks round the camera have not arrived from the server, so nothing
+            // is queued yet, and that read as settled over an empty world: an all-black frame reported
+            // as meshesSettled (#115). The chunks must be here first, and the queue then empty on two
+            // polls with frames between, since a chunk that has just arrived is queued on the next frame.
+            int[] state = context.onGameThread(new Callable<int[]>() {
                 @Override
-                public Boolean call() {
-                    return Minecraft.getMinecraft().renderGlobal.hasNoChunkUpdates();
+                public int[] call() {
+                    Minecraft mc = Minecraft.getMinecraft();
+                    int absent = 0;
+                    int centreX = MathHelper.floor(camera[0]) >> 4;
+                    int centreZ = MathHelper.floor(camera[2]) >> 4;
+                    for (int dx = -CAMERA_CHUNK_RADIUS; dx <= CAMERA_CHUNK_RADIUS; dx++) {
+                        for (int dz = -CAMERA_CHUNK_RADIUS; dz <= CAMERA_CHUNK_RADIUS; dz++) {
+                            net.minecraft.world.chunk.Chunk chunk =
+                                mc.world.getChunkProvider().getLoadedChunk(centreX + dx, centreZ + dz);
+                            if (chunk == null || chunk.isEmpty()) {
+                                absent++;
+                            }
+                        }
+                    }
+                    return new int[] {absent, mc.renderGlobal.hasNoChunkUpdates() ? 1 : 0};
                 }
             });
+            missing = state[0];
+            quietPolls = missing == 0 && state[1] == 1 ? quietPolls + 1 : 0;
+            settled = quietPolls >= 2;
             if (settled || System.currentTimeMillis() >= deadline) {
                 break;
             }
-            Thread.sleep(100L);
+            ClientFrameClock.await(2, 0, 500L);
         }
         // One more frame after the last mesh lands, so it is in the frame that is read.
         ClientFrameClock.await(2, 0, 2000L);
         view.addProperty("meshesSettled", settled);
+        if (missing > 0) {
+            int side = CAMERA_CHUNK_RADIUS * 2 + 1;
+            view.addProperty("chunksMissingAtCamera", missing + " of " + side * side);
+        }
     }
+
+    /** Chunks each side of the camera's that must be loaded before its view counts as built. */
+    private static final int CAMERA_CHUNK_RADIUS = 2;
 
     /**
      * Makes sure the tile entities in view will be drawn, and says how many are (#96).
@@ -672,7 +715,8 @@ public final class ClientDebugTools {
      * <p>A settled mesh can still be missing its tile entities: see {@link TileEntityCoverage}. Those
      * missing have their render chunks rebuilt and the meshes are let settle once more.
      */
-    private static void settleTileEntities(ToolContext context, int settleMillis, JsonObject view)
+    private static void settleTileEntities(ToolContext context, int settleMillis, JsonObject view,
+                                           double[] camera)
         throws Exception {
         TileEntityCoverage.Result first = context.onGameThread(() -> TileEntityCoverage.check(Minecraft.getMinecraft()));
         if (!first.checked) {
@@ -684,7 +728,7 @@ public final class ClientDebugTools {
                 TileEntityCoverage.rebuild(Minecraft.getMinecraft(), first.missing);
                 return null;
             });
-            settleChunkMeshes(context, Math.max(1000, settleMillis), view);
+            settleChunkMeshes(context, Math.max(1000, settleMillis), view, camera);
             last = context.onGameThread(() -> TileEntityCoverage.check(Minecraft.getMinecraft()));
         }
         JsonObject json = last.toJson();
