@@ -30,6 +30,9 @@ import javax.annotation.Nullable;
  */
 public final class ServerJobTools {
 
+    /** Longest one status call waits; a client gives up on a call that says nothing for much longer. */
+    static final int MAX_WAIT_SECONDS = 120;
+
     private ServerJobTools() {
     }
 
@@ -61,10 +64,14 @@ public final class ServerJobTools {
             .description("A background job's state (queued, running, paused, done, failed, cancelled, "
                 + "interrupted), parts done of parts, percent, eta, totals summed over its parts, and for an "
                 + "op replay 'lastOp', the last op finished: resume an interrupted job from lastOp + 1. A "
-                + "get_blocks job's results are pages: pass 'page' to read one.")
+                + "get_blocks job's results are pages: pass 'page' to read one. 'wait' holds the call until "
+                + "the job's state changes (it finishes, fails, pauses...) or that many seconds pass: one "
+                + "call instead of a poll per few seconds.")
             .schema(JsonSchema.object()
                 .string("id", "The job id.")
                 .integer("page", "A get_blocks job's page to return, from 0.", 0, 1_000_000)
+                .integer("wait", "Seconds to wait for the job's state to change before answering. Default 0.",
+                    0, MAX_WAIT_SECONDS)
                 .required("id")
                 .build())
             .serverOnly()
@@ -175,10 +182,22 @@ public final class ServerJobTools {
         return ToolResult.structured(json);
     }
 
-    private static ToolResult status(ToolContext context) {
+    private static ToolResult status(ToolContext context) throws InterruptedException {
         Job job = owned(context);
         if (job == null) {
             return ToolResult.error("You have no job '" + context.getString("id", "") + "'.");
+        }
+        int wait = context.getBoundedInt("wait", 0, 0, MAX_WAIT_SECONDS);
+        if (wait > 0 && !job.state().settled()) {
+            // In one-second slices, so a cancelled call stops waiting within a second.
+            Job.State from = job.state();
+            long end = System.currentTimeMillis() + wait * 1000L;
+            while (job.state() == from && System.currentTimeMillis() < end) {
+                context.getCancellation().throwIfCancelled();
+                job.awaitStateChange(from, Math.min(1000L, end - System.currentTimeMillis()));
+                context.reportProgress((System.currentTimeMillis() - (end - wait * 1000L)) / 1000.0D, wait,
+                    "Waiting on job " + job.id);
+            }
         }
         JsonObject json = job.toJson(true);
         if (context.has("page")) {

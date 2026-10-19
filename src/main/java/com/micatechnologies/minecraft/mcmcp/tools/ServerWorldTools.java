@@ -278,7 +278,7 @@ public final class ServerWorldTools {
                         json.addProperty("blocksScanned", scanned);
                         json.addProperty("matches", found.size());
                         json.addProperty("truncated", found.size() >= limit);
-                        json.add("positions", found);
+                        json.add("positions", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(found));
                         return json;
                     }
                 });
@@ -344,7 +344,7 @@ public final class ServerWorldTools {
                             json.addProperty("radiusRequested", requested);
                         }
                         json.addProperty("count", array.size());
-                        json.add("entities", array);
+                        json.add("entities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(array));
                         return json;
                     }
                 });

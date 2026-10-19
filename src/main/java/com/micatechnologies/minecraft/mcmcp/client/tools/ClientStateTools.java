@@ -342,7 +342,7 @@ public final class ClientStateTools {
                             json.addProperty("radiusRequested", requested);
                         }
                         json.addProperty("count", array.size());
-                        json.add("entities", array);
+                        json.add("entities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(array));
                         return json;
                     }
                 });

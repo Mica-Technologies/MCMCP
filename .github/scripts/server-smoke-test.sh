@@ -587,6 +587,12 @@ case "$TE_POS_BODY" in
   *'"matched":1'*'"returned":2'*'"summary"'*'No tile entity here'*) echo "    positions: the chest summarised, the empty cell reported" ;;
   *) mcp_failure "server_get_tile_entities positions/summary wrong: ${TE_POS_BODY}" ;;
 esac
+TE_ALL_BODY="$(mcp_call 605 server_get_tile_entities "{\"x\":${TX},\"y\":${TY},\"z\":${TZ},\"toX\":$((TX + 4)),\"toY\":${TY},\"toZ\":${TZ},\"keys\":[\"id\"]}")" \
+  || mcp_failure "reading every tile entity failed: ${TE_ALL_BODY}"
+case "$TE_ALL_BODY" in
+  *'"tileEntities":{"columns":['*'"rows":[['*) echo "    three tile entities came back as columns and rows" ;;
+  *) mcp_failure "three tile entities were not a table: ${TE_ALL_BODY}" ;;
+esac
 
 echo "==> Two-part blocks: a door's lower half brings its upper half, and replaces a different door"
 DX=$((SPAWN_X + 16)); DY=$((UNDO_Y + 10)); DZ=$((SPAWN_Z + 16))
@@ -827,14 +833,21 @@ esac
 TJOB_BODY="$(mcp_call 599 server_job_submit '{"kind":"test","label":"smoke test","args":{"steps":[{"check":"${1 + 1 == 2}","label":"arithmetic"}]}}')" \
   || mcp_failure "a test job failed to start: ${TJOB_BODY}"
 TJOB_ID="$(printf '%s' "$TJOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"
-for _ in $(seq 1 30); do
-  TJOB_STATE="$(mcp_call 61 server_job_status "{\"id\":\"${TJOB_ID}\"}")" || mcp_failure "status failed: ${TJOB_STATE}"
-  case "$TJOB_STATE" in *'"state":"done"'*|*'"state":"failed"'*) break ;; esac
-  sleep 1
-done
+# One call that waits, not a poll a second: it answers when the job's state changes.
+TJOB_STATE="$(mcp_call 606 server_job_status "{\"id\":\"${TJOB_ID}\",\"wait\":30}")" || mcp_failure "status failed: ${TJOB_STATE}"
+case "$TJOB_STATE" in *'"state":"running"'*|*'"state":"queued"'*)
+  TJOB_STATE="$(mcp_call 607 server_job_status "{\"id\":\"${TJOB_ID}\",\"wait\":30}")" || mcp_failure "status failed: ${TJOB_STATE}" ;;
+esac
 case "$TJOB_STATE" in
-  *'"state":"done"'*'"verdict":{"passed":true'*) echo "    a test job's verdict is in its status" ;;
+  *'"state":"done"'*'"verdict":{"passed":true'*) echo "    a test job's verdict came back from a waiting status call" ;;
   *) mcp_failure "the test job did not give a verdict: ${TJOB_STATE}" ;;
+esac
+BATCH_SCRIPT='{"steps":[{"call":"server_get_block","args":{"x":BXV,"y":BYV,"z":BZV},"save":"a"},{"call":"server_world_info","args":{},"save":"w"}],"return":["a","w"]}'
+BATCH_SCRIPT="${BATCH_SCRIPT//BXV/$LX}"; BATCH_SCRIPT="${BATCH_SCRIPT//BYV/$LY}"; BATCH_SCRIPT="${BATCH_SCRIPT//BZV/$LZ}"
+BATCH_BODY="$(mcp_call 608 server_run_test "$BATCH_SCRIPT")" || mcp_failure "a batch of reads failed: ${BATCH_BODY}"
+case "$BATCH_BODY" in
+  *'"values":{"a":{'*'redstone_lamp'*'"w":{'*) echo "    two reads came back in one call through return" ;;
+  *) mcp_failure "return did not hand back the saved reads: ${BATCH_BODY}" ;;
 esac
 MORE_SCRIPT='{"vars":{"x":MXV,"y":MYV,"z":MZV},"defs":{"note":[{"set":{"noted":true}}]},"steps":[{"mark":"start"},{"call":"server_run_commands","args":{"commands":["setblock ${x} ${y} ${z} minecraft:diamond_block"]},"restore":[["${x}","${y}","${z}"]]},{"repeat":5,"until":"${repeatIndex >= 2}","steps":[{"call":"server_get_block","args":{"x":"${x}","y":"${y}","z":"${z}"},"append":"reads"}]},{"check":"${len(reads) == 3}","label":"repeat stopped at its until"},{"check":"${reads[0].block == '"'"'minecraft:diamond_block'"'"'}","label":"the command wrote"},{"sleepUntil":1,"since":"start"},{"check":"${since.start >= 1}","label":"slept until a second after the mark"},{"include":"note"},{"check":"${noted}","label":"include ran"}]}'
 MORE_SCRIPT="${MORE_SCRIPT//MXV/$((LX + 5))}"; MORE_SCRIPT="${MORE_SCRIPT//MYV/$LY}"; MORE_SCRIPT="${MORE_SCRIPT//MZV/$LZ}"

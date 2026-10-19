@@ -30,6 +30,7 @@ import com.micatechnologies.minecraft.mcmcp.tools.ScreenshotImages;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.nio.file.Files;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Callable;
 import javax.annotation.Nullable;
@@ -149,6 +150,10 @@ public final class ClientDebugTools {
                 .bool("bringPlayer", "With 'from': move the player to the camera first, so its chunks load, "
                     + "and back to where they were, facing the same way, after the capture.")
                 .property("burst", Json.obj("type", "object"))
+                .array("crop", "Keep only [x, y, width, height] of the frame: pixels, or fractions of it "
+                    + "when all four are 0-1 ([0.25, 0.25, 0.5, 0.5] is the middle). Saved beside the full "
+                    + "frame and returned as the path, at full resolution: an image costs by area, inline or "
+                    + "read from the file.", NUMBER)
                 .build())
             .clientOnly()
             .handler(context -> {
@@ -160,6 +165,11 @@ public final class ClientDebugTools {
                     return burst(context);
                 }
 
+                final double[] crop = numbers(context.getArguments(), "crop", 4);
+                if (context.has("crop") && (crop == null || crop[2] <= 0 || crop[3] <= 0)) {
+                    return ToolResult.error("'crop' is [x, y, width, height] with a positive width and height, "
+                        + "in pixels or as fractions 0-1. Nothing was captured.");
+                }
                 final double[] from = vector(context.getArguments(), "from");
                 final double[] lookAt = vector(context.getArguments(), "look_at");
                 if ((context.has("from") && from == null) || (context.has("look_at") && lookAt == null)) {
@@ -302,12 +312,49 @@ public final class ClientDebugTools {
                         + capture.get("reason").getAsString());
                 }
 
+                // A crop is written beside the full frame and becomes the path returned: an image is
+                // charged by area wherever it is read, inline or from the file, so the part under test
+                // at full resolution costs a fraction of the frame. The full frame stays, as fullPath.
+                JsonObject cropped = null;
+                String shownPath = savedPath;
+                if (crop != null) {
+                    BufferedImage full = ImageIO.read(file);
+                    if (full == null) {
+                        return ToolResult.error("The screenshot at " + savedPath + " could not be read back to "
+                            + "crop. The full frame is there.");
+                    }
+                    int[] rect = ScreenshotImages.cropRect(crop, full.getWidth(), full.getHeight());
+                    if (rect == null) {
+                        return ToolResult.error("'crop' " + Arrays.toString(crop) + " lies outside the "
+                            + full.getWidth() + " x " + full.getHeight() + " frame. The full frame is at "
+                            + savedPath + ".");
+                    }
+                    String stem = file.getName().endsWith(".png")
+                        ? file.getName().substring(0, file.getName().length() - 4) : file.getName();
+                    File part = new File(file.getParentFile(), stem + "-crop.png");
+                    ImageIO.write(full.getSubimage(rect[0], rect[1], rect[2], rect[3]), "png", part);
+                    cropped = new JsonObject();
+                    JsonArray box = new JsonArray();
+                    for (int value : rect) {
+                        box.add(value);
+                    }
+                    cropped.add("rect", box);
+                    cropped.addProperty("frameWidth", full.getWidth());
+                    cropped.addProperty("frameHeight", full.getHeight());
+                    cropped.addProperty("fullPath", savedPath);
+                    file = part;
+                    shownPath = part.getAbsolutePath();
+                }
+
                 // The resource template resolves names under screenshots/, which a redirected file
-                // is not in.
-                boolean linkable = !capture.has("redirected");
+                // is not in. A crop is named for its frame, so it is given by path only.
+                boolean linkable = !capture.has("redirected") && cropped == null;
 
                 JsonObject structured = new JsonObject();
-                structured.addProperty("path", savedPath);
+                structured.addProperty("path", shownPath);
+                if (cropped != null) {
+                    structured.add("crop", cropped);
+                }
                 structured.addProperty("name", file.getName());
                 structured.addProperty("exists", true);
                 structured.addProperty("bytes", file.length());
@@ -325,7 +372,7 @@ public final class ClientDebugTools {
                         McmcpConstants.RESOURCE_SCHEME + "://client/screenshot/" + fileName);
                 }
 
-                ToolResult result = ToolResult.text("Screenshot saved to " + savedPath
+                ToolResult result = ToolResult.text("Screenshot saved to " + shownPath
                         + (capture.has("fallback")
                             ? " (written by MCMCP directly: " + capture.get("fallback").getAsString()
                                 + ")"
@@ -517,12 +564,18 @@ public final class ClientDebugTools {
     /** {@code [x, y, z]} from {@code arguments.name}, or null if absent or not three numbers. */
     @Nullable
     private static double[] vector(JsonObject arguments, String name) {
+        return numbers(arguments, name, 3);
+    }
+
+    /** {@code count} numbers from {@code arguments.name}, or null if absent or not that many numbers. */
+    @Nullable
+    private static double[] numbers(JsonObject arguments, String name, int count) {
         JsonElement element = arguments.get(name);
-        if (element == null || !element.isJsonArray() || element.getAsJsonArray().size() != 3) {
+        if (element == null || !element.isJsonArray() || element.getAsJsonArray().size() != count) {
             return null;
         }
-        double[] values = new double[3];
-        for (int i = 0; i < 3; i++) {
+        double[] values = new double[count];
+        for (int i = 0; i < count; i++) {
             JsonElement value = element.getAsJsonArray().get(i);
             if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
                 return null;

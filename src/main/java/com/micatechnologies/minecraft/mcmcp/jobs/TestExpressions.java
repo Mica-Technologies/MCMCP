@@ -145,7 +145,8 @@ public final class TestExpressions {
                 }
                 String index = path.substring(i + 1, end).trim();
                 i = end + 1;
-                for (JsonElement element : current) {
+                for (JsonElement raw : current) {
+                    JsonElement element = listOf(raw);
                     if (element == null || !element.isJsonArray()) {
                         continue;
                     }
@@ -192,6 +193,15 @@ public final class TestExpressions {
         return current.isEmpty() || current.get(0) == null ? JsonNull.INSTANCE : current.get(0);
     }
 
+    /**
+     * A table ({columns, rows}) as the list of objects it stands for; anything else as it is. Big
+     * lists in tool results are tables, and a script reads them the same way either shape.
+     */
+    public static JsonElement listOf(JsonElement value) {
+        return com.micatechnologies.minecraft.mcmcp.json.JsonTables.isTable(value)
+            ? com.micatechnologies.minecraft.mcmcp.json.JsonTables.rows(value) : value;
+    }
+
     // ------------------------------------------------------------------
     // Conditions
     // ------------------------------------------------------------------
@@ -211,7 +221,7 @@ public final class TestExpressions {
         }
         JsonObject spec = condition.getAsJsonObject();
         String pathText = spec.has("path") ? spec.get("path").getAsString() : "";
-        JsonElement value = pathText.isEmpty() ? result : path(result, pathText);
+        JsonElement value = listOf(pathText.isEmpty() ? result : path(result, pathText));
         List<JsonElement> values = new ArrayList<>();
         if (value.isJsonArray()) {
             for (JsonElement element : value.getAsJsonArray()) {
@@ -467,7 +477,8 @@ public final class TestExpressions {
                     }
                     else {
                         JsonArray all = new JsonArray();
-                        for (JsonElement element : many ? elements(value) : java.util.Collections.singletonList(value)) {
+                        for (JsonElement each : many ? elements(value) : java.util.Collections.singletonList(value)) {
+                            JsonElement element = listOf(each);
                             if (element != null && element.isJsonArray()) {
                                 for (JsonElement item : element.getAsJsonArray()) {
                                     all.add(item);
@@ -492,6 +503,7 @@ public final class TestExpressions {
 
         private List<JsonElement> elements(JsonElement value) {
             List<JsonElement> list = new ArrayList<>();
+            value = listOf(value);
             if (value != null && value.isJsonArray()) {
                 for (JsonElement item : value.getAsJsonArray()) {
                     list.add(item);
@@ -519,6 +531,9 @@ public final class TestExpressions {
         private JsonElement index(JsonElement element, JsonElement key) {
             if (element == null || element.isJsonNull()) {
                 return null;
+            }
+            if (key.isJsonPrimitive() && key.getAsJsonPrimitive().isNumber()) {
+                element = listOf(element);
             }
             if (element.isJsonArray() && key.isJsonPrimitive() && key.getAsJsonPrimitive().isNumber()) {
                 JsonArray array = element.getAsJsonArray();
@@ -643,7 +658,7 @@ public final class TestExpressions {
         JsonElement call(String name, List<JsonElement> args) {
             switch (name) {
                 case "len": {
-                    JsonElement value = args.isEmpty() ? JsonNull.INSTANCE : args.get(0);
+                    JsonElement value = listOf(args.isEmpty() ? JsonNull.INSTANCE : args.get(0));
                     return new JsonPrimitive(value.isJsonArray() ? value.getAsJsonArray().size()
                         : value.isJsonObject() ? value.getAsJsonObject().size()
                         : value.isJsonNull() ? 0 : display(value).length());

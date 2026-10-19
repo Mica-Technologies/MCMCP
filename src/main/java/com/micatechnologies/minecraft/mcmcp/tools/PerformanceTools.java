@@ -801,8 +801,8 @@ public final class PerformanceTools {
         }
 
         JsonObject json = new JsonObject();
-        json.add("tileEntities", section(tileEntities, top, "block"));
-        json.add("entities", section(entities, top, "entity"));
+        json.add("tileEntities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.tabulate(section(tileEntities, top, "block")));
+        json.add("entities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.tabulate(section(entities, top, "entity")));
         json.add("chunks", chunks(tileEntities, entities, top));
         return json;
     }

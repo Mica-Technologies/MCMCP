@@ -11,6 +11,14 @@ destructive ones — so they are set honestly rather than defensively.
 gets "did you mean 'worldType'?" — and nothing is done. Ignoring it used to run the tool on a
 default the caller never chose, and the result read as success.
 
+**Big lists are tables.** A list of three or more objects in a result (tile entities, nearby
+entities, inventory slots, `server_find_blocks` hits around a point, profiler rows) comes back as
+`{"columns": [...], "rows": [[...], ...]}`: each key once, not once per item, often half the size.
+Nothing is dropped. A key an item lacks is `null` in its row, and a value that is an object (a tile
+entity's `nbt`) stays whole in its cell. Shorter lists stay lists. In a
+[`server_run_test`](#server_run_test) script a table reads exactly as the list it stands for:
+`r.tileEntities[*].nbt`, `len(r.entities)` and `where` all work on either shape.
+
 !!! tip "Try them live"
 
     The [API explorer](../api-explorer.md) lists the tools your own instance actually exposes,
@@ -677,7 +685,7 @@ point. The same holds for `server_set_blocks` and `server_undo`.
 
 #### `server_run_test`
 
-:material-alert: Destructive · `steps` required · optional `finally`, `vars`, `defs`, `hold`, `dimension`, `maxSeconds`, `stopOnFail`
+:material-alert: Destructive · `steps` required · optional `finally`, `vars`, `defs`, `hold`, `dimension`, `maxSeconds`, `stopOnFail`, `return`
 
 A building test in one call: a script of ordinary tool calls with waits, loops, checks and report
 rows, after which the world is put back. It exists because acceptance tests (ride every lift to
@@ -747,6 +755,10 @@ and `rows`, and `restored`. Default `maxSeconds` is 300, at most 1,800. Run a lo
 `server_job_submit` `kind: "test"` job: it survives the caller disconnecting, and its status carries
 the verdict.
 
+**A batch of reads.** `return: ["a", "b"]` adds `values`, the named variables as the script saved
+them. Steps that each `call` a read and `save` it, then `return` them all, bring back several reads
+(blocks, tile entities, entities, players) in one call and one turn, rather than one turn each.
+
 #### `server_job_submit`
 
 :material-alert: Destructive · `kind`, `args` required · optional `label`
@@ -761,7 +773,11 @@ Refused during an emergency stop, and when the caller already has four jobs queu
 
 #### `server_job_status`
 
-:material-eye: Read-only · `id` required · optional `page`
+:material-eye: Read-only · `id` required · optional `page`, `wait`
+
+`wait: 60` holds the call until the job's state changes (it finishes, fails, is paused or cancelled)
+or 60 seconds pass, at most 120. Progress alone does not end the wait. One waiting call replaces a
+poll every few seconds, and every poll is a turn.
 
 A job's `state` (`queued`, `running`, `paused`, `done`, `failed`, `cancelled` or `interrupted`),
 `partsDone` of `parts`, `percent`, `elapsedMs` and `etaMs`. Also:
@@ -2062,7 +2078,7 @@ when the player lands.
 #### `client_screenshot`
 
 Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
-`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`, `burst`
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`, `burst`, `crop`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
 
@@ -2070,6 +2086,12 @@ Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_
 (1-40, at 50 ms a tick) from the first, as `<name>_1.png` onwards, and returns `shots`: each one's
 `path` and `atMs`, when after the first it was actually taken. A slow capture delays the next frame
 rather than shifting the rest. Every other argument applies to each frame. Not with `inline`.
+
+**A crop.** `crop: [x, y, width, height]` keeps only that part of the frame, in pixels, or as
+fractions of it when all four are 0-1 (`[0.25, 0.25, 0.5, 0.5]` is the middle quarter). It is saved
+beside the full frame as `<name>-crop.png` and returned as `path`, at full resolution, with
+`crop.rect`, the frame's size and `crop.fullPath`. An image is charged by area however it is read,
+inline or from the file, so the part under test costs a fraction of the frame and loses nothing.
 
 **A view without moving the player.** `from: [x, y, z]` renders the frame from that eye position,
 aimed at `look_at: [x, y, z]` or by `yaw`/`pitch`, without the HUD or hand. Nothing changes on the

@@ -418,8 +418,8 @@ public final class ClientPerformanceTools {
                             removeTimingRenderers();
                             long frames = Math.max(1L, ClientFrameClock.frames() - framesBefore);
                             JsonObject json = new JsonObject();
-                            json.add("tileEntities", tileEntityReport(tileEntities, frames, filter));
-                            json.add("entities", entityReport(entities, frames, filter));
+                            json.add("tileEntities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.tabulate(tileEntityReport(tileEntities, frames, filter)));
+                            json.add("entities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.tabulate(entityReport(entities, frames, filter)));
                             json.addProperty("frames", frames);
                             json.addProperty("timerOverheadMicrosPerCall",
                                 DurationWindow.micros(measureTimerOverheadNanos()));

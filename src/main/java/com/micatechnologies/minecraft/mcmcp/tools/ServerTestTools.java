@@ -133,6 +133,9 @@ public final class ServerTestTools {
                 .integer("maxSeconds", "Stop after this long, restoring as usual. Default " + DEFAULT_SECONDS
                     + ".", 1, MAX_SECONDS)
                 .bool("stopOnFail", "Stop at the first failed check. Default false.")
+                .array("return", "Variables to hand back in the result's 'values', as saved: several reads "
+                    + "in one call, e.g. steps that each call and save, then return them all.",
+                    Json.obj("type", "string"))
                 .required("steps")
                 .build())
             .serverOnly()
@@ -304,6 +307,17 @@ public final class ServerTestTools {
                 table.add("rows", run.rows);
                 json.add("table", table);
             }
+            List<String> returned = Json.getStringList(context.getArguments(), "return");
+            if (!returned.isEmpty()) {
+                // The script's results themselves, for a call that is a batch of reads rather than
+                // a test: one turn for what was several.
+                JsonObject values = new JsonObject();
+                for (String name : returned) {
+                    JsonElement value = run.vars.get(name);
+                    values.add(name, value == null ? com.google.gson.JsonNull.INSTANCE : value);
+                }
+                json.add("values", values);
+            }
             json.addProperty("restored", run.restoreNames.size() - run.restoreFailures.size());
             if (!run.restoreFailures.isEmpty()) {
                 json.add("restoreFailures", Json.arrayOfStrings(run.restoreFailures));
@@ -431,7 +445,7 @@ public final class ServerTestTools {
                 return;
             }
             case "forEach": {
-                JsonElement list = TestExpressions.resolve(step.get("forEach"), run.vars);
+                JsonElement list = TestExpressions.listOf(TestExpressions.resolve(step.get("forEach"), run.vars));
                 if (!list.isJsonArray()) {
                     throw new Stop("forEach " + step.get("forEach") + " is not a list: " + list);
                 }

@@ -92,4 +92,16 @@ class ScreenshotImagesTest {
 
         assertEquals(large, small * 4.0D, 4.0D);
     }
+
+    @Test
+    void aCropInFractionsIsThatShareOfTheFrameAndInPixelsIsClampedToIt() {
+        assertArrayEquals(new int[] {480, 270, 960, 540},
+            ScreenshotImages.cropRect(new double[] {0.25, 0.25, 0.5, 0.5}, 1920, 1080));
+        assertArrayEquals(new int[] {1800, 1000, 120, 80},
+            ScreenshotImages.cropRect(new double[] {1800, 1000, 400, 400}, 1920, 1080));
+        assertEquals(null, ScreenshotImages.cropRect(new double[] {2000, 0, 10, 10}, 1920, 1080));
+        // A quarter of the frame costs a quarter of the tokens, at the same resolution.
+        assertEquals(ScreenshotImages.approximateTokens(1920, 1080) / 4.0D,
+            ScreenshotImages.approximateTokens(960, 540), 2.0D);
+    }
 }

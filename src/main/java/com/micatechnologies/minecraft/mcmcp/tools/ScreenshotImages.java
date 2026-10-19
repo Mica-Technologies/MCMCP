@@ -142,4 +142,23 @@ public final class ScreenshotImages {
     public static int approximateTokens(int width, int height) {
         return (int) Math.round(width * (double) height / 750.0D);
     }
+    /**
+     * A crop as pixels {x, y, width, height}, clamped to the frame: fractions when all four are 0-1,
+     * pixels otherwise. Null when nothing of it is inside the frame.
+     */
+    @javax.annotation.Nullable
+    public static int[] cropRect(double[] crop, int width, int height) {
+        boolean fractions = crop[0] <= 1.0D && crop[1] <= 1.0D && crop[2] <= 1.0D && crop[3] <= 1.0D;
+        double sx = fractions ? width : 1.0D;
+        double sy = fractions ? height : 1.0D;
+        int x = (int) Math.max(0, Math.round(crop[0] * sx));
+        int y = (int) Math.max(0, Math.round(crop[1] * sy));
+        int right = (int) Math.min(width, Math.round((crop[0] + crop[2]) * sx));
+        int bottom = (int) Math.min(height, Math.round((crop[1] + crop[3]) * sy));
+        if (right <= x || bottom <= y) {
+            return null;
+        }
+        return new int[] {x, y, right - x, bottom - y};
+    }
+
 }

@@ -144,7 +144,7 @@ public final class ServerTileEntityTools {
                         if (end < found.size()) {
                             result.addProperty("next", end);
                         }
-                        result.add("tileEntities", entities);
+                        result.add("tileEntities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(entities));
                         ChunkLoadGovernor.touch(dimension, chunks);
                         result.add("chunks", chunksBlock(world, chunks, outcome));
                         return result;
@@ -199,7 +199,7 @@ public final class ServerTileEntityTools {
                 result.addProperty("dimension", dimension);
                 result.addProperty("matched", foundCount);
                 result.addProperty("returned", entities.size());
-                result.add("tileEntities", entities);
+                result.add("tileEntities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(entities));
                 ChunkLoadGovernor.touch(dimension, chunks);
                 result.add("chunks", chunksBlock(world, chunks, outcome));
                 return result;

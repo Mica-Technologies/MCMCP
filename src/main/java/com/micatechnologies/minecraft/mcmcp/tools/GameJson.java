@@ -501,7 +501,7 @@ public final class GameJson {
             slots.add(slot);
         }
         json.addProperty("emptySlots", empty);
-        json.add("items", slots);
+        json.add("items", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(slots));
         return json;
     }
 

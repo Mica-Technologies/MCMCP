@@ -129,6 +129,20 @@ public final class Job {
         return version;
     }
 
+    /**
+     * Waits until the job's state is no longer {@code from}, or {@code millis} pass. Progress alone
+     * does not end the wait: a caller waiting on a job wants the next thing that changes what it
+     * does next, not every percent.
+     */
+    public synchronized void awaitStateChange(State from, long millis) throws InterruptedException {
+        long end = System.currentTimeMillis() + millis;
+        long left = millis;
+        while (state == from && left > 0L) {
+            wait(Math.min(left, 1000L));
+            left = end - System.currentTimeMillis();
+        }
+    }
+
     public int partCount() {
         return restoredPartCount >= 0 ? restoredPartCount : parts.size();
     }
