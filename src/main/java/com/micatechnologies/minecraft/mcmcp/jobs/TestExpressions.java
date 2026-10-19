@@ -442,7 +442,99 @@ public final class TestExpressions {
             return primary();
         }
 
+        /** A value and what follows it: {@code .name}, {@code [index]}, {@code [*]}, any number of them. */
         JsonElement primary() {
+            JsonElement value = atom();
+            boolean many = false;
+            while (true) {
+                skipSpace();
+                if (at + 1 < text.length() && text.charAt(at) == '.'
+                    && (Character.isLetter(text.charAt(at + 1)) || text.charAt(at + 1) == '_')) {
+                    at++;
+                    int start = at;
+                    while (at < text.length() && (Character.isLetterOrDigit(text.charAt(at)) || text.charAt(at) == '_')) {
+                        at++;
+                    }
+                    final String member = text.substring(start, at);
+                    value = step(value, many, element -> element != null && element.isJsonObject()
+                        ? element.getAsJsonObject().get(member) : null);
+                }
+                else if (at < text.length() && text.charAt(at) == '[') {
+                    at++;
+                    int open = at;
+                    if (!(eat("*") && eat("]"))) {
+                        at = open;
+                    }
+                    else {
+                        JsonArray all = new JsonArray();
+                        for (JsonElement element : many ? elements(value) : java.util.Collections.singletonList(value)) {
+                            if (element != null && element.isJsonArray()) {
+                                for (JsonElement item : element.getAsJsonArray()) {
+                                    all.add(item);
+                                }
+                            }
+                        }
+                        value = all;
+                        many = true;
+                        continue;
+                    }
+                    final JsonElement key = or();
+                    if (!eat("]")) {
+                        throw new IllegalArgumentException("Missing ] in ${" + text + "}.");
+                    }
+                    value = step(value, many, element -> index(element, key));
+                }
+                else {
+                    return value;
+                }
+            }
+        }
+
+        private List<JsonElement> elements(JsonElement value) {
+            List<JsonElement> list = new ArrayList<>();
+            if (value != null && value.isJsonArray()) {
+                for (JsonElement item : value.getAsJsonArray()) {
+                    list.add(item);
+                }
+            }
+            return list;
+        }
+
+        /** One postfix step, applied to each match after a [*], to the value otherwise. */
+        private JsonElement step(JsonElement value, boolean many, java.util.function.Function<JsonElement, JsonElement> op) {
+            if (!many) {
+                JsonElement next = op.apply(value);
+                return next == null ? JsonNull.INSTANCE : next;
+            }
+            JsonArray mapped = new JsonArray();
+            for (JsonElement element : elements(value)) {
+                JsonElement next = op.apply(element);
+                if (next != null && !next.isJsonNull()) {
+                    mapped.add(next);
+                }
+            }
+            return mapped;
+        }
+
+        private JsonElement index(JsonElement element, JsonElement key) {
+            if (element == null || element.isJsonNull()) {
+                return null;
+            }
+            if (element.isJsonArray() && key.isJsonPrimitive() && key.getAsJsonPrimitive().isNumber()) {
+                JsonArray array = element.getAsJsonArray();
+                int n = key.getAsInt();
+                if (n < 0) {
+                    n += array.size();
+                }
+                return n >= 0 && n < array.size() ? array.get(n) : null;
+            }
+            if (element.isJsonObject()) {
+                return element.getAsJsonObject().get(display(key));
+            }
+            return null;
+        }
+
+        JsonElement atom() {
             skipSpace();
             if (at >= text.length()) {
                 throw new IllegalArgumentException("${" + text + "} ends where a value was expected.");
@@ -455,6 +547,47 @@ public final class TestExpressions {
                 }
                 return inner;
             }
+            // A list literal: [a, b, c].
+            if (eat("[")) {
+                JsonArray list = new JsonArray();
+                if (!eat("]")) {
+                    do {
+                        list.add(or());
+                    } while (eat(","));
+                    if (!eat("]")) {
+                        throw new IllegalArgumentException("Missing ] in a list in ${" + text + "}.");
+                    }
+                }
+                return list;
+            }
+            // A map literal: {n: [0, 1], 'south': 3}. Lookup tables, such as facing to offset.
+            if (eat("{")) {
+                JsonObject map = new JsonObject();
+                if (!eat("}")) {
+                    do {
+                        skipSpace();
+                        String key;
+                        if (at < text.length() && text.charAt(at) == '\'') {
+                            key = atom().getAsString();
+                        }
+                        else {
+                            int start = at;
+                            while (at < text.length() && (Character.isLetterOrDigit(text.charAt(at)) || text.charAt(at) == '_')) {
+                                at++;
+                            }
+                            key = text.substring(start, at);
+                        }
+                        if (key.isEmpty() || !eat(":")) {
+                            throw new IllegalArgumentException("A map is {key: value, ...} in ${" + text + "}.");
+                        }
+                        map.add(key, or());
+                    } while (eat(","));
+                    if (!eat("}")) {
+                        throw new IllegalArgumentException("Missing } in a map in ${" + text + "}.");
+                    }
+                }
+                return map;
+            }
             if (c == '\'') {
                 int end = text.indexOf('\'', at + 1);
                 if (end < 0) {
@@ -464,9 +597,10 @@ public final class TestExpressions {
                 at = end + 1;
                 return new JsonPrimitive(literal);
             }
-            if (Character.isDigit(c) || c == '.') {
+            if (Character.isDigit(c)) {
                 int start = at;
-                while (at < text.length() && (Character.isDigit(text.charAt(at)) || text.charAt(at) == '.')) {
+                while (at < text.length() && (Character.isDigit(text.charAt(at))
+                    || text.charAt(at) == '.' && at + 1 < text.length() && Character.isDigit(text.charAt(at + 1)))) {
                     at++;
                 }
                 double value = Double.parseDouble(text.substring(start, at));
@@ -501,30 +635,7 @@ public final class TestExpressions {
                     throw new IllegalArgumentException("No variable '" + name + "' in ${" + text + "}. Known: "
                         + scope.keySet() + ".");
                 }
-                // The rest of a path: .name, [n], [*], up to the first character that is none of those.
-                int pathStart = at;
-                while (at < text.length()) {
-                    char p = text.charAt(at);
-                    if (p == '.' && at + 1 < text.length() && (Character.isLetter(text.charAt(at + 1))
-                        || text.charAt(at + 1) == '_')) {
-                        at++;
-                        while (at < text.length() && (Character.isLetterOrDigit(text.charAt(at)) || text.charAt(at) == '_')) {
-                            at++;
-                        }
-                    }
-                    else if (p == '[') {
-                        int end = text.indexOf(']', at);
-                        if (end < 0) {
-                            throw new IllegalArgumentException("Unclosed [ in ${" + text + "}.");
-                        }
-                        at = end + 1;
-                    }
-                    else {
-                        break;
-                    }
-                }
-                JsonElement root = scope.get(name);
-                return pathStart == at ? root : path(root, text.substring(pathStart, at));
+                return scope.get(name);
             }
             throw new IllegalArgumentException("Unexpected '" + c + "' in ${" + text + "}.");
         }
@@ -568,9 +679,89 @@ public final class TestExpressions {
                     }
                     return new JsonPrimitive(best);
                 }
+                case "sort":
+                case "unique": {
+                    List<JsonElement> values = elements(args.isEmpty() ? null : args.get(0));
+                    if ("unique".equals(name)) {
+                        List<JsonElement> kept = new ArrayList<>();
+                        for (JsonElement value : values) {
+                            boolean seen = false;
+                            for (JsonElement earlier : kept) {
+                                seen |= looselyEqual(earlier, value);
+                            }
+                            if (!seen) {
+                                kept.add(value);
+                            }
+                        }
+                        values = kept;
+                    }
+                    else {
+                        values.sort((a, b) -> isNumber(a) && isNumber(b) ? Double.compare(numeric(a), numeric(b))
+                            : display(a).compareTo(display(b)));
+                    }
+                    JsonArray out = new JsonArray();
+                    values.forEach(out::add);
+                    return out;
+                }
+                case "slice": {
+                    // As Python's list[from:to]: negative counts from the end, 'to' may be left out.
+                    List<JsonElement> values = elements(args.get(0));
+                    int size = values.size();
+                    int from = args.size() > 1 ? (int) numeric(args.get(1)) : 0;
+                    int to = args.size() > 2 ? (int) numeric(args.get(2)) : size;
+                    from = Math.max(0, Math.min(size, from < 0 ? from + size : from));
+                    to = Math.max(from, Math.min(size, to < 0 ? to + size : to));
+                    JsonArray out = new JsonArray();
+                    values.subList(from, to).forEach(out::add);
+                    return out;
+                }
+                case "concat": {
+                    JsonArray out = new JsonArray();
+                    for (JsonElement arg : args) {
+                        if (arg.isJsonArray()) {
+                            arg.getAsJsonArray().forEach(out::add);
+                        }
+                        else {
+                            out.add(arg);
+                        }
+                    }
+                    return out;
+                }
+                case "minBy":
+                case "maxBy": {
+                    // minBy(list, 'distance'): the item whose value at that path is smallest.
+                    String key = args.size() > 1 ? display(args.get(1)) : "";
+                    JsonElement best = JsonNull.INSTANCE;
+                    double bestValue = 0.0D;
+                    for (JsonElement item : elements(args.get(0))) {
+                        JsonElement at = key.isEmpty() ? item : path(item, key);
+                        if (!isNumber(at)) {
+                            continue;
+                        }
+                        double value = numeric(at);
+                        if (best.isJsonNull() || ("minBy".equals(name) ? value < bestValue : value > bestValue)) {
+                            best = item;
+                            bestValue = value;
+                        }
+                    }
+                    return best;
+                }
+                case "meta": {
+                    // The metadata of an id as reads report it, "mod:block:5" (0 when there is none).
+                    String id = display(args.get(0));
+                    int colon = id.lastIndexOf(':');
+                    if (colon > 0 && id.indexOf(':') != colon) {
+                        try {
+                            return new JsonPrimitive(Integer.parseInt(id.substring(colon + 1)));
+                        } catch (NumberFormatException e) {
+                            return new JsonPrimitive(0);
+                        }
+                    }
+                    return new JsonPrimitive(0);
+                }
                 default:
                     throw new IllegalArgumentException("No function '" + name + "'; there are len, abs, floor, "
-                        + "round, min and max.");
+                        + "round, min, max, sort, unique, slice, concat, minBy, maxBy and meta.");
             }
         }
 

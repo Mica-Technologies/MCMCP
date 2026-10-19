@@ -83,7 +83,8 @@ public final class ServerTestTools {
         "server_stop", "server_estop"));
 
     private static final Set<String> VERBS = new LinkedHashSet<>(Arrays.asList(
-        "call", "waitUntil", "sleep", "set", "forEach", "if", "check", "row", "holdItem", "restoreNow"));
+        "call", "waitUntil", "sleep", "sleepUntil", "mark", "set", "forEach", "repeat", "if", "include", "check", "row",
+        "holdItem", "releaseItem", "restoreNow"));
 
     private ServerTestTools() {
     }
@@ -97,21 +98,27 @@ public final class ServerTestTools {
                 + "turns of send / wait / read / reset: ride every lift to every landing, trip a fire "
                 + "panel and prove the cars recall, sound the alarms and reset.\n\n"
                 + "Steps (each an object with one verb):\n"
-                + "- {call: tool, args, save?: var, restore?: true, optional?: true}: any server tool. "
-                + "restore: true undoes what it wrote when the script ends, however it ends.\n"
+                + "- {call: tool, args, save?: var, append?: list, restore?, optional?: true}: any server tool. "
+                + "restore: true undoes what it wrote (its undo point) when the script ends, however it ends; "
+                + "restore: [[x,y,z], {x,y,z,toX,toY,toZ}] instead reads those cells first and writes them "
+                + "back, for a /setblock inside server_run_commands. save names may be templated.\n"
                 + "- {waitUntil: {call, args, until, every?: s, timeout?: s}, save?}: poll until 'until' holds; "
                 + "saves {met, seconds, polls, result}. until: \"${expr}\" with the result as 'result', or "
                 + "{path, anyIn | equals | where | atLeast | none}, e.g. {path: 'blocks[*].y', anyIn: "
                 + "['${c.y+1}']} or {path: 'tileEntities[*]', where: {'nbt.open': true}}.\n"
-                + "- {forEach: '${ctl.blocks}', as?: 'it', steps}, {if: '${expr}', then, else?}, "
-                + "{set: {var: value}}, {sleep: s}.\n"
+                + "- {forEach: '${ctl.blocks}', as?: 'it', steps}, {repeat: n, until?, steps}, {if: '${expr}', "
+                + "then, else?}, {set: {var: value}}, {sleep: s}, {mark: name}, {sleepUntil: s, since?: mark} "
+                + "(variables 'elapsed' and 'since.<mark>' are seconds), {include: name} runs defs.<name>.\n"
                 + "- {check: '${expr}', label}: a pass or a fail in the verdict. {row: {col: value}}: a "
                 + "report row.\n"
                 + "- {holdItem: {player, slot, item, count?, meta?, nbt?}}: put an item in a hotbar slot, "
-                + "given back at the end. {restoreNow: true}: undo everything restorable so far.\n"
-                + "Strings take ${...}: paths (c.y, r.blocks[*].y), arithmetic, comparisons, && || !, len "
-                + "abs floor round min max. A step's error stops the script unless optional. Every "
-                + "step is checked before any runs.\n\n"
+                + "given back at the end, or now with {releaseItem: {player, slot}}; a second holdItem in the "
+                + "slot keeps the first original. nbt is SNBT. {restoreNow: true}: undo everything "
+                + "restorable so far.\n"
+                + "Strings take ${...}: paths (c.y, r.positions[*][1]), [lists], {maps} and indexing "
+                + "(BACK[face][0]), arithmetic, comparisons, && || !, and len abs floor round min max sort "
+                + "unique slice concat minBy maxBy meta. A step's error stops the script unless optional. "
+                + "Every step is checked before any runs.\n\n"
                 + "Long tests belong in a job: server_job_submit kind 'test' with these arguments, then "
                 + "server_job_status for the verdict.")
             .schema(JsonSchema.object()
@@ -119,6 +126,7 @@ public final class ServerTestTools {
                 .array("finally", "Steps run after everything restorable is restored, however the script "
                     + "ended: resetting a panel, for instance.", Json.obj("type", "object"))
                 .property("vars", Json.obj("type", "object"))
+                .property("defs", Json.obj("type", "object"))
                 .array("hold", "Chunk areas to keep loaded for the whole run, each [x0, z0, x1, z1].",
                     Json.obj("type", "array"))
                 .integer("dimension", "Dimension of 'hold'. Default 0.")
@@ -151,6 +159,13 @@ public final class ServerTestTools {
         final ToolContext context;
         final Map<String, JsonElement> vars = new HashMap<>();
         final Deque<Runnable> restores = new ArrayDeque<>();
+        final Map<String, JsonArray> defs = new HashMap<>();
+        /** When each mark was set, for since.name and sleepUntil. */
+        final Map<String, Long> marks = new HashMap<>();
+        /** Held hotbar slots, by "player/slot", so a second holdItem keeps the first original. */
+        final Map<String, Runnable> heldSlots = new HashMap<>();
+        final long startedMillis = System.currentTimeMillis();
+        int includeDepth;
         final List<String> restoreNames = new ArrayList<>();
         final List<String> restoreFailures = new ArrayList<>();
         final List<String> warnings = new ArrayList<>();
@@ -179,9 +194,21 @@ public final class ServerTestTools {
         }
         JsonArray finallySteps = Json.getArray(context.getArguments(), "finally");
         List<String> problems = new ArrayList<>();
-        validate(context, steps, "steps", problems);
+        JsonObject defsArgument = Json.getObject(context.getArguments(), "defs");
+        Set<String> defNames = new HashSet<>();
+        if (defsArgument != null) {
+            for (Map.Entry<String, JsonElement> entry : defsArgument.entrySet()) {
+                defNames.add(entry.getKey());
+            }
+            for (Map.Entry<String, JsonElement> entry : defsArgument.entrySet()) {
+                if (entry.getValue().isJsonArray()) {
+                    validate(context, entry.getValue().getAsJsonArray(), "defs." + entry.getKey(), problems, defNames);
+                }
+            }
+        }
+        validate(context, steps, "steps", problems, defNames);
         if (finallySteps != null) {
-            validate(context, finallySteps, "finally", problems);
+            validate(context, finallySteps, "finally", problems, defNames);
         }
         if (!problems.isEmpty()) {
             return ToolResult.error("Nothing was run. " + String.join(" ", problems.subList(0, Math.min(5, problems.size())))
@@ -196,8 +223,25 @@ public final class ServerTestTools {
                 run.vars.put(entry.getKey(), entry.getValue());
             }
         }
+        JsonObject defs = Json.getObject(context.getArguments(), "defs");
+        if (defs != null) {
+            for (Map.Entry<String, JsonElement> entry : defs.entrySet()) {
+                if (!entry.getValue().isJsonArray()) {
+                    return ToolResult.error("defs." + entry.getKey() + " is a list of steps.");
+                }
+                run.defs.put(entry.getKey(), entry.getValue().getAsJsonArray());
+            }
+        }
         Set<Long> chunks = new java.util.LinkedHashSet<>();
-        JsonArray hold = Json.getArray(context.getArguments(), "hold");
+        JsonElement holdTemplate = context.getArguments().get("hold");
+        JsonArray hold;
+        try {
+            // Templated, so a building's box from vars can be held with a margin: "${box[0]-4}".
+            JsonElement resolved = holdTemplate == null ? null : TestExpressions.resolve(holdTemplate, run.vars);
+            hold = resolved != null && resolved.isJsonArray() ? resolved.getAsJsonArray() : null;
+        } catch (IllegalArgumentException e) {
+            return ToolResult.error("'hold': " + e.getMessage());
+        }
         if (hold != null) {
             for (JsonElement area : hold) {
                 if (!area.isJsonArray() || area.getAsJsonArray().size() != 4) {
@@ -277,18 +321,98 @@ public final class ServerTestTools {
                 throw new Stop("maxSeconds reached");
             }
             run.context.getCancellation().throwIfCancelled();
+            tickClocks(run);
             runStep(run, element.getAsJsonObject());
         }
+    }
+
+    /** elapsed: seconds since the script began; since.name: seconds since that mark. */
+    private static void tickClocks(Run run) {
+        long now = System.currentTimeMillis();
+        run.vars.put("elapsed", new JsonPrimitive(Math.round((now - run.startedMillis) / 100.0D) / 10.0D));
+        JsonObject since = new JsonObject();
+        for (Map.Entry<String, Long> mark : run.marks.entrySet()) {
+            since.addProperty(mark.getKey(), Math.round((now - mark.getValue()) / 100.0D) / 10.0D);
+        }
+        run.vars.put("since", since);
     }
 
     private static void runStep(Run run, JsonObject step) {
         String verb = verbOf(step);
         switch (verb) {
             case "call": {
+                JsonElement restore = step.get("restore");
+                boolean undoPoint = restore != null && restore.isJsonPrimitive() && TestExpressions.truthy(restore);
+                if (restore != null && (restore.isJsonObject() || restore.isJsonArray())) {
+                    // Cells named outright, for a call whose writes no undo point can see: a /setblock
+                    // inside server_run_commands. Read before the call, written back at the end.
+                    snapshotCells(run, TestExpressions.resolve(restore, run.vars), step.get("call").getAsString());
+                }
                 JsonElement result = call(run, step.get("call").getAsString(),
-                    resolveObject(run, step.get("args")), Json.getBoolean(step, "restore", false),
-                    Json.getBoolean(step, "optional", false));
+                    resolveObject(run, step.get("args")), undoPoint, Json.getBoolean(step, "optional", false));
                 save(run, step, result);
+                return;
+            }
+            case "mark": {
+                run.marks.put(TestExpressions.display(TestExpressions.resolve(step.get("mark"), run.vars)),
+                    System.currentTimeMillis());
+                return;
+            }
+            case "sleepUntil": {
+                // {sleepUntil: 40, since: 'alarm'}: until 40 s after the mark, or after the start.
+                double seconds = TestExpressions.resolve(step.get("sleepUntil"), run.vars).getAsDouble();
+                String mark = Json.getString(step, "since", null);
+                Long from = mark == null ? Long.valueOf(run.startedMillis) : run.marks.get(mark);
+                if (from == null) {
+                    throw new Stop("sleepUntil since '" + mark + "', and no step has marked it.");
+                }
+                double left = (from + seconds * 1000.0D - System.currentTimeMillis()) / 1000.0D;
+                if (left > 0) {
+                    sleep(run, Math.min(1800.0D, left));
+                }
+                return;
+            }
+            case "repeat": {
+                // {repeat: 3, until: '${...}', steps}: the steps once, then again while until is false.
+                int times = Math.max(1, Math.min(1000, TestExpressions.resolve(step.get("repeat"), run.vars).getAsInt()));
+                JsonArray body = step.getAsJsonArray("steps");
+                for (int i = 0; i < times; i++) {
+                    run.vars.put("repeatIndex", new JsonPrimitive(i));
+                    runSteps(run, body);
+                    if (step.has("until") && TestExpressions.truthy(TestExpressions.resolve(step.get("until"), run.vars))) {
+                        return;
+                    }
+                }
+                return;
+            }
+            case "include": {
+                String name = Json.getString(step, "include", "");
+                JsonArray body = run.defs.get(name);
+                if (body == null) {
+                    throw new Stop("No defs." + name + ".");
+                }
+                if (++run.includeDepth > 16) {
+                    throw new Stop("include nested more than 16 deep: defs." + name + " includes itself?");
+                }
+                try {
+                    runSteps(run, body);
+                }
+                finally {
+                    run.includeDepth--;
+                }
+                return;
+            }
+            case "releaseItem": {
+                JsonObject spec = resolveObject(run, step.get("releaseItem"));
+                String key = Json.getString(spec, "player", "") + "/" + Json.getInt(spec, "slot", -1);
+                Runnable giveBack = run.heldSlots.remove(key.toLowerCase(java.util.Locale.ROOT));
+                if (giveBack == null) {
+                    run.warnings.add("releaseItem " + key + ": that slot was not held.");
+                }
+                else {
+                    run.restores.remove(giveBack);
+                    giveBack.run();
+                }
                 return;
             }
             case "waitUntil": {
@@ -375,11 +499,131 @@ public final class ServerTestTools {
         }
     }
 
+    /** save: a name, templated ("sent_${car.id}"); append: a list the value is added to. */
     private static void save(Run run, JsonObject step, JsonElement value) {
-        String name = Json.getString(step, "save", null);
-        if (name != null && !name.isEmpty()) {
-            run.vars.put(name, value);
+        if (step.has("save")) {
+            String name = TestExpressions.display(TestExpressions.resolve(step.get("save"), run.vars));
+            if (!name.isEmpty()) {
+                run.vars.put(name, value);
+            }
         }
+        if (step.has("append")) {
+            String name = TestExpressions.display(TestExpressions.resolve(step.get("append"), run.vars));
+            JsonElement list = run.vars.get(name);
+            if (list == null || !list.isJsonArray()) {
+                list = new JsonArray();
+                run.vars.put(name, list);
+            }
+            list.getAsJsonArray().add(value);
+        }
+    }
+
+    /** Most cells a restore may name outright: it is a test's few switch cells, not a region. */
+    static final int MAX_RESTORE_CELLS = 4096;
+
+    /**
+     * Reads named cells, block, metadata and tile-entity NBT, before a call, and pushes a restore
+     * that writes them back as they were.
+     */
+    private static void snapshotCells(Run run, JsonElement spec, String tool) {
+        final List<int[]> cells = new ArrayList<>();
+        List<JsonElement> items = new ArrayList<>();
+        if (spec.isJsonArray()) {
+            spec.getAsJsonArray().forEach(items::add);
+        }
+        else {
+            items.add(spec);
+        }
+        for (JsonElement item : items) {
+            if (item.isJsonArray() && item.getAsJsonArray().size() == 3) {
+                JsonArray at = item.getAsJsonArray();
+                cells.add(new int[] {at.get(0).getAsInt(), at.get(1).getAsInt(), at.get(2).getAsInt()});
+            }
+            else if (item.isJsonObject() && item.getAsJsonObject().has("x")) {
+                JsonObject box = item.getAsJsonObject();
+                int x = Json.getInt(box, "x", 0);
+                int y = Json.getInt(box, "y", 0);
+                int z = Json.getInt(box, "z", 0);
+                int toX = Json.getInt(box, "toX", x);
+                int toY = Json.getInt(box, "toY", y);
+                int toZ = Json.getInt(box, "toZ", z);
+                long volume = (long) (Math.abs(toX - x) + 1) * (Math.abs(toY - y) + 1) * (Math.abs(toZ - z) + 1);
+                if (volume + cells.size() > MAX_RESTORE_CELLS) {
+                    throw new Stop("restore names more than " + MAX_RESTORE_CELLS + " cells; mark the call restore: "
+                        + "true instead if it leaves an undo point.");
+                }
+                for (int cy = Math.min(y, toY); cy <= Math.max(y, toY); cy++) {
+                    for (int cz = Math.min(z, toZ); cz <= Math.max(z, toZ); cz++) {
+                        for (int cx = Math.min(x, toX); cx <= Math.max(x, toX); cx++) {
+                            cells.add(new int[] {cx, cy, cz});
+                        }
+                    }
+                }
+            }
+            else {
+                throw new Stop("restore is true, a cell [x, y, z] or {x, y, z, toX?, toY?, toZ?}, or a list of them; got "
+                    + item + ".");
+            }
+        }
+        if (cells.size() > MAX_RESTORE_CELLS) {
+            throw new Stop("restore names more than " + MAX_RESTORE_CELLS + " cells.");
+        }
+        String denied = run.context.refusal(Capability.WORLD_EDITS, McmcpConfig.isAllowWorldEdits(),
+            "restore with cells writes them back directly, which needs permissions.allowWorldEdits.");
+        if (denied != null) {
+            throw new Stop(denied);
+        }
+        Principal principal = run.context.getPrincipal();
+        if (principal.isCompanion() && !principal.has(Principal.CLASS_WRITE)) {
+            throw new Stop("restore with cells writes blocks, and your companion access has no write class.");
+        }
+        final int dimension = run.context.getInt("dimension", 0);
+        final Object[] before = run.context.onGameThread(() -> {
+            net.minecraft.world.WorldServer world = ServerWorldTools.requireWorld(dimension);
+            Object[] saved = new Object[cells.size() * 2];
+            for (int i = 0; i < cells.size(); i++) {
+                net.minecraft.util.math.BlockPos pos = new net.minecraft.util.math.BlockPos(cells.get(i)[0], cells.get(i)[1], cells.get(i)[2]);
+                if (!world.isBlockLoaded(pos)) {
+                    throw new IllegalStateException("restore cell " + pos + " is in an unloaded chunk; hold it first.");
+                }
+                // As plain values: no Minecraft object leaves the game thread.
+                saved[i * 2] = net.minecraft.block.Block.getStateId(world.getBlockState(pos));
+                net.minecraft.tileentity.TileEntity entity = world.getTileEntity(pos);
+                saved[i * 2 + 1] = entity == null ? null : entity.writeToNBT(new net.minecraft.nbt.NBTTagCompound()).toString();
+            }
+            return saved;
+        });
+        final String what = cells.size() + " cell(s) before " + tool;
+        run.restoreNames.add(what);
+        run.restores.push(() -> {
+            try {
+                cleanContext(run.context).onGameThread((Callable<Void>) () -> {
+                    net.minecraft.world.WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    for (int i = 0; i < cells.size(); i++) {
+                        net.minecraft.util.math.BlockPos pos = new net.minecraft.util.math.BlockPos(cells.get(i)[0], cells.get(i)[1], cells.get(i)[2]);
+                        if (!world.isBlockLoaded(pos)) {
+                            throw new IllegalStateException(pos + " was unloaded before it could be put back");
+                        }
+                        net.minecraft.block.state.IBlockState state = net.minecraft.block.Block.getStateById((Integer) before[i * 2]);
+                        if (world.getBlockState(pos) != state) {
+                            world.setBlockState(pos, state, 3);
+                        }
+                        String snbt = (String) before[i * 2 + 1];
+                        net.minecraft.nbt.NBTTagCompound tag = snbt == null ? null : JsonToNBT.getTagFromJson(snbt);
+                        net.minecraft.tileentity.TileEntity entity = tag == null ? null : world.getTileEntity(pos);
+                        if (entity != null) {
+                            entity.readFromNBT(tag);
+                            entity.markDirty();
+                            world.notifyBlockUpdate(pos, state, state, 3);
+                        }
+                    }
+                    return null;
+                });
+            }
+            catch (RuntimeException e) {
+                run.restoreFailures.add(what + ": " + e.getMessage());
+            }
+        });
     }
 
     private static JsonObject resolveObject(Run run, @Nullable JsonElement template) {
@@ -517,33 +761,47 @@ public final class ServerTestTools {
         final int count = Math.max(1, Math.min(64, Json.getInt(spec, "count", 1)));
         final int meta = Math.max(0, Json.getInt(spec, "meta", 0));
         final String nbt = Json.getString(spec, "nbt", null);
-        final ItemStack[] before = new ItemStack[1];
+        final String key = (playerName + "/" + slot).toLowerCase(java.util.Locale.ROOT);
+        final boolean alreadyHeld = run.heldSlots.containsKey(key);
+        // The slot's own item, as SNBT: no Minecraft object leaves the game thread.
+        final String[] before = new String[1];
         run.context.onGameThread((Callable<Void>) () -> {
             EntityPlayerMP player = player(playerName);
             ItemStack stack = new ItemStack(item, count, meta);
             if (nbt != null && !nbt.isEmpty()) {
                 stack.setTagCompound(JsonToNBT.getTagFromJson(nbt));
             }
-            before[0] = player.inventory.getStackInSlot(slot).copy();
+            before[0] = player.inventory.getStackInSlot(slot).writeToNBT(new net.minecraft.nbt.NBTTagCompound()).toString();
             player.inventory.setInventorySlotContents(slot, stack);
             player.inventoryContainer.detectAndSendChanges();
             return null;
         });
+        if (alreadyHeld) {
+            // A second item in a held slot (the stick, then the config tool): the slot still goes back
+            // to what it held before the first, once.
+            return;
+        }
         final String what = "slot " + slot + " of " + playerName;
         run.restoreNames.add(what);
-        run.restores.push(() -> {
-            try {
-                cleanContext(run.context).onGameThread((Callable<Void>) () -> {
-                    EntityPlayerMP player = player(playerName);
-                    player.inventory.setInventorySlotContents(slot, before[0]);
-                    player.inventoryContainer.detectAndSendChanges();
-                    return null;
-                });
+        Runnable giveBack = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    cleanContext(run.context).onGameThread((Callable<Void>) () -> {
+                        EntityPlayerMP player = player(playerName);
+                        player.inventory.setInventorySlotContents(slot, new ItemStack(JsonToNBT.getTagFromJson(before[0])));
+                        player.inventoryContainer.detectAndSendChanges();
+                        return null;
+                    });
+                }
+                catch (RuntimeException e) {
+                    run.restoreFailures.add(what + ": " + e.getMessage());
+                }
+                run.heldSlots.remove(key);
             }
-            catch (RuntimeException e) {
-                run.restoreFailures.add(what + ": " + e.getMessage());
-            }
-        });
+        };
+        run.heldSlots.put(key, giveBack);
+        run.restores.push(giveBack);
     }
 
     private static EntityPlayerMP player(String name) {
@@ -614,7 +872,8 @@ public final class ServerTestTools {
         return "";
     }
 
-    private static void validate(ToolContext context, JsonArray steps, String where, List<String> problems) {
+    private static void validate(ToolContext context, JsonArray steps, String where, List<String> problems,
+                                 Set<String> defNames) {
         for (int i = 0; i < steps.size(); i++) {
             String at = where + "[" + i + "]";
             JsonElement element = steps.get(i);
@@ -642,20 +901,28 @@ public final class ServerTestTools {
                     }
                     break;
                 }
+                case "include": {
+                    String name = Json.getString(step, "include", "");
+                    if (!defNames.contains(name)) {
+                        problems.add(at + ": no defs." + name + " to include; defined: " + defNames + ".");
+                    }
+                    break;
+                }
                 case "forEach":
+                case "repeat":
                     if (Json.getArray(step, "steps") == null) {
-                        problems.add(at + ": forEach needs 'steps'.");
+                        problems.add(at + ": " + verb + " needs 'steps'.");
                     }
                     else {
-                        validate(context, step.getAsJsonArray("steps"), at + ".steps", problems);
+                        validate(context, step.getAsJsonArray("steps"), at + ".steps", problems, defNames);
                     }
                     break;
                 case "if":
                     if (Json.getArray(step, "then") != null) {
-                        validate(context, step.getAsJsonArray("then"), at + ".then", problems);
+                        validate(context, step.getAsJsonArray("then"), at + ".then", problems, defNames);
                     }
                     if (Json.getArray(step, "else") != null) {
-                        validate(context, step.getAsJsonArray("else"), at + ".else", problems);
+                        validate(context, step.getAsJsonArray("else"), at + ".else", problems, defNames);
                     }
                     break;
                 case "set":

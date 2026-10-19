@@ -44,6 +44,31 @@ class TestExpressionsTest {
     }
 
     @Test
+    void aLookupTableTurnsAFacingIntoTheCellBehindIt() {
+        Map<String, JsonElement> scope = scope();
+        scope.put("face", Json.parse("\"e\""));
+        scope.put("BACK", Json.parse("{\"n\":[0,1],\"s\":[0,-1],\"e\":[-1,0],\"w\":[1,0]}"));
+        assertEquals(170, TestExpressions.evaluate("c.x + BACK[face][0]", scope).getAsInt());
+        assertEquals(-1, TestExpressions.evaluate("{n: [0, 1], e: [-1, 0]}[face][0]", scope).getAsInt());
+        assertEquals("east", TestExpressions.evaluate("['south', 'west', 'north', 'east'][7 % 4]", scope).getAsString());
+        assertEquals(3, TestExpressions.evaluate("meta('csm:firealarmcontrolpanel:3')", scope).getAsInt());
+        assertEquals(0, TestExpressions.evaluate("meta('minecraft:stone')", scope).getAsInt());
+    }
+
+    @Test
+    void positionArraysIndexAfterAWildcardAndListsSortSliceAndRotate() {
+        Map<String, JsonElement> scope = scope();
+        scope.put("r", Json.parse("{\"positions\":[[1,210,2,0],[1,63,2,0],[1,75,2,0],[1,63,2,0]]}"));
+        assertEquals(Json.parse("[63,75,210]"), TestExpressions.evaluate("sort(unique(r.positions[*][1]))", scope));
+        assertEquals(63, TestExpressions.evaluate("min(r.positions[*][1])", scope).getAsInt());
+        assertEquals(Json.parse("[75,210,63]"), TestExpressions.evaluate(
+            "concat(slice(sort(unique(r.positions[*][1])), 1), slice(sort(unique(r.positions[*][1])), 0, 1))", scope));
+        scope.put("pulls", Json.parse("[{\"x\":1,\"distance\":9.5},{\"x\":2,\"distance\":3.25}]"));
+        assertEquals(2, TestExpressions.evaluate("minBy(pulls, 'distance').x", scope).getAsInt());
+        assertEquals(1, TestExpressions.evaluate("maxBy(pulls, 'distance').x", scope).getAsInt());
+    }
+
+    @Test
     void anUnknownVariableIsAnErrorThatNamesTheKnownOnes() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
             () -> TestExpressions.evaluate("cc.y + 1", scope()));

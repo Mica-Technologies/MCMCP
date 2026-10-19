@@ -677,7 +677,7 @@ point. The same holds for `server_set_blocks` and `server_undo`.
 
 #### `server_run_test`
 
-:material-alert: Destructive · `steps` required · optional `finally`, `vars`, `hold`, `dimension`, `maxSeconds`, `stopOnFail`
+:material-alert: Destructive · `steps` required · optional `finally`, `vars`, `defs`, `hold`, `dimension`, `maxSeconds`, `stopOnFail`
 
 A building test in one call: a script of ordinary tool calls with waits, loops, checks and report
 rows, after which the world is put back. It exists because acceptance tests (ride every lift to
@@ -689,21 +689,34 @@ Each step is an object with one verb:
 
 | Step | Does |
 | --- | --- |
-| `{call, args, save?, restore?, optional?}` | Runs a server tool through its own handler, checks and limits. `save` keeps its structured result as a variable. `restore: true` makes it leave an undo point whatever the undo settings, undone when the script ends. An error stops the script unless `optional`. |
+| `{call, args, save?, append?, restore?, optional?}` | Runs a server tool through its own handler, checks and limits. `save` keeps its structured result as a variable, under a name that may be templated (`"sent_${car.id}"`); `append` adds it to a list. `restore: true` makes it leave an undo point whatever the undo settings, undone when the script ends. `restore: [[x, y, z], {x, y, z, toX, toY, toZ}]` instead reads those cells (block, metadata, tile-entity NBT; at most 4,096) before the call and writes them back: for a `/setblock` inside `server_run_commands`, which no undo point sees. An error stops the script unless `optional`. |
 | `{waitUntil: {call, args, until, every?, timeout?}, save?}` | Calls until `until` holds, every `every` seconds (default 0.5) for up to `timeout` (default 30, at most 600). Saves `{met, seconds, polls, result}`. |
 | `{forEach, as?, steps}` | Runs `steps` once per item of a list, with the item as `as` (default `it`) and its index as `<as>Index`. |
+| `{repeat, until?, steps}` | Runs `steps` up to `repeat` times, stopping once `until` holds; `repeatIndex` counts from 0. A retry. |
 | `{if, then, else?}` | Runs one branch. |
+| `{include}` | Runs `defs.<name>`, a list of steps given once at the top level; `finally` can include the same reset an aborted run needs. |
 | `{set: {name: value}}` | Sets variables. |
-| `{sleep}` | Waits, in seconds. |
+| `{sleep}` | Waits, in seconds (templated). |
+| `{mark}`, `{sleepUntil, since?}` | `mark` notes the time under a name; `sleepUntil: 40, since: "alarm"` waits until 40 s after it, or after the start. `elapsed` and `since.<name>` are always seconds, for "+40 s into the alarm" exactly. |
 | `{check, label?}` | A pass or a fail in the verdict. With `stopOnFail`, a fail stops the script. |
 | `{row: {column: value}}` | Adds a row to the report table. |
-| `{holdItem: {player, slot, item, count?, meta?, nbt?}}` | Puts an item in a hotbar slot, for a `server_use_item_on_block` step; the slot is given back at the end. Needs `permissions.allowWorldEdits`. |
+| `{holdItem: {player, slot, item, count?, meta?, nbt?}}` | Puts an item in a hotbar slot, for a `server_use_item_on_block` step; the slot is given back at the end, or now with `{releaseItem: {player, slot}}`. A second `holdItem` in a held slot (a stick, then a config tool) keeps the first original, given back once. `nbt` is SNBT, `{csm_tool_mode:1}`. Needs `permissions.allowWorldEdits`. |
 | `{restoreNow: true}` | Undoes everything restorable so far, now. |
 
 **Templates.** Any string can hold `${...}`. A string that is exactly one `${...}` keeps the value's
-type, so `"y": "${c.y + 1}"` is a number. Expressions take paths (`c.y`, `r.blocks[0].y`,
-`r.blocks[*].y` for every match), arithmetic, comparisons, `&& || !`, `'strings'`, and `len abs floor
-round min max`.
+type, so `"y": "${c.y + 1}"` is a number. Expressions take paths (`c.y`, `r.positions[0][1]`,
+`r.positions[*][1]` for every match), `[lists]` and `{maps}` with indexing by any value
+(`${ {n: [0, 1], s: [0, -1]}[face][0] }`, or a map in `vars` as `${BACK[face][0]}`), arithmetic,
+comparisons, `&& || !`, `'strings'`, and the functions `len abs floor round min max sort unique
+slice concat minBy maxBy meta`. `slice` is Python's (`slice(ys, 1)`), so a rotation is
+`concat(slice(ys, 1), slice(ys, 0, 1))`; `minBy(list, 'distance')` is the nearest; `meta('mod:block:3')`
+is 3. `hold` boxes, `sleep` and `save` names are templated too.
+
+**Result shapes.** `server_find_blocks` in a box gives `positions` as `[x, y, z, palette index]`
+arrays, with the palette's `block` as `id:meta`; around a point it gives `{x, y, z, metadata,
+distance}` objects. `server_get_tile_entities` gives `tileEntities[n].nbt`, projected to `keys` when
+asked, with the tag as the tile entity writes it (`nbt.data.open` where a mod nests it). The verdict is
+the record: keep its `table` where the knowledge base keeps its logs.
 
 **Conditions.** `until` is a `"${...}"` string, with the polled result as `result`, or an object
 with a `path` into the result and one test: `anyIn` (some value is in a list), `equals`, `where` (the

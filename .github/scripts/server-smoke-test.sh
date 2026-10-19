@@ -836,6 +836,17 @@ case "$TJOB_STATE" in
   *'"state":"done"'*'"verdict":{"passed":true'*) echo "    a test job's verdict is in its status" ;;
   *) mcp_failure "the test job did not give a verdict: ${TJOB_STATE}" ;;
 esac
+MORE_SCRIPT='{"vars":{"x":MXV,"y":MYV,"z":MZV},"defs":{"note":[{"set":{"noted":true}}]},"steps":[{"mark":"start"},{"call":"server_run_commands","args":{"commands":["setblock ${x} ${y} ${z} minecraft:diamond_block"]},"restore":[["${x}","${y}","${z}"]]},{"repeat":5,"until":"${repeatIndex >= 2}","steps":[{"call":"server_get_block","args":{"x":"${x}","y":"${y}","z":"${z}"},"append":"reads"}]},{"check":"${len(reads) == 3}","label":"repeat stopped at its until"},{"check":"${reads[0].block == '"'"'minecraft:diamond_block'"'"'}","label":"the command wrote"},{"sleepUntil":1,"since":"start"},{"check":"${since.start >= 1}","label":"slept until a second after the mark"},{"include":"note"},{"check":"${noted}","label":"include ran"}]}'
+MORE_SCRIPT="${MORE_SCRIPT//MXV/$((LX + 5))}"; MORE_SCRIPT="${MORE_SCRIPT//MYV/$LY}"; MORE_SCRIPT="${MORE_SCRIPT//MZV/$LZ}"
+MORE_BODY="$(mcp_call 603 server_run_test "$MORE_SCRIPT")" || mcp_failure "the second script failed: ${MORE_BODY}"
+case "$MORE_BODY" in
+  *'"passed":true'*'"checksPassed":4'*'"restored":1'*) echo "    repeat, append, sleepUntil, include, and a /setblock put back by its named cell" ;;
+  *) mcp_failure "the second script did not pass: ${MORE_BODY}" ;;
+esac
+DIAMOND_BODY="$(mcp_call 604 server_get_block "{\"x\":$((LX + 5)),\"y\":${LY},\"z\":${LZ}}")" || mcp_failure "reading the named cell failed"
+case "$DIAMOND_BODY" in
+  *'diamond_block'*) mcp_failure "the /setblock inside a command was not put back: ${DIAMOND_BODY}" ;;
+esac
 CANCEL_SCRIPT='{"kind":"test","args":{"steps":[{"call":"server_set_block","args":{"x":CXV,"y":CYV,"z":CZV,"block":"minecraft:gold_block"},"restore":true},{"sleep":60}]}}'
 CANCEL_SCRIPT="${CANCEL_SCRIPT//CXV/$((LX + 3))}"; CANCEL_SCRIPT="${CANCEL_SCRIPT//CYV/$LY}"; CANCEL_SCRIPT="${CANCEL_SCRIPT//CZV/$LZ}"
 CJOB_BODY="$(mcp_call 600 server_job_submit "$CANCEL_SCRIPT")" || mcp_failure "the cancel test job failed to start: ${CJOB_BODY}"
