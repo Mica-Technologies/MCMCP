@@ -43,7 +43,13 @@ public final class ServerChunkTools {
      */
     public static ToolResult withChunks(ToolContext context, int dimension, Set<Long> chunks,
                                         WithChunks<ToolResult> body) throws Exception {
-        if (!context.getBoolean("load", false)) {
+        return withChunks(context, dimension, chunks, context.getBoolean("load", false), body);
+    }
+
+    /** As above, with whether to load decided by the caller rather than the 'load' argument. */
+    public static ToolResult withChunks(ToolContext context, int dimension, Set<Long> chunks, boolean load,
+                                        WithChunks<ToolResult> body) throws Exception {
+        if (!load) {
             return body.run(null);
         }
         ChunkLoadGovernor.Outcome outcome;

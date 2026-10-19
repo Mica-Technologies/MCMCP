@@ -639,7 +639,11 @@ public final class ServerBulkTools {
                 .bool("allResults", "List every command's result, not just the ones that failed. Default false.")
                 .integer("maxOutputLines", "Output lines kept per listed command. Default 20; a command "
                     + "with more says how many were dropped in outputTruncated.", 1, 500)
-                .bool("load", "Load the chunks the commands' coordinates name, and release them afterwards.")
+                .bool("load", "Load the chunks the commands' coordinates name, and release them afterwards. "
+                    + "Vanilla build commands are read exactly; another mod's command by the shape of its "
+                    + "numbers: two in a row an x z column, six a box, three a point.")
+                .array("loadBoxes", "Also load these, for coordinates no command spells out: each "
+                    + "[x0, z0, x1, z1], or [x, z, radius]. Implies load.", Json.obj("type", "array"))
                 .required("commands")
                 .build())
             .serverOnly()
@@ -696,13 +700,41 @@ public final class ServerBulkTools {
             return new int[] {spawn.getX(), spawn.getY(), spawn.getZ(), 0};
         });
         final Set<Long> chunks = new LinkedHashSet<>();
+        int unread = 0;
         for (String command : commands) {
-            for (int[] box : CommandTargets.boxes(command, base)) {
+            List<int[]> boxes = CommandTargets.loadBoxes(command, base);
+            if (boxes.isEmpty()) {
+                unread++;
+            }
+            for (int[] box : boxes) {
                 chunks.addAll(ChunkKeys.box(box[0], box[2], box[3], box[5]));
             }
         }
+        JsonArray extra = Json.getArray(context.getArguments(), "loadBoxes");
+        if (extra != null) {
+            for (com.google.gson.JsonElement element : extra) {
+                if (!element.isJsonArray() || element.getAsJsonArray().size() < 3
+                    || element.getAsJsonArray().size() > 4) {
+                    return ToolResult.error("Each loadBoxes entry is [x0, z0, x1, z1] or [x, z, radius]; got "
+                        + element + ".");
+                }
+                JsonArray box = element.getAsJsonArray();
+                int a = box.get(0).getAsInt();
+                int b = box.get(1).getAsInt();
+                if (box.size() == 3) {
+                    int r = Math.max(0, Math.min(256, box.get(2).getAsInt()));
+                    chunks.addAll(ChunkKeys.box(a - r, b - r, a + r, b + r));
+                }
+                else {
+                    chunks.addAll(ChunkKeys.box(Math.min(a, box.get(2).getAsInt()), Math.min(b, box.get(3).getAsInt()),
+                        Math.max(a, box.get(2).getAsInt()), Math.max(b, box.get(3).getAsInt())));
+                }
+            }
+        }
+        final boolean load = context.getBoolean("load", false) || extra != null && extra.size() > 0;
+        final int unreadCommands = unread;
 
-        return ServerChunkTools.withChunks(context, base[3], chunks, outcome -> {
+        return ServerChunkTools.withChunks(context, base[3], chunks, load, outcome -> {
             final long deadline = System.currentTimeMillis() + 120_000L;
             final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
             final Object[] undo = new Object[3];
@@ -713,6 +745,7 @@ public final class ServerBulkTools {
             final List<Object[]> pending = new ArrayList<>();
             final java.util.concurrent.CompletableFuture<?>[] sliceCapture = new java.util.concurrent.CompletableFuture<?>[1];
             final int[] next = {0};
+            final int[] unloadedReplies = {0};
             final boolean[] stopped = {false};
             while (next[0] < commands.size() && !stopped[0]) {
                 if (System.currentTimeMillis() > deadline || context.getCancellation().isCancelled()) {
@@ -769,7 +802,9 @@ public final class ServerBulkTools {
                             if (cancelled) {
                                 counts[2]++;
                             }
-                            if ((allResults || !ok) && results.size() + pending.size() < 2000) {
+                            // With load on, every reply is read for "unloaded", so a success that skipped
+                            // its work is listed rather than counted (#106).
+                            if ((allResults || !ok || load) && results.size() < 2000 && pending.size() < 10_000) {
                                 JsonObject item = new JsonObject();
                                 item.addProperty("i", index);
                                 item.addProperty("succeeded", ok);
@@ -811,6 +846,20 @@ public final class ServerBulkTools {
                     lines.addAll(sender.getErrors());
                     lines.addAll(sender.getOutput());
                     List<String> listed = new ArrayList<>(lines);
+                    boolean saysUnloaded = false;
+                    if (load) {
+                        for (String line : listed) {
+                            String lower = line.toLowerCase(java.util.Locale.ROOT);
+                            saysUnloaded |= lower.contains("unloaded") || lower.contains("not loaded");
+                        }
+                        if (saysUnloaded) {
+                            item.addProperty("saysUnloaded", true);
+                            unloadedReplies[0]++;
+                        }
+                        else if (!allResults && item.get("succeeded").getAsBoolean()) {
+                            continue;
+                        }
+                    }
                     if (!listed.isEmpty()) {
                         // Cut at five lines without a word, a builder's 18-line report read as a command that
                         // stopped after its first step (#103).
@@ -820,7 +869,9 @@ public final class ServerBulkTools {
                             item.addProperty("outputTruncated", listed.size() - maxOutputLines);
                         }
                     }
-                    results.add(item);
+                    if (results.size() < 2000) {
+                        results.add(item);
+                    }
                 }
                 pending.clear();
                 context.reportProgress(next[0], commands.size(), "Ran " + next[0] + " of " + commands.size());
@@ -841,6 +892,15 @@ public final class ServerBulkTools {
             json.add("results", results);
             if (outcome != null) {
                 json.add("chunks", outcome.toJson());
+                if (unreadCommands > 0) {
+                    json.addProperty("noCoordinatesRead", unreadCommands);
+                }
+            }
+            if (unloadedReplies[0] > 0) {
+                json.addProperty("warning", unloadedReplies[0] + " command(s) replied that something was "
+                    + "unloaded although load was on, so their coordinates are not ones MCMCP read from the "
+                    + "text (see saysUnloaded in results). Name the area with loadBoxes, or hold it with "
+                    + "server_keep_loaded, and run them again.");
             }
             if (recorder != null && undo[0] != null) {
                 ServerUndoTools.finish(context, recorder, "server_run_commands", (Integer) undo[0], (int[]) undo[1],

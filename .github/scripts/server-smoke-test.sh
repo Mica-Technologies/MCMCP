@@ -564,6 +564,12 @@ case "$RUN_BODY" in
   *'"ran":3'*'"i":1,"succeeded":false'*) echo "    3 run, the out-of-world one reported as failed" ;;
   *) mcp_failure "server_run_commands did not report per command: ${RUN_BODY}" ;;
 esac
+LOADBOX_BODY="$(mcp_call 594 server_run_commands "{\"commands\":[\"say no coordinates here\"],\"loadBoxes\":[[$((SPAWN_X + 2000)),${SPAWN_Z},0]]}")" \
+  || mcp_failure "server_run_commands with loadBoxes failed: ${LOADBOX_BODY}"
+case "$LOADBOX_BODY" in
+  *'"chunks":{"inBox":1,'*'"noCoordinatesRead":1'*) echo "    loadBoxes held a chunk no command named, and said none was read from the text" ;;
+  *) mcp_failure "loadBoxes did not load its box: ${LOADBOX_BODY}" ;;
+esac
 
 echo "==> Tile entities: one call reads a box's, filtered, projected and paged"
 TX=$((SPAWN_X + 12)); TY=$((UNDO_Y + 8)); TZ=$((SPAWN_Z + 12))

@@ -1351,7 +1351,7 @@ Requires `permissions.allowChat` · `player`, `message` required
 
 #### `server_run_commands`
 
-:material-alert: Destructive · `commands` required · optional `asPlayer`, `stopOnError`, `allResults`, `maxOutputLines`, `load`
+:material-alert: Destructive · `commands` required · optional `asPlayer`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`
 
 Runs up to 10,000 commands in order in one call, with nothing sent to chat in between. It replaces
 scripts that teleport a player around a region and send commands through chat in groups. The
@@ -1375,7 +1375,18 @@ result:
   up a tick.
 - **Time limit.** A call that runs past two minutes stops and returns `nextIndex`.
 - **Loading.** `load: true` loads the chunks the commands' coordinates name. Relative coordinates
-  resolve against `asPlayer`, or against world spawn for the console.
+  resolve against `asPlayer`, or against world spawn for the console. `/setblock`, `/fill`, `/clone`
+  and `/blockdata` are read exactly. Any other command is read by the shape of its numbers, since a
+  mod's grammar is its own: two in a row are an `x z` column (LDME's
+  `/elevator install x z facing y...`), six a box, and other runs of three or more are points.
+  Runs continue across commas (`x,y,z;x,y,z`), and each box grows by 4 blocks. Vanilla commands whose
+  numbers are counts (`/give`, `/effect`, `/xp` and the like) load nothing. `noCoordinatesRead`
+  counts the commands nothing was read from.
+- **`loadBoxes`** names more to load, each `[x0, z0, x1, z1]` or `[x, z, radius]`, for coordinates no
+  command spells out. It implies `load`.
+- **Unloaded replies.** With loading on, every reply is read: a command that says something was
+  "unloaded" or "not loaded" is listed with `saysUnloaded: true` even if it succeeded, and a
+  top-level `warning` says how many did.
 - **Through the companion,** commands run as you, as with [`server_run_command`](#server_run_command).
 
 ### Lifecycle
