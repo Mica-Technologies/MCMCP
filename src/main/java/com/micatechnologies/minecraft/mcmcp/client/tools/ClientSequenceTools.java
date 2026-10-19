@@ -46,8 +46,9 @@ import net.minecraftforge.fml.relauncher.SideOnly;
  * misspelt argument in step nine does not leave steps one to eight applied.
  *
  * <p>Only tools that act on or read the player and the world as a player can be steps. The world
- * lifecycle, screenshots (whose images would pile up in one reply), profiling and this tool itself
- * cannot.
+ * lifecycle, profiling and this tool itself cannot. A screenshot can, saved to a file and returned
+ * as its path, never inline, since images would pile up in one reply: it is how to catch a frame a
+ * few ticks after a click, which a separate call reaches too late for (#114).
  */
 @SideOnly(Side.CLIENT)
 public final class ClientSequenceTools {
@@ -84,7 +85,7 @@ public final class ClientSequenceTools {
             "client_inventory", "client_nearby_entities", "client_read_chat",
             "client_gui_state", "client_gui_widgets", "client_gui_click", "client_gui_click_at",
             "client_gui_key", "client_gui_text", "client_gui_close", "client_gui_open",
-            "client_options")));
+            "client_options", "client_screenshot")));
 
     private ClientSequenceTools() {
     }
@@ -337,6 +338,13 @@ public final class ClientSequenceTools {
         String unknown = ArgumentNames.describeUnknown(name, tool.getInputSchema(), arguments);
         if (unknown != null) {
             return unknown;
+        }
+        // A screenshot step catches a frame a few ticks after the step before it, which a separate
+        // call arrives too late for (#114). It is saved and returned as a path: images inline would
+        // pile up in one reply, and a sequence's results carry no image content anyway.
+        if ("client_screenshot".equals(name) && Json.getBoolean(arguments, "inline", false)) {
+            return "a screenshot step saves its frame and returns the path; 'inline' is not allowed in a "
+                + "sequence. Read the file afterwards, or take an inline client_screenshot on its own.";
         }
 
         JsonElement expect = object.get(EXPECT);

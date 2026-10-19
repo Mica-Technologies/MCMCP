@@ -116,7 +116,12 @@ public final class ClientDebugTools {
                 + "'fullbrightApplied' says whether it took. Both are put back "
                 + "before the call returns. For a place beyond the render distance, 'bringPlayer' moves "
                 + "the player to the camera for the capture and back afterwards (creative or spectator; "
-                + "with input locked or the window in the background).")
+                + "with input locked or the window in the background).\n\n"
+                + "'burst': {count, interval_ticks} saves count frames (2-" + MAX_BURST + "), one every "
+                + "interval_ticks (1-40, at 50 ms a tick) from the first, named <name>_1 ... and returned as "
+                + "paths, each with the ms after the first it was taken: an animation of a few ticks (a "
+                + "door's swing) in one call. Not with inline. To shoot right after an action, use a "
+                + "client_sequence with a screenshot step.")
             .schema(JsonSchema.object()
                 .string("name", "File name for the screenshot, without a path. '.png' is appended if "
                     + "missing. Defaults to a timestamped name.")
@@ -143,12 +148,16 @@ public final class ClientDebugTools {
                     + "viewpoint before capturing. Default 5000.", 0, MAX_SETTLE_MILLIS)
                 .bool("bringPlayer", "With 'from': move the player to the camera first, so its chunks load, "
                     + "and back to where they were, facing the same way, after the capture.")
+                .property("burst", Json.obj("type", "object"))
                 .build())
             .clientOnly()
             .handler(context -> {
                 if (!McmcpConfig.isAllowScreenshots()) {
                     return ToolResult.error("Screenshots are disabled by permissions.allowScreenshots "
                         + "in the MCMCP config.");
+                }
+                if (context.has("burst")) {
+                    return burst(context);
                 }
 
                 final double[] from = vector(context.getArguments(), "from");
@@ -438,6 +447,72 @@ public final class ClientDebugTools {
     private static final double MIN_FOV = 10.0D;
     private static final double MAX_FOV = 130.0D;
     private static final int MAX_SETTLE_MILLIS = 20_000;
+
+    /** Most frames one burst saves: each is a full-size PNG on disk. */
+    static final int MAX_BURST = 32;
+
+    /**
+     * Several frames of a short animation (#114): a door's swing lasts 8-16 ticks, and a second
+     * call to client_screenshot arrives after it has ended. Each shot is this tool's own single
+     * capture, at a fixed time from the first, so a slow capture delays the next one rather than
+     * shifting the rest; every shot says when it was actually taken.
+     */
+    private static ToolResult burst(ToolContext context) throws Exception {
+        JsonObject spec = Json.getObject(context.getArguments(), "burst");
+        if (spec == null) {
+            return ToolResult.error("'burst' is {count, interval_ticks}.");
+        }
+        if (context.getBoolean("inline", false)) {
+            return ToolResult.error("A burst saves its frames as files; it cannot be inline. Read the "
+                + "frames you need from their paths. Nothing was captured.");
+        }
+        int count = Math.max(2, Math.min(MAX_BURST, Json.getInt(spec, "count", 4)));
+        int interval = Math.max(1, Math.min(40, Json.getInt(spec, "interval_ticks", 2)));
+        String base = context.getString("name", null);
+        if (base == null || base.isEmpty()) {
+            base = "burst-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+        }
+        base = base.endsWith(".png") ? base.substring(0, base.length() - 4) : base;
+        McpTool single = McpRegistry.tool("client_screenshot", context.getSide());
+        JsonArray shots = new JsonArray();
+        long first = 0L;
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                long due = first + (long) i * interval * 50L;
+                while (System.currentTimeMillis() < due) {
+                    context.getCancellation().throwIfCancelled();
+                    Thread.sleep(Math.max(1L, Math.min(10L, due - System.currentTimeMillis())));
+                }
+            }
+            JsonObject args = new JsonObject();
+            for (java.util.Map.Entry<String, JsonElement> entry : context.getArguments().entrySet()) {
+                if (!"burst".equals(entry.getKey()) && !"name".equals(entry.getKey())) {
+                    args.add(entry.getKey(), entry.getValue());
+                }
+            }
+            args.addProperty("name", base + "_" + (i + 1));
+            long taken = System.currentTimeMillis();
+            if (i == 0) {
+                first = taken;
+            }
+            ToolResult shot = single.call(context.forPart(args, i, count, "frame " + (i + 1)));
+            JsonObject entry = new JsonObject();
+            entry.addProperty("atMs", taken - first);
+            JsonObject structured = shot.getStructuredContent();
+            if (shot.isError() || structured == null) {
+                entry.addProperty("error", shot.getText());
+            }
+            else {
+                entry.addProperty("path", Json.getString(structured, "path", ""));
+            }
+            shots.add(entry);
+        }
+        JsonObject json = new JsonObject();
+        json.addProperty("count", count);
+        json.addProperty("intervalTicks", interval);
+        json.add("shots", shots);
+        return ToolResult.structured(json);
+    }
 
     /** {@code [x, y, z]} from {@code arguments.name}, or null if absent or not three numbers. */
     @Nullable

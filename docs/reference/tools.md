@@ -1974,6 +1974,10 @@ tool's arguments. It may add:
   checked as `{"text": "..."}`.
 - `quiet: true`, which leaves a passing step's result out of the reply.
 
+A `screenshot` step saves its frame and returns the path, never inline. It is how to catch a frame a
+few ticks into an animation: `use_on_block`, then `wait {ticks: 6}`, then `screenshot {from, look_at,
+settle_ms: 0}` shoots a door mid-swing, which a separate `client_screenshot` call arrives too late for.
+
 A step fails when its tool reports an error or an expectation does not match. By default the
 sequence stops there and returns `nextIndex`; `stop_on_fail: false` runs on. The first failure
 is repeated at the top of the reply as `firstError`, so a loop that reads only each step's
@@ -2058,9 +2062,14 @@ when the player lands.
 #### `client_screenshot`
 
 Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
-`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`, `burst`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
+
+**A burst.** `burst: {count, interval_ticks}` saves `count` frames (2-32), one every `interval_ticks`
+(1-40, at 50 ms a tick) from the first, as `<name>_1.png` onwards, and returns `shots`: each one's
+`path` and `atMs`, when after the first it was actually taken. A slow capture delays the next frame
+rather than shifting the rest. Every other argument applies to each frame. Not with `inline`.
 
 **A view without moving the player.** `from: [x, y, z]` renders the frame from that eye position,
 aimed at `look_at: [x, y, z]` or by `yaw`/`pitch`, without the HUD or hand. Nothing changes on the
