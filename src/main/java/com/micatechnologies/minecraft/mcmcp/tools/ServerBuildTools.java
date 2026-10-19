@@ -446,6 +446,9 @@ public final class ServerBuildTools {
                     + "nothing if any cell conflicts.", "skip", "abort")
                 .bool("skipIfTileEntity", "palette mode: leave cells that hold a tile entity (signal heads, "
                     + "controllers, chests). Default false.")
+                .bool("pairTwoPart", "Write two-part blocks whole, deriving a missing second half. Default "
+                    + "true; false writes every cell exactly as given. Halves made up are listed in "
+                    + "pairs.derivedAt. Blocks in writes.notPairedBlocks (LBE's tables) are never paired.")
                 .bool("neighbourUpdates", "Notify neighbouring blocks, as /setblock and a normal placement "
                     + "do, so a redstone block written beside a machine powers it. Default true, in every mode. "
                     + "false still updates clients and lighting but tells no neighbour, for removing networks "
@@ -577,6 +580,7 @@ public final class ServerBuildTools {
                         }
                     }
                     final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
+                    pairs.pairing = context.getBoolean("pairTwoPart", true);
                     // Neighbour updates held to the end of each slice, so a block several cells big is whole
                     // before any of its cells hears of a neighbour (#85).
                     final DeferredNeighbours deferred = (flags & 1) != 0 ? new DeferredNeighbours() : null;
@@ -623,6 +627,7 @@ public final class ServerBuildTools {
                     tally.partners = pairs.partnersWritten;
                     tally.oldHalves = pairs.oldPartnersCleared;
                     JsonObject json = tally.toJson(dimension, placements.size(), replaceOnlyId);
+                    pairs.report(json);
                     if (deferred != null) {
                         deferred.report(json);
                     }

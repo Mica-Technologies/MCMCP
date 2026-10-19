@@ -497,6 +497,18 @@ Default `3`, range 1–20
 How many journal files are kept, the current one included. The oldest goes when a new one starts.
 Nothing is removed by age, and `game_storage` reports the journal's size but does not expire it.
 
+## `writes`
+
+### `notPairedBlocks`
+
+`string list` · default **`lbe:*_table`** · read live
+
+Blocks the bulk writes never write as [two-part](tools.md#server_set_blocks), though their state has
+a stored `upper` or `top` flag. A flag says a class *can* be two cells, not that every block of it is:
+LBE's casino machines are one class, and its tables carry the cabinets' `top` flag but are always one
+cell. Only the class knows which, so this list says. Patterns are matched as `server_find_blocks`
+matches them: `mod:block`, or `*` for any run of characters.
+
 ## `limits`
 
 ### `maxSessions`

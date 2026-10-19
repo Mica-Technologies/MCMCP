@@ -333,6 +333,7 @@ public final class ServerBulkTools {
                 }
             }
             final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
+            pairs.pairing = context.getBoolean("pairTwoPart", true);
             // Expectations of two-part cells are checked against the world as this call found it: the
             // lower half's pair write replaces the upper before the upper's own turn, and a swapped
             // cooler's old upper half was otherwise a conflict and left as air (#85).
@@ -458,6 +459,7 @@ public final class ServerBulkTools {
             tally.partners = pairs.partnersWritten;
             tally.oldHalves = pairs.oldPartnersCleared;
             JsonObject json = tally.toJson(dimension, count);
+            pairs.report(json);
             json.addProperty("neighbourUpdates", flags == 3);
             if (deferred != null) {
                 deferred.report(json);

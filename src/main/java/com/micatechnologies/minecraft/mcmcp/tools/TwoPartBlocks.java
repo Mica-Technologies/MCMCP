@@ -1,7 +1,11 @@
 package com.micatechnologies.minecraft.mcmcp.tools;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
 import net.minecraft.block.Block;
@@ -11,6 +15,7 @@ import net.minecraft.block.properties.PropertyBool;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.init.Blocks;
 import net.minecraft.util.EnumFacing;
+import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 
@@ -38,6 +43,8 @@ final class TwoPartBlocks {
 
     /** No neighbour updates, no observer updates, but sent to clients. */
     private static final int QUIET = 2 | 16;
+    /** How many derived second halves a result names by position. */
+    private static final int LISTED = 32;
 
     private TwoPartBlocks() {
     }
@@ -65,7 +72,30 @@ final class TwoPartBlocks {
 
     /** Whether a state is one half of a two-part block. */
     static boolean isTwoPart(IBlockState state) {
-        return halfProperty(state) != null || upperFlag(state) != null || state.getBlock() instanceof BlockBed;
+        return (halfProperty(state) != null || upperFlag(state) != null || state.getBlock() instanceof BlockBed)
+            && !notPaired(state.getBlock());
+    }
+
+    @Nullable
+    private static List<String> notPairedSource;
+    private static BlockPatterns notPairedPatterns = BlockPatterns.of(Collections.<String>emptyList());
+
+    /**
+     * Whether {@code writes.notPairedBlocks} names this block. A stored flag says a class can be two
+     * cells, not that every block of it is: LBE's casino machines are one class, and its tables carry
+     * the cabinets' 'top' flag but are always one cell (#105). Only the class knows, so the list says.
+     */
+    static boolean notPaired(Block block) {
+        List<String> source = McmcpConfig.getNotPairedBlocks();
+        if (source != notPairedSource) {
+            notPairedPatterns = BlockPatterns.of(source);
+            notPairedSource = source;
+        }
+        if (notPairedPatterns.isEmpty()) {
+            return false;
+        }
+        ResourceLocation name = block.getRegistryName();
+        return name != null && notPairedPatterns.matches(name.toString());
     }
 
     /** Whether a state is the second half: a door's or plant's upper half, or a bed's head. */
@@ -115,6 +145,10 @@ final class TwoPartBlocks {
         private final java.util.Set<Long> changedPartners = new java.util.HashSet<>();
         int partnersWritten;
         int oldPartnersCleared;
+        /** False when the caller asked for every cell to be written as given (pairTwoPart: false). */
+        boolean pairing = true;
+        /** Second halves made up rather than given, the first few by position: a caller can check them. */
+        final JsonArray derivedAt = new JsonArray();
         /** Where neighbour updates go when they are held to the end of a slice, or null. */
         @Nullable
         DeferredNeighbours deferred;
@@ -136,7 +170,7 @@ final class TwoPartBlocks {
          */
         Outcome write(World world, BlockPos pos, IBlockState state, @Nullable IBlockState partner,
                       @Nullable Recorder recorder) {
-            if (!isTwoPart(state)) {
+            if (!pairing || !isTwoPart(state)) {
                 return Outcome.NOT_TWO_PART;
             }
             BlockPos otherPos = partnerPos(state, pos);
@@ -151,10 +185,11 @@ final class TwoPartBlocks {
                 return set(world, pos, state, recorder) ? Outcome.WRITTEN : unchangedOrFailed(world, pos, state);
             }
             IBlockState other = partner;
+            boolean derived = false;
             if (other == null) {
                 IBlockState fromWrite = given.get(otherPos.toLong());
-                other = fromWrite != null && isSecondHalf(fromWrite) && fromWrite.getBlock() == state.getBlock()
-                    ? fromWrite : derivedSecondHalf(state);
+                derived = fromWrite == null || !isSecondHalf(fromWrite) || fromWrite.getBlock() != state.getBlock();
+                other = derived ? derivedSecondHalf(state) : fromWrite;
             }
             if (!world.isBlockLoaded(otherPos) || otherPos.getY() < 0 || otherPos.getY() > 255) {
                 return Outcome.FAILED;
@@ -173,6 +208,9 @@ final class TwoPartBlocks {
                 changedPartners.add(otherPos.toLong());
                 if (!given.containsKey(otherPos.toLong())) {
                     partnersWritten++;
+                }
+                if (derived && derivedAt.size() < LISTED) {
+                    derivedAt.add(GameJson.blockPos(otherPos));
                 }
             }
             if ((flags & 1) != 0 && deferred != null) {
@@ -231,6 +269,14 @@ final class TwoPartBlocks {
                 }
             }
             return changed;
+        }
+
+        /** Adds {@code derivedAt} to a write's {@code pairs} block, when any half was made up. */
+        void report(JsonObject json) {
+            JsonObject pairs = json.getAsJsonObject("pairs");
+            if (pairs != null && derivedAt.size() > 0) {
+                pairs.add("derivedAt", derivedAt);
+            }
         }
 
         private static Outcome unchangedOrFailed(World world, BlockPos pos, IBlockState state) {

@@ -78,6 +78,8 @@ public final class ServerApplyOps {
                 .string("since", "A server_changes_since token: cells someone else changed after it are left "
                     + "alone and counted as conflicts.")
                 .bool("stopOnRefusal", "Write nothing if any line fails to parse or names an unknown block.")
+                .bool("pairTwoPart", "Write two-part blocks (doors, beds, tall furniture) whole, deriving a "
+                    + "missing second half. Default true; false writes every cell exactly as given.")
                 .bool("load", "Load the chunks the ops reach for this call, and release them afterwards.")
                 .required("ops")
                 .build())
@@ -459,6 +461,7 @@ public final class ServerApplyOps {
             });
         }
         final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
+        pairs.pairing = context.getBoolean("pairTwoPart", true);
         final int[] cursor = {0};
         while (cursor[0] < sections.size()) {
             context.onGameThread(() -> {

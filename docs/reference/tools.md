@@ -621,7 +621,7 @@ short slices with ticks between them.
 
 #### `server_apply_ops`
 
-:material-alert: Destructive · requires `permissions.allowWorldEdits` · `ops` required · optional `dimension`, `dryRun`, `neighbourUpdates`, `since`, `stopOnRefusal`, `load`
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `ops` required · optional `dimension`, `dryRun`, `neighbourUpdates`, `since`, `stopOnRefusal`, `pairTwoPart`, `load`
 
 Replays a build generator's command lines on the server and writes only the cells whose final block
 differs from what is there. One call covers a build phase, with no read of the area first: the ops
@@ -1001,6 +1001,7 @@ the area first, or use `server_set_blocks` with `load: true`. `nbt` is merged in
 | `replaceOnly` | string | Only write where the existing block matches this id. |
 | `dimension` | integer | Default 0. |
 | `load` | boolean | Default false. Load the chunks the write touches, and release them afterwards. |
+| `pairTwoPart` | boolean | Default true. False writes every cell as given, deriving no second half. |
 
 Fill a cuboid, or apply an explicit list. The intended shape of a build is: fill the bulk volumes
 first, then one list call for the detail.
@@ -1063,7 +1064,12 @@ place.
   two-part block, which includes mods' doors built on `BlockDoor`. So does one with a boolean `upper`
   or `top` stored in its metadata: CSM's closets, coolers and vending machines, LBE's cabinets. The
   half with it clear is the lower one. A boolean of that name worked out from neighbours, such as a
-  pipe's connection, is never stored and does not count.
+  pipe's connection, is never stored and does not count. Blocks named in
+  [`writes.notPairedBlocks`](configuration.md#notpairedblocks) (by default LBE's one-cell tables, which
+  share the cabinets' class and flag) never count.
+- `pairs.derivedAt` names, by position, up to 32 second halves the write made up rather than was
+  given. `pairTwoPart: false` turns pairing off for the call (here and in `server_apply_ops`): every
+  cell is written exactly as given, and nothing is derived.
 - In palette mode, a two-part cell's `expectPalette` entry is checked against the world as the call
   found it. The lower half's write replaces the upper before the upper's own turn, and swapping a
   cooler's lower half would otherwise find its old upper gone and report a conflict.

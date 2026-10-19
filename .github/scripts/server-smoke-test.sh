@@ -605,6 +605,19 @@ case "$SWAPPED_BODY" in
   *'iron_door'*) echo "    a palette write swapped it for an iron door, both halves" ;;
   *) mcp_failure "the swap left the old upper half: ${SWAP_BODY} / ${SWAPPED_BODY}" ;;
 esac
+case "$SWAP_BODY" in
+  *"\"derivedAt\":[{\"x\":${DX},\"y\":$((DY + 2)),\"z\":${DZ}}]"*) echo "    the made-up upper half is named in derivedAt" ;;
+  *) mcp_failure "the derived upper half was not listed: ${SWAP_BODY}" ;;
+esac
+mcp_call 591 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:stone\",\"x\":$((DX + 2)),\"y\":${DY},\"z\":${DZ}}" > /dev/null
+ALONE_BODY="$(mcp_call 592 server_set_blocks "{\"mode\":\"list\",\"pairTwoPart\":false,\"neighbourUpdates\":false,\"blocks\":[{\"x\":$((DX + 2)),\"y\":$((DY + 1)),\"z\":${DZ},\"block\":\"minecraft:wooden_door\",\"metadata\":1}]}")" \
+  || mcp_failure "writing an unpaired door failed: ${ALONE_BODY}"
+ABOVE_BODY="$(mcp_call 593 server_get_block "{\"x\":$((DX + 2)),\"y\":$((DY + 2)),\"z\":${DZ}}")" \
+  || mcp_failure "reading above the unpaired door failed: ${ABOVE_BODY}"
+case "$ABOVE_BODY" in
+  *'wooden_door'*) mcp_failure "pairTwoPart:false still derived an upper half: ${ALONE_BODY}" ;;
+  *) echo "    pairTwoPart:false wrote the one cell given and nothing above it" ;;
+esac
 
 echo "==> Replaying fill and setblock lines on the server, writing only the difference"
 AX=$((SPAWN_X + 20)); AY=$((UNDO_Y + 10)); AZ=$((SPAWN_Z + 20))

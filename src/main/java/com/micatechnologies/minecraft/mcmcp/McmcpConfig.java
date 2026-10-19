@@ -53,6 +53,7 @@ public class McmcpConfig {
     private static final String CATEGORY_JOURNAL = "journal";
     private static final String CATEGORY_COMPANION = "companion";
     private static final String CATEGORY_CHUNKS = "chunks";
+    private static final String CATEGORY_WRITES = "writes";
 
     /**
      * Dev-launch overrides injected by {@code addon.gradle}.
@@ -98,6 +99,7 @@ public class McmcpConfig {
     private static boolean allowInventoryChanges = true;
     private static boolean allowWorldEdits = false;
     private static boolean allowScreenshots = true;
+    private static List<String> notPairedBlocks = Collections.emptyList();
     private static boolean showActivityBanner = true;
     private static boolean undoPointsEnabled = true;
     private static boolean undoSingleBlockWrites = false;
@@ -480,6 +482,13 @@ public class McmcpConfig {
                 + "other mods rely on, so they are a fundamentally different grant from 'act as the "
                 + "player'.");
 
+        notPairedBlocks = Arrays.asList(configuration.getStringList("notPairedBlocks", CATEGORY_WRITES,
+            new String[] { "lbe:*_table" },
+            "Blocks the bulk writes never write as two-part, though they carry a stored 'upper' or 'top' "
+                + "flag: one block class can be a tall cabinet and a one-cell table, and only the class "
+                + "knows which. Patterns as server_find_blocks takes them: 'mod:block', 'mod:*_table'. "
+                + "LBE's casino tables are one cell, its cabinets two."));
+
         allowScreenshots = configuration.getBoolean("allowScreenshots", CATEGORY_PERMISSIONS, true,
             "Allow the screenshot tools. Client endpoint only. Screenshots capture whatever is on screen, "
                 + "including any other window content composited into the game's framebuffer.");
@@ -683,6 +692,10 @@ public class McmcpConfig {
 
     public static boolean isAllowWorldEdits() {
         return allowWorldEdits;
+    }
+
+    public static List<String> getNotPairedBlocks() {
+        return notPairedBlocks;
     }
 
     public static boolean isAllowScreenshots() {
