@@ -267,6 +267,12 @@ The headless orchestrator approves on first use, because nothing is on screen to
 `--strict-approval` to refuse unknown instances instead, then approve them with
 `mcmcp-orchestrator approve <id>`.
 
+While a game waits to be approved, `mcmcp_instances` lists it under `pendingApproval` — its id,
+label, side, folder, pid and `waitingSeconds` — with a note saying what the person has to do, so a
+model can ask for the approval instead of reporting the game missing. It is not connected, and
+nothing can be called on it until it is approved. The game logs one line when it starts waiting,
+naming its instance id and the orchestrator it reached.
+
 ## Instance identity
 
 Three values in the `identity` section of `config/mcmcp.cfg`, generated on first launch:

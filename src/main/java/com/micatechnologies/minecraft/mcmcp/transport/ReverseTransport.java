@@ -102,6 +102,8 @@ public class ReverseTransport implements McpTransport {
      * thing wanted from a component whose failures are otherwise invisible.
      */
     private volatile boolean loggedOffline;
+    /** Whether this wait for approval has been logged; cleared once the link connects or is refused. */
+    private volatile boolean loggedWaiting;
 
     @Nullable
     private volatile String assignedName;
@@ -298,6 +300,7 @@ public class ReverseTransport implements McpTransport {
             this.assignedName = result.getAssignedName();
             backoff.reset();
             loggedOffline = false;
+            loggedWaiting = false;
             reachedConnected = true;
             setState(LinkState.CONNECTED, result.describe());
             Mcmcp.LOGGER.info("MCMCP " + side.id() + " endpoint " + result.describe() + " at "
@@ -364,16 +367,23 @@ public class ReverseTransport implements McpTransport {
         if (LinkProtocol.REASON_PENDING_APPROVAL.equals(result.getReason())) {
             // Not a failure. Somebody has an approval dialog on screen; keep knocking, quietly, and
             // do not let the backoff grow to half a minute while they reach for the mouse.
+            // Logged on entering the state, not behind loggedOffline: a game started before the
+            // orchestrator had already logged "no orchestrator", and so never said a human was
+            // being asked (#108).
             setState(LinkState.WAITING_FOR_APPROVAL, "");
-            if (!loggedOffline) {
-                loggedOffline = true;
-                Mcmcp.LOGGER.info("MCMCP is waiting for this instance (" + identity.getInstanceId()
-                    + ") to be approved in the orchestrator at " + settings.describeTarget() + ".");
+            loggedOffline = true;
+            if (!loggedWaiting) {
+                loggedWaiting = true;
+                Mcmcp.LOGGER.info("MCMCP " + side.id() + " endpoint reached the orchestrator at "
+                    + settings.describeTarget() + " and is waiting for this instance ("
+                    + identity.getInstanceId() + ") to be approved there: accept it in the orchestrator "
+                    + "app's approval prompt. It keeps asking until then.");
             }
             backoff.reset();
             return true;
         }
 
+        loggedWaiting = false;
         if (!result.isRetryable()) {
             Mcmcp.LOGGER.error("MCMCP orchestrator link refused: " + result.describe());
             setState(LinkState.STOPPED, result.describe());

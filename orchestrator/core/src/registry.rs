@@ -36,6 +36,56 @@ pub enum FocusResolution {
 pub struct Registry {
     instances: RwLock<HashMap<String, Arc<Instance>>>,
     focus: RwLock<Option<String>>,
+    /// Links held open while a human decides whether to approve them, by `<instance>.<side>`.
+    pending: RwLock<HashMap<String, PendingApproval>>,
+}
+
+/// A link that reached the orchestrator and is waiting on a human (#108).
+///
+/// Not an instance: it has no tools and cannot be addressed. It is listed so that a model asked to
+/// work in a game that "is running but not there" can tell the person exactly what to approve,
+/// rather than concluding the game is not connected at all.
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub instance_id: String,
+    pub label: String,
+    pub side: &'static str,
+    pub game_directory: Option<String>,
+    pub pid: Option<i64>,
+    /// When it first asked. Kept across its retries, so the wait reads as one wait.
+    pub since: std::time::Instant,
+    /// When a question for it was last open: now, while one is.
+    pub seen: std::time::Instant,
+    pub open: bool,
+}
+
+/// How long a link told "pending" stays listed after its knock. A game retries about once a second,
+/// so this outlives the gap between knocks; the headless orchestrator answers "pending" at once, and
+/// without it the entry would never be there to see.
+const PENDING_LINGER: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Ends its pending entry when dropped, however the wait ends: a `finally` block the compiler
+/// guarantees runs. Removed when the question was settled (approved or refused); left to linger
+/// for a moment when the answer was "still pending", since the game will knock again.
+pub struct PendingGuard {
+    registry: Arc<Registry>,
+    key: String,
+    pub linger: bool,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.registry.pending.write() {
+            if self.linger {
+                if let Some(entry) = pending.get_mut(&self.key) {
+                    entry.open = false;
+                    entry.seen = std::time::Instant::now();
+                }
+            } else {
+                pending.remove(&self.key);
+            }
+        }
+    }
 }
 
 impl Registry {
@@ -165,6 +215,44 @@ impl Registry {
                 _ => FocusResolution::Ambiguous(ids),
             },
         }
+    }
+
+    /// Records a link waiting for approval until the returned guard is dropped.
+    pub fn add_pending(self: &Arc<Self>, mut approval: PendingApproval) -> PendingGuard {
+        let key = format!(
+            "{}{}{}",
+            approval.instance_id,
+            crate::instance::ENDPOINT_SEPARATOR,
+            approval.side
+        );
+        let mut pending = self.pending.write().expect("pending lock");
+        if let Some(earlier) = pending.get(&key) {
+            if earlier.seen.elapsed() < PENDING_LINGER || earlier.open {
+                approval.since = earlier.since;
+            }
+        }
+        approval.open = true;
+        approval.seen = std::time::Instant::now();
+        pending.insert(key.clone(), approval);
+        PendingGuard {
+            registry: Arc::clone(self),
+            key,
+            linger: true,
+        }
+    }
+
+    /// The links waiting for approval, oldest first.
+    pub fn pending(&self) -> Vec<PendingApproval> {
+        let connected: Vec<String> = self.ids();
+        let mut map = self.pending.write().expect("pending lock");
+        // A game approved since its last knock connects without asking again, so it leaves here by
+        // appearing among the connected rather than through its guard.
+        map.retain(|key, approval| {
+            !connected.contains(key) && (approval.open || approval.seen.elapsed() < PENDING_LINGER)
+        });
+        let mut all: Vec<PendingApproval> = map.values().cloned().collect();
+        all.sort_by_key(|approval| approval.since);
+        all
     }
 }
 
@@ -361,5 +449,56 @@ mod tests {
         registry.insert(instance("alpha"));
 
         assert_eq!(registry.ids(), vec!["alpha".to_string(), "zulu".to_string()]);
+    }
+
+    fn waiting(id: &str) -> PendingApproval {
+        let now = std::time::Instant::now();
+        PendingApproval {
+            instance_id: id.into(),
+            label: "UIA Server Utility Mod".into(),
+            side: "client",
+            game_directory: Some("E:/run".into()),
+            pid: Some(42),
+            since: now,
+            seen: now,
+            open: true,
+        }
+    }
+
+    #[test]
+    fn a_link_waiting_for_approval_is_listed_until_its_question_is_settled() {
+        let registry = Arc::new(Registry::new());
+        let mut guard = registry.add_pending(waiting("run-ccd2f3"));
+        let pending = registry.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].instance_id, "run-ccd2f3");
+        // Pending is not connected: nothing can be routed to it.
+        assert!(registry.ids().is_empty());
+        guard.linger = false;
+        drop(guard);
+        assert!(registry.pending().is_empty());
+    }
+
+    #[test]
+    fn a_link_told_pending_stays_listed_between_knocks_and_keeps_its_first_time() {
+        let registry = Arc::new(Registry::new());
+        let first = registry.add_pending(waiting("run-ccd2f3"));
+        let since = registry.pending()[0].since;
+        drop(first);
+        let listed = registry.pending();
+        assert_eq!(
+            listed.len(),
+            1,
+            "a refused-as-pending knock lingers until the next one"
+        );
+        assert!(!listed[0].open);
+        let again = registry.add_pending(waiting("run-ccd2f3"));
+        assert_eq!(registry.pending()[0].since, since);
+        drop(again);
+        registry.insert(instance("run-ccd2f3.client"));
+        assert!(
+            registry.pending().is_empty(),
+            "once it is connected it is no longer waiting"
+        );
     }
 }

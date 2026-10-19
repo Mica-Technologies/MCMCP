@@ -1611,11 +1611,35 @@ impl Router {
                     }
                 }
 
-                structured_result(json!({
+                let mut listing = json!({
                     "connected": connected,
                     "knownButNotRunning": known,
                     "focused": focus,
-                }))
+                });
+                // Only when there is one: a link waiting on a human is the exception (#108).
+                let pending: Vec<Value> = self
+                    .registry
+                    .pending()
+                    .into_iter()
+                    .map(|approval| {
+                        json!({
+                            "game": approval.instance_id,
+                            "label": approval.label,
+                            "side": approval.side,
+                            "gameDirectory": approval.game_directory,
+                            "pid": approval.pid,
+                            "waitingSeconds": approval.since.elapsed().as_secs(),
+                        })
+                    })
+                    .collect();
+                if !pending.is_empty() {
+                    listing["pendingApproval"] = json!(pending);
+                    listing["pendingNote"] = json!(
+                        "Connected but not yet approved: ask the person to accept it in the \
+                         orchestrator app's approval prompt. It appears under connected once approved."
+                    );
+                }
+                structured_result(listing)
             }
             "mcmcp_focus" => {
                 let Some(requested) = arguments.get("target").and_then(Value::as_str) else {

@@ -35,7 +35,7 @@ use crate::instance::{Instance, InstanceInfo, UpstreamEvent};
 use crate::jsonrpc;
 use crate::link::framing;
 use crate::link::protocol::{self, Hello};
-use crate::registry::Registry;
+use crate::registry::{PendingApproval, Registry};
 use crate::store::{ApprovalStore, Verdict};
 
 /// How many frames may queue for one instance's writer before sends block.
@@ -413,6 +413,20 @@ async fn bootstrap(
 }
 
 async fn ask(context: &LinkContext, hello: &Hello) -> ApprovalOutcome {
+    // Listed by mcmcp_instances for as long as this question is open, so a model can say what to
+    // approve instead of reporting the game missing (#108). Dropped on every way out of here.
+    let now = std::time::Instant::now();
+    let mut pending = context.registry.add_pending(PendingApproval {
+        instance_id: hello.instance_id.clone(),
+        label: hello.fallback_label(),
+        side: hello.side.as_str(),
+        game_directory: hello.game_directory.clone(),
+        pid: hello.pid,
+        since: now,
+        seen: now,
+        open: true,
+    });
+    info!(instance = %hello.instance_id, label = %hello.fallback_label(), "waiting for a human to approve a link");
     let (respond, answer) = oneshot::channel();
     let request = ApprovalRequest {
         hello: HelloSummary::from_hello(hello),
@@ -424,7 +438,10 @@ async fn ask(context: &LinkContext, hello: &Hello) -> ApprovalOutcome {
         // and a restarted orchestrator with an approver attached will pick it up.
         return ApprovalOutcome::Pending;
     }
-    answer.await.unwrap_or(ApprovalOutcome::Pending)
+    let outcome = answer.await.unwrap_or(ApprovalOutcome::Pending);
+    // Settled questions leave the list at once; "still pending" lingers until the next knock.
+    pending.linger = matches!(outcome, ApprovalOutcome::Pending);
+    outcome
 }
 
 async fn read_loop<R>(reader: &mut R, instance: &Arc<Instance>, context: &LinkContext) -> Result<()>
