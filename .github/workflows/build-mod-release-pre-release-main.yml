@@ -444,9 +444,22 @@ jobs:
       # No continue-on-error. It was here while this path had never been executed, and all it bought
       # was a release that published a jar, published binaries, shipped no installers, and stayed
       # green. fail-fast is off on the matrix, so one platform failing still lets the others publish.
+      #
+      # A pre-release's app version carries a SemVer pre-release identifier, 26.10.190-2154, which
+      # the MSI, the DMG, the deb and the AppImage all accept. RPM does not: its versions allow no
+      # '-' (it spells a pre-release '~'), and tauri-bundler refuses the whole Linux build, so every
+      # push's pre-release run failed from 2026-10-15 (#113). A pre-release skips only the RPM; a
+      # release has no '-' and builds every bundle.
       - name: Build the desktop app installers
         working-directory: orchestrator
-        run: cargo tauri build --target ${{ matrix.target }} --config app/tauri.conf.json
+        shell: bash
+        run: |
+          bundles=""
+          if [ "${{ runner.os }}" = "Linux" ] && grep -qE '"version": "[^"]*-' app/tauri.conf.json; then
+            bundles="--bundles deb,appimage"
+            echo "Pre-release version: building deb and AppImage, not rpm (RPM versions allow no '-')."
+          fi
+          cargo tauri build --target ${{ matrix.target }} --config app/tauri.conf.json $bundles
 
       - name: Collect installers
         id: installers
