@@ -65,6 +65,176 @@ public final class RegistryDumpTools {
 
     public static void register() {
         registerDumpRegistries();
+        registerBlockStates();
+    }
+
+    private static void registerBlockStates() {
+        McpRegistry.registerTool(McpTool.named("game_block_states")
+            .title("Decode a block's metadata into states")
+            .description("For a block id, what each metadata 0-15 decodes to (getStateFromMeta), with "
+                + "property values both as blockstate JSON names them and, where different, as "
+                + "toString gives them; plus every property's allowed values and how many valid states "
+                + "no metadata can store (worked out at render time, or lost on save). No world "
+                + "writes: this replaces placing a block per meta and reading it back. 'namespace' "
+                + "instead decodes every block of a mod into a JSON file under <game directory>/"
+                + DUMP_DIRECTORY + "/ and returns its path, SHA-256 and counts.")
+            .schema(JsonSchema.object()
+                .string("block", "Block id, e.g. 'csm:trafficpolevertical'. Give this or namespace.")
+                .string("namespace", "Decode every block of this namespace into a file instead.")
+                .array("metas", "Only these metadata values (0-15). Default all 16.",
+                    Json.obj("type", "integer"))
+                .build())
+            .readOnly()
+            .closedWorld()
+            .handler(context -> {
+                final String blockId = Json.getString(context.getArguments(), "block", "").trim();
+                final String namespace = Json.getString(context.getArguments(), "namespace", "")
+                    .trim().toLowerCase(Locale.ROOT);
+                if (blockId.isEmpty() == namespace.isEmpty()) {
+                    return ToolResult.error("Give exactly one of block (e.g. \"csm:bench\") or namespace "
+                        + "(e.g. \"csm\").");
+                }
+                final boolean[] metas = new boolean[16];
+                java.util.List<String> metaList = Json.getStringList(context.getArguments(), "metas");
+                for (String meta : metaList) {
+                    int m;
+                    try {
+                        m = (int) Math.round(Double.parseDouble(meta.trim()));
+                    } catch (NumberFormatException e) {
+                        m = -1;
+                    }
+                    if (m < 0 || m > 15) {
+                        return ToolResult.error("metas must be 0-15; got " + meta + ".");
+                    }
+                    metas[m] = true;
+                }
+                if (metaList.isEmpty()) {
+                    java.util.Arrays.fill(metas, true);
+                }
+                if (!namespace.isEmpty()) {
+                    JsonObject dump = context.onGameThread(() -> {
+                        JsonArray blocks = new JsonArray();
+                        for (Block block : ForgeRegistries.BLOCKS) {
+                            ResourceLocation name = block.getRegistryName();
+                            if (name != null && namespace.equals(name.getNamespace())) {
+                                blocks.add(blockStates(block, metas));
+                            }
+                        }
+                        JsonObject json = new JsonObject();
+                        json.addProperty("namespace", namespace);
+                        json.add("blocks", blocks);
+                        return json;
+                    });
+                    int count = dump.getAsJsonArray("blocks").size();
+                    if (count == 0) {
+                        return ToolResult.error("No block is registered under namespace '" + namespace + "'.");
+                    }
+                    File directory = new File(McmcpPaths.gameDirectory(), DUMP_DIRECTORY);
+                    File target = new File(directory, "block-states-" + namespace + ".json");
+                    byte[] bytes = Json.writePretty(dump).getBytes(StandardCharsets.UTF_8);
+                    try {
+                        if (!directory.isDirectory() && !directory.mkdirs()) {
+                            return ToolResult.error("Could not create " + directory.getAbsolutePath());
+                        }
+                        Files.write(target.toPath(), bytes);
+                    } catch (IOException e) {
+                        return ToolResult.error("Could not write " + target.getAbsolutePath() + ": "
+                            + e.getMessage());
+                    }
+                    JsonObject result = new JsonObject();
+                    result.addProperty("namespace", namespace);
+                    result.addProperty("blocks", count);
+                    result.addProperty("file", target.getAbsolutePath());
+                    result.addProperty("bytes", bytes.length);
+                    result.addProperty("sha256", sha256(bytes));
+                    return ToolResult.structured(result);
+                }
+                // The block registry has a default (air), so getValue never says "missing".
+                final ResourceLocation key = new ResourceLocation(blockId);
+                final Block block = ForgeRegistries.BLOCKS.getValue(key);
+                if (block == null || !ForgeRegistries.BLOCKS.containsKey(key)) {
+                    return ToolResult.error("No block is registered as '" + blockId + "'.");
+                }
+                return ToolResult.structured(context.onGameThread(() -> blockStates(block, metas)));
+            })
+            .build());
+    }
+
+    /** What each requested meta decodes to, and what no meta can hold. */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static JsonObject blockStates(Block block, boolean[] metas) {
+        JsonObject json = new JsonObject();
+        ResourceLocation name = block.getRegistryName();
+        json.addProperty("block", name == null ? "unknown" : name.toString());
+        json.addProperty("class", block.getClass().getName());
+        JsonObject properties = new JsonObject();
+        for (net.minecraft.block.properties.IProperty property : block.getBlockState().getProperties()) {
+            JsonArray values = new JsonArray();
+            for (Object value : property.getAllowedValues()) {
+                values.add(property.getName((Comparable) value));
+            }
+            properties.add(property.getName(), values);
+        }
+        json.add("properties", properties);
+
+        JsonArray decoded = new JsonArray();
+        java.util.Map<net.minecraft.block.state.IBlockState, Integer> firstMeta = new java.util.HashMap<>();
+        java.util.Set<net.minecraft.block.state.IBlockState> stored = new java.util.HashSet<>();
+        for (int meta = 0; meta < 16; meta++) {
+            net.minecraft.block.state.IBlockState state;
+            try {
+                state = block.getStateFromMeta(meta);
+            } catch (RuntimeException e) {
+                if (metas[meta]) {
+                    JsonObject item = new JsonObject();
+                    item.addProperty("meta", meta);
+                    item.addProperty("error", e.getClass().getSimpleName() + ": " + e.getMessage());
+                    decoded.add(item);
+                }
+                continue;
+            }
+            stored.add(state);
+            Integer earlier = firstMeta.get(state);
+            if (earlier == null) {
+                firstMeta.put(state, meta);
+            }
+            if (!metas[meta]) {
+                continue;
+            }
+            JsonObject item = new JsonObject();
+            item.addProperty("meta", meta);
+            if (earlier != null) {
+                // Most blocks use fewer than 16 metas; the rest repeat a state. Saying so is shorter
+                // than repeating it, and is the fact that matters.
+                item.addProperty("sameAs", earlier);
+            }
+            else {
+                GameJson.addStateNames(item, state);
+                int back;
+                try {
+                    back = block.getMetaFromState(state);
+                } catch (RuntimeException e) {
+                    back = -1;
+                }
+                if (back != meta) {
+                    item.addProperty("storesAs", back);
+                }
+            }
+            decoded.add(item);
+        }
+        json.add("metas", decoded);
+        int valid = block.getBlockState().getValidStates().size();
+        json.addProperty("validStates", valid);
+        int unstored = 0;
+        for (net.minecraft.block.state.IBlockState state : block.getBlockState().getValidStates()) {
+            if (!stored.contains(state)) {
+                unstored++;
+            }
+        }
+        if (unstored > 0) {
+            json.addProperty("unstoredStates", unstored);
+        }
+        return json;
     }
 
     private static void registerDumpRegistries() {

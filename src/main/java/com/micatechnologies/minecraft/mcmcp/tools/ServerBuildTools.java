@@ -12,6 +12,8 @@ import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.regions.BlockBoxes;
+import com.micatechnologies.minecraft.mcmcp.regions.BlockSlices;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -79,7 +81,10 @@ public final class ServerBuildTools {
                 + "Returns a palette of the distinct blocks present plus a flat index array in "
                 + "x-then-z-then-y order (x varies fastest, y slowest), so the block at local offset "
                 + "(dx, dy, dz) is at index dx + sizeX * (dz + sizeZ * dy). Choose format 'summary' when "
-                + "you only need to know what is present, not where — it is far cheaper.")
+                + "you only need to know what is present, not where — it is far cheaper. To look at a "
+                + "layout, 'slice' draws it as text, one character per block; to read a structure "
+                + "exactly, 'boxes' merges same-block cells into cuboids, often 20-100x smaller than "
+                + "the index array.")
             .schema(JsonSchema.object()
                 .integer("x", "X coordinate of one corner of the region.")
                 .integer("y", "Y coordinate of one corner, 0-255.")
@@ -91,8 +96,21 @@ public final class ServerBuildTools {
                 .enumeration("format", "How to encode the result. 'palette' (default) returns the "
                         + "palette and the full index array. 'summary' returns only the palette with "
                         + "block counts. 'list' returns one object per non-air block, which is the most "
-                        + "readable but by far the largest.",
-                    "palette", "summary", "list")
+                        + "readable but by far the largest. 'boxes': the palette plus cuboids "
+                        + "[index, x0, y0, z0, x1, y1, z1] in world coordinates, corners inclusive, greedily "
+                        + "merged x then z then y; a cell in no box is 'rest' (air), so it is exact. "
+                        + "'slice': every layer along 'axis' as text rows, with a legend of one character per "
+                        + "block, '.' air, '?' unloaded; a y slice has north (-z) up and west (-x) left, an "
+                        + "x or z slice the top layer first, each row prefixed by its coordinate.",
+                    "palette", "summary", "list", "boxes", "slice")
+                .integer("maxBoxes", "boxes: stop after this many boxes and set truncated. Default "
+                    + DEFAULT_MAX_BOXES + ".", 1, MAX_BOXES_CEILING)
+                .enumeration("axis", "slice: the axis the slices are cut across. 'y' (default) gives "
+                    + "floor plans, 'x' and 'z' elevations. At most " + MAX_SLICE_CELLS + " cells in all.",
+                    "y", "x", "z")
+                .bool("states", "Add each palette entry's stored block-state properties as the blockstate "
+                    + "JSON names them, with 'stateToString' where an enum's toString differs. Default "
+                    + "false. For a block's states without a world, see game_block_states.")
                 .bool("includeAir", "Include air in the palette and counts. Defaults to true for "
                     + "'palette' (the index array needs it) and false for 'summary' and 'list'.")
                 .bool("load", "Load the chunks this read needs that are not loaded, and release them "
@@ -145,6 +163,17 @@ public final class ServerBuildTools {
                 }
 
                 final boolean includeAir = context.getBoolean("includeAir", "palette".equals(format));
+                final boolean states = context.getBoolean("states", false);
+                final boolean wantsCells = "palette".equals(format) || "boxes".equals(format)
+                    || "slice".equals(format);
+                final int maxBoxes = Math.max(1, Math.min(MAX_BOXES_CEILING,
+                    context.getInt("maxBoxes", DEFAULT_MAX_BOXES)));
+                final String axis = context.getString("axis", "y");
+                if ("slice".equals(format) && volume > MAX_SLICE_CELLS) {
+                    return ToolResult.error("A slice read is at most " + MAX_SLICE_CELLS + " cells, and "
+                        + "this region is " + volume + ". Cut it to the layers you want to see: y and toY "
+                        + "the same for one floor plan, or x and toX (z and toZ) for one elevation.");
+                }
                 final Set<Long> chunkSet = ChunkKeys.box(minX, minZ, maxX, maxZ);
 
                 return ServerChunkTools.withChunks(context, dimension, chunkSet, outcome -> {
@@ -190,11 +219,14 @@ public final class ServerBuildTools {
                                     PaletteEntry entry = palette.get(id);
                                     if (entry == null) {
                                         entry = new PaletteEntry(palette.size(), id, metadata);
+                                        if (states && !"mcmcp:unloaded".equals(id)) {
+                                            entry.state = world.getBlockState(pos);
+                                        }
                                         palette.put(id, entry);
                                     }
                                     entry.count++;
 
-                                    if ("palette".equals(format)) {
+                                    if (wantsCells) {
                                         indices.add(entry.index);
                                     }
                                     else if ("list".equals(format) && (includeAir || !isAir)) {
@@ -226,6 +258,9 @@ public final class ServerBuildTools {
                             paletteJson.addProperty("index", entry.index);
                             paletteJson.addProperty("block", entry.id);
                             paletteJson.addProperty("count", entry.count);
+                            if (entry.state != null) {
+                                GameJson.addStateNames(paletteJson, entry.state);
+                            }
                             paletteArray.add(paletteJson);
                         }
                         json.add("palette", paletteArray);
@@ -242,6 +277,13 @@ public final class ServerBuildTools {
                         else if ("list".equals(format)) {
                             json.add("blocks", blockList);
                         }
+                        else if ("boxes".equals(format)) {
+                            addBoxes(json, palette, indices, minX, minY, minZ, sizeX, sizeY, sizeZ,
+                                includeAir, maxBoxes);
+                        }
+                        else if ("slice".equals(format)) {
+                            addSlices(json, palette, indices, minX, minY, minZ, sizeX, sizeY, sizeZ, axis);
+                        }
                         // Always present: an empty read over unloaded chunks must never look like
                         // empty ground.
                         json.add("chunks", outcome != null ? outcome.toJson()
@@ -254,6 +296,93 @@ public final class ServerBuildTools {
                 });
             })
             .build());
+    }
+
+    static final int DEFAULT_MAX_BOXES = 2000;
+    static final int MAX_BOXES_CEILING = 20000;
+    /** A slice read draws every cell, so it is bounded like a picture: by what a model can read. */
+    static final int MAX_SLICE_CELLS = 16384;
+
+    private static int[] toArray(List<Integer> indices) {
+        int[] cells = new int[indices.size()];
+        for (int i = 0; i < cells.length; i++) {
+            cells[i] = indices.get(i);
+        }
+        return cells;
+    }
+
+    private static void addBoxes(JsonObject json, Map<String, PaletteEntry> palette, List<Integer> indices,
+                                 int minX, int minY, int minZ, int sizeX, int sizeY, int sizeZ,
+                                 boolean includeAir, int maxBoxes) {
+        PaletteEntry air = palette.get("minecraft:air");
+        int skip = includeAir || air == null ? -1 : air.index;
+        BlockBoxes.Result merged = BlockBoxes.merge(toArray(indices), sizeX, sizeY, sizeZ, skip, maxBoxes);
+        JsonArray boxes = new JsonArray();
+        for (int[] box : merged.boxes) {
+            JsonArray item = new JsonArray();
+            item.add(box[0]);
+            item.add(minX + box[1]);
+            item.add(minY + box[2]);
+            item.add(minZ + box[3]);
+            item.add(minX + box[4]);
+            item.add(minY + box[5]);
+            item.add(minZ + box[6]);
+            boxes.add(item);
+        }
+        if (skip >= 0) {
+            json.addProperty("rest", "minecraft:air");
+        }
+        json.add("boxes", boxes);
+        json.addProperty("cells", indices.size());
+        json.addProperty("boxCount", merged.boxes.size());
+        if (!merged.boxes.isEmpty()) {
+            json.addProperty("ratio", Math.round(indices.size() * 10.0 / merged.boxes.size()) / 10.0);
+        }
+        if (merged.truncated) {
+            json.addProperty("truncated", true);
+            json.addProperty("warning", "Stopped at maxBoxes=" + maxBoxes + "; cells after the last box "
+                + "(x fastest, then z, then y) are not described. Read a smaller region, or raise maxBoxes.");
+        }
+    }
+
+    private static void addSlices(JsonObject json, Map<String, PaletteEntry> palette, List<Integer> indices,
+                                  int minX, int minY, int minZ, int sizeX, int sizeY, int sizeZ, String axis) {
+        String[] ids = new String[palette.size()];
+        int[] counts = new int[palette.size()];
+        for (PaletteEntry entry : palette.values()) {
+            ids[entry.index] = entry.id;
+            counts[entry.index] = entry.count;
+        }
+        char[] chars = BlockSlices.assign(ids, counts);
+        JsonObject legend = new JsonObject();
+        for (Map.Entry<String, String> entry : BlockSlices.legend(ids, chars).entrySet()) {
+            legend.addProperty(entry.getKey(), entry.getValue());
+        }
+        json.add("legend", legend);
+        json.addProperty("axis", axis);
+        String alongX = "x " + minX + ".." + (minX + sizeX - 1) + ", west first";
+        String alongZ = "z " + minZ + ".." + (minZ + sizeZ - 1) + ", north first";
+        if ("y".equals(axis)) {
+            json.addProperty("rows", alongZ);
+            json.addProperty("columns", alongX);
+        }
+        else {
+            json.addProperty("rows", "y " + (minY + sizeY - 1) + ".." + minY + ", top first");
+            json.addProperty("columns", "x".equals(axis) ? alongZ : alongX);
+        }
+        JsonArray slices = new JsonArray();
+        for (BlockSlices.Slice slice : BlockSlices.render(toArray(indices), chars, minX, minY, minZ,
+            sizeX, sizeY, sizeZ, axis.charAt(0))) {
+            JsonObject item = new JsonObject();
+            item.addProperty(axis, slice.at);
+            JsonArray rows = new JsonArray();
+            for (String row : slice.rows) {
+                rows.add(row);
+            }
+            item.add("rows", rows);
+            slices.add(item);
+        }
+        json.add("slices", slices);
     }
 
     // ------------------------------------------------------------------
@@ -922,6 +1051,9 @@ public final class ServerBuildTools {
         final int metadata;
 
         int count;
+        /** The stored state, kept only when the read asked for states. */
+        @Nullable
+        IBlockState state;
 
         PaletteEntry(int index, String id, int metadata) {
             this.index = index;

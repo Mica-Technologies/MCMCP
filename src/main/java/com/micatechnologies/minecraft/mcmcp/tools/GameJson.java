@@ -180,6 +180,31 @@ public final class GameJson {
     }
 
     /**
+     * A state's properties under {@code state}, named as blockstate JSON and Dynmap name them
+     * ({@code IProperty.getName(value)}), plus {@code stateToString} when any value's
+     * {@code toString} differs. Enums often differ ({@code NORTH} against {@code north}), and a tool
+     * matching on one form silently misses every block written in the other.
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static void addStateNames(JsonObject json, IBlockState state) {
+        JsonObject names = new JsonObject();
+        JsonObject strings = new JsonObject();
+        boolean differs = false;
+        for (Map.Entry<IProperty<?>, Comparable<?>> entry : state.getProperties().entrySet()) {
+            IProperty property = entry.getKey();
+            String name = property.getName((Comparable) entry.getValue());
+            String text = String.valueOf(entry.getValue());
+            names.addProperty(property.getName(), name);
+            strings.addProperty(property.getName(), text);
+            differs |= !name.equals(text);
+        }
+        json.add("state", names);
+        if (differs) {
+            json.add("stateToString", strings);
+        }
+    }
+
+    /**
      * The block's state as it is actually drawn and interacted with, when that differs from the
      * state stored in the chunk.
      *

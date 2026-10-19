@@ -87,6 +87,24 @@ modules, rewriting registration, reordering tabs. Dump before, dump after, diff.
 is what the creative inventory renders, so take both dumps in the same state: at the main menu the
 order is registration order, inside a world it is the saved id mapping.
 
+### `game_block_states`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `block` | string | A block id, e.g. `csm:bench`. Give this or `namespace`. |
+| `namespace` | string | Decode every block of this namespace into `mcmcp/dumps/block-states-<namespace>.json`. |
+| `metas` | integer array | Only these metadata values, 0-15. Default all 16. |
+
+What each metadata decodes to through `getStateFromMeta`, with no world write: replaces placing a
+block per meta and reading it back. Each meta carries `state`, named as blockstate JSON names the
+values, and `stateToString` where `toString` differs; `sameAs` when it decodes to the same state as an
+earlier meta, and `storesAs` when that state saves under a different meta. `properties` lists each
+property's allowed values, `validStates` counts them, and `unstoredStates` counts states no meta can
+hold, worked out in `getActualState` or lost on save. With `namespace` the result is the file's path,
+SHA-256 and block count.
+
 ### `game_read_log`
 
 :material-eye: Read-only
@@ -327,8 +345,11 @@ unclickable from the side it should be clickable from.
 | `x`, `y`, `z` | integer | One corner. Required. |
 | `toX`, `toY`, `toZ` | integer | Opposite corner. Default: same as `x`/`y`/`z`. |
 | `dimension` | integer | Default 0. |
-| `format` | `palette` \| `summary` \| `list` | Default `palette`. |
+| `format` | `palette` \| `summary` \| `list` \| `boxes` \| `slice` | Default `palette`. |
 | `includeAir` | boolean | Defaults true for `palette`, false otherwise. |
+| `maxBoxes` | integer | `boxes`: stop after this many and set `truncated`. Default 2,000, at most 20,000. |
+| `axis` | `y` \| `x` \| `z` | `slice`: the axis the slices cut across. Default `y`, floor plans. |
+| `states` | boolean | Default false. Each palette entry also carries its stored state properties. |
 | `load` | boolean | Default false. Load the chunks the read needs, and release them afterwards. See [Chunk loading](#chunk-loading). |
 | `encoding` | `json` \| `packed` | Default `json`. `packed` returns the index array as one short string. |
 | `mode` | `blocks` \| `surface` | Default `blocks`. `surface` reads each column's top block. |
@@ -354,6 +375,25 @@ Unloaded positions appear in the palette as `mcmcp:unloaded`, never as air. Ever
 generated. A read that comes back empty over unloaded chunks can't be mistaken for empty ground.
 
 Bounded by `limits.maxBlockVolume` (default 32,768) in the `json` encoding.
+
+**Boxes.** `format: "boxes"` merges same-block cells into cuboids: the palette, then `boxes` as
+`[index, x0, y0, z0, x1, y1, z1]` in world coordinates, both corners inclusive. From the first cell not
+yet covered (x fastest, then z, then y) a box grows along x, then z, then y while every cell
+matches. Air is left out unless `includeAir`, and `rest: "minecraft:air"` says what a cell in no box
+is, so painting the boxes over air rebuilds the region exactly. `cells`, `boxCount` and `ratio` say
+what it saved: a 40 × 10 × 30 room of a few materials is some 12,000 indices and a few dozen boxes.
+
+**Slices.** `format: "slice"` draws the region as text, one character per block, with a `legend`.
+A block gets its name's first letter where that is free (`s` stone, then `S` for stonebrick), `.` is
+air and `?` an unloaded cell. A `y` slice is a map with north (−z) at the top and west (−x) on the
+left; an `x` or `z` slice is an elevation, top layer first. Each row starts with its coordinate, and
+`rows` and `columns` name the ranges. At most 16,384 cells: set `y` and `toY` the same for one floor
+plan. A 60 × 40 floor is about 2,500 characters, the cheapest way for a model to see a layout.
+
+**States.** `states: true` adds `state` to each palette entry, named as blockstate JSON names them
+(`IStringSerializable` names), and `stateToString` where an enum's `toString` differs (wool's
+`light_blue` against `lightBlue`). For a block's states with no world at all, see
+[`game_block_states`](#game_block_states).
 
 **Packed.** With `encoding: "packed"` the palette comes back as usual, but the indices are a single
 string. It's run-length encoded as varint pairs (value, run), zlib-deflated, then base64

@@ -503,6 +503,35 @@ case "$SURFACE_BODY" in
   *) mcp_failure "surface read did not return heights: ${SURFACE_BODY}" ;;
 esac
 
+echo "==> Region reads: boxes, slices and states"
+BOX_Y=$((UNDO_Y + 10))
+WOOL_BODY="$(mcp_call 570 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:wool\",\"metadata\":3,\"x\":$((SPAWN_X + 1)),\"y\":${BOX_Y},\"z\":$((SPAWN_Z + 1)),\"toX\":$((SPAWN_X + 3)),\"toY\":$((BOX_Y + 1)),\"toZ\":$((SPAWN_Z + 3))}")" \
+  || mcp_failure "the wool fill failed: ${WOOL_BODY}"
+WOOL_UNDO="$(printf '%s' "$WOOL_BODY" | grep -o '"undoPoint":"u[0-9]*"' | head -1 | sed 's/.*"\(u[0-9]*\)"/\1/')"
+BOXES_BODY="$(mcp_call 571 server_get_blocks "{\"x\":${SPAWN_X},\"y\":$((BOX_Y - 1)),\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 4)),\"toY\":$((BOX_Y + 2)),\"toZ\":$((SPAWN_Z + 4)),\"format\":\"boxes\",\"states\":true}")" \
+  || mcp_failure "boxes read failed: ${BOXES_BODY}"
+case "$BOXES_BODY" in
+  *"\"boxes\":[[1,$((SPAWN_X + 1)),${BOX_Y},$((SPAWN_Z + 1)),$((SPAWN_X + 3)),$((BOX_Y + 1)),$((SPAWN_Z + 3))]]"*) echo "    18 wool cells in 100 came back as one box" ;;
+  *) mcp_failure "boxes read did not merge the wool into one box: ${BOXES_BODY}" ;;
+esac
+case "$BOXES_BODY" in
+  *'"color":"light_blue"'*'"stateToString":{"color":"lightBlue"}'*) echo "    states named as blockstate JSON names them, with toString beside" ;;
+  *) mcp_failure "states did not name light blue wool both ways: ${BOXES_BODY}" ;;
+esac
+SLICE_BODY="$(mcp_call 572 server_get_blocks "{\"x\":${SPAWN_X},\"y\":${BOX_Y},\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 4)),\"toZ\":$((SPAWN_Z + 4)),\"format\":\"slice\"}")" \
+  || mcp_failure "slice read failed: ${SLICE_BODY}"
+case "$SLICE_BODY" in
+  *"\"w\":\"minecraft:wool:3\""*"|.www.\""*) echo "    a floor plan drew the wool as w" ;;
+  *) mcp_failure "slice read did not draw the wool: ${SLICE_BODY}" ;;
+esac
+STATES_BODY="$(mcp_call 573 game_block_states '{"block":"minecraft:wool","metas":[0,3]}')" \
+  || mcp_failure "game_block_states failed: ${STATES_BODY}"
+case "$STATES_BODY" in
+  *'"meta":3'*'"color":"light_blue"'*'"validStates":16'*) echo "    game_block_states decoded wool meta 3 with no world write" ;;
+  *) mcp_failure "game_block_states did not decode wool: ${STATES_BODY}" ;;
+esac
+[ -n "$WOOL_UNDO" ] && mcp_call 574 server_undo "{\"op\":\"restore\",\"id\":\"${WOOL_UNDO}\"}" > /dev/null
+
 echo "==> Change tracking: MCMCP's own writes are not listed as someone else's"
 TOKEN_BODY="$(mcp_call 46 server_changes_since "{\"x\":${SPAWN_X},\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 15)),\"toZ\":$((SPAWN_Z + 15))}")" \
   || mcp_failure "server_changes_since failed: ${TOKEN_BODY}"
