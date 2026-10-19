@@ -2219,6 +2219,44 @@ The client only profiles while the F3 pie chart is on screen, and re-decides eve
 turns F3 and the chart on for the duration and restores them afterwards. They will appear in any
 screenshot taken meanwhile, and drawing F3 inflates the `gui` section.
 
+A mod that skips its own `startSection` while profiling is off and still calls `endSection` (MTS
+does) pops an empty section stack, which crashed the client. The profiler's stacks are guarded
+before the profile starts: such a call is ignored, and the result's header counts them in a `NOTE`,
+since the sections around them may be misattributed. With OptiFine loaded and no `terrain` section in
+the tree, a second note says OptiFine replaced parts of the profiler. `display_update` is the buffer
+swap, which includes waiting for vsync or the GPU; use `client_profile_rendering` or `game_cpu_sample`
+for where the frame goes.
+
+#### `client_trace`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `target` | string | `player` (default), `riding` (what the player rides), or an entity id. |
+| `per` | `tick` \| `frame` | Default `tick`. |
+| `samples` | integer | Default 200; at most 2,400 ticks or 7,200 frames, and two minutes. |
+| `velocity` | boolean | Tick only: also record `motionX/Y/Z`. |
+| `angleThreshold` | number | Degrees an angle's step must pass to be listed. Default 30. |
+| `positionThreshold` | number | Blocks per sample² a change of velocity must pass. Default 0.25. |
+| `output` | `summary` \| `columns` | Default `summary`. `columns` adds every sample inline, up to 2,000. |
+
+Records a pose on every client tick, or every frame, in the game, so no sample is missed, and returns
+what is odd about it rather than the run. For each column: the largest step and the tick it was at,
+how many samples passed the threshold, the first 20 as `[tick, step]`, and `everyTicks` when most of
+them recur at one interval — a server correction every fifth tick says so. The full trace goes to a
+CSV under `mcmcp/dumps`, named in `file`.
+
+**Raw yaw.** Yaw is `rotationYaw` as stored, not wrapped as snapshots report it. Wrapping maps x and
+x + 360 to the same angle, which hides the one-tick whole-turn jump vanilla interpolates into an
+on-screen spin, and turns every crossing of ±180 into a fake 359.9° step. Positions are judged on
+change of velocity, so steady motion is not an outlier and a kink is.
+
+**Frames.** `per: "frame"` samples the camera as drawn, from Forge's `CameraSetup` after every mod has
+changed it: `cameraYaw` (Forge's convention, the entity's yaw + 180), `cameraPitch`, `cameraRoll`,
+with the target's interpolated position, its raw yaw and the partial tick. Roll is otherwise
+invisible to an agent.
+
 #### `client_profile_rendering`
 
 :material-eye: Read-only

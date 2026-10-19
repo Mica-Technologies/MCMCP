@@ -10,6 +10,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
 import com.micatechnologies.minecraft.mcmcp.perf.GcPauseLog;
+import com.micatechnologies.minecraft.mcmcp.perf.GuardedStack;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import com.micatechnologies.minecraft.mcmcp.tools.PerformanceTools;
 import java.util.ArrayList;
@@ -197,6 +198,10 @@ public final class ClientPerformanceTools {
                             // so at the one point where no section is open; setting it anywhere a
                             // mod can run would have the next endSection pop an empty stack and
                             // crash the client.
+                            // Even so, a mod that skips its startSection while profiling is off and
+                            // still calls endSection pops an empty stack (#107). Guarded first.
+                            guardProfiler(Minecraft.getMinecraft().profiler);
+                            GuardedStack.UNDERFLOWS.set(0);
                             GameSettings game = Minecraft.getMinecraft().gameSettings;
                             savedShowDebugInfo = game.showDebugInfo;
                             savedShowProfilerChart = game.showDebugProfilerChart;
@@ -222,6 +227,19 @@ public final class ClientPerformanceTools {
                             String warning = com.micatechnologies.minecraft.mcmcp.perf.TickClock.CLIENT_FRAMES
                                 .throttledSince(startedNanos) ? "# WARNING: " + ClientStateTools.throttleWarning() + "\n"
                                 : "";
+                            int underflows = GuardedStack.UNDERFLOWS.getAndSet(0);
+                            if (underflows > 0) {
+                                warning += "# NOTE: " + underflows + " endSection call(s) closed a section "
+                                    + "that was never opened (a mod that skips startSection while profiling is "
+                                    + "off, as MTS does). They were ignored rather than crash the client; the "
+                                    + "sections around them may be misattributed.\n";
+                            }
+                            if (optifineLoaded() && !rendered.contains("terrain")) {
+                                warning += "# NOTE: OptiFine is loaded and replaces parts of the profiler, so "
+                                    + "frame phases may be missing. display_update is the buffer swap, which "
+                                    + "includes waiting for vsync or the GPU. For what the frame is spent on, "
+                                    + "use client_profile_rendering (per renderer) or game_cpu_sample.\n";
+                            }
                             return warning + "# percent of frame, ~ms per frame (mean frame " + meanFrameMs + " ms)\n"
                                 + rendered;
                         }
@@ -240,6 +258,51 @@ public final class ClientPerformanceTools {
                 }
             })
             .build());
+    }
+
+    /**
+     * Swaps the profiler's lists for {@link GuardedStack}s, once, so popping an empty one is
+     * ignored rather than thrown. Every list field is swapped, found by type: the names differ
+     * between a dev client and a released jar, and OptiFine's profiler has more than vanilla's.
+     * Left in place afterwards; it differs from the list it replaced only where that one throws.
+     * Client thread only, with no profiler call in progress.
+     */
+    private static void guardProfiler(net.minecraft.profiler.Profiler profiler) {
+        for (Class<?> type = profiler.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers()) || field.getType() != List.class) {
+                    continue;
+                }
+                try {
+                    field.setAccessible(true);
+                    Object current = field.get(profiler);
+                    if (current instanceof GuardedStack || !(current instanceof List)) {
+                        continue;
+                    }
+                    Class<?> holds = Object.class;
+                    java.lang.reflect.Type generic = field.getGenericType();
+                    if (generic instanceof java.lang.reflect.ParameterizedType) {
+                        java.lang.reflect.Type argument =
+                            ((java.lang.reflect.ParameterizedType) generic).getActualTypeArguments()[0];
+                        if (argument instanceof Class) {
+                            holds = (Class<?>) argument;
+                        }
+                    }
+                    field.set(profiler, new GuardedStack((List<?>) current, holds));
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    // Unguarded is how every earlier version ran; not a reason to refuse the profile.
+                }
+            }
+        }
+    }
+
+    private static boolean optifineLoaded() {
+        try {
+            Class.forName("net.optifine.Lagometer", false, ClientPerformanceTools.class.getClassLoader());
+            return true;
+        } catch (ClassNotFoundException | LinkageError e) {
+            return false;
+        }
     }
 
     /** Client thread only. Safe to call twice. */
