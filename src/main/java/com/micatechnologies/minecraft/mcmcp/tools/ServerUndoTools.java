@@ -267,6 +267,9 @@ public final class ServerUndoTools {
      */
     @Nullable
     static UndoPoints.Recorder start(ToolContext context, boolean singleBlock) {
+        if (context.isUndoRequired()) {
+            return new UndoPoints.Recorder();
+        }
         // A write a player makes through the companion always leaves a point, single block or not:
         // on a shared server it is the way back from a mistake and the record of who made it.
         if (context.getPrincipal().isCompanion()) {

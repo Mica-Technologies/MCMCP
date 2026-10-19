@@ -51,6 +51,7 @@ public final class CommonTools {
         ServerAreaTools.register();
         ServerApplyOps.register();
         ServerJobTools.register();
+        ServerTestTools.register();
         StorageTools.register();
         ServerPlayerTools.register();
         ServerCommandTools.register();

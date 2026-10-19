@@ -22,6 +22,7 @@ server_job_submit {"kind": "apply_ops", "label": "Castleton block 4",
 | `set_blocks` | [`server_set_blocks`](../reference/tools.md#server_set_blocks) | Palette cells, list placements, or the layers of a fill |
 | `get_blocks` | [`server_get_blocks`](../reference/tools.md#server_get_blocks) | The box, into reads of at most `limits.maxBlockVolume` cells; each comes back as a page |
 | `relight` | [`server_relight`](../reference/tools.md#server_relight) | The box |
+| `test` | [`server_run_test`](../reference/tools.md#server_run_test) | Not split: one script, one run. Its status carries the `verdict`, and a cancel still restores what the script marked |
 
 `args` are the arguments the tool itself would take, and are checked against its schema when the job
 is submitted.

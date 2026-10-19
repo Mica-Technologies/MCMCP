@@ -113,6 +113,20 @@ public class ToolContext {
         this.caller = value;
     }
 
+    /**
+     * Whether this call must leave an undo point whatever the undo settings say: a test script's
+     * {@code restore: true} step puts the world back from it.
+     */
+    private volatile boolean undoRequired;
+
+    public boolean isUndoRequired() {
+        return undoRequired;
+    }
+
+    public void setUndoRequired(boolean value) {
+        this.undoRequired = value;
+    }
+
     /** The key chunk holds are taken under, or null for the caller's own. */
     @Nullable
     public String getHoldCaller() {

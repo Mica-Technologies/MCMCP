@@ -72,6 +72,9 @@ public final class Job {
     @Nullable
     private String error;
     private final JsonObject totals = new JsonObject();
+    /** A test job's verdict, once its run has ended. */
+    @Nullable
+    private JsonObject verdict;
     private final JsonArray lists = new JsonArray();
     private final List<Page> pages = new ArrayList<>();
     private long pageBytes;
@@ -222,7 +225,11 @@ public final class Job {
         if (part.lastOp >= 0) {
             lastOp = part.lastOp;
         }
-        if (result != null) {
+        if (result != null && "test".equals(kind)) {
+            // A test's result is its verdict, not counts to add up.
+            verdict = result;
+        }
+        else if (result != null) {
             JobParts.fold(totals, lists, result, part.opOffset);
             if (keepAsPage) {
                 JsonObject page = new JsonObject();
@@ -308,6 +315,9 @@ public final class Job {
         }
         if (totals.size() > 0) {
             json.add("totals", totals);
+        }
+        if (verdict != null) {
+            json.add("verdict", verdict);
         }
         if (full && lists.size() > 0) {
             json.add("refused", lists);

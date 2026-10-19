@@ -220,7 +220,22 @@ public final class JobManager {
             return;
         }
         job.started(System.currentTimeMillis());
-        McpSession.CancellationToken cancellation = new McpSession.CancellationToken();
+        // Cancelling the job cancels the call it is running, not only its next game-thread step: a
+        // test script waits between steps, and a wait that never asked would sleep through a cancel.
+        McpSession.CancellationToken cancellation = new McpSession.CancellationToken() {
+            @Override
+            public boolean isCancelled() {
+                return super.isCancelled() || job.cancelRequested();
+            }
+
+            @Override
+            public void throwIfCancelled() {
+                super.throwIfCancelled();
+                if (job.cancelRequested()) {
+                    throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");
+                }
+            }
+        };
         boolean pages = "get_blocks".equals(job.kind);
         int count = job.parts.size();
         try {
@@ -248,6 +263,12 @@ public final class JobManager {
                 }
                 job.partDone(part, result.getStructuredContent(), pages, MAX_PAGE_BYTES);
                 dirty = true;
+                // A part that saw the cancel and stopped early still returns its result; the job was
+                // cancelled all the same, and must not read as done.
+                if (job.cancelRequested()) {
+                    job.finish(Job.State.CANCELLED, "Cancelled during part " + (part.index + 1) + " of " + count + ".");
+                    return;
+                }
             }
             job.finish(Job.State.DONE, null);
         }

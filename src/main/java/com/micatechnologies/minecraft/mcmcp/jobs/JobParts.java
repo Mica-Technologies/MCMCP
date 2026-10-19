@@ -33,6 +33,7 @@ public final class JobParts {
         {"set_blocks", "server_set_blocks"},
         {"get_blocks", "server_get_blocks"},
         {"relight", "server_relight"},
+        {"test", "server_run_test"},
     };
 
     @Nullable
@@ -101,8 +102,11 @@ public final class JobParts {
                 return splitBox(args, limits.readCells, 0, 255);
             case "relight":
                 return splitBox(args, limits.relightCells, 0, 255);
+            case "test":
+                // A script is one run: its own steps are its pace, and it restores as a whole.
+                return Collections.singletonList(new Part(0, args, 0, -1, null));
             default:
-                throw new IllegalArgumentException("'kind' is one of apply_ops, set_blocks, get_blocks, relight.");
+                throw new IllegalArgumentException("'kind' is one of apply_ops, set_blocks, get_blocks, relight, test.");
         }
     }
 

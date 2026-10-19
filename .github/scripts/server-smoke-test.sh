@@ -800,6 +800,59 @@ case "$PAGE_BODY" in
   *) mcp_failure "page 1 had no region and result: ${PAGE_BODY}" ;;
 esac
 
+echo "==> Test scripts: power a lamp, wait for it, check, and put the world back"
+LX=$((SPAWN_X + 30)); LY=$((UNDO_Y + 12)); LZ=$((SPAWN_Z + 30))
+mcp_call 595 server_set_block "{\"x\":${LX},\"y\":${LY},\"z\":${LZ},\"block\":\"minecraft:redstone_lamp\"}" > /dev/null \
+  || mcp_failure "placing the lamp failed"
+# Single quotes keep the script's own ${...} away from the shell; the coordinates go in after.
+SCRIPT='{"vars":{"x":LXV,"y":LYV,"z":LZV},"steps":[{"call":"server_set_block","args":{"x":"${x+1}","y":"${y}","z":"${z}","block":"minecraft:redstone_block"},"restore":true},{"waitUntil":{"call":"server_get_block","args":{"x":"${x}","y":"${y}","z":"${z}"},"until":{"path":"block","equals":"minecraft:lit_redstone_lamp"},"timeout":5,"every":0.1},"save":"lit"},{"check":"${lit.met}","label":"the lamp lit"},{"row":{"lamp":"${x}","lit":"${lit.met}","polls":"${lit.polls}"}}]}'
+SCRIPT="${SCRIPT//LXV/$LX}"; SCRIPT="${SCRIPT//LYV/$LY}"; SCRIPT="${SCRIPT//LZV/$LZ}"
+TEST_BODY="$(mcp_call 596 server_run_test "$SCRIPT")" || mcp_failure "server_run_test failed: ${TEST_BODY}"
+case "$TEST_BODY" in
+  *'"passed":true'*"\"table\":{\"columns\":[\"lamp\",\"lit\",\"polls\"],\"rows\":[[${LX},true,"*'"restored":1'*) echo "    the lamp lit, the check passed, one row, one restore" ;;
+  *) mcp_failure "the lamp script did not pass and restore: ${TEST_BODY}" ;;
+esac
+BEHIND_BODY="$(mcp_call 597 server_get_block "{\"x\":$((LX + 1)),\"y\":${LY},\"z\":${LZ}}")" \
+  || mcp_failure "reading the restored cell failed: ${BEHIND_BODY}"
+case "$BEHIND_BODY" in
+  *'redstone_block'*) mcp_failure "the redstone block was left behind: ${BEHIND_BODY}" ;;
+  *) echo "    the redstone block is gone again" ;;
+esac
+BAD_BODY="$(mcp_call 598 server_run_test '{"steps":[{"check":"${true}"},{"call":"server_get_block","args":{"xx":1}}]}')" \
+  || mcp_failure "server_run_test with a bad step failed outright: ${BAD_BODY}"
+case "$BAD_BODY" in
+  *'Nothing was run'*"Unknown argument 'xx'"*'"isError":true'*) echo "    a misspelt argument in step 2 stopped step 1 too" ;;
+  *) mcp_failure "a bad step was not refused before running: ${BAD_BODY}" ;;
+esac
+TJOB_BODY="$(mcp_call 599 server_job_submit '{"kind":"test","label":"smoke test","args":{"steps":[{"check":"${1 + 1 == 2}","label":"arithmetic"}]}}')" \
+  || mcp_failure "a test job failed to start: ${TJOB_BODY}"
+TJOB_ID="$(printf '%s' "$TJOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"
+for _ in $(seq 1 30); do
+  TJOB_STATE="$(mcp_call 61 server_job_status "{\"id\":\"${TJOB_ID}\"}")" || mcp_failure "status failed: ${TJOB_STATE}"
+  case "$TJOB_STATE" in *'"state":"done"'*|*'"state":"failed"'*) break ;; esac
+  sleep 1
+done
+case "$TJOB_STATE" in
+  *'"state":"done"'*'"verdict":{"passed":true'*) echo "    a test job's verdict is in its status" ;;
+  *) mcp_failure "the test job did not give a verdict: ${TJOB_STATE}" ;;
+esac
+CANCEL_SCRIPT='{"kind":"test","args":{"steps":[{"call":"server_set_block","args":{"x":CXV,"y":CYV,"z":CZV,"block":"minecraft:gold_block"},"restore":true},{"sleep":60}]}}'
+CANCEL_SCRIPT="${CANCEL_SCRIPT//CXV/$((LX + 3))}"; CANCEL_SCRIPT="${CANCEL_SCRIPT//CYV/$LY}"; CANCEL_SCRIPT="${CANCEL_SCRIPT//CZV/$LZ}"
+CJOB_BODY="$(mcp_call 600 server_job_submit "$CANCEL_SCRIPT")" || mcp_failure "the cancel test job failed to start: ${CJOB_BODY}"
+CJOB_ID="$(printf '%s' "$CJOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"
+sleep 3
+mcp_call 601 server_job_cancel "{\"id\":\"${CJOB_ID}\"}" > /dev/null || mcp_failure "cancelling the test job failed"
+for _ in $(seq 1 20); do
+  CJOB_STATE="$(mcp_call 61 server_job_status "{\"id\":\"${CJOB_ID}\"}")" || mcp_failure "status failed: ${CJOB_STATE}"
+  case "$CJOB_STATE" in *'"state":"running"'*|*'"state":"queued"'*) sleep 1 ;; *) break ;; esac
+done
+GOLD_BODY="$(mcp_call 602 server_get_block "{\"x\":$((LX + 3)),\"y\":${LY},\"z\":${LZ}}")" || mcp_failure "reading the cancelled job's cell failed"
+case "$GOLD_BODY" in
+  *'gold_block'*) mcp_failure "a cancelled test left its block behind: ${CJOB_STATE} / ${GOLD_BODY}" ;;
+  *) case "$CJOB_STATE" in *'"state":"cancelled"'*'"stopped":"cancelled"'*) ;; *) mcp_failure "the cancelled test job did not end cancelled with its verdict: ${CJOB_STATE}" ;; esac
+     echo "    a test cancelled mid-sleep ended cancelled and still put its block back" ;;
+esac
+
 echo "==> Emergency stop: an agent can set it, and then nothing writes"
 ESTOP_BODY="$(mcp_call 65 server_estop '{"reason":"smoke test"}')" || mcp_failure "server_estop failed: ${ESTOP_BODY}"
 STOPPED_BODY="$(mcp_call 66 server_set_block "{\"x\":${BX},\"y\":$((BY + 2)),\"z\":${BZ},\"block\":\"minecraft:stone\"}")" \

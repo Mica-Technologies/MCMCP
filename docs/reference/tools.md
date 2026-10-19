@@ -675,13 +675,73 @@ names the exception and the class and method that threw, and the server log has 
 trace once per fault. Whatever the hook changed before it threw stays changed, and is in the undo
 point. The same holds for `server_set_blocks` and `server_undo`.
 
+#### `server_run_test`
+
+:material-alert: Destructive · `steps` required · optional `finally`, `vars`, `hold`, `dimension`, `maxSeconds`, `stopOnFail`
+
+A building test in one call: a script of ordinary tool calls with waits, loops, checks and report
+rows, after which the world is put back. It exists because acceptance tests (ride every lift to
+every landing, trip a fire panel and prove the cars recall, sound the alarms and reset) took 10 to 40
+agent turns each, and the turns were the cost. Nothing about any mod is built in: the script names
+the blocks, NBT keys and commands.
+
+Each step is an object with one verb:
+
+| Step | Does |
+| --- | --- |
+| `{call, args, save?, restore?, optional?}` | Runs a server tool through its own handler, checks and limits. `save` keeps its structured result as a variable. `restore: true` makes it leave an undo point whatever the undo settings, undone when the script ends. An error stops the script unless `optional`. |
+| `{waitUntil: {call, args, until, every?, timeout?}, save?}` | Calls until `until` holds, every `every` seconds (default 0.5) for up to `timeout` (default 30, at most 600). Saves `{met, seconds, polls, result}`. |
+| `{forEach, as?, steps}` | Runs `steps` once per item of a list, with the item as `as` (default `it`) and its index as `<as>Index`. |
+| `{if, then, else?}` | Runs one branch. |
+| `{set: {name: value}}` | Sets variables. |
+| `{sleep}` | Waits, in seconds. |
+| `{check, label?}` | A pass or a fail in the verdict. With `stopOnFail`, a fail stops the script. |
+| `{row: {column: value}}` | Adds a row to the report table. |
+| `{holdItem: {player, slot, item, count?, meta?, nbt?}}` | Puts an item in a hotbar slot, for a `server_use_item_on_block` step; the slot is given back at the end. Needs `permissions.allowWorldEdits`. |
+| `{restoreNow: true}` | Undoes everything restorable so far, now. |
+
+**Templates.** Any string can hold `${...}`. A string that is exactly one `${...}` keeps the value's
+type, so `"y": "${c.y + 1}"` is a number. Expressions take paths (`c.y`, `r.blocks[0].y`,
+`r.blocks[*].y` for every match), arithmetic, comparisons, `&& || !`, `'strings'`, and `len abs floor
+round min max`.
+
+**Conditions.** `until` is a `"${...}"` string, with the polled result as `result`, or an object
+with a `path` into the result and one test: `anyIn` (some value is in a list), `equals`, `where` (the
+items whose fields all match, at least one), `atLeast` (a count) or `none`. Values compare loosely,
+so an NBT byte `1b` equals `true`.
+
+```json
+{"waitUntil": {"call": "server_get_tile_entities",
+               "args": {"x": "${cx-2}", "y": "${c.y}", "z": "${cz-2}", "toX": "${cx+2}", "toY": "${c.y+1}", "toZ": "${cz+2}"},
+               "until": {"path": "tileEntities[*]", "where": {"nbt.controllerY": "${c.y}", "nbt.open": true}},
+               "every": 0.3, "timeout": 6},
+ "save": "doors"}
+```
+
+**Putting the world back.** However the script ends (finished, a failed check with `stopOnFail`, an
+error, `maxSeconds`, or a cancel) every `restore: true` call is undone and every `holdItem` slot
+given back, last first, and then the `finally` steps run. Only an emergency stop prevents it, since
+nothing writes then; `restoreFailures` names what was left.
+
+**Checked first.** Every step's tool and argument names are checked before the first step runs, so a
+misspelt argument in step nine leaves steps one to eight unapplied. A step cannot call
+`server_run_test`, the job tools, `server_stop` or `server_estop`. Through the companion, each step
+needs its own tool's class.
+
+**The verdict.** `passed`, `checksPassed`, `checksFailed`, the first 20 `failures` by label,
+`stopped` with the reason when it stopped early, `calls`, `seconds`, the `table` of rows as `columns`
+and `rows`, and `restored`. Default `maxSeconds` is 300, at most 1,800. Run a long test as a
+`server_job_submit` `kind: "test"` job: it survives the caller disconnecting, and its status carries
+the verdict.
+
 #### `server_job_submit`
 
 :material-alert: Destructive · `kind`, `args` required · optional `label`
 
 Starts a long write or read as a background job and returns its id at once. `kind` is `apply_ops`,
-`set_blocks`, `get_blocks` or `relight`. `args` are the arguments that tool takes, of any size: the
-server splits them into ordinary calls and works through them at its own pace. See
+`set_blocks`, `get_blocks`, `relight` or `test`. `args` are the arguments that tool takes, of any
+size: the server splits them into ordinary calls and works through them at its own pace. A `test`
+job runs one [`server_run_test`](#server_run_test) script, and its status carries the `verdict`. See
 [Background jobs](../guide/jobs.md) for how parts are split, paced and retried.
 
 Refused during an emergency stop, and when the caller already has four jobs queued or running.
