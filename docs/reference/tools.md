@@ -1465,7 +1465,13 @@ result:
 - **Tick time.** Commands run in game-thread slices of at most 25 ms, so a long list never holds
   up a tick.
 - **Time limit.** A call that runs past two minutes stops and returns `nextIndex`.
-- **Loading.** `load: true` loads the chunks the commands' coordinates name. Relative coordinates
+- **Failures at the top.** When any command fails, a top-level `warning` says how many of how many,
+  so a script that only checks that the call returned still sees them. `outsideLoadedChunks` counts
+  those that answered "outside of the world", which vanilla says both for a y outside 0-255 and for
+  an unloaded chunk; a chunk that was never generated is said so, since MCMCP does not generate
+  terrain.
+- **Loading.** On by default: the chunks the commands' coordinates name are loaded first and released
+  afterwards. `load: false` runs the commands on whatever is already loaded. Relative coordinates
   resolve against `asPlayer`, or against world spawn for the console. `/setblock`, `/fill`, `/clone`
   and `/blockdata` are read exactly. Any other command is read by the shape of its numbers, since a
   mod's grammar is its own: two in a row are an `x z` column (LDME's

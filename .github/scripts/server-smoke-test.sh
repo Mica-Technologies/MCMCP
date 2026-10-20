@@ -564,6 +564,23 @@ case "$RUN_BODY" in
   *'"ran":3'*'"i":1,"succeeded":false'*) echo "    3 run, the out-of-world one reported as failed" ;;
   *) mcp_failure "server_run_commands did not report per command: ${RUN_BODY}" ;;
 esac
+case "$RUN_BODY" in
+  *'"warning":"'*' of 3 command(s) failed; see results.'*) echo "    the failure is counted at the top, not only in its line" ;;
+  *) mcp_failure "a failed command was not flagged at the top level: ${RUN_BODY}" ;;
+esac
+FAR_X=$((SPAWN_X + 3000))
+FAR_BODY="$(mcp_call 609 server_run_commands "{\"commands\":[\"setblock ${FAR_X} 70 ${SPAWN_Z} minecraft:stone\"],\"load\":false}")" \
+  || mcp_failure "a write with load off failed outright: ${FAR_BODY}"
+case "$FAR_BODY" in
+  *'"failed":1'*'"warning":'*'run them with load on'*) echo "    load: false into an unloaded chunk fails, and says to load" ;;
+  *) mcp_failure "a write into an unloaded chunk with load off was not flagged: ${FAR_BODY}" ;;
+esac
+NEAR_BODY="$(mcp_call 610 server_run_commands "{\"commands\":[\"setblock ${FAR_X} 70 ${SPAWN_Z} minecraft:stone\"]}")" \
+  || mcp_failure "a write with the default load failed outright: ${NEAR_BODY}"
+case "$NEAR_BODY" in
+  *'"chunks":{"inBox":1,'*'"ungenerated":1'*'never generated'*) echo "    by default the write tried to load its chunk, and says that one was never generated" ;;
+  *) mcp_failure "the default did not try to load the chunk, or did not say why it could not: ${NEAR_BODY}" ;;
+esac
 LOADBOX_BODY="$(mcp_call 594 server_run_commands "{\"commands\":[\"say no coordinates here\"],\"loadBoxes\":[[$((SPAWN_X + 2000)),${SPAWN_Z},0]]}")" \
   || mcp_failure "server_run_commands with loadBoxes failed: ${LOADBOX_BODY}"
 case "$LOADBOX_BODY" in

@@ -627,10 +627,11 @@ public final class ServerBulkTools {
                 + "Runs as asPlayer when given, else with the console's authority (through the companion: as "
                 + "you). A /fill or /clone leaves an undo point; the whole call leaves one. Commands on "
                 + "permissions.blockedCommands are refused before anything runs.\n\n"
-                + "Commands only act on loaded chunks; pass load: true to load the chunks their coordinates "
-                + "name first (relative coordinates resolve against the player, or world spawn for the "
-                + "console). A call that runs past two minutes stops and returns nextIndex: call again from "
-                + "there.")
+                + "Commands only act on loaded chunks, so the chunks their coordinates name are loaded first "
+                + "and released afterwards (relative coordinates resolve against the player, or world spawn "
+                + "for the console); load: false skips that. When any command fails, a top-level warning "
+                + "says how many, and how many wrote outside a loaded chunk. A call that runs past two "
+                + "minutes stops and returns nextIndex: call again from there.")
             .schema(JsonSchema.object()
                 .array("commands", "The commands, with or without the leading slash. At most 10,000.",
                     Json.obj("type", "string"))
@@ -639,7 +640,8 @@ public final class ServerBulkTools {
                 .bool("allResults", "List every command's result, not just the ones that failed. Default false.")
                 .integer("maxOutputLines", "Output lines kept per listed command. Default 20; a command "
                     + "with more says how many were dropped in outputTruncated.", 1, 500)
-                .bool("load", "Load the chunks the commands' coordinates name, and release them afterwards. "
+                .bool("load", "Default true. Load the chunks the commands' coordinates name, and release them "
+                    + "afterwards; false runs the commands on whatever is loaded. "
                     + "Vanilla build commands are read exactly; another mod's command by the shape of its "
                     + "numbers: two in a row an x z column, six a box, three a point.")
                 .array("loadBoxes", "Also load these, for coordinates no command spells out: each "
@@ -731,7 +733,9 @@ public final class ServerBulkTools {
                 }
             }
         }
-        final boolean load = context.getBoolean("load", false) || extra != null && extra.size() > 0;
+        // On by default (#117): a /setblock into an unloaded chunk fails one line at a time, the batch
+        // still returns, and two agents' scripts reported "applied" for rails and signs never written.
+        final boolean load = context.getBoolean("load", true) || extra != null && extra.size() > 0;
         final int unreadCommands = unread;
 
         return ServerChunkTools.withChunks(context, base[3], chunks, load, outcome -> {
@@ -746,6 +750,7 @@ public final class ServerBulkTools {
             final java.util.concurrent.CompletableFuture<?>[] sliceCapture = new java.util.concurrent.CompletableFuture<?>[1];
             final int[] next = {0};
             final int[] unloadedReplies = {0};
+            final int[] outsideWorld = {0};
             final boolean[] stopped = {false};
             while (next[0] < commands.size() && !stopped[0]) {
                 if (System.currentTimeMillis() > deadline || context.getCancellation().isCancelled()) {
@@ -847,6 +852,14 @@ public final class ServerBulkTools {
                     lines.addAll(sender.getOutput());
                     List<String> listed = new ArrayList<>(lines);
                     boolean saysUnloaded = false;
+                    if (!item.get("succeeded").getAsBoolean()) {
+                        for (String line : listed) {
+                            if (line.toLowerCase(java.util.Locale.ROOT).contains("outside of the world")) {
+                                outsideWorld[0]++;
+                                break;
+                            }
+                        }
+                    }
                     if (load) {
                         for (String line : listed) {
                             String lower = line.toLowerCase(java.util.Locale.ROOT);
@@ -896,11 +909,32 @@ public final class ServerBulkTools {
                     json.addProperty("noCoordinatesRead", unreadCommands);
                 }
             }
+            // Said at the top, not only per command: a script that checks the call returned saw a batch
+            // with failures in it as applied (#117).
+            List<String> warnings = new ArrayList<>();
+            if (counts[1] > 0) {
+                warnings.add(counts[1] + " of " + next[0] + " command(s) failed; see results."
+                    + (outsideWorld[0] > 0 ? " " + outsideWorld[0] + " of them answered 'outside of the world', "
+                        + "which vanilla says both for a y outside 0-255 and for a chunk that is not loaded: check "
+                        + "their y, and " + (load ? "for their chunks hold the area with server_keep_loaded or name "
+                        + "it with loadBoxes" : "run them with load on") + "." : ""));
+            }
+            if (outsideWorld[0] > 0) {
+                json.addProperty("outsideLoadedChunks", outsideWorld[0]);
+                long ungenerated = outcome == null ? 0L : Json.getLong(outcome.toJson(), "ungenerated", 0L);
+                if (ungenerated > 0) {
+                    warnings.add(ungenerated + " chunk(s) the commands name were never generated, and MCMCP does "
+                        + "not generate terrain (see chunks.ungeneratedChunks): a player has to go there first.");
+                }
+            }
             if (unloadedReplies[0] > 0) {
-                json.addProperty("warning", unloadedReplies[0] + " command(s) replied that something was "
+                warnings.add(unloadedReplies[0] + " command(s) replied that something was "
                     + "unloaded although load was on, so their coordinates are not ones MCMCP read from the "
                     + "text (see saysUnloaded in results). Name the area with loadBoxes, or hold it with "
                     + "server_keep_loaded, and run them again.");
+            }
+            if (!warnings.isEmpty()) {
+                json.addProperty("warning", String.join(" ", warnings));
             }
             if (recorder != null && undo[0] != null) {
                 ServerUndoTools.finish(context, recorder, "server_run_commands", (Integer) undo[0], (int[]) undo[1],
