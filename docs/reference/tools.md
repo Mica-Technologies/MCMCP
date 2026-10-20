@@ -741,8 +741,10 @@ so an NBT byte `1b` equals `true`.
 
 **Putting the world back.** However the script ends (finished, a failed check with `stopOnFail`, an
 error, `maxSeconds`, or a cancel) every `restore: true` call is undone and every `holdItem` slot
-given back, last first, and then the `finally` steps run. Only an emergency stop prevents it, since
-nothing writes then; `restoreFailures` names what was left.
+given back, last first, and then the `finally` steps run. They see the run's variables, `defs` and
+marks, so `finally` can `include` the same reset the steps use. A `finally` that stops early (an
+error, a missing def) makes `passed` false and names why in `finallyStopped`. Only an emergency stop
+prevents it, since nothing writes then; `restoreFailures` names what was left.
 
 **Checked first.** Every step's tool and argument names are checked before the first step runs, so a
 misspelt argument in step nine leaves steps one to eight unapplied. A step cannot call

@@ -124,7 +124,8 @@ public final class ServerTestTools {
             .schema(JsonSchema.object()
                 .array("steps", "The script.", Json.obj("type", "object"))
                 .array("finally", "Steps run after everything restorable is restored, however the script "
-                    + "ended: resetting a panel, for instance.", Json.obj("type", "object"))
+                    + "ended: resetting a panel, for instance. It sees the run's vars, defs and marks; if it stops "
+                    + "early, passed is false and finallyStopped says why.", Json.obj("type", "object"))
                 .property("vars", Json.obj("type", "object"))
                 .property("defs", Json.obj("type", "object"))
                 .array("hold", "Chunk areas to keep loaded for the whole run, each [x0, z0, x1, z1].",
@@ -189,7 +190,7 @@ public final class ServerTestTools {
         }
     }
 
-    private static ToolResult run(ToolContext context) throws Exception {
+    static ToolResult run(ToolContext context) throws Exception {
         JsonArray steps = Json.getArray(context.getArguments(), "steps");
         if (steps == null || steps.size() == 0) {
             return ToolResult.error("'steps' is the script: an array of steps, each an object with one verb ("
@@ -273,15 +274,23 @@ public final class ServerTestTools {
             }
             // However it ended: put back what was marked, then the script's own finally.
             restoreAll(run);
+            String finallyStopped = null;
             if (finallySteps != null && finallySteps.size() > 0) {
                 Run after = new Run(cleanContext(context), false, System.currentTimeMillis() + 120_000L);
+                // The finally sees what the run saw: its variables, its defs (so the same reset an
+                // aborted run needs can be included) and its marks.
                 after.vars.putAll(run.vars);
+                after.defs.putAll(run.defs);
+                after.marks.putAll(run.marks);
                 try {
                     runSteps(after, finallySteps);
                 }
                 catch (RuntimeException e) {
-                    run.warnings.add("finally stopped: " + e.getMessage());
+                    // A cleanup that did not finish fails the run: it exists to put a live system back.
+                    finallyStopped = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    run.warnings.add("finally stopped: " + finallyStopped);
                 }
+                run.warnings.addAll(after.warnings);
                 restoreAll(after);
                 run.failures.addAll(after.failures);
                 run.failed += after.failed;
@@ -289,7 +298,7 @@ public final class ServerTestTools {
                 run.restoreFailures.addAll(after.restoreFailures);
             }
             JsonObject json = new JsonObject();
-            json.addProperty("passed", stopped == null && run.failed == 0);
+            json.addProperty("passed", stopped == null && finallyStopped == null && run.failed == 0);
             json.addProperty("checksPassed", run.passed);
             json.addProperty("checksFailed", run.failed);
             if (!run.failures.isEmpty()) {
@@ -298,6 +307,9 @@ public final class ServerTestTools {
             }
             if (stopped != null) {
                 json.addProperty("stopped", stopped);
+            }
+            if (finallyStopped != null) {
+                json.addProperty("finallyStopped", finallyStopped);
             }
             json.addProperty("calls", run.calls);
             json.addProperty("seconds", Math.round((System.currentTimeMillis() - started) / 100.0D) / 10.0D);
