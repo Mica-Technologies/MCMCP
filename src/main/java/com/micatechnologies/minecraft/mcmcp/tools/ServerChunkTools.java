@@ -64,7 +64,7 @@ public final class ServerChunkTools {
             return body.run(outcome);
         }
         finally {
-            ChunkLoadGovernor.release(outcome.holdId, "its call ended");
+            ChunkLoadGovernor.release(outcome, "its call ended");
         }
     }
 

@@ -11,6 +11,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.LongSupplier;
 import javax.annotation.Nullable;
 
 /**
@@ -43,6 +44,14 @@ public final class HoldLedger {
         /** Who the caller is, for people to read (the agent's name); null when only the id is known. */
         @Nullable
         public String label;
+        /**
+         * For a temporary hold: when the call it belongs to ended or stopped waiting, or 0 while it has
+         * not. Its release is normally already on its way then; a hold still here {@link #CALL_GONE_GRACE_MILLIS}
+         * after that is a leak, and is expired and shed like one (#132). Null for a lasting hold, and for
+         * a temporary one nobody can vouch for, which then ends only at its lease.
+         */
+        @Nullable
+        public LongSupplier callEndedAt;
 
         Hold(String id, String caller, int dimension, Set<Long> chunks, boolean temporary,
              long nowMillis, long idleMillis, long maxMillis) {
@@ -57,9 +66,20 @@ public final class HoldLedger {
             this.maxMillis = maxMillis;
         }
 
-        /** When this hold ends if nothing touches it: idle timeout or absolute lease, whichever first. */
+        /**
+         * When this hold ends if nothing touches it: idle timeout or absolute lease, whichever first. A
+         * temporary hold has no idle timeout, since its call may go minutes without reading in it, only
+         * its lease.
+         */
         public long expiresAtMillis() {
-            return Math.min(lastUsedMillis + idleMillis, createdMillis + maxMillis);
+            return temporary ? createdMillis + maxMillis : Math.min(lastUsedMillis + idleMillis, createdMillis + maxMillis);
+        }
+
+        /** Whether this is a temporary hold whose call has been over for longer than its release takes. */
+        public boolean callGone(long nowMillis) {
+            LongSupplier ended = callEndedAt;
+            long at = temporary && ended != null ? ended.getAsLong() : 0L;
+            return at != 0L && nowMillis - at >= CALL_GONE_GRACE_MILLIS;
         }
     }
 
@@ -84,6 +104,12 @@ public final class HoldLedger {
             return Long.hashCode(chunk) * 31 + dimension;
         }
     }
+
+    /**
+     * How long after its call ends a temporary hold may still be here before it counts as leaked: its
+     * release is a task on the server thread, and may wait a tick or several for it.
+     */
+    public static final long CALL_GONE_GRACE_MILLIS = 5_000L;
 
     private final Map<String, Hold> holds = new LinkedHashMap<>();
     private final Map<Place, Integer> references = new HashMap<>();
@@ -215,13 +241,19 @@ public final class HoldLedger {
         public final int callers;
         public final int callerHeldChunks;
         /**
-         * Whether a call in progress holds chunks that count against this cap. Those end with their
-         * call, so a moment's wait may make room; a lasting hold never frees up that soon.
+         * Whether another caller's call in progress holds chunks that count against this cap. Those end
+         * with their call, so a moment's wait may make room; a lasting hold never frees up that soon.
          */
         public final boolean callsInProgress;
+        /**
+         * Whether the asker's own calls in progress hold some of these. Not worth waiting for: the
+         * asking call may be running inside one of them — a {@code server_run_test} step — and that one
+         * cannot end until this one does (#132).
+         */
+        public final boolean ownCallsInProgress;
 
         CapRefusal(String limit, int cap, int adding, int heldChunks, int callers, int callerHeldChunks,
-                   boolean callsInProgress) {
+                   boolean callsInProgress, boolean ownCallsInProgress) {
             this.limit = limit;
             this.cap = cap;
             this.adding = adding;
@@ -229,6 +261,7 @@ public final class HoldLedger {
             this.callers = callers;
             this.callerHeldChunks = callerHeldChunks;
             this.callsInProgress = callsInProgress;
+            this.ownCallsInProgress = ownCallsInProgress;
         }
 
         public boolean perCaller() {
@@ -255,6 +288,11 @@ public final class HoldLedger {
                 text.append(" Calls still running hold some of these and give them back when they end: retry ")
                     .append("after busy.retryAfterMs.");
             }
+            else if (ownCallsInProgress) {
+                text.append(" Calls of yours still running hold some of these and give them back when they end; ")
+                    .append("a call made from inside one of them, such as a server_run_test step, cannot wait ")
+                    .append("for that.");
+            }
             return text.toString();
         }
     }
@@ -275,7 +313,7 @@ public final class HoldLedger {
         int addingTotal = added(dimension, chunks);
         if (held + addingTotal > maxTotal) {
             return new CapRefusal(LIMIT_TOTAL, maxTotal, addingTotal, held, callers(), mine.size(),
-                hasCallInProgress(null));
+                hasCallInProgress(caller, false), hasCallInProgress(caller, true));
         }
         if (maxPerCaller > 0) {
             int addingMine = 0;
@@ -285,16 +323,18 @@ public final class HoldLedger {
                 }
             }
             if (mine.size() + addingMine > maxPerCaller) {
+                // Only the asker's own chunks count here, so only their own calls could make room.
                 return new CapRefusal(LIMIT_PER_CALLER, maxPerCaller, addingMine, held, callers(), mine.size(),
-                    hasCallInProgress(caller));
+                    false, hasCallInProgress(caller, true));
             }
         }
         return null;
     }
 
-    private boolean hasCallInProgress(@Nullable String caller) {
+    /** Whether a temporary hold is held by {@code caller} (own) or by anyone else (not own). */
+    private boolean hasCallInProgress(String caller, boolean own) {
         for (Hold hold : holds.values()) {
-            if (hold.temporary && (caller == null || hold.caller.equals(caller))) {
+            if (hold.temporary && hold.caller.equals(caller) == own) {
                 return true;
             }
         }
@@ -386,11 +426,15 @@ public final class HoldLedger {
         return soonest;
     }
 
-    /** Holds whose idle timer or lease has run out. Temporary holds end with their call, not here. */
+    /**
+     * Holds whose idle timer or lease has run out. A temporary hold normally ends with its call, not
+     * here; it is listed only once its call is known to be over, or at its lease, both of which mean it
+     * was never given back (#132).
+     */
     public List<String> expired(long nowMillis) {
         List<String> ids = new ArrayList<>();
         for (Hold hold : holds.values()) {
-            if (!hold.temporary && nowMillis >= hold.expiresAtMillis()) {
+            if (nowMillis >= hold.expiresAtMillis() || hold.callGone(nowMillis)) {
                 ids.add(hold.id);
             }
         }
@@ -409,13 +453,13 @@ public final class HoldLedger {
     }
 
     /**
-     * The order to give holds back in when the server is struggling: the longest-idle first, then the
-     * oldest. Pinned holds after those, and calls in progress (temporary holds) last of all — they end
-     * soon on their own.
+     * The order to give holds back in when the server is struggling: temporary holds whose call is
+     * over first, since nothing uses them; then the longest-idle lasting holds, then the oldest. Pinned
+     * holds after those, and calls in progress last of all — they end soon on their own.
      */
-    public List<String> shedOrder() {
+    public List<String> shedOrder(long nowMillis) {
         List<Hold> sorted = new ArrayList<>(holds.values());
-        sorted.sort(Comparator.<Hold>comparingInt(hold -> hold.temporary ? 2 : hold.pinned ? 1 : 0)
+        sorted.sort(Comparator.<Hold>comparingInt(hold -> hold.callGone(nowMillis) ? -1 : hold.temporary ? 2 : hold.pinned ? 1 : 0)
             .thenComparingLong(hold -> hold.lastUsedMillis)
             .thenComparingLong(hold -> hold.createdMillis));
         List<String> ids = new ArrayList<>();

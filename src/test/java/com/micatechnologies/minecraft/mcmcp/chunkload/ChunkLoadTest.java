@@ -173,17 +173,44 @@ class ChunkLoadTest {
     }
 
     @Test
-    void aCallsTemporaryHoldNeverExpiresByTimeAndIsShedLast() {
+    void aRunningCallsHoldOutlivesItsIdleTimerAndIsShedLast() {
         HoldLedger ledger = new HoldLedger();
-        HoldLedger.Hold call = ledger.create("p", 0, chunks(1), true, 0L, 1L, 1L);
+        HoldLedger.Hold call = ledger.create("p", 0, chunks(1), true, 0L, 1L, 3_600_000L);
+        call.callEndedAt = () -> 0L;
         HoldLedger.Hold idle = ledger.create("p", 0, chunks(2), false, 0L, 120_000L, 900_000L);
         HoldLedger.Hold busy = ledger.create("p", 0, chunks(3), false, 0L, 120_000L, 900_000L);
         ledger.add(call);
         ledger.add(idle);
         ledger.add(busy);
         ledger.touch(0, chunks(3), 50_000L);
-        assertFalse(ledger.expired(10_000_000L).contains(call.id));
-        assertEquals(Arrays.asList(idle.id, busy.id, call.id), ledger.shedOrder());
+        assertFalse(ledger.expired(1_000_000L).contains(call.id), "a call may go minutes without reading");
+        assertEquals(Arrays.asList(idle.id, busy.id, call.id), ledger.shedOrder(1_000_000L));
+    }
+
+    @Test
+    void aCallsHoldThatWasNeverGivenBackEndsAtItsLease() {
+        HoldLedger ledger = new HoldLedger();
+        HoldLedger.Hold call = ledger.create("p", 0, chunks(1), true, 0L, 1L, 3_600_000L);
+        ledger.add(call);
+        assertFalse(ledger.expired(3_599_999L).contains(call.id));
+        assertEquals(Arrays.asList(call.id), ledger.expired(3_600_000L), "a leaked hold does not live for ever");
+    }
+
+    @Test
+    void aCallsHoldIsALeakOnlyOnceItsCallHasBeenOverLongerThanItsReleaseTakes() {
+        HoldLedger ledger = new HoldLedger();
+        HoldLedger.Hold call = ledger.create("p", 0, chunks(1), true, 0L, 1L, 3_600_000L);
+        long[] ended = {0L};
+        call.callEndedAt = () -> ended[0];
+        HoldLedger.Hold region = ledger.create("p", 0, chunks(2), false, 0L, 120_000L, 900_000L);
+        ledger.add(call);
+        ledger.add(region);
+        assertFalse(ledger.expired(60_000L).contains(call.id), "its call is still running");
+        ended[0] = 60_000L;
+        assertFalse(ledger.expired(61_000L).contains(call.id), "its release is on its way to the server thread");
+        assertEquals(Arrays.asList(call.id), ledger.expired(60_000L + HoldLedger.CALL_GONE_GRACE_MILLIS));
+        assertEquals(Arrays.asList(call.id, region.id), ledger.shedOrder(70_000L),
+            "nothing uses it, so it goes before any hold someone asked for");
     }
 
     @Test
@@ -196,7 +223,7 @@ class ChunkLoadTest {
         ledger.add(watch);
         ledger.add(region);
         ledger.add(call);
-        assertEquals(Arrays.asList(region.id, watch.id, call.id), ledger.shedOrder());
+        assertEquals(Arrays.asList(region.id, watch.id, call.id), ledger.shedOrder(20_000L));
     }
 
     @Test
@@ -302,6 +329,21 @@ class ChunkLoadTest {
         assertTrue(ledger.checkCaps("b", 0, range(20, 5), 20, 0).callsInProgress, "a's call ends soon");
         assertFalse(ledger.checkCaps("b", 0, range(20, 5), 1024, 10).callsInProgress,
             "b's own share is all lasting holds");
+    }
+
+    @Test
+    void aCapThatOnlyTheAskersOwnRunningCallsCountAgainstIsNotWorthWaitingFor() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("a", 0, range(0, 10), true, 0L, 1L, 3_600_000L));
+        HoldLedger.CapRefusal own = ledger.checkCaps("a", 0, range(10, 5), 1024, 12);
+        assertEquals(HoldLedger.LIMIT_PER_CALLER, own.limit);
+        assertFalse(own.callsInProgress, "a server_run_test step cannot outwait the test it runs in");
+        assertTrue(own.ownCallsInProgress);
+        assertTrue(own.message().contains("cannot wait"), own.message());
+        HoldLedger.CapRefusal total = ledger.checkCaps("a", 0, range(10, 15), 20, 0);
+        assertEquals(HoldLedger.LIMIT_TOTAL, total.limit);
+        assertFalse(total.callsInProgress, "the only running call is the asker's own");
+        assertTrue(ledger.checkCaps("b", 0, range(10, 15), 20, 0).callsInProgress, "for b, a's call ends soon");
     }
 
     @Test

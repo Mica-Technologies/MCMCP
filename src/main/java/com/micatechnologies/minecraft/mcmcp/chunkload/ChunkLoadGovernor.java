@@ -27,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.Nullable;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.math.ChunkPos;
@@ -135,6 +136,9 @@ public final class ChunkLoadGovernor {
     /** How long a call refused by a hold cap waits for calls in progress to give chunks back. */
     private static final long CAP_WAIT_MILLIS = 10_000L;
 
+    /** How long a call that gave up waiting for loads waits for the server thread to hear of it. */
+    private static final long GIVE_UP_MILLIS = 15_000L;
+
     // ------------------------------------------------------------------
     // Asking for chunks
     // ------------------------------------------------------------------
@@ -173,10 +177,13 @@ public final class ChunkLoadGovernor {
         int ungenerated;
         long waitedMillis;
         final List<Long> ungeneratedChunks = new ArrayList<>();
+        /** When the call was done with the hold, or 0 while it is not; see {@link HoldLedger.Hold#callEndedAt}. */
+        final AtomicLong callEnded;
 
-        Outcome(String holdId, int inBox) {
+        Outcome(String holdId, int inBox, AtomicLong callEnded) {
             this.holdId = holdId;
             this.inBox = inBox;
+            this.callEnded = callEnded;
         }
 
         public JsonObject toJson() {
@@ -223,14 +230,57 @@ public final class ChunkLoadGovernor {
      */
     public static Outcome acquire(ToolContext context, final int dimension, final Set<Long> chunks,
                                   final boolean temporary, final long idleMillis, final long maxMillis) throws Busy {
+        // It waits for server ticks to load the chunks, and on the server thread those never come.
+        MinecraftServer running = ServerThreadBridge.server();
+        if (running != null && running.isCallingFromMinecraftThread()) {
+            throw new IllegalStateException("ChunkLoadGovernor.acquire was called on the server thread, where "
+                + "waiting for chunk loads would wait forever. Call it from the tool's worker.");
+        }
         final String caller = holdCallerOf(context);
         final String label = context.getHoldCaller() != null || context.getPrincipal().isCompanion()
             ? null : context.getCaller().label();
         final long started = System.currentTimeMillis();
+        // A call's own hold has no idle timer, only a lease longer than any call runs: what ends it is the
+        // call, through release(Outcome), and callEnded says when that has happened.
+        final long lease = temporary ? temporaryLeaseMillis() : maxMillis;
+        final AtomicLong callEnded = new AtomicLong();
+        try {
+            return acquire(context, caller, label, dimension, chunks, temporary, idleMillis, lease, started, callEnded);
+        }
+        catch (Busy | RuntimeException e) {
+            endCall(callEnded);
+            throw e;
+        }
+    }
+
+    /** Marks a call as done with its hold, the first time only. */
+    private static void endCall(AtomicLong callEnded) {
+        callEnded.compareAndSet(0L, System.currentTimeMillis());
+    }
+
+    /**
+     * A temporary hold's lease: the longest a hold may ask for, and never under an hour, so it outlives
+     * any call — a test run as a job lasts up to 30 minutes — and still ends if its release was lost.
+     */
+    static long temporaryLeaseMillis() {
+        return Math.max(3_600L, McmcpConfig.getChunkHoldLongestLeaseSeconds()) * 1000L;
+    }
+
+    private static Outcome acquire(ToolContext context, final String caller, @Nullable final String label,
+                                   final int dimension, final Set<Long> chunks, final boolean temporary,
+                                   final long idleMillis, final long maxMillis, final long started,
+                                   final AtomicLong callEnded) throws Busy {
         Object admitted;
         while (true) {
-            admitted = context.onGameThread(() -> admit(caller, label, dimension, chunks, temporary, idleMillis,
-                maxMillis, System.currentTimeMillis()));
+            // If this call stops waiting while admit runs, the hold admit takes is nobody's: give it back
+            // as soon as admit ends (#132). If it stops waiting before admit starts, admit never runs.
+            admitted = context.onGameThreadWithCleanup(() -> admit(caller, label, dimension, chunks, temporary,
+                idleMillis, maxMillis, System.currentTimeMillis(), callEnded), orphan -> {
+                    endCall(callEnded);
+                    if (orphan instanceof Request) {
+                        releaseNow(((Request) orphan).hold.id, "its call stopped waiting for the server thread");
+                    }
+                });
             // A cap that calls in progress count against clears when they end, usually within seconds:
             // a short wait then saves the caller a retry round. A lasting hold does not end that soon,
             // so a cap made of those is refused at once.
@@ -257,36 +307,67 @@ public final class ChunkLoadGovernor {
         long lastProgress = started;
         int total = request.pending.size();
         int lastLeft = total;
-        while (true) {
-            try {
-                Outcome outcome = request.done.get(250L, TimeUnit.MILLISECONDS);
-                outcome.waitedMillis = System.currentTimeMillis() - started;
-                return outcome;
+        boolean gaveUp = false;
+        long gaveUpAt = 0L;
+        boolean wasInterrupted = false;
+        try {
+            while (true) {
+                try {
+                    Outcome outcome = request.done.get(250L, TimeUnit.MILLISECONDS);
+                    outcome.waitedMillis = System.currentTimeMillis() - started;
+                    return outcome;
+                }
+                catch (TimeoutException waiting) {
+                    long now = System.currentTimeMillis();
+                    int leftNow = request.pending.size();
+                    if (leftNow < lastLeft) {
+                        lastLeft = leftNow;
+                        lastProgress = now;
+                    }
+                    if (context.getCancellation().isCancelled() || now - lastProgress > patience) {
+                        // Once: on a server too far behind to run it soon, one more task every 250 ms for the
+                        // same request only adds to the queue it is stuck behind.
+                        if (!gaveUp) {
+                            gaveUp = true;
+                            gaveUpAt = now;
+                            giveUp(request, context.getCancellation().isCancelled() ? "cancelled" : null);
+                        }
+                        else if (now - gaveUpAt > GIVE_UP_MILLIS) {
+                            // The server thread has not even run the give-up: it is stalled. Stop waiting
+                            // for it; the give-up still releases the hold when it runs, and if it never
+                            // does, the hold reads as its call's gone and is expired (#132).
+                            throw new Busy("The server thread did not respond while this call waited for its "
+                                + "chunks; it is " + ServerLoad.describe() + ". Retry after busy.retryAfterMs.",
+                                ServerLoad.busy("server_overloaded"));
+                        }
+                    }
+                    else if (total > 0) {
+                        int left = request.pending.size();
+                        context.reportProgress(total - left, total, "Loading chunks: " + (total - left) + " of " + total);
+                    }
+                }
+                catch (InterruptedException interrupted) {
+                    // Not re-flagged until this returns: with the flag set, every get() would throw at once and
+                    // this loop would spin until the server thread got round to the give-up.
+                    wasInterrupted = true;
+                    if (!gaveUp) {
+                        gaveUp = true;
+                        giveUp(request, "cancelled");
+                    }
+                }
+                catch (ExecutionException failed) {
+                    if (failed.getCause() instanceof Busy) {
+                        // Whoever failed it released the hold.
+                        throw (Busy) failed.getCause();
+                    }
+                    release(request.hold.id, "its call failed while its chunks loaded");
+                    throw new IllegalStateException(failed.getCause());
+                }
             }
-            catch (TimeoutException waiting) {
-                long now = System.currentTimeMillis();
-                int leftNow = request.pending.size();
-                if (leftNow < lastLeft) {
-                    lastLeft = leftNow;
-                    lastProgress = now;
-                }
-                if (context.getCancellation().isCancelled() || now - lastProgress > patience) {
-                    giveUp(request, context.getCancellation().isCancelled() ? "cancelled" : null);
-                }
-                else if (total > 0) {
-                    int left = request.pending.size();
-                    context.reportProgress(total - left, total, "Loading chunks: " + (total - left) + " of " + total);
-                }
-            }
-            catch (InterruptedException interrupted) {
+        }
+        finally {
+            if (wasInterrupted) {
                 Thread.currentThread().interrupt();
-                giveUp(request, "cancelled");
-            }
-            catch (ExecutionException failed) {
-                if (failed.getCause() instanceof Busy) {
-                    throw (Busy) failed.getCause();
-                }
-                throw new IllegalStateException(failed.getCause());
             }
         }
     }
@@ -317,7 +398,12 @@ public final class ChunkLoadGovernor {
 
     /** Server thread: limits, the hold itself, and what is already loaded. */
     private static Object admit(String caller, @Nullable String label, int dimension, Set<Long> chunks,
-                                boolean temporary, long idleMillis, long maxMillis, long nowMillis) {
+                                boolean temporary, long idleMillis, long maxMillis, long nowMillis,
+                                AtomicLong callEnded) {
+        if (callEnded.get() != 0L) {
+            // The call left while this waited its turn; take nothing for it.
+            return new Busy("The call ended before its chunks were admitted.", busy("released", null, 0L));
+        }
         WorldServer world = DimensionManager.getWorld(dimension);
         if (world == null) {
             return new Busy("Dimension " + dimension + " is not loaded.", busy("limit", "dimension", 0L));
@@ -334,8 +420,11 @@ public final class ChunkLoadGovernor {
 
         HoldLedger.Hold hold = LEDGER.create(caller, dimension, chunks, temporary, nowMillis, idleMillis, maxMillis);
         hold.label = label;
+        if (temporary) {
+            hold.callEndedAt = callEnded::get;
+        }
         LEDGER.add(hold);
-        Outcome outcome = new Outcome(hold.id, chunks.size());
+        Outcome outcome = new Outcome(hold.id, chunks.size(), callEnded);
         Deque<Long> pending = new ArrayDeque<>();
         ChunkProviderServer provider = world.getChunkProvider();
         for (long chunk : chunks) {
@@ -365,6 +454,15 @@ public final class ChunkLoadGovernor {
             QUEUE.add(request);
         }
         return request;
+    }
+
+    /**
+     * Ends the hold a call took, from its worker, when the call is done with it. Says so at once, so the
+     * hold reads as nobody's even while the release waits its turn on a busy server thread.
+     */
+    public static void release(Outcome outcome, String why) {
+        endCall(outcome.callEnded);
+        release(outcome.holdId, why);
     }
 
     /** Ends a hold, from any thread. Chunks no hold needs are unforced and, if MCMCP loaded them, unloaded. */
@@ -688,11 +786,14 @@ public final class ChunkLoadGovernor {
         }
     }
 
-    /** Gives back one hold while the server stays paused: the longest idle first. */
+    /**
+     * Gives back one hold while the server stays paused: a call's hold its call is done with first, then
+     * the longest idle. Never the hold of a call still running.
+     */
     private static void shedOne(long now) {
-        for (String id : LEDGER.shedOrder()) {
+        for (String id : LEDGER.shedOrder(now)) {
             HoldLedger.Hold hold = LEDGER.get(id);
-            if (hold == null || hold.temporary) {
+            if (hold == null || hold.temporary && !hold.callGone(now)) {
                 continue;
             }
             Mcmcp.LOGGER.warn("MCMCP released hold " + id + " (" + hold.chunks.size() + " chunks, " + hold.caller
@@ -710,6 +811,12 @@ public final class ChunkLoadGovernor {
 
     private static void housekeeping(long now) {
         for (String id : LEDGER.expired(now)) {
+            HoldLedger.Hold hold = LEDGER.get(id);
+            if (hold != null && hold.temporary) {
+                // A call's hold ends with its call. One still here was never given back (#132).
+                Mcmcp.LOGGER.warn("MCMCP released hold " + id + " (" + hold.chunks.size() + " chunks, " + hold.caller
+                    + "): " + (hold.callGone(now) ? "its call had ended without releasing it" : "its lease ran out") + ".");
+            }
             releaseNow(id, "it expired");
         }
         // Reconcile: a forced chunk no hold references is a leak; give it back.

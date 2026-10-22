@@ -521,8 +521,16 @@ Both go through one governor:
 - **Hold caps.** At most `chunks.maxHeldChunks` chunks are held at once, and at most
   `chunks.maxHeldChunksPerCaller` by any one caller, so one agent cannot take them all. A caller is
   one player through the companion, one agent on the endpoint (each agent through the orchestrator
-  counts apart), or one background job. A request that a running call's chunks stand in the way of
-  waits up to 10 seconds for them before it is refused.
+  counts apart), or one background job. A request that another caller's running call's chunks
+  stand in the way of waits up to 10 seconds for them before it is refused. One that only the
+  caller's own running calls stand in the way of is refused at once, since it may be running inside
+  one of them (a [`server_run_test`](#server_run_test) step).
+- **A call's own hold.** `load: true` holds its chunks only while its call runs. If the call stops
+  waiting before the server thread admits it, nothing is held; if it stops waiting while the
+  admission runs, the hold is given back as soon as the admission ends. A hold whose call is over
+  but which is somehow still there is released within seconds, and is the first thing given back
+  when the server is struggling. As a last resort a call's hold ends after
+  `chunks.holdLongestLeaseSeconds`, and never under an hour.
 - **Server health.** It watches tick time and memory. Loading slows when the server is
   struggling, and stops when it falls below 20 TPS or is short of memory. If that lasts, the
   longest-idle holds are given back.
