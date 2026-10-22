@@ -83,3 +83,5 @@ orchestrator/app/binaries/
 
 # `mkdocs build` output. The wiki is published from CI, never from a checkout.
 site/
+
+__pycache__/

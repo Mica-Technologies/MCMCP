@@ -635,8 +635,10 @@ public final class ServerTestTools {
                 if (!world.isBlockLoaded(pos)) {
                     throw new IllegalStateException("restore cell " + pos + " is in an unloaded chunk; hold it first.");
                 }
-                // As plain values: no Minecraft object leaves the game thread.
-                saved[i * 2] = net.minecraft.block.Block.getStateId(world.getBlockState(pos));
+                // The tile entity as SNBT text. The block state is kept as itself, not as Block.getStateId:
+                // that round trip turns a block whose meta mappings disagree into another state (#120). A
+                // state is an immutable registry value, and it is only read back on the game thread.
+                saved[i * 2] = world.getBlockState(pos);
                 net.minecraft.tileentity.TileEntity entity = world.getTileEntity(pos);
                 saved[i * 2 + 1] = entity == null ? null : entity.writeToNBT(new net.minecraft.nbt.NBTTagCompound()).toString();
             }
@@ -661,7 +663,7 @@ public final class ServerTestTools {
                             if (!world.isBlockLoaded(pos)) {
                                 throw new IllegalStateException(pos + " was unloaded before it could be put back");
                             }
-                            net.minecraft.block.state.IBlockState state = net.minecraft.block.Block.getStateById((Integer) before[i * 2]);
+                            net.minecraft.block.state.IBlockState state = (net.minecraft.block.state.IBlockState) before[i * 2];
                             if (world.getBlockState(pos) != state) {
                                 world.setBlockState(pos, state, 3);
                             }
