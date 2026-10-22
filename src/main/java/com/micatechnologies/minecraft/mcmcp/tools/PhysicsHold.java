@@ -21,9 +21,11 @@ import net.minecraftforge.fluids.IFluidBlock;
  * {@code holdPhysics} for a bulk write (#118): no sand falls and no fluid flows until the call ends.
  *
  * <p>Both happen only on a scheduled block tick, which the write schedules and a later world tick runs,
- * between the write's game-thread slices. At the end of every slice {@link #capture} takes the ticks of
- * gravity blocks and fluids in the write's box (and one cell around it) out of the world's queue and
- * keeps them; every other tick it takes is put straight back. Nothing global is set, so there is
+ * between the write's game-thread slices. At the end of every slice that changed a cell at or next to a
+ * gravity block or fluid, {@link #capture} takes the ticks of gravity blocks and fluids in the write's
+ * box (and one cell around it) out of the world's queue and keeps them; every other tick it takes is
+ * put straight back. A slice that changed nothing of the kind skips it, since the lookup walks the
+ * dimension's whole pending-tick set. Nothing global is set, so there is
  * nothing to reset if the call fails: a tick not given back leaves a block still, not the world wrong.
  * {@link #finish} gives every held tick back with what was left of its delay, and reports what would
  * still move. {@code BlockFalling.fallInstantly} was the other way in, and is not one: it makes sand
@@ -40,6 +42,8 @@ final class PhysicsHold {
     private long[] candidates;
     private int cursor;
     private boolean released;
+    /** Whether a change since the last capture was at or next to a gravity block or fluid. */
+    private boolean dirty;
 
     /**
      * @param box  the cells the write may change: min x, y, z, max x, y, z, inclusive
@@ -56,13 +60,52 @@ final class PhysicsHold {
         return block instanceof BlockFalling || block instanceof BlockLiquid || block instanceof IFluidBlock;
     }
 
-    /** The write changed this cell. */
-    void changed(BlockPos pos) {
+    /**
+     * Game thread: the write changed this cell. Notes whether a gravity block or fluid is at it or next
+     * to it, since only then can the change have scheduled a tick {@link #capture} needs to take.
+     */
+    void changed(WorldServer world, BlockPos pos) {
         ledger.changed(pos.getX(), pos.getY(), pos.getZ());
+        if (!dirty) {
+            dirty = nearPhysics(world, pos);
+        }
     }
 
-    /** Game thread: takes the pending gravity and fluid ticks in the box out of the world's queue. */
+    /**
+     * Whether a gravity block or fluid sits at the cell, beside it, or two above or below it: where a
+     * write of the cell, its neighbour updates, or the other half of a two-part block it placed can have
+     * scheduled one. Never looks into a chunk that is not loaded, which would load it.
+     */
+    private static boolean nearPhysics(WorldServer world, BlockPos pos) {
+        if (isPhysicsAt(world, pos) || isPhysicsAt(world, pos.up(2)) || isPhysicsAt(world, pos.down(2))) {
+            return true;
+        }
+        for (EnumFacing facing : EnumFacing.VALUES) {
+            if (isPhysicsAt(world, pos.offset(facing))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isPhysicsAt(WorldServer world, BlockPos pos) {
+        return pos.getY() >= 0 && pos.getY() <= 255 && world.isBlockLoaded(pos)
+            && isPhysics(world.getBlockState(pos).getBlock());
+    }
+
+    /**
+     * Game thread: takes the pending gravity and fluid ticks in the box out of the world's queue, when a
+     * change since the last capture can have scheduled one.
+     *
+     * <p>The world's lookup walks every pending tick in the dimension, not the box's, and putting the
+     * rest back costs a reschedule each. After every slice of a write that touched nothing of the kind,
+     * that was the cost of a large write on a busy server, for nothing (#132).
+     */
     void capture(WorldServer world) {
+        if (!dirty) {
+            return;
+        }
+        dirty = false;
         int[] box = ledger.box();
         // The world's own lookup takes x and z, exclusive at the top, and every y.
         List<NextTickListEntry> taken = world.getPendingBlockUpdates(

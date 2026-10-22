@@ -650,6 +650,14 @@ case "$TE_ALL_BODY" in
   *'"tileEntities":{"columns":['*'"rows":[['*) echo "    three tile entities came back as columns and rows" ;;
   *) mcp_failure "three tile entities were not a table: ${TE_ALL_BODY}" ;;
 esac
+# groupBy reads in server-thread slices chunk by chunk (#132), and still counts everything it read.
+TE_GROUP_BODY="$(mcp_call 1001 server_get_tile_entities "{\"x\":${TX},\"y\":${TY},\"z\":${TZ},\"toX\":$((TX + 4)),\"toY\":${TY},\"toZ\":${TZ},\"groupBy\":[\"id\"]}")" \
+  || mcp_failure "groupBy failed: ${TE_GROUP_BODY}"
+case "$TE_GROUP_BODY" in
+  *'"truncated"'*) mcp_failure "groupBy over three tile entities said it was truncated: ${TE_GROUP_BODY}" ;;
+  *'"matched":3'*'"groupCount":2'*) echo "    groupBy: two chests and a sign in two groups" ;;
+  *) mcp_failure "groupBy did not group the three tile entities: ${TE_GROUP_BODY}" ;;
+esac
 
 echo "==> Two-part blocks: a door's lower half brings its upper half, and replaces a different door"
 DX=$((SPAWN_X + 16)); DY=$((UNDO_Y + 10)); DZ=$((SPAWN_Z + 16))

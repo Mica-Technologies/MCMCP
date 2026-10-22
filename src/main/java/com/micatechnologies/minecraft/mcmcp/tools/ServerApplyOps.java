@@ -575,7 +575,7 @@ public final class ServerApplyOps {
                 case WRITTEN:
                     tally.written++;
                     if (hold != null) {
-                        hold.changed(pos);
+                        hold.changed(world, pos);
                     }
                     return;
                 case UNCHANGED:
@@ -613,7 +613,7 @@ public final class ServerApplyOps {
         if (BlockWriteFaults.set(world, pos, target, flags, recorder, was)) {
             tally.written++;
             if (hold != null) {
-                hold.changed(pos);
+                hold.changed(world, pos);
             }
             if (recorder != null) {
                 recorder.record(pos, was, world.getBlockState(pos));

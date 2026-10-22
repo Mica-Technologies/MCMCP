@@ -410,7 +410,7 @@ public final class ServerBulkTools {
                                 if (paired == TwoPartBlocks.Outcome.WRITTEN) {
                                     tally.applied++;
                                     if (hold != null) {
-                                        hold.changed(pos);
+                                        hold.changed(world, pos);
                                     }
                                 }
                                 else if (paired == TwoPartBlocks.Outcome.UNCHANGED) {
@@ -448,7 +448,7 @@ public final class ServerBulkTools {
                             if (changed) {
                                 tally.applied++;
                                 if (hold != null) {
-                                    hold.changed(pos);
+                                    hold.changed(world, pos);
                                 }
                                 if (recorder != null) {
                                     recorder.record(pos, was, world.getBlockState(pos));

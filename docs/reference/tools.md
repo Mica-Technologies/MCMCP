@@ -626,7 +626,10 @@ entity can lag the server's by minutes.
   `cursor: next`. `matched` is the total.
 - `groupBy: ["tU", "pU"]` returns `groups` instead of entities: each distinct block and value of
   those keys, with its `count` and up to `samples` (default 3) positions, largest first. It is not
-  paged; `limit` caps the groups listed and `groupsNotListed` counts the rest. Box mode only.
+  paged; `limit` caps the groups listed and `groupsNotListed` counts the rest. Box mode only. It
+  reads in short server-thread slices, chunk by chunk, and stops after 20,000 tile entities: then
+  `truncated` is true, `chunksNotRead` says how many chunks it did not reach, and the groups count
+  only what was read.
 - Unloaded chunks appear in the `chunks` block. `load: true` reads them.
 
 ```json
@@ -1330,10 +1333,12 @@ in a later batch. `holdPhysics: true` (palette mode, and `server_apply_ops`) sto
 length of the call.
 
 Sand falls and a fluid flows only on a scheduled block tick, which the write schedules and a later
-world tick runs. At the end of every batch, the call takes the pending ticks of gravity blocks
-(anything built on `BlockFalling`: sand, gravel, concrete powder, anvils) and fluids (vanilla and
-Forge fluids) in the write's box and one cell around it out of the world's queue, and keeps them.
-Other ticks in the box are put straight back. Nothing global is changed. When the call ends, every
+world tick runs. At the end of every batch that changed a cell at or next to a gravity block or
+fluid, the call takes the pending ticks of gravity blocks (anything built on `BlockFalling`: sand,
+gravel, concrete powder, anvils) and fluids (vanilla and Forge fluids) in the write's box and one
+cell around it out of the world's queue, and keeps them. Other ticks in the box are put straight
+back. A batch that changed nothing of the kind cannot have scheduled such a tick, and skips the
+lookup, which walks every pending tick in the dimension. Nothing global is changed. When the call ends, every
 held tick goes back with what was left of its delay, so whatever is still unsupported or open
 moves from the next tick on. A cell written in a later call does not hold anything up: the hold
 lasts one call, so order a large write so that each call ends supported.

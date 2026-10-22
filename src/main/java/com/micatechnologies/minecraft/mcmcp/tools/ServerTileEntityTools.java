@@ -41,6 +41,12 @@ public final class ServerTileEntityTools {
     /** Positions one call may name. */
     private static final int MAX_POSITIONS = 1000;
 
+    /** Tile entities one {@code groupBy} call reads; each costs a tag serialised on the server thread. */
+    static final int MAX_GROUP_CANDIDATES = 20_000;
+
+    /** About how long one game-thread slice of a {@code groupBy} read runs, as in {@code ServerAreaTools}. */
+    private static final long SLICE_NANOS = 25_000_000L;
+
     private ServerTileEntityTools() {
     }
 
@@ -80,7 +86,8 @@ public final class ServerTileEntityTools {
                 .bool("load", "Load the box's unloaded chunks for this read, and release them afterwards.")
                 .array("groupBy", "NBT keys (dot paths, as 'keys') to group by: returns groups of block + "
                     + "identical values, each with a count and sample positions, not each entity. Not paged; "
-                    + "'limit' caps the groups listed.", Json.obj("type", "string"))
+                    + "'limit' caps the groups listed. Reads at most " + MAX_GROUP_CANDIDATES + " tile entities, "
+                    + "and says 'truncated' when it stopped there.", Json.obj("type", "string"))
                 .integer("samples", "With groupBy: sample positions per group. Default 3.", 0, 20)
                 .build())
             .serverOnly()
@@ -117,6 +124,10 @@ public final class ServerTileEntityTools {
                 final Set<Long> chunks = ChunkKeys.box(minX, minZ, maxX, maxZ);
 
                 return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
+                    if (!groupBy.isEmpty()) {
+                        return ToolResult.structured(grouped(context, dimension, chunks, minX, minY, minZ, maxX, maxY,
+                            maxZ, blocks, groupBy, samples, limit, outcome));
+                    }
                     JsonObject json = context.onGameThread(() -> {
                         WorldServer world = ServerWorldTools.requireWorld(dimension);
                         List<TileEntity> found = new ArrayList<>();
@@ -136,9 +147,6 @@ public final class ServerTileEntityTools {
                                     found.add(tile);
                                 }
                             }
-                        }
-                        if (!groupBy.isEmpty()) {
-                            return grouped(world, found, groupBy, samples, limit, dimension, chunks, outcome);
                         }
                         // A fixed order, so a cursor means the same thing on the next page.
                         found.sort(Comparator.<TileEntity>comparingInt(t -> t.getPos().getX())
@@ -166,41 +174,99 @@ public final class ServerTileEntityTools {
             .build());
     }
 
-    /** Game thread: {@code groupBy}, the found entities as groups of identical values (#124). */
-    private static JsonObject grouped(WorldServer world, List<TileEntity> found, List<String> groupBy, int samples,
-                                      int limit, int dimension, Set<Long> chunks,
-                                      @Nullable ChunkLoadGovernor.Outcome outcome) {
-        found.sort(Comparator.<TileEntity>comparingInt(t -> t.getPos().getX())
-            .thenComparingInt(t -> t.getPos().getZ()).thenComparingInt(t -> t.getPos().getY()));
-        NbtGroups groups = new NbtGroups(samples);
-        int failed = 0;
-        for (TileEntity tile : found) {
-            BlockPos pos = tile.getPos();
-            ResourceLocation name = world.getBlockState(pos).getBlock().getRegistryName();
-            JsonObject value;
-            try {
-                JsonElement tag = NbtJson.toJson(tile.writeToNBT(new NBTTagCompound()));
-                value = NbtProjection.project(tag.isJsonObject() ? tag.getAsJsonObject() : new JsonObject(), groupBy);
+    /**
+     * {@code groupBy}: the matching entities as groups of identical values (#124), read in game-thread
+     * slices of about {@link #SLICE_NANOS} a chunk batch at a time. Serialising a tag is the expensive
+     * part, and over a 4096-chunk box in one task it held the server thread for seconds (#132). Stops
+     * after {@link #MAX_GROUP_CANDIDATES} entities and says so.
+     */
+    private static JsonObject grouped(ToolContext context, final int dimension, Set<Long> chunks, final int minX,
+                                      final int minY, final int minZ, final int maxX, final int maxY, final int maxZ,
+                                      final List<String> blocks, final List<String> groupBy, int samples, int limit,
+                                      @Nullable final ChunkLoadGovernor.Outcome outcome) {
+        // Chunk by chunk, west to east then north to south, so the samples come in a fixed order.
+        final List<Long> pending = new ArrayList<>(chunks);
+        pending.sort(Comparator.<Long>comparingInt(ChunkKeys::x).thenComparingInt(ChunkKeys::z));
+        final NbtGroups groups = new NbtGroups(samples);
+        // matched, unreadable: written by the game thread one task at a time, read here after each.
+        final int[] counts = {0, 0};
+        int done = 0;
+        while (done < pending.size() && counts[0] < MAX_GROUP_CANDIDATES) {
+            final int from = done;
+            done = context.onGameThread(() -> {
+                WorldServer world = ServerWorldTools.requireWorld(dimension);
+                long started = System.nanoTime();
+                int at = from;
+                while (at < pending.size() && counts[0] < MAX_GROUP_CANDIDATES
+                    && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
+                    long key = pending.get(at++);
+                    Chunk chunk = world.getChunkProvider().getLoadedChunk(ChunkKeys.x(key), ChunkKeys.z(key));
+                    if (chunk == null) {
+                        continue;
+                    }
+                    List<TileEntity> found = new ArrayList<>();
+                    for (TileEntity tile : chunk.getTileEntityMap().values()) {
+                        BlockPos pos = tile.getPos();
+                        if (pos.getX() < minX || pos.getX() > maxX || pos.getZ() < minZ || pos.getZ() > maxZ
+                            || pos.getY() < minY || pos.getY() > maxY || tile.isInvalid()) {
+                            continue;
+                        }
+                        ResourceLocation name = world.getBlockState(pos).getBlock().getRegistryName();
+                        if (NbtProjection.matches(name == null ? "unknown" : name.toString(), blocks)) {
+                            found.add(tile);
+                        }
+                    }
+                    found.sort(Comparator.<TileEntity>comparingInt(t -> t.getPos().getX())
+                        .thenComparingInt(t -> t.getPos().getZ()).thenComparingInt(t -> t.getPos().getY()));
+                    for (TileEntity tile : found) {
+                        if (counts[0] >= MAX_GROUP_CANDIDATES) {
+                            // The rest of this chunk is not read either: start again from it on a narrower box.
+                            break;
+                        }
+                        counts[0]++;
+                        BlockPos pos = tile.getPos();
+                        ResourceLocation name = world.getBlockState(pos).getBlock().getRegistryName();
+                        JsonObject value;
+                        try {
+                            JsonElement tag = NbtJson.toJson(tile.writeToNBT(new NBTTagCompound()));
+                            value = NbtProjection.project(tag.isJsonObject() ? tag.getAsJsonObject() : new JsonObject(),
+                                groupBy);
+                        }
+                        catch (RuntimeException e) {
+                            counts[1]++;
+                            continue;
+                        }
+                        groups.add(name == null ? "unknown" : name.toString(), value, pos.getX(), pos.getY(), pos.getZ());
+                    }
+                }
+                return at;
+            });
+            if (pending.size() > 64) {
+                context.reportProgress(done, pending.size(), "Grouped " + done + " of " + pending.size() + " chunks");
             }
-            catch (RuntimeException e) {
-                failed++;
-                continue;
-            }
-            groups.add(name == null ? "unknown" : name.toString(), value, pos.getX(), pos.getY(), pos.getZ());
         }
+        final int chunksRead = done;
         JsonObject result = new JsonObject();
         result.addProperty("dimension", dimension);
-        result.addProperty("matched", found.size());
+        result.addProperty("matched", counts[0]);
+        if (counts[0] >= MAX_GROUP_CANDIDATES) {
+            result.addProperty("truncated", true);
+            result.addProperty("chunksNotRead", pending.size() - chunksRead);
+            result.addProperty("note", "Stopped after " + MAX_GROUP_CANDIDATES + " tile entities, the most one groupBy "
+                + "reads: the groups count only those. Narrow the box or 'blocks' to read the rest.");
+        }
         result.addProperty("groupCount", groups.size());
         if (groups.size() > limit) {
             result.addProperty("groupsNotListed", groups.size() - limit);
         }
-        if (failed > 0) {
-            result.addProperty("unreadable", failed);
+        if (counts[1] > 0) {
+            result.addProperty("unreadable", counts[1]);
         }
         result.add("groups", groups.toJson(limit));
-        ChunkLoadGovernor.touch(dimension, chunks);
-        result.add("chunks", chunksBlock(world, chunks, outcome));
+        result.add("chunks", context.onGameThread(() -> {
+            ChunkLoadGovernor.touch(dimension, chunks);
+            return chunksBlock(ServerWorldTools.requireWorld(dimension), chunks, outcome);
+        }));
         return result;
     }
 
