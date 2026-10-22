@@ -656,7 +656,7 @@ short slices with ticks between them.
 
 #### `server_apply_ops`
 
-:material-alert: Destructive · requires `permissions.allowWorldEdits` · `ops` required · optional `dimension`, `dryRun`, `neighbourUpdates`, `since`, `stopOnRefusal`, `pairTwoPart`, `load`
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `ops` required · optional `dimension`, `dryRun`, `neighbourUpdates`, `since`, `stopOnRefusal`, `pairTwoPart`, `load`, `holdPhysics`
 
 Replays a build generator's command lines on the server and writes only the cells whose final block
 differs from what is there. One call covers a build phase, with no read of the area first: the ops
@@ -696,6 +696,9 @@ Options:
   after it are left alone and counted as `conflicts`. If the record no longer reaches back that far,
   the call is refused rather than risking someone's edit.
 - `stopOnRefusal` writes nothing if any line fails to parse or names an unknown block.
+- `holdPhysics: true` keeps sand, gravel and fluids still until the call ends. See
+  [holding physics](#holding-physics) under `server_set_blocks`; it works the same way here. A dry
+  run ignores it.
 
 The counts add up to `attempted` (the cells the ops reach): `written` (or `wouldWrite`),
 `unchanged`, `conflicts`, `unloaded`, `refused` and `byPartner`. Lines that could not be replayed
@@ -1178,6 +1181,7 @@ the area first, or use `server_set_blocks` with `load: true`. `nbt` is merged in
 | `dimension` | integer | Default 0. |
 | `load` | boolean | Default false. Load the chunks the write touches, and release them afterwards. |
 | `pairTwoPart` | boolean | Default true. False writes every cell as given, deriving no second half. |
+| `holdPhysics` | boolean | Palette mode. Default false. Keeps sand, gravel and fluids still until the call ends; see [holding physics](#holding-physics). |
 
 Fill a cuboid, or apply an explicit list. The intended shape of a build is: fill the bulk volumes
 first, then one list call for the detail.
@@ -1282,12 +1286,43 @@ placed, as a torch does, gets no help from this and is reported the same way.
 | `onConflict` | `skip` (default) writes the rest; `abort` writes nothing if any cell conflicts. |
 | `skipIfTileEntity` | Leave cells holding a tile entity (signal heads, controllers, chests). |
 | `neighbourUpdates` | Default true. `false` still updates clients and lighting but notifies no neighbour. Use it for removing wire or track networks without each removal recalculating them. |
+| `holdPhysics` | Default false. Keeps gravity blocks and fluids still until the call ends. See below. |
 
 The result counts `applied`, `unchanged`, `conflicts`, `skippedTileEntity`, `unloaded` and `failed`.
 `conflictList` holds the first 50 conflicts as `{pos, expected, actual}`, so a generator can see
 exactly which cells a person changed since it last read them, and leave them alone.
 Writes per caller are limited to `limits.writeCellsPerMinutePerCaller` (1,000,000) a minute. Past
 that, the result is a `busy` error with `retryAfterMs`.
+
+##### Holding physics
+
+A large write runs in game-thread batches with world ticks between them, and sand, gravel and
+fluids move on those ticks. In an excavation written air first and bottom up, sand above a cell just
+dug fell before the slab over it was written, and a spring flowed through a wall cell still waiting
+in a later batch. `holdPhysics: true` (palette mode, and `server_apply_ops`) stops that for the
+length of the call.
+
+Sand falls and a fluid flows only on a scheduled block tick, which the write schedules and a later
+world tick runs. At the end of every batch, the call takes the pending ticks of gravity blocks
+(anything built on `BlockFalling`: sand, gravel, concrete powder, anvils) and fluids (vanilla and
+Forge fluids) in the write's box and one cell around it out of the world's queue, and keeps them.
+Other ticks in the box are put straight back. Nothing global is changed. When the call ends, every
+held tick goes back with what was left of its delay, so whatever is still unsupported or open
+moves from the next tick on. A cell written in a later call does not hold anything up: the hold
+lasts one call, so order a large write so that each call ends supported.
+
+The result has a `physics` object:
+
+| Field | Meaning |
+| --- | --- |
+| `ticksHeld`, `ticksRestored` | Ticks taken out, and put back. A tick in a chunk unloaded by then is not put back. |
+| `gravityUnsupported` | Gravity blocks among or next to the changed cells with nothing under them that holds them (air, water, lava or fire). |
+| `fluidsExposed` | Fluid cells among or next to the changed cells with air, or something a fluid washes away, below or beside them. |
+| `sample` | Up to 10 of those, as `[x, y, z, block]`. |
+| `woken` | Cells counted above that had no held tick and were given one, as the write's neighbour updates would have. |
+
+With `neighbourUpdates: false` (the default in `server_apply_ops`), cells that would move but had no
+tick held are only reported: a write without neighbour updates never sets them moving either.
 
 !!! warning "Direct writes bypass hooks"
 

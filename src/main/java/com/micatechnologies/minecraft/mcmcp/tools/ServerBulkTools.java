@@ -271,6 +271,7 @@ public final class ServerBulkTools {
         final boolean abortOnConflict = "abort".equals(context.getString("onConflict", "skip"));
         final boolean skipTileEntities = context.getBoolean("skipIfTileEntity", false);
         final int flags = context.getBoolean("neighbourUpdates", true) ? 3 : 2 | 16;
+        final boolean holdPhysics = context.getBoolean("holdPhysics", false);
         final Set<Long> chunks = new LinkedHashSet<>();
         int minX = Integer.MAX_VALUE;
         int minZ = Integer.MAX_VALUE;
@@ -361,6 +362,10 @@ public final class ServerBulkTools {
                 minOf(xs) - 1, minOf(ys) - 1, minOf(zs) - 1, maxOf(xs) + 2, maxOf(ys) + 2, maxOf(zs) + 2);
             final java.util.Set<Integer> itemsBefore = context.onGameThread(
                 () -> DeferredNeighbours.itemsIn(ServerWorldTools.requireWorld(dimension), written));
+            final PhysicsHold hold = holdPhysics ? new PhysicsHold(new int[] {minOf(xs), minOf(ys), minOf(zs),
+                maxOf(xs), maxOf(ys), maxOf(zs)}, deferred != null) : null;
+            JsonObject physics = null;
+            try {
             for (int from = 0; from < count; from += batch) {
                 final int start = from;
                 final int end = Math.min(count, from + batch);
@@ -396,6 +401,9 @@ public final class ServerBulkTools {
                                 TwoPartBlocks.Outcome paired = pairs.write(world, pos, entry.state, null, undo);
                                 if (paired == TwoPartBlocks.Outcome.WRITTEN) {
                                     tally.applied++;
+                                    if (hold != null) {
+                                        hold.changed(pos);
+                                    }
                                 }
                                 else if (paired == TwoPartBlocks.Outcome.UNCHANGED) {
                                     tally.unchanged++;
@@ -431,6 +439,9 @@ public final class ServerBulkTools {
                             }
                             if (changed) {
                                 tally.applied++;
+                                if (hold != null) {
+                                    hold.changed(pos);
+                                }
                                 if (recorder != null) {
                                     recorder.record(pos, was, world.getBlockState(pos));
                                 }
@@ -447,14 +458,28 @@ public final class ServerBulkTools {
                     }
                     }
                     finally {
-                        if (deferred != null) {
-                            deferred.flush(world);
+                        try {
+                            if (deferred != null) {
+                                deferred.flush(world);
+                            }
+                        }
+                        finally {
+                            // Before the world ticks again: the ticks this batch scheduled are where sand falls.
+                            if (hold != null) {
+                                hold.capture(world);
+                            }
                         }
                     }
                     return null;
                 });
                 if (count > batch) {
                     context.reportProgress(end, count, "Wrote " + end + " of " + count + " cells");
+                }
+            }
+            }
+            finally {
+                if (hold != null) {
+                    physics = hold.finish(context, dimension);
                 }
             }
             tally.partners = pairs.partnersWritten;
@@ -464,6 +489,9 @@ public final class ServerBulkTools {
             json.addProperty("neighbourUpdates", flags == 3);
             if (deferred != null) {
                 deferred.report(json);
+            }
+            if (physics != null) {
+                json.add("physics", physics);
             }
             int dropped = context.onGameThread(
                 () -> DeferredNeighbours.itemsDropped(ServerWorldTools.requireWorld(dimension), written, itemsBefore));

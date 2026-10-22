@@ -815,6 +815,31 @@ case "$CACTUS_BODY" in
   *) mcp_failure "the cactus with no sand was not reported: ${CACTUS_BODY}" ;;
 esac
 
+echo "==> holdPhysics holds a write's sand still, then reports it and lets it fall (#118)"
+# Sand on stone on a stone floor. Digging the stone out with holdPhysics takes the tick the dig gave
+# the sand out of the world's queue for the call, reports the sand as unsupported, and puts the tick
+# back at the end, so the sand drops onto the floor once the call returns.
+HX=$((SPAWN_X + 46)); HY=$((UNDO_Y + 20)); HZ=$((SPAWN_Z + 46))
+mcp_call 811 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:air\",\"neighbourUpdates\":false,\"x\":${HX},\"y\":$((HY - 1)),\"z\":${HZ},\"toY\":$((HY + 3))}" > /dev/null
+SETUP_BODY="$(mcp_call 812 server_set_blocks "{\"mode\":\"palette\",\"neighbourUpdates\":false,\"palette\":[\"minecraft:stone\",\"minecraft:sand\"],\"origin\":{\"x\":${HX},\"y\":${HY},\"z\":${HZ}},\"cells\":[0,-1,0,0, 0,0,0,0, 0,1,0,1]}")" \
+  || mcp_failure "writing the sand on stone failed: ${SETUP_BODY}"
+case "$SETUP_BODY" in
+  *'"physics"'*) mcp_failure "a write without holdPhysics reported physics: ${SETUP_BODY}" ;;
+esac
+HOLD_BODY="$(mcp_call 813 server_set_blocks "{\"mode\":\"palette\",\"holdPhysics\":true,\"palette\":[\"minecraft:air\"],\"origin\":{\"x\":${HX},\"y\":${HY},\"z\":${HZ}},\"cells\":[0,0,0,0]}")" \
+  || mcp_failure "the holdPhysics dig failed: ${HOLD_BODY}"
+case "$HOLD_BODY" in
+  *'"physics":{"ticksHeld":'[1-9]*'"gravityUnsupported":1,'*'minecraft:sand'*) echo "    the sand's tick was held and the sand reported unsupported" ;;
+  *) mcp_failure "holdPhysics did not hold and report the sand: ${HOLD_BODY}" ;;
+esac
+sleep 1
+FELL_BODY="$(mcp_call 814 server_get_block "{\"x\":${HX},\"y\":${HY},\"z\":${HZ}}")" \
+  || mcp_failure "reading under the sand failed: ${FELL_BODY}"
+case "$FELL_BODY" in
+  *'minecraft:sand'*) echo "    and once the call ended its tick ran and it fell onto the floor" ;;
+  *) mcp_failure "the held sand did not fall once the call ended: ${HOLD_BODY} / ${FELL_BODY}" ;;
+esac
+
 echo "==> Background jobs: an op replay and a paged read run to the end"
 BX=$((SPAWN_X + 24)); BY=$((UNDO_Y + 10)); BZ=$((SPAWN_Z + 24))
 JOB_BODY="$(mcp_call 60 server_job_submit "{\"kind\":\"apply_ops\",\"label\":\"smoke\",\"args\":{\"ops\":[\"fill ${BX} ${BY} ${BZ} $((BX + 3)) ${BY} $((BZ + 3)) minecraft:stone\",\"setblock ${BX} $((BY + 1)) ${BZ} minecraft:torch\"]}}")" \

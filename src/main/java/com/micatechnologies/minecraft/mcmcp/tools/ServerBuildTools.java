@@ -453,6 +453,8 @@ public final class ServerBuildTools {
                     + "do, so a redstone block written beside a machine powers it. Default true, in every mode. "
                     + "false still updates clients and lighting but tells no neighbour, for removing networks "
                     + "(wires, tracks) without each removal recalculating them.")
+                .bool("holdPhysics", "palette mode: hold sand, gravel and fluids in and next to the write still "
+                    + "until the call ends, then report what would still move (physics) and let it. Default false.")
                 .string("block", "Namespaced block id for fill mode, e.g. 'minecraft:stone'.")
                 .integer("metadata", "Block metadata for fill mode. Defaults to 0.", 0, 15)
                 .property("nbt", nbtSchema("Fill mode: tile-entity data merged into every block "

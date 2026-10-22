@@ -81,6 +81,8 @@ public final class ServerApplyOps {
                 .bool("pairTwoPart", "Write two-part blocks (doors, beds, tall furniture) whole, deriving a "
                     + "missing second half. Default true; false writes every cell exactly as given.")
                 .bool("load", "Load the chunks the ops reach for this call, and release them afterwards.")
+                .bool("holdPhysics", "Hold sand, gravel and fluids in and next to the write still until the call "
+                    + "ends, then report what would still move (physics) and let it. Default false.")
                 .required("ops")
                 .build())
             .serverOnly()
@@ -148,6 +150,7 @@ public final class ServerApplyOps {
         final int dimension = context.getInt("dimension", 0);
         final boolean dryRun = context.getBoolean("dryRun", false);
         final int flags = context.getBoolean("neighbourUpdates", false) ? 3 : 2 | 16;
+        final boolean holdPhysics = context.getBoolean("holdPhysics", false);
         final boolean stopOnRefusal = context.getBoolean("stopOnRefusal", false);
         final Long since;
         try {
@@ -278,9 +281,18 @@ public final class ServerApplyOps {
             final UndoPoints.Recorder recorder = dryRun ? null : ServerUndoTools.start(context, false);
             final int[] area = recorder == null ? null : UndoPoints.imageArea(box[0], box[2], box[3], box[5]);
             final BufferedImage beforeImage = recorder == null ? null : ServerUndoTools.drawImage(context, dimension, area);
-            write(context, dimension, overlay, palette, protectedCells, flags, dryRun, tally, recorder);
-            if (!dryRun) {
-                mergeTags(context, dimension, tags, protectedCells, tally);
+            final PhysicsHold hold = holdPhysics && !dryRun ? new PhysicsHold(box, (flags & 1) != 0) : null;
+            JsonObject physics = null;
+            try {
+                write(context, dimension, overlay, palette, protectedCells, flags, dryRun, tally, recorder, hold);
+                if (!dryRun) {
+                    mergeTags(context, dimension, tags, protectedCells, tally);
+                }
+            }
+            finally {
+                if (hold != null) {
+                    physics = hold.finish(context, dimension);
+                }
             }
 
             JsonObject json = new JsonObject();
@@ -324,6 +336,9 @@ public final class ServerApplyOps {
             }
             if (dryRun) {
                 json.add("sample", tally.sample);
+            }
+            if (physics != null) {
+                json.add("physics", physics);
             }
             json.add("chunks", context.onGameThread(() -> {
                 ChunkLoadGovernor.touch(dimension, touchedChunks);
@@ -479,7 +494,7 @@ public final class ServerApplyOps {
     /** Diffs the overlay against the world and writes the difference, bottom section first. */
     private static void write(ToolContext context, int dimension, CellOverlay overlay, StatePalette palette,
                               Set<Long> protectedCells, int flags, boolean dryRun, Tally tally,
-                              @Nullable UndoPoints.Recorder recorder) {
+                              @Nullable UndoPoints.Recorder recorder, @Nullable PhysicsHold hold) {
         final List<Long> sections = overlay.sectionsBottomUp();
         final Map<Long, IBlockState> twoPart = new HashMap<>();
         for (long key : sections) {
@@ -498,18 +513,27 @@ public final class ServerApplyOps {
                 WorldServer world = ServerWorldTools.requireWorld(dimension);
                 TwoPartBlocks.Recorder undo = TwoPartBlocks.undo(world, recorder);
                 long started = System.nanoTime();
-                while (cursor[0] < sections.size() && (System.nanoTime() - started < SLICE_NANOS)) {
-                    overlay.visit(sections.get(cursor[0]++), (x, y, z, value) -> {
-                        BlockPos pos = new BlockPos(x, y, z);
-                        IBlockState target = palette.state(value);
-                        try {
-                            writeCell(world, pos, target, protectedCells, flags, dryRun, pairs, undo, tally, recorder);
-                        }
-                        catch (RuntimeException e) {
-                            tally.refuse(pos, BlockWriteFaults.reason(e, pos,
-                                ServerRegionTools.describe(Block.getStateId(palette.state(value)))));
-                        }
-                    });
+                try {
+                    while (cursor[0] < sections.size() && (System.nanoTime() - started < SLICE_NANOS)) {
+                        overlay.visit(sections.get(cursor[0]++), (x, y, z, value) -> {
+                            BlockPos pos = new BlockPos(x, y, z);
+                            IBlockState target = palette.state(value);
+                            try {
+                                writeCell(world, pos, target, protectedCells, flags, dryRun, pairs, undo, tally,
+                                    recorder, hold);
+                            }
+                            catch (RuntimeException e) {
+                                tally.refuse(pos, BlockWriteFaults.reason(e, pos,
+                                    ServerRegionTools.describe(Block.getStateId(palette.state(value)))));
+                            }
+                        });
+                    }
+                }
+                finally {
+                    // Before the world ticks again: the ticks this slice scheduled are where sand falls.
+                    if (hold != null) {
+                        hold.capture(world);
+                    }
                 }
                 return null;
             });
@@ -522,7 +546,7 @@ public final class ServerApplyOps {
     private static void writeCell(WorldServer world, BlockPos pos, IBlockState target, Set<Long> protectedCells,
                                   int flags, boolean dryRun, TwoPartBlocks.Writer pairs,
                                   @Nullable TwoPartBlocks.Recorder undo, Tally tally,
-                                  @Nullable UndoPoints.Recorder recorder) {
+                                  @Nullable UndoPoints.Recorder recorder, @Nullable PhysicsHold hold) {
         if (!world.isBlockLoaded(pos)) {
             tally.unloaded++;
             return;
@@ -538,6 +562,9 @@ public final class ServerApplyOps {
             switch (pairs.write(world, pos, target, null, undo)) {
                 case WRITTEN:
                     tally.written++;
+                    if (hold != null) {
+                        hold.changed(pos);
+                    }
                     return;
                 case UNCHANGED:
                     tally.unchanged++;
@@ -573,6 +600,9 @@ public final class ServerApplyOps {
         UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
         if (BlockWriteFaults.set(world, pos, target, flags, recorder, was)) {
             tally.written++;
+            if (hold != null) {
+                hold.changed(pos);
+            }
             if (recorder != null) {
                 recorder.record(pos, was, world.getBlockState(pos));
             }
