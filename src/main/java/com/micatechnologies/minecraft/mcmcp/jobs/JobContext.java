@@ -45,6 +45,12 @@ final class JobContext extends ToolContext {
 
     @Override
     public <T> T onGameThread(Callable<T> task) {
+        if (isFollowUp()) {
+            // It finishes a step that already ran — the undo point of a write — so it neither waits for
+            // the job's pause or the server's health, nor stops for a cancel: the write would be left
+            // without it. It waits long already, at the front of the queue.
+            return super.onGameThread(task);
+        }
         for (int attempt = 0; ; attempt++) {
             try {
                 if (!job.awaitRunnable()) {

@@ -105,12 +105,52 @@ class FairDrainTest {
     }
 
     @Test
+    void aFollowUpRunsBeforeEveryCallersTurnSoItIsNotLeftBehindOtherCallersSlices() {
+        Clock clock = new Clock();
+        FairDrain<String> queue = new FairDrain<>(() -> clock.nanos);
+        queue.offer("a", "a0@40");
+        queue.offer("b", "b0@40");
+        queue.offer("c", "c0@40");
+        queue.offerFirst("c", "c-undo@1");
+        List<String> ran = new ArrayList<>();
+        assertEquals(2, queue.drain(15_000_000L, Integer.MAX_VALUE, running(clock, ran)),
+            "the follow-up, then one slice before the budget is spent");
+        assertEquals(Arrays.asList("c-undo@1", "a0@40"), ran);
+    }
+
+    @Test
+    void followUpsRunInTheOrderOfferedAndTakeNoCallersTurn() {
+        Clock clock = new Clock();
+        FairDrain<String> queue = new FairDrain<>(() -> clock.nanos);
+        queue.offer("a", "a0@1");
+        queue.offer("b", "b0@1");
+        queue.offerFirst("b", "b-undo@1");
+        queue.offerFirst("a", "a-undo@1");
+        List<String> ran = new ArrayList<>();
+        queue.drain(100_000_000L, Integer.MAX_VALUE, running(clock, ran));
+        assertEquals(Arrays.asList("b-undo@1", "a-undo@1", "a0@1", "b0@1"), ran);
+        assertEquals(0, queue.depth());
+    }
+
+    @Test
+    void aFollowUpIsTheOneTaskOfATickThatRunsOnlyOne() {
+        Clock clock = new Clock();
+        FairDrain<String> queue = new FairDrain<>(() -> clock.nanos);
+        queue.offer("a", "a0@1");
+        queue.offerFirst("b", "b-undo@1");
+        List<String> ran = new ArrayList<>();
+        assertEquals(1, queue.drain(0L, 1, running(clock, ran)));
+        assertEquals(Arrays.asList("b-undo@1"), ran);
+    }
+
+    @Test
     void clearingTakesEverythingQueuedWithoutRunningIt() {
         Clock clock = new Clock();
         FairDrain<String> queue = new FairDrain<>(() -> clock.nanos);
         queue.offer("a", "a0@1");
         queue.offer("b", "b0@1");
-        assertEquals(2, queue.clear().size());
+        queue.offerFirst("b", "b-undo@1");
+        assertEquals(3, queue.clear().size());
         assertEquals(0, queue.depth());
         List<String> ran = new ArrayList<>();
         assertEquals(0, queue.drain(1_000_000L, Integer.MAX_VALUE, running(clock, ran)));

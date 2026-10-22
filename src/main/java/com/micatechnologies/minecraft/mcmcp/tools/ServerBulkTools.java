@@ -501,12 +501,14 @@ public final class ServerBulkTools {
             if (physics != null) {
                 json.add("physics", physics);
             }
-            int dropped = context.onGameThread(
+            // Follow-ups from here on: the write has happened, and dropping these behind other callers'
+            // work would fail the call before its undo point is saved (#133).
+            int dropped = context.onGameThreadFollowUp(
                 () -> DeferredNeighbours.itemsDropped(ServerWorldTools.requireWorld(dimension), written, itemsBefore));
             if (dropped > 0) {
                 json.addProperty("itemsDropped", dropped);
             }
-            json.add("chunks", context.onGameThread(() -> {
+            json.add("chunks", context.onGameThreadFollowUp(() -> {
                 ChunkLoadGovernor.touch(dimension, chunks);
                 return outcome != null ? outcome.toJson()
                     : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);

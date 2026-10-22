@@ -110,6 +110,17 @@ is dropped and its callers hear so at once. An integrated server stops ticking w
 the game paused, so there, once no tick has drained the pump for a second, an offer, and a caller
 still waiting on one, schedules a vanilla task that drains the pump until it is empty.
 
+A follow-up is a task that finishes a write the same call has already made: the read that saves its
+undo point, its after-picture, the look for what its held physics would move and the hand-back of
+those ticks, a test script's restores. Behind three agents looping 32-cubed fills, the undo capture
+waited out the 5 s timeout and was dropped, and fills that had run were left with no undo point. So a
+follow-up (`ToolContext.onGameThreadFollowUp`, or every task of a context marked with
+`setFollowUp`) is offered to a line the pump serves before anyone's turn, within the same budget, and
+its caller waits up to 60 s for it rather than the usual timeout, with no cancellation dropping it.
+Each one is small and a caller waits on one at a time, so going first costs the others little. A
+call's own writes are never follow-ups, or one call could jump the queue with them; only putting back
+is. An emergency stop still refuses a restore, but not a follow-up that only reads or gives back.
+
 Both short-circuit when already on the game thread. Scheduling onto the thread you are already on and
 then waiting for it is an instant deadlock.
 

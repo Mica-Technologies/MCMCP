@@ -343,7 +343,9 @@ public final class ServerApplyOps {
             if (physics != null) {
                 json.add("physics", physics);
             }
-            json.add("chunks", context.onGameThread(() -> {
+            // A follow-up: the write has happened, and dropping this would fail the call before its undo
+            // point is saved (#133).
+            json.add("chunks", context.onGameThreadFollowUp(() -> {
                 ChunkLoadGovernor.touch(dimension, touchedChunks);
                 return outcome != null ? outcome.toJson()
                     : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), touchedChunks);

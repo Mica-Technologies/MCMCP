@@ -31,6 +31,15 @@ import java.util.function.LongSupplier;
  * task when there is one, so nothing starves however small the budget. A task that turns out to have
  * been abandoned by its caller costs nothing and does not use a turn.
  *
+ * <h2>Follow-ups go first</h2>
+ *
+ * A task offered with {@link #offerFirst} finishes a call whose earlier task already changed the
+ * world: the read that saves its undo point, the hand-back of the physics ticks it held. It waits in a
+ * line of its own that every drain serves before anyone's turn, in the order offered, within the same
+ * budget. Behind other callers' slices it could wait out its caller's timeout and be dropped, and the
+ * write it finishes would be left without its undo point. Each is small, and a caller waits on one at
+ * a time, so going first costs the others little.
+ *
  * <h2>Who spends the tick</h2>
  *
  * Each drain notes how long each caller's tasks ran, and keeps a moving average of milliseconds per
@@ -78,10 +87,13 @@ public final class FairDrain<T> {
 
     private final LongSupplier nanoClock;
     private final ConcurrentLinkedQueue<Entry<T>> inbound = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<Entry<T>> inboundFirst = new ConcurrentLinkedQueue<>();
     private final AtomicInteger depth = new AtomicInteger();
 
     /** Draining thread only: each caller's line, the caller to serve next first. */
     private final LinkedHashMap<String, ArrayDeque<T>> waiting = new LinkedHashMap<>();
+    /** Draining thread only: follow-ups, served before any turn, in the order offered. */
+    private final ArrayDeque<Entry<T>> first = new ArrayDeque<>();
     /** Draining thread only. */
     private final Map<String, Double> averages = new HashMap<>();
 
@@ -94,6 +106,15 @@ public final class FairDrain<T> {
     /** Any thread: queues a task for {@code key}. Never blocks. */
     public void offer(String key, T task) {
         inbound.add(new Entry<>(key, task));
+        depth.incrementAndGet();
+    }
+
+    /**
+     * Any thread: queues a follow-up for {@code key}, run before every caller's turn (see the class
+     * comment). Never blocks.
+     */
+    public void offerFirst(String key, T task) {
+        inboundFirst.add(new Entry<>(key, task));
         depth.incrementAndGet();
     }
 
@@ -114,17 +135,27 @@ public final class FairDrain<T> {
         long started = nanoClock.getAsLong();
         int ran = 0;
         take();
-        while (!waiting.isEmpty() && ran < Math.max(1, maxTasks)
+        while ((!first.isEmpty() || !waiting.isEmpty()) && ran < Math.max(1, maxTasks)
             && (ran == 0 || nanoClock.getAsLong() - started < budgetNanos)) {
-            Iterator<Map.Entry<String, ArrayDeque<T>>> front = waiting.entrySet().iterator();
-            Map.Entry<String, ArrayDeque<T>> next = front.next();
-            String key = next.getKey();
-            ArrayDeque<T> line = next.getValue();
-            T task = line.pollFirst();
-            front.remove();
-            if (!line.isEmpty()) {
-                // To the back of the turn order.
-                waiting.put(key, line);
+            String key;
+            T task;
+            if (!first.isEmpty()) {
+                // A follow-up: before anyone's turn, and without using its caller's.
+                Entry<T> entry = first.pollFirst();
+                key = entry.key;
+                task = entry.task;
+            }
+            else {
+                Iterator<Map.Entry<String, ArrayDeque<T>>> front = waiting.entrySet().iterator();
+                Map.Entry<String, ArrayDeque<T>> next = front.next();
+                key = next.getKey();
+                ArrayDeque<T> line = next.getValue();
+                task = line.pollFirst();
+                front.remove();
+                if (!line.isEmpty()) {
+                    // To the back of the turn order.
+                    waiting.put(key, line);
+                }
             }
             depth.decrementAndGet();
             long before = nanoClock.getAsLong();
@@ -143,6 +174,10 @@ public final class FairDrain<T> {
     public List<T> clear() {
         take();
         List<T> all = new ArrayList<>();
+        for (Entry<T> entry : first) {
+            all.add(entry.task);
+        }
+        first.clear();
         for (ArrayDeque<T> line : waiting.values()) {
             all.addAll(line);
         }
@@ -168,6 +203,9 @@ public final class FairDrain<T> {
     /** Moves what other threads offered into the callers' lines, keeping the turn order of the rest. */
     private void take() {
         Entry<T> entry;
+        while ((entry = inboundFirst.poll()) != null) {
+            first.addLast(entry);
+        }
         while ((entry = inbound.poll()) != null) {
             ArrayDeque<T> line = waiting.get(entry.key);
             if (line == null) {

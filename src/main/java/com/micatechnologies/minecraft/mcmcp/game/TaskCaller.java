@@ -8,6 +8,9 @@ import javax.annotation.Nullable;
  *
  * <p>The key is the chunk governor's hold caller: one per agent on the endpoint, one per player
  * through the companion, one per background job. The label is for people to read.
+ *
+ * <p>A follow-up finishes a call whose earlier task already changed the world, such as saving its
+ * undo point: the pump runs it before anyone's turn ({@link FairDrain#offerFirst}).
  */
 public final class TaskCaller {
 
@@ -16,9 +19,20 @@ public final class TaskCaller {
 
     public final String key;
     public final String label;
+    public final boolean followUp;
 
     public TaskCaller(String key, @Nullable String label) {
+        this(key, label, false);
+    }
+
+    private TaskCaller(String key, @Nullable String label, boolean followUp) {
         this.key = key;
         this.label = label == null || label.isEmpty() ? key : label;
+        this.followUp = followUp;
+    }
+
+    /** The same caller, for a task that finishes what one of its earlier tasks started. */
+    public TaskCaller asFollowUp() {
+        return followUp ? this : new TaskCaller(key, label, true);
     }
 }

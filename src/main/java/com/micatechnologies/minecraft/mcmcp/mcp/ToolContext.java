@@ -62,6 +62,20 @@ public class ToolContext {
     @Nullable
     private java.util.function.Consumer<?> orphanCleanup;
 
+    /**
+     * How long a follow-up waits for the server thread before it is given up on. Long, because what
+     * it finishes has already happened, and its caller waiting does not add to the queue: one task per
+     * waiting call, at the front.
+     */
+    public static final long FOLLOW_UP_TIMEOUT_MILLIS = 60_000L;
+
+    /** Every game-thread task of this context is a follow-up; see {@link #setFollowUp}. */
+    private volatile boolean followUpContext;
+    /** Set for the length of one {@link #onGameThreadFollowUp} call. */
+    private boolean followUpHop;
+    /** Whether a game-thread task of this context has run to its end: later ones are not the first. */
+    private volatile boolean ranAHop;
+
     @Nullable
     private final JsonElement progressToken;
 
@@ -167,6 +181,24 @@ public class ToolContext {
     }
 
     /**
+     * Makes every game-thread task of this context a follow-up: for a context that puts back what an
+     * earlier call did, such as a test script's restores. As {@link #onGameThreadFollowUp}, except that
+     * an emergency stop still refuses its tasks, since they write.
+     */
+    public void setFollowUp(boolean value) {
+        this.followUpContext = value;
+    }
+
+    /**
+     * Whether the game-thread task being handed over now finishes work already done: from
+     * {@link #setFollowUp}, or inside {@link #onGameThreadFollowUp}. A subclass that hands its tasks
+     * to another context passes this on.
+     */
+    public boolean isFollowUp() {
+        return followUpContext || followUpHop;
+    }
+
+    /**
      * Who this call is for chunk holds, budgets and the server's task queue (#121): one key per
      * player through the companion, whatever agents they run; one per agent on the endpoint; a
      * background job's own {@code job:<id>}.
@@ -264,9 +296,15 @@ public class ToolContext {
      * and return {@link ToolResult#error} instead of letting it propagate.
      */
     public <T> T onGameThread(Callable<T> task) {
-        final long timeoutMillis = Math.max(gameThreadTimeoutMillis, extendedTimeoutMillis);
-        cancellation.throwIfCancelled();
-        if (mutating && com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
+        // A follow-up finishes what an earlier task of this call already did to the world, so it is not
+        // dropped for a cancellation or the usual timeout, and goes to the front of the server's queue.
+        final boolean followUp = isFollowUp();
+        final long timeoutMillis = Math.max(followUp ? FOLLOW_UP_TIMEOUT_MILLIS : gameThreadTimeoutMillis,
+            extendedTimeoutMillis);
+        if (!followUp) {
+            cancellation.throwIfCancelled();
+        }
+        if (mutating && !followUpHop && com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
             throw new JsonRpcException(JsonRpcException.INTERNAL_ERROR,
                 com.micatechnologies.minecraft.mcmcp.game.Estop.refusal());
         }
@@ -289,18 +327,32 @@ public class ToolContext {
         };
         @SuppressWarnings("unchecked")
         java.util.function.Consumer<? super T> cleanup = (java.util.function.Consumer<? super T>) orphanCleanup;
+        TaskCaller who = new TaskCaller(callerKey(), callerLabel());
         try {
-            return gameThread.callOnGameThread(observed, timeoutMillis, cleanup, cancellation::isCancelled,
-                new TaskCaller(callerKey(), callerLabel()));
+            T value = gameThread.callOnGameThread(observed, timeoutMillis, cleanup,
+                followUp ? null : cancellation::isCancelled, followUp ? who.asFollowUp() : who);
+            ranAHop = true;
+            return value;
         }
         catch (JsonRpcException e) {
             throw e;
         }
         catch (BridgeTask.NotStarted e) {
-            // Certainly nothing ran, so this is safe to retry, and the agent is told to: as a tool error
-            // with a wait in it, not a protocol timeout it would resend at once (#132).
-            throw new ToolBusyException(e.getMessage() + " The server is " + ServerLoad.describe()
-                + "; retry after busy.retryAfterMs.", ServerLoad.busy("server_overloaded"), true);
+            // This step certainly did not run, so a job may try it again. The agent is told so as a tool
+            // error with a wait in it, not a protocol timeout it would resend at once (#132) — and told
+            // when earlier steps of the same call had run, since then the call as a whole is not
+            // "nothing changed", and resending it would do those again.
+            JsonObject busy = ServerLoad.busy("server_overloaded");
+            boolean earlier = followUp || ranAHop && mutating;
+            if (earlier) {
+                busy.addProperty("earlierStepsRan", true);
+            }
+            String message = earlier
+                ? "The game thread did not start a step of this call within " + e.waitedMillis() + " ms, so that "
+                    + "step was dropped before it ran; but earlier steps of the call had already run, so it may have "
+                    + "changed the world in part: look before you retry it. The server is " + ServerLoad.describe() + "."
+                : e.getMessage() + " The server is " + ServerLoad.describe() + "; retry after busy.retryAfterMs.";
+            throw new ToolBusyException(message, busy, true);
         }
         catch (BridgeTask.Dropped e) {
             throw new JsonRpcException(JsonRpcException.INTERNAL_ERROR, e.getMessage());
@@ -349,6 +401,32 @@ public class ToolContext {
         }
         finally {
             orphanCleanup = previous;
+        }
+    }
+
+    /**
+     * As {@link #onGameThread(Callable)}, for a task that finishes a write this call has already made
+     * and does not itself change the world: the read that saves its undo point, its after-picture, the
+     * look for what its held physics would move and the hand-back of those ticks, the touch of its
+     * chunks. Dropping one of these leaves the write without its undo point, or the world's ticks held,
+     * so it is not treated like a new step:
+     *
+     * <ul>
+     *   <li>the server's pump runs it before anyone's turn ({@link TaskCaller#asFollowUp});</li>
+     *   <li>it waits up to {@link #FOLLOW_UP_TIMEOUT_MILLIS}, not the usual timeout, before it is given up on;</li>
+     *   <li>a cancellation does not drop it, and nor does an emergency stop, since it changes nothing.</li>
+     * </ul>
+     *
+     * Never for a task that writes: that would let one call's writes jump the queue and the stop.
+     */
+    public <T> T onGameThreadFollowUp(Callable<T> task) {
+        boolean previous = followUpHop;
+        followUpHop = true;
+        try {
+            return onGameThread(task);
+        }
+        finally {
+            followUpHop = previous;
         }
     }
 

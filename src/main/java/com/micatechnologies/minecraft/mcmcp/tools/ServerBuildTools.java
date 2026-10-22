@@ -731,11 +731,14 @@ public final class ServerBuildTools {
             .build());
     }
 
-    /** The {@code chunks} block of a write: what loading cost, or what was not loaded. */
+    /**
+     * The {@code chunks} block of a write: what loading cost, or what was not loaded. A follow-up, since
+     * the write has happened: dropped, it would fail the call before its undo point is saved (#133).
+     */
     private static JsonObject chunksBlock(com.micatechnologies.minecraft.mcmcp.mcp.ToolContext context,
                                           final int dimension, final Set<Long> chunks,
                                           @Nullable final ChunkLoadGovernor.Outcome outcome) {
-        return context.onGameThread(() -> {
+        return context.onGameThreadFollowUp(() -> {
             ChunkLoadGovernor.touch(dimension, chunks);
             return outcome != null ? outcome.toJson()
                 : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);

@@ -19,7 +19,7 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
  * <p>Every call goes through a {@link BridgeTask}: a task whose caller timed out or was cancelled
  * before the server thread reached it is skipped when it is reached, instead of running for nobody
  * on a server that was already too far behind to run it in time (#132). Tasks go through
- * {@link ServerTaskPump}, not {@code addScheduledTask}: offered without a lock, run at the end of each
+ * {@link ServerTaskPump}, not {@code addScheduledTask}: offered without a lock, run at the start of each
  * tick within a budget, callers taking turns (#133).
  */
 public class ServerThreadBridge implements GameThreadBridge {

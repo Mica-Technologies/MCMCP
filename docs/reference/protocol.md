@@ -134,7 +134,11 @@ On the server endpoint every step a tool hands to the server thread is one of tw
   `{"busy": {"reason": "server_overloaded", "health": "paused", "mspt": 87.2, "heapPercent": 60,
   "retryAfterMs": 5000}}`. Nothing ran, so retrying after `retryAfterMs` cannot do anything twice.
   Background jobs wait and retry the step themselves. A step still queued when the server stops is
-  dropped at once, and the call is a tool error saying nothing changed.
+  dropped at once, and the call is a tool error saying nothing changed. When earlier steps of the
+  same call had already run, the block also says `"earlierStepsRan": true`, and the message says the
+  call may have changed the world in part: look before retrying it. A step that finishes a write
+  already made, such as saving its undo point, goes to the front of the server's queue and waits up
+  to 60 s instead, so the write is not left without its undo point.
 - **It had started.** It runs to its end, and the call is the `-32006` timeout as before. Its
   message says the step started and that what it changed is not known, so look before retrying.
 

@@ -284,14 +284,26 @@ public final class ServerUndoTools {
         return new UndoPoints.Recorder();
     }
 
-    /** A map of {@code area} as it is now, or null when there is no area to draw. */
+    /** A map of {@code area} as it is now, before a write, or null when there is no area to draw. */
     @Nullable
     static BufferedImage drawImage(ToolContext context, int dimension, @Nullable int[] area) {
+        return drawImage(context, dimension, area, false);
+    }
+
+    /**
+     * @param afterWrite whether the write has happened, so the picture is a follow-up
+     *                   ({@link ToolContext#onGameThreadFollowUp}) and not dropped behind other callers
+     */
+    @Nullable
+    private static BufferedImage drawImage(ToolContext context, int dimension, @Nullable int[] area,
+                                           boolean afterWrite) {
         if (area == null) {
             return null;
         }
+        java.util.concurrent.Callable<BufferedImage> draw =
+            () -> UndoPoints.drawArea(ServerWorldTools.requireWorld(dimension), area);
         try {
-            return context.onGameThread(() -> UndoPoints.drawArea(ServerWorldTools.requireWorld(dimension), area));
+            return afterWrite ? context.onGameThreadFollowUp(draw) : context.onGameThread(draw);
         }
         catch (RuntimeException e) {
             // A picture is a nicety; it must never cost the write.
@@ -304,6 +316,11 @@ public final class ServerUndoTools {
      * Saves what {@code recorder} holds as an undo point and names it in {@code result}. A failure is
      * reported in the result and logged, never thrown: the write it records has already happened.
      *
+     * <p>Its game-thread steps are follow-ups ({@link ToolContext#onGameThreadFollowUp}): first in the
+     * server's queue, and not dropped after the usual timeout, for a cancellation or for an emergency
+     * stop. Behind three agents' looping 32-cubed fills, the capture waited out the timeout and was
+     * dropped, and fills that had run were left with no undo point (#133).
+     *
      * @return the new point's id, or null when nothing was recorded or it could not be saved
      */
     @Nullable
@@ -315,7 +332,7 @@ public final class ServerUndoTools {
         }
         final String id = UndoPoints.newId();
         try {
-            Object[] taken = context.onGameThread(() -> {
+            Object[] taken = context.onGameThreadFollowUp(() -> {
                 WorldServer world = ServerWorldTools.requireWorld(dimension);
                 return new Object[] {UndoPoints.folder(world), recorder.toNbt(), recorder.bounds()};
             });
@@ -329,7 +346,7 @@ public final class ServerUndoTools {
             meta.addProperty(UndoPoints.OWNER, ownerOf(context));
             meta.addProperty("by", context.getPrincipal().isCompanion() ? context.getPrincipal().getPlayerName()
                 : context.getCaller().label());
-            BufferedImage afterImage = beforeImage == null ? null : drawImage(context, dimension, area);
+            BufferedImage afterImage = beforeImage == null ? null : drawImage(context, dimension, area, true);
             UndoPoints.Pruned pruned = UndoPoints.save(folder, meta, (NBTTagCompound) taken[1], beforeImage, afterImage);
             result.addProperty("undoPoint", id);
             // Undo is bounded, and past its bounds history goes without a word unless said here (#131).

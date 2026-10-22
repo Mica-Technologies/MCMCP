@@ -90,7 +90,12 @@ public final class ServerTaskPump {
             return;
         }
         LABELS.put(caller.key, caller.label);
-        QUEUE.offer(caller.key, task);
+        if (caller.followUp) {
+            QUEUE.offerFirst(caller.key, task);
+        }
+        else {
+            QUEUE.offer(caller.key, task);
+        }
         kickIfPaused();
     }
 

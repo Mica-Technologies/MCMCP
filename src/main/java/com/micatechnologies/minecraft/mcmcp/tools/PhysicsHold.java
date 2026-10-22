@@ -131,6 +131,9 @@ final class PhysicsHold {
      * ticks go back even if the look fails. Call it once, from the tool's thread, whatever happened to
      * the write.
      *
+     * <p>Its steps are follow-ups ({@link ToolContext#onGameThreadFollowUp}): the write has happened, so
+     * they go first in the server's queue and are not dropped for a cancellation or the usual timeout.
+     *
      * @return the result's {@code physics} object
      */
     JsonObject finish(ToolContext context, int dimension) {
@@ -139,19 +142,19 @@ final class PhysicsHold {
         try {
             boolean done = false;
             while (!done) {
-                done = context.onGameThread(() -> scan(ServerWorldTools.requireWorld(dimension)));
+                done = context.onGameThreadFollowUp(() -> scan(ServerWorldTools.requireWorld(dimension)));
             }
         }
         finally {
             try {
-                context.onGameThread(() -> {
+                context.onGameThreadFollowUp(() -> {
                     restore(ServerWorldTools.requireWorld(dimension), restored, woken);
                     return null;
                 });
             }
             catch (RuntimeException e) {
-                // Cancelled, or the emergency stop was set: onGameThread refuses, but the ticks still go
-                // back, or every block they belong to would stay still until something touched it.
+                // The server thread did not get to it even first in line: the ticks still go back, or
+                // every block they belong to would stay still until something touched it.
                 context.onGameThreadAsync(() -> {
                     try {
                         restore(ServerWorldTools.requireWorld(dimension), restored, woken);

@@ -132,6 +132,10 @@ before its task starts marks it abandoned, the pump skips it, and the caller get
 tool error — never a task that runs after nobody is waiting.
 That retried-but-still-queued pile-up is what froze AltoTEST (#132). Do not add a server-side path that
 calls `addScheduledTask` from a worker; the client bridge still uses it.
+A step that finishes a write already made — the undo-point capture, the after-picture, the physics
+hand-back, the chunks touch, a test's restores — goes through `ToolContext.onGameThreadFollowUp` (or a
+`setFollowUp` context): first in the queue, waited for 60 s, not dropped for a cancel. Dropped behind
+other callers' fills, it left writes with no undo point. A new multi-step write tool needs the same.
 
 **Server health gates work.** `ServerLoad` (fed by the governor and by `ServerWatchdog`, a thread off
 the server thread) is ok / throttled / paused / stalled. Jobs wait from throttled; writes are refused

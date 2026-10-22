@@ -651,7 +651,7 @@ public final class ServerTestTools {
             cellChunks.add(ChunkKeys.ofBlock(cell[0], cell[2]));
         }
         run.restores.push(() -> {
-            ToolContext clean = cleanContext(run.context);
+            ToolContext clean = restoreContext(run.context);
             try {
                 // Loaded for the put-back if they unloaded meanwhile: a long wait between the write and
                 // the restore can outlast the chunk, and a cell left as written is the worst outcome.
@@ -737,7 +737,7 @@ public final class ServerTestTools {
                     McpTool undoTool = McpRegistry.tool("server_undo", McmcpSide.SERVER);
                     ToolResult restored;
                     try {
-                        restored = undoTool.call(nested(cleanContext(run.context), undo, undoTool));
+                        restored = undoTool.call(nested(restoreContext(run.context), undo, undoTool));
                     }
                     catch (Exception e) {
                         restored = ToolResult.error(String.valueOf(e.getMessage()));
@@ -854,7 +854,7 @@ public final class ServerTestTools {
             @Override
             public void run() {
                 try {
-                    cleanContext(run.context).onGameThread((Callable<Void>) () -> {
+                    restoreContext(run.context).onGameThread((Callable<Void>) () -> {
                         EntityPlayerMP player = player(playerName);
                         player.inventory.setInventorySlotContents(slot, new ItemStack(JsonToNBT.getTagFromJson(before[0])));
                         player.inventoryContainer.detectAndSendChanges();
@@ -899,7 +899,8 @@ public final class ServerTestTools {
             McmcpConfig.getGameThreadTimeoutMillis(), null) {
             @Override
             public <T> T onGameThread(Callable<T> task) {
-                return whole.onGameThread(task);
+                // A step's follow-up (its undo point) stays one through the script's gate.
+                return isFollowUp() ? whole.onGameThreadFollowUp(task) : whole.onGameThread(task);
             }
 
             @Override
@@ -923,6 +924,18 @@ public final class ServerTestTools {
         clean.setCaller(whole.getCaller());
         clean.setHoldCaller(whole.getHoldCaller());
         clean.setMutating(true);
+        return clean;
+    }
+
+    /**
+     * A {@link #cleanContext} for one restore, whose tasks are follow-ups ({@link ToolContext#setFollowUp}):
+     * first in the server's queue and waited for long, since a restore dropped behind other callers'
+     * work leaves the test's changes in the world (#133). Not for the script's own finally steps, which
+     * are whatever the script says and take their turn like any other.
+     */
+    private static ToolContext restoreContext(ToolContext whole) {
+        ToolContext clean = cleanContext(whole);
+        clean.setFollowUp(true);
         return clean;
     }
 
