@@ -232,6 +232,40 @@ public final class ServerLoad {
             + Math.round(heapPercent) + "%)";
     }
 
+    /** How many tasks wait for the server thread in MCMCP's queue, or negative when there is none to ask. */
+    private static volatile java.util.function.IntSupplier queueDepth = () -> -1;
+
+    /** Set by the task pump, which owns the queue; kept as a supplier so this class names no Minecraft one. */
+    public static void setQueueDepth(java.util.function.IntSupplier depth) {
+        queueDepth = depth;
+    }
+
+    /**
+     * The busy block of a step dropped because the server thread did not start it in time. On a
+     * healthy server the cause is other callers' work queued ahead of it, not the server: the reason
+     * is {@code server_busy}, with how many tasks were waiting. Otherwise it is
+     * {@code server_overloaded}.
+     */
+    public static JsonObject notStarted() {
+        boolean healthy = level() == Level.OK;
+        JsonObject json = busy(healthy ? "server_busy" : "server_overloaded");
+        int queued = queueDepth.getAsInt();
+        if (queued >= 0) {
+            json.addProperty("queuedTasks", queued);
+        }
+        return json;
+    }
+
+    /** Why a step was not started in time, in words, to follow "it was dropped before it ran: nothing changed." */
+    public static String notStartedCause() {
+        if (level() != Level.OK) {
+            return "The server is " + describe() + ".";
+        }
+        int queued = queueDepth.getAsInt();
+        return "The server is healthy (" + describe() + "), but MCMCP's queue onto its thread was full of other "
+            + "callers' work" + (queued >= 0 ? " (" + queued + " task(s) waiting)" : "") + ", which takes turns.";
+    }
+
     /** The structured {@code busy} block a refused call carries. */
     public static JsonObject busy(String reason) {
         JsonObject json = new JsonObject();

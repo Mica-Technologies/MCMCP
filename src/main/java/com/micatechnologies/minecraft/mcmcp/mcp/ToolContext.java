@@ -342,7 +342,7 @@ public class ToolContext {
             // error with a wait in it, not a protocol timeout it would resend at once (#132) — and told
             // when earlier steps of the same call had run, since then the call as a whole is not
             // "nothing changed", and resending it would do those again.
-            JsonObject busy = ServerLoad.busy("server_overloaded");
+            JsonObject busy = ServerLoad.notStarted();
             boolean earlier = followUp || ranAHop && mutating;
             if (earlier) {
                 busy.addProperty("earlierStepsRan", true);
@@ -350,8 +350,8 @@ public class ToolContext {
             String message = earlier
                 ? "The game thread did not start a step of this call within " + e.waitedMillis() + " ms, so that "
                     + "step was dropped before it ran; but earlier steps of the call had already run, so it may have "
-                    + "changed the world in part: look before you retry it. The server is " + ServerLoad.describe() + "."
-                : e.getMessage() + " The server is " + ServerLoad.describe() + "; retry after busy.retryAfterMs.";
+                    + "changed the world in part: look before you retry it. " + ServerLoad.notStartedCause()
+                : e.getMessage() + " " + ServerLoad.notStartedCause() + " Retry after busy.retryAfterMs.";
             throw new ToolBusyException(message, busy, true);
         }
         catch (BridgeTask.Dropped e) {

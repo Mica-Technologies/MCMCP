@@ -165,4 +165,12 @@ class FairDrainTest {
         assertEquals(1, TaskBudget.maxTasks(ServerLoad.Level.STALLED));
         assertEquals(Integer.MAX_VALUE, TaskBudget.maxTasks(ServerLoad.Level.OK));
     }
+
+    @Test
+    void aBudgetOfOneTaskIsCalledThatNotZeroMilliseconds() {
+        assertEquals("15 ms", TaskBudget.describe(ServerLoad.Level.OK, 15));
+        assertEquals("5 ms", TaskBudget.describe(ServerLoad.Level.THROTTLED, 15));
+        assertEquals("one task", TaskBudget.describe(ServerLoad.Level.PAUSED, 15));
+        assertEquals("one task", TaskBudget.describe(ServerLoad.Level.STALLED, 15));
+    }
 }

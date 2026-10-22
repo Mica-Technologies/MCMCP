@@ -73,6 +73,7 @@ public final class ServerTaskPump {
         if (!registered) {
             registered = true;
             MinecraftForge.EVENT_BUS.register(new Events());
+            ServerLoad.setQueueDepth(QUEUE::depth);
         }
     }
 
@@ -144,8 +145,13 @@ public final class ServerTaskPump {
             entry.addProperty("msPerTick", Math.round(share.msPerTick * 100.0D) / 100.0D);
             callers.add(entry);
         }
-        json.addProperty("budgetMs", TaskBudget.budgetNanos(ServerLoad.level(), McmcpConfig.getHealthTickBudgetMs())
-            / 1_000_000L);
+        // "one task" when the budget is a count, not a time: a budgetMs of 0 read as no work at all.
+        ServerLoad.Level level = ServerLoad.level();
+        int configured = McmcpConfig.getHealthTickBudgetMs();
+        json.addProperty("budget", TaskBudget.describe(level, configured));
+        if (TaskBudget.maxTasks(level) > 1) {
+            json.addProperty("budgetMs", TaskBudget.budgetNanos(level, configured) / 1_000_000L);
+        }
         json.add("byCaller", callers);
         return json;
     }

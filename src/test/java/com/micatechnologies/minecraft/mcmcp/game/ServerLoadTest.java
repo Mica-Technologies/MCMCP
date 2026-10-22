@@ -137,6 +137,25 @@ class ServerLoadTest {
     }
 
     @Test
+    void aStepDroppedOnAHealthyServerIsCalledBusyWithTheQueueNotOverloaded() {
+        ServerLoad.setQueueDepth(() -> 7);
+        try {
+            JsonObject busy = ServerLoad.notStarted();
+            assertEquals("server_busy", busy.get("reason").getAsString());
+            assertEquals("ok", busy.get("health").getAsString());
+            assertEquals(7, busy.get("queuedTasks").getAsInt());
+            assertTrue(ServerLoad.notStartedCause().contains("healthy"), ServerLoad.notStartedCause());
+            assertTrue(ServerLoad.notStartedCause().contains("7 task(s) waiting"), ServerLoad.notStartedCause());
+            ServerLoad.measured(ServerLoad.Level.PAUSED, 120.0D, 40.0D, 10_000L);
+            assertEquals("server_overloaded", ServerLoad.notStarted().get("reason").getAsString());
+            assertTrue(ServerLoad.notStartedCause().startsWith("The server is paused"), ServerLoad.notStartedCause());
+        }
+        finally {
+            ServerLoad.setQueueDepth(() -> -1);
+        }
+    }
+
+    @Test
     void theRealTpsIsWhatTheDescriptionAndTheHealthReportGive() {
         ServerLoad.measured(ServerLoad.Level.PAUSED, 0.2D, 40.0D, 3.33D, 10_000L);
         assertEquals("paused (mean tick 0.2 ms, 3.3 TPS, heap 40%)", ServerLoad.describe());

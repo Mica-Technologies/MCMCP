@@ -20,6 +20,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import javax.annotation.Nullable;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /** How a tool's step onto the server thread is handed over, and what its caller hears when it does not run (#133). */
@@ -92,6 +93,11 @@ class GameThreadStepTest {
     private final McpSession.CancellationToken cancellation = session.beginRequest(new JsonPrimitive(1));
     private final ToolContext context = new ToolContext(session, new JsonObject(), bridge, cancellation, 5_000L, null);
 
+    @BeforeEach
+    void startHealthy() {
+        ServerLoad.reset();
+    }
+
     @AfterEach
     void healthy() {
         bridge.release.countDown();
@@ -154,6 +160,8 @@ class GameThreadStepTest {
         JsonObject block = busy.toResult().getStructuredContent().getAsJsonObject("busy");
         assertFalse(block.has("earlierStepsRan"));
         assertTrue(block.has("retryAfterMs"));
+        assertEquals("server_busy", block.get("reason").getAsString(), "a healthy server is busy, not overloaded");
+        assertTrue(busy.getMessage().contains("healthy"), busy.getMessage());
     }
 
     @Test

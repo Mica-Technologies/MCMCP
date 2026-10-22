@@ -675,8 +675,11 @@ A timeout on the game thread *getting around to* the task, not on the task itsel
 take several ticks; 5 seconds is generous for that and short enough that a stuck endpoint is noticed.
 
 On the server, a task the server thread has not started when the time runs out is dropped and
-never runs, and the call is a retryable `busy` tool error (`reason: "server_overloaded"`). A task
-that had started finishes, and the call is a timeout that says its effect is unknown. See
+never runs, and the call is a retryable `busy` tool error (`reason: "server_overloaded"`, or
+`"server_busy"` when the server's health is `ok` and the wait was behind other callers' work). A
+task that had started finishes, and the call is a `busy` tool error with `effectUnknown: true` that
+says to check the world before retrying. A step that finishes a write already made, such as saving
+its undo point, waits up to 60 s instead, at the front of the queue. See
 [Error semantics](protocol.md#error-semantics).
 
 ### `maxScanRadius`

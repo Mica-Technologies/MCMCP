@@ -123,7 +123,7 @@ This distinction matters more than any other in the implementation:
 | Malformed request, unknown method, missing required parameter | JSON-RPC `error` |
 | Session unknown, expired, or not initialized | JSON-RPC `error` |
 | Request cancelled, or a client-thread step timed out | JSON-RPC `error` |
-| The server thread never started a step in time (overloaded) | Tool error with a `busy` block |
+| The server thread never started a step in time (busy or overloaded) | Tool error with a `busy` block |
 | The server thread started a step and had not finished it in time | Tool error with a `busy` block, `effectUnknown: true` |
 | The server is paused or stalled and the call would change the world | Tool error with a `busy` block, before it runs |
 | **Tool ran and the action failed** | **Successful response with `isError: true`** |
@@ -134,7 +134,9 @@ On the server endpoint every step a tool hands to the server thread is one of tw
 - **It never started.** It is dropped, and does nothing when the server thread reaches it. The
   call is a tool error whose structured content is
   `{"busy": {"reason": "server_overloaded", "health": "paused", "mspt": 87.2, "heapPercent": 60,
-  "retryAfterMs": 5000}}`. Nothing ran, so retrying after `retryAfterMs` cannot do anything twice.
+  "queuedTasks": 12, "retryAfterMs": 5000}}`. On a server whose health is `ok` the reason is
+  `server_busy` instead: the server is fine, and the step waited behind other callers' work in
+  MCMCP's queue, which `queuedTasks` counts. Nothing ran, so retrying after `retryAfterMs` cannot do anything twice.
   Background jobs wait and retry the step themselves. A step still queued when the server stops is
   dropped at once, and the call is a tool error saying nothing changed. When earlier steps of the
   same call had already run, the block also says `"earlierStepsRan": true`, and the message says the

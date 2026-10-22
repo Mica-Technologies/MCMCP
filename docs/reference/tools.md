@@ -190,7 +190,8 @@ finished no tick for [`health.stallDumpSeconds`](configuration.md#health); then 
 says for how long and `stalled` carries the server thread's state and top frames, as for a client.
 `lastStallDump` is the file the last stall's stacks were written to. `tasks` is MCMCP's queue onto
 the server thread: `queued` tasks waiting, MCMCP's `msPerTick` over about the last 20 ticks, this
-tick's `budgetMs`, and `byCaller`, the five callers spending most (`caller`, `label`, `msPerTick`).
+tick's `budget` (`"15 ms"`, or `"one task"` while writes are refused or the server is stalled)
+with `budgetMs` when it is a time, and `byCaller`, the five callers spending most (`caller`, `label`, `msPerTick`).
 Like `clientThread`, this is answered off the server thread.
 
 `previousRun` is what the [request journal](configuration.md#journal) recorded about the run before

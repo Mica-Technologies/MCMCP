@@ -34,6 +34,11 @@ public final class TaskBudget {
         }
     }
 
+    /** The tick's budget for people to read: "15 ms", or "one task" when it is a count, not a time. */
+    public static String describe(ServerLoad.Level level, int configuredMs) {
+        return maxTasks(level) == 1 ? "one task" : budgetNanos(level, configuredMs) / 1_000_000L + " ms";
+    }
+
     public static int maxTasks(ServerLoad.Level level) {
         return level == ServerLoad.Level.OK || level == ServerLoad.Level.THROTTLED ? Integer.MAX_VALUE : 1;
     }
