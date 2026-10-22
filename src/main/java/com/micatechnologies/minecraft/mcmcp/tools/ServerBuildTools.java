@@ -411,7 +411,8 @@ public final class ServerBuildTools {
                 + "merges tile-entity data into each block after it is placed, as /blockdata does; "
                 + "read it back with server_get_block nbt=true.\n\n"
                 + "Two-part blocks (doors, tall plants, beds, and blocks with a stored 'upper' or 'top' "
-                + "flag such as CSM's tall furniture) are written whole: give the lower half "
+                + "flag whose upper half drops nothing, such as CSM's tall furniture, or that are in "
+                + "writes.pairedBlocks) are written whole: give the lower half "
                 + "(or a bed's foot) and the other half is placed with it, before either is updated, "
                 + "replacing any different door already there. In list mode 'upper' sets the second "
                 + "half's metadata; in any mode an explicit upper half in the cell above is used. "
@@ -448,7 +449,9 @@ public final class ServerBuildTools {
                     + "controllers, chests). Default false.")
                 .bool("pairTwoPart", "Write two-part blocks whole, deriving a missing second half. Default "
                     + "true; false writes every cell exactly as given. Halves made up are listed in "
-                    + "pairs.derivedAt. Blocks in writes.notPairedBlocks (LBE's tables) are never paired.")
+                    + "pairs.derivedAt. Blocks in writes.notPairedBlocks (LBE's tables) are never paired; a "
+                    + "flag with no other sign of a half (a cable tray's 'top') is written as given and named "
+                    + "in pairs.suspected.")
                 .bool("neighbourUpdates", "Notify neighbouring blocks, as /setblock and a normal placement "
                     + "do, so a redstone block written beside a machine powers it. Default true, in every mode. "
                     + "false still updates clients and lighting but tells no neighbour, for removing networks "
@@ -575,14 +578,21 @@ public final class ServerBuildTools {
                     final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                     final Tally tally = new Tally();
                     final java.util.Map<Long, IBlockState> twoPart = new java.util.HashMap<>();
-                    for (Placement placement : placements) {
-                        IBlockState state = placement.state();
-                        if (state != null && TwoPartBlocks.isTwoPart(state)) {
-                            twoPart.put(placement.pos.toLong(), state);
-                        }
-                    }
                     final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
                     pairs.pairing = context.getBoolean("pairTwoPart", true);
+                    for (Placement placement : placements) {
+                        IBlockState state = placement.state();
+                        if (state == null) {
+                            continue;
+                        }
+                        TwoPartRule.Verdict verdict = TwoPartBlocks.verdict(state);
+                        if (verdict == TwoPartRule.Verdict.PAIR) {
+                            twoPart.put(placement.pos.toLong(), state);
+                        }
+                        else if (verdict == TwoPartRule.Verdict.SUSPECTED) {
+                            pairs.suspect(state);
+                        }
+                    }
                     // Neighbour updates held to the end of each slice, so a block several cells big is whole
                     // before any of its cells hears of a neighbour (#85).
                     final DeferredNeighbours deferred = (flags & 1) != 0 ? new DeferredNeighbours() : null;

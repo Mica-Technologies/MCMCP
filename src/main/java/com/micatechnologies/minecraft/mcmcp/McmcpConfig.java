@@ -100,6 +100,7 @@ public class McmcpConfig {
     private static boolean allowWorldEdits = false;
     private static boolean allowScreenshots = true;
     private static List<String> notPairedBlocks = Collections.emptyList();
+    private static List<String> pairedBlocks = Collections.emptyList();
     private static boolean showActivityBanner = true;
     private static boolean undoPointsEnabled = true;
     private static boolean undoSingleBlockWrites = false;
@@ -492,6 +493,15 @@ public class McmcpConfig {
                 + "knows which. Patterns as server_find_blocks takes them: 'mod:block', 'mod:*_table'. "
                 + "LBE's casino tables are one cell, its cabinets two."));
 
+        pairedBlocks = Arrays.asList(configuration.getStringList("pairedBlocks", CATEGORY_WRITES,
+            new String[] { "csm:portable_toilet" },
+            "Blocks the bulk writes write as two-part because of their stored 'upper' or 'top' flag. "
+                + "A flag alone is not enough: CSM's cable trays use 'top' for a tray hung high in one "
+                + "cell. Without this list a flagged block pairs only when its upper half drops nothing "
+                + "and its lower half drops an item, as doors do; otherwise the write leaves it one cell "
+                + "and names it under pairs.suspected. notPairedBlocks wins over this list. Patterns as "
+                + "server_find_blocks takes them. CSM's portable toilet drops from both halves."));
+
         allowScreenshots = configuration.getBoolean("allowScreenshots", CATEGORY_PERMISSIONS, true,
             "Allow the screenshot tools. Client endpoint only. Screenshots capture whatever is on screen, "
                 + "including any other window content composited into the game's framebuffer.");
@@ -699,6 +709,10 @@ public class McmcpConfig {
 
     public static List<String> getNotPairedBlocks() {
         return notPairedBlocks;
+    }
+
+    public static List<String> getPairedBlocks() {
+        return pairedBlocks;
     }
 
     public static boolean isAllowScreenshots() {

@@ -5,8 +5,12 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.Nullable;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockBed;
@@ -14,6 +18,8 @@ import net.minecraft.block.properties.IProperty;
 import net.minecraft.block.properties.PropertyBool;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.init.Blocks;
+import net.minecraft.init.Items;
+import net.minecraft.item.Item;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
@@ -30,8 +36,10 @@ import net.minecraft.world.World;
  *
  * <p>Two-part means a block state with a {@code half} property whose values include {@code lower}
  * and {@code upper} (every {@code BlockDoor} and {@code BlockDoublePlant}, and mods' blocks built on
- * them); a stored boolean {@code upper} or {@code top} (CSM's tall furniture, LBE's casino cabinets,
- * #85); or a bed. The first half is the lower one, or a bed's foot.
+ * them); a bed; or a stored boolean {@code upper} or {@code top} with evidence that it really is a
+ * half (CSM's tall furniture, LBE's casino cabinets, #85). {@link TwoPartRule} says what counts as
+ * evidence: the flag alone does not, since CSM's cable trays use {@code top} for a one-cell tray
+ * (#130). The first half is the lower one, or a bed's foot.
  *
  * <p>The boolean counts only when it is stored in the metadata. A pipe's "connected on top" is a
  * boolean called {@code top} too, but it is worked out in {@code getActualState} and never stored, so
@@ -45,6 +53,8 @@ final class TwoPartBlocks {
     private static final int QUIET = 2 | 16;
     /** How many derived second halves a result names by position. */
     private static final int LISTED = 32;
+    /** How many suspected blocks a result names. */
+    private static final int SUSPECTED_LISTED = 16;
 
     private TwoPartBlocks() {
     }
@@ -72,13 +82,27 @@ final class TwoPartBlocks {
 
     /** Whether a state is one half of a two-part block. */
     static boolean isTwoPart(IBlockState state) {
-        return (halfProperty(state) != null || upperFlag(state) != null || state.getBlock() instanceof BlockBed)
-            && !notPaired(state.getBlock());
+        return verdict(state) == TwoPartRule.Verdict.PAIR;
+    }
+
+    /** How the bulk writes treat a state: as a pair, as one cell, or as one cell worth reporting. */
+    static TwoPartRule.Verdict verdict(IBlockState state) {
+        Block block = state.getBlock();
+        boolean half = halfProperty(state) != null;
+        boolean bed = block instanceof BlockBed;
+        PropertyBool flag = half || bed ? null : upperFlag(state);
+        return TwoPartRule.decide(notPaired(block), flag != null && paired(block), half, bed, flag != null,
+            flag != null && onlyLowerHalfDrops(state, flag));
     }
 
     @Nullable
     private static List<String> notPairedSource;
     private static BlockPatterns notPairedPatterns = BlockPatterns.of(Collections.<String>emptyList());
+    @Nullable
+    private static List<String> pairedSource;
+    private static BlockPatterns pairedPatterns = BlockPatterns.of(Collections.<String>emptyList());
+    /** The drop probe's answer per block: it depends on the class's code, which does not change. */
+    private static final Map<Block, Boolean> DROP_PROBES = new ConcurrentHashMap<>();
 
     /**
      * Whether {@code writes.notPairedBlocks} names this block. A stored flag says a class can be two
@@ -91,11 +115,55 @@ final class TwoPartBlocks {
             notPairedPatterns = BlockPatterns.of(source);
             notPairedSource = source;
         }
-        if (notPairedPatterns.isEmpty()) {
+        return matches(notPairedPatterns, block);
+    }
+
+    /** Whether {@code writes.pairedBlocks} names this block: its stored flag is a half, whatever it drops. */
+    static boolean paired(Block block) {
+        List<String> source = McmcpConfig.getPairedBlocks();
+        if (source != pairedSource) {
+            pairedPatterns = BlockPatterns.of(source);
+            pairedSource = source;
+        }
+        return matches(pairedPatterns, block);
+    }
+
+    private static boolean matches(BlockPatterns patterns, Block block) {
+        if (patterns.isEmpty()) {
             return false;
         }
         ResourceLocation name = block.getRegistryName();
-        return name != null && notPairedPatterns.matches(name.toString());
+        return name != null && patterns.matches(name.toString());
+    }
+
+    /**
+     * Whether the half with the flag set drops nothing and the half with it clear drops an item. A real
+     * two-cell block drops from one half only, or breaking it would hand back two; a one-cell block
+     * whose flag is a variant (a cable tray hung high) drops itself either way.
+     */
+    private static boolean onlyLowerHalfDrops(IBlockState state, PropertyBool flag) {
+        Block block = state.getBlock();
+        Boolean known = DROP_PROBES.get(block);
+        if (known != null) {
+            return known;
+        }
+        boolean result;
+        try {
+            Random random = new Random(0);
+            Item upper = block.getItemDropped(state.withProperty(flag, true), random, 0);
+            Item lower = block.getItemDropped(state.withProperty(flag, false), random, 0);
+            result = isNothing(upper) && !isNothing(lower);
+        }
+        catch (RuntimeException e) {
+            // A mod's drop code that needs a world: no evidence either way, so not a pair.
+            result = false;
+        }
+        DROP_PROBES.put(block, result);
+        return result;
+    }
+
+    private static boolean isNothing(@Nullable Item item) {
+        return item == null || item == Items.AIR;
     }
 
     /** Whether a state is the second half: a door's or plant's upper half, or a bed's head. */
@@ -149,6 +217,9 @@ final class TwoPartBlocks {
         boolean pairing = true;
         /** Second halves made up rather than given, the first few by position: a caller can check them. */
         final JsonArray derivedAt = new JsonArray();
+        /** Blocks with an upper/top flag and no other sign of being two cells, written as given (#130). */
+        private final Set<String> suspected = new LinkedHashSet<>();
+        int suspectedCells;
         /** Where neighbour updates go when they are held to the end of a slice, or null. */
         @Nullable
         DeferredNeighbours deferred;
@@ -160,6 +231,22 @@ final class TwoPartBlocks {
         Writer(Map<Long, IBlockState> given, int flags) {
             this.given = given == null ? Collections.<Long, IBlockState>emptyMap() : given;
             this.flags = flags;
+        }
+
+        /**
+         * Counts one cell of the write whose block {@link #verdict} called {@link TwoPartRule.Verdict#SUSPECTED}:
+         * written as given, and named in the reply so a caller whose block really is two cells can say so.
+         * Nothing is counted when pairing is off for the call.
+         */
+        void suspect(IBlockState state) {
+            if (!pairing) {
+                return;
+            }
+            suspectedCells++;
+            ResourceLocation name = state.getBlock().getRegistryName();
+            if (name != null && suspected.size() < SUSPECTED_LISTED) {
+                suspected.add(name.toString());
+            }
         }
 
         /**
@@ -271,11 +358,27 @@ final class TwoPartBlocks {
             return changed;
         }
 
-        /** Adds {@code derivedAt} to a write's {@code pairs} block, when any half was made up. */
+        /**
+         * Adds {@code derivedAt} to a write's {@code pairs} block, when any half was made up, and
+         * {@code suspected}/{@code suspectedCells} when a cell had an upper/top flag that was not taken
+         * for a half: a caller whose block really is two cells names it in {@code writes.pairedBlocks}.
+         */
         void report(JsonObject json) {
             JsonObject pairs = json.getAsJsonObject("pairs");
             if (pairs != null && derivedAt.size() > 0) {
                 pairs.add("derivedAt", derivedAt);
+            }
+            if (suspectedCells > 0) {
+                if (pairs == null) {
+                    pairs = new JsonObject();
+                    json.add("pairs", pairs);
+                }
+                JsonArray names = new JsonArray();
+                for (String name : suspected) {
+                    names.add(name);
+                }
+                pairs.add("suspected", names);
+                pairs.addProperty("suspectedCells", suspectedCells);
             }
         }
 

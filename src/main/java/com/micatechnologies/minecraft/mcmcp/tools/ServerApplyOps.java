@@ -283,8 +283,10 @@ public final class ServerApplyOps {
             final BufferedImage beforeImage = recorder == null ? null : ServerUndoTools.drawImage(context, dimension, area);
             final PhysicsHold hold = holdPhysics && !dryRun ? new PhysicsHold(box, (flags & 1) != 0) : null;
             JsonObject physics = null;
+            TwoPartBlocks.Writer pairs;
             try {
-                write(context, dimension, overlay, palette, protectedCells, flags, dryRun, tally, recorder, hold);
+                pairs = write(context, dimension, overlay, palette, protectedCells, flags, dryRun, tally, recorder,
+                    hold);
                 if (!dryRun) {
                     mergeTags(context, dimension, tags, protectedCells, tally);
                 }
@@ -308,6 +310,7 @@ public final class ServerApplyOps {
             if (tally.byPartner > 0) {
                 json.addProperty("byPartner", tally.byPartner);
             }
+            pairs.report(json);
             if (unloadedReads[0] > 0) {
                 json.addProperty("unloadedReads", unloadedReads[0]);
             }
@@ -491,22 +494,30 @@ public final class ServerApplyOps {
         }
     }
 
-    /** Diffs the overlay against the world and writes the difference, bottom section first. */
-    private static void write(ToolContext context, int dimension, CellOverlay overlay, StatePalette palette,
-                              Set<Long> protectedCells, int flags, boolean dryRun, Tally tally,
-                              @Nullable UndoPoints.Recorder recorder, @Nullable PhysicsHold hold) {
+    /**
+     * Diffs the overlay against the world and writes the difference, bottom section first. Returns the
+     * pair writer, for the reply's {@code pairs}.
+     */
+    private static TwoPartBlocks.Writer write(ToolContext context, int dimension, CellOverlay overlay,
+                                              StatePalette palette, Set<Long> protectedCells, int flags,
+                                              boolean dryRun, Tally tally, @Nullable UndoPoints.Recorder recorder,
+                                              @Nullable PhysicsHold hold) {
         final List<Long> sections = overlay.sectionsBottomUp();
         final Map<Long, IBlockState> twoPart = new HashMap<>();
+        final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
+        pairs.pairing = context.getBoolean("pairTwoPart", true);
         for (long key : sections) {
             overlay.visit(key, (x, y, z, value) -> {
                 IBlockState state = palette.state(value);
-                if (TwoPartBlocks.isTwoPart(state)) {
+                TwoPartRule.Verdict verdict = TwoPartBlocks.verdict(state);
+                if (verdict == TwoPartRule.Verdict.PAIR) {
                     twoPart.put(new BlockPos(x, y, z).toLong(), state);
+                }
+                else if (verdict == TwoPartRule.Verdict.SUSPECTED) {
+                    pairs.suspect(state);
                 }
             });
         }
-        final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
-        pairs.pairing = context.getBoolean("pairTwoPart", true);
         final int[] cursor = {0};
         while (cursor[0] < sections.size()) {
             context.onGameThread(() -> {
@@ -540,6 +551,7 @@ public final class ServerApplyOps {
             context.reportProgress(sections.size() + cursor[0], sections.size() * 3.0D, (dryRun ? "Diffed " : "Wrote ")
                 + cursor[0] + " of " + sections.size() + " sections");
         }
+        return pairs;
     }
 
     /** Game thread: one cell's diff, and its write unless this is a dry run. */

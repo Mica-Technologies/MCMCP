@@ -1253,12 +1253,17 @@ place.
   half is left behind.
 - The response's `pairs` object counts `byPartner`, `partnersAdded` (second halves the write did not
   list) and `oldHalvesCleared`. Any type with a `half` property of `lower`/`upper` counts as a
-  two-part block, which includes mods' doors built on `BlockDoor`. So does one with a boolean `upper`
-  or `top` stored in its metadata: CSM's closets, coolers and vending machines, LBE's cabinets. The
-  half with it clear is the lower one. A boolean of that name worked out from neighbours, such as a
+  two-part block, which includes mods' doors built on `BlockDoor`. A boolean `upper` or `top` stored
+  in its metadata counts only with a second sign that it is a half: the half with it set drops
+  nothing while the half with it clear drops an item, as CSM's closets, coolers and vending machines
+  and LBE's cabinets do, or the block is named in
+  [`writes.pairedBlocks`](configuration.md#pairedblocks). The half with it clear is the lower one. A
+  flag with neither sign, such as a CSM cable tray's `top` (a tray hung high in its one cell), is
+  written as given, and the block is named under `pairs.suspected`, with `pairs.suspectedCells`
+  counting its cells in the write. A boolean of that name worked out from neighbours, such as a
   pipe's connection, is never stored and does not count. Blocks named in
   [`writes.notPairedBlocks`](configuration.md#notpairedblocks) (by default LBE's one-cell tables, which
-  share the cabinets' class and flag) never count.
+  share the cabinets' class, flag and drops) never count.
 - `pairs.derivedAt` names, by position, up to 32 second halves the write made up rather than was
   given. `pairTwoPart: false` turns pairing off for the call (here and in `server_apply_ops`): every
   cell is written exactly as given, and nothing is derived.

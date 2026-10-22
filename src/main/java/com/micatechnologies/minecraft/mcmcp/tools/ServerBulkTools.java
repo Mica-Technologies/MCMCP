@@ -320,22 +320,30 @@ public final class ServerBulkTools {
             final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
             final BufferedImage beforeImage = recorder == null ? null : ServerUndoTools.drawImage(context, dimension, area);
             final boolean[] twoPartEntry = new boolean[palette.size()];
+            final boolean[] suspectEntry = new boolean[palette.size()];
             boolean anyTwoPart = false;
+            boolean anySuspect = false;
             for (int p = 0; p < palette.size(); p++) {
                 IBlockState state = palette.get(p).state;
-                twoPartEntry[p] = state != null && TwoPartBlocks.isTwoPart(state);
+                TwoPartRule.Verdict verdict = state == null ? TwoPartRule.Verdict.SINGLE : TwoPartBlocks.verdict(state);
+                twoPartEntry[p] = verdict == TwoPartRule.Verdict.PAIR;
+                suspectEntry[p] = verdict == TwoPartRule.Verdict.SUSPECTED;
                 anyTwoPart |= twoPartEntry[p];
+                anySuspect |= suspectEntry[p];
             }
             final java.util.Map<Long, IBlockState> twoPart = new java.util.HashMap<>();
-            if (anyTwoPart) {
+            final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
+            pairs.pairing = context.getBoolean("pairTwoPart", true);
+            if (anyTwoPart || anySuspect) {
                 for (int i = 0; i < count; i++) {
                     if (twoPartEntry[values[i]]) {
                         twoPart.put(new BlockPos(xs[i], ys[i], zs[i]).toLong(), palette.get(values[i]).state);
                     }
+                    else if (suspectEntry[values[i]]) {
+                        pairs.suspect(palette.get(values[i]).state);
+                    }
                 }
             }
-            final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
-            pairs.pairing = context.getBoolean("pairTwoPart", true);
             // Expectations of two-part cells are checked against the world as this call found it: the
             // lower half's pair write replaces the upper before the upper's own turn, and a swapped
             // cooler's old upper half was otherwise a conflict and left as air (#85).

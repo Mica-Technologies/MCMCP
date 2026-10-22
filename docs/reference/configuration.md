@@ -509,6 +509,18 @@ LBE's casino machines are one class, and its tables carry the cabinets' `top` fl
 cell. Only the class knows which, so this list says. Patterns are matched as `server_find_blocks`
 matches them: `mod:block`, or `*` for any run of characters.
 
+### `pairedBlocks`
+
+`string list` · default **`csm:portable_toilet`** · read live
+
+Blocks the bulk writes write as [two-part](tools.md#server_set_blocks) because of a stored `upper` or
+`top` flag. The flag alone is not enough, since CSM's cable trays use `top` for a tray hung high in
+one cell. Without this list, a flagged block is paired only when its upper half drops nothing and its
+lower half drops an item, as a door's halves do. A flagged block with neither is written one cell at a
+time, as given, and named in the reply under `pairs.suspected`: add it here if it really is two cells.
+CSM's portable toilet drops from both halves, so it is listed by default.
+[`notPairedBlocks`](#notpairedblocks) wins over this list. Patterns as for `notPairedBlocks`.
+
 ## `limits`
 
 ### `maxSessions`
