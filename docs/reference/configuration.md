@@ -435,7 +435,7 @@ room.
 | `maxSurfaceColumns` | 262,144 | Columns one `mode: "surface"` call reads (512 × 512). |
 | `changeLogEntries` | 262,144 | Block changes `server_changes_since` remembers, about 50 bytes each. Takes effect when the server starts. |
 | `maxWriteCells` | 1,048,576 | Cells one palette-mode `server_set_blocks` call writes. |
-| `writeCellsPerMinutePerCaller` | 1,000,000 | Cells one caller writes in palette mode in any minute. |
+| `writeCellsPerMinutePerCaller` | 1,000,000 | Cells one caller writes in palette mode in any minute. A caller is one agent on the endpoint, one player through the companion, or one background job. |
 
 ## `chunks`
 

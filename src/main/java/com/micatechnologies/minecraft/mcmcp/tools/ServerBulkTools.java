@@ -533,7 +533,9 @@ public final class ServerBulkTools {
      */
     @Nullable
     static ToolResult chargeWrites(ToolContext context, long count) {
-        final String caller = ChunkLoadGovernor.callerOf(context.getPrincipal());
+        // Per agent, as chunk holds are (#121): keyed on the endpoint alone, every agent behind the
+        // orchestrator shared one budget, and one bulk write starved the rest.
+        final String caller = ChunkLoadGovernor.holdCallerOf(context);
         long now = System.currentTimeMillis();
         int perMinute = McmcpConfig.getWriteCellsPerMinutePerCaller();
         int cells = (int) Math.min(Integer.MAX_VALUE, count);

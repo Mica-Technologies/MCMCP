@@ -1291,7 +1291,7 @@ placed, as a torch does, gets no help from this and is reported the same way.
 The result counts `applied`, `unchanged`, `conflicts`, `skippedTileEntity`, `unloaded` and `failed`.
 `conflictList` holds the first 50 conflicts as `{pos, expected, actual}`, so a generator can see
 exactly which cells a person changed since it last read them, and leave them alone.
-Writes per caller are limited to `limits.writeCellsPerMinutePerCaller` (1,000,000) a minute. Past
+Writes per caller (each agent, companion player or job) are limited to `limits.writeCellsPerMinutePerCaller` (1,000,000) a minute. Past
 that, the result is a `busy` error with `retryAfterMs`.
 
 ##### Holding physics
