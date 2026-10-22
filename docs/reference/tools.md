@@ -867,7 +867,7 @@ Two shapes:
   for the next page. `load: true` searches unloaded chunks too.
 
 **Near** (box mode only): `near: {blocks, radius, mode}` keeps only the matches that have
-(`mode: "with"`, the default) or lack (`"without"`) one of `near.blocks` within `radius` (1 to 16),
+(`mode: "with"`, the default) or lack (`"without"`) one of `near.blocks` within `radius` (1 to 8),
 measured as box (Chebyshev) distance, so radius 1 is the 26 touching cells. A match is never its own
 neighbour. With `"with"`, each position gains a fifth element, up to three nearby blocks' `[x, y, z]`,
 nearest first. The join runs on the server: neighbours outside the box or in an adjacent chunk are

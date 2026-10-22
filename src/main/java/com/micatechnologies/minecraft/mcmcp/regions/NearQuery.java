@@ -18,7 +18,7 @@ import java.util.Locale;
 public final class NearQuery {
 
     /** The largest radius taken. A neighbourhood is (2r + 1)^3 cells, read per candidate. */
-    public static final int MAX_RADIUS = 16;
+    public static final int MAX_RADIUS = 8;
     /** Neighbour positions reported per hit in mode "with". */
     public static final int MAX_REPORTED = 3;
 
