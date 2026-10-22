@@ -137,7 +137,8 @@ On the server endpoint every step a tool hands to the server thread is one of tw
 - **It had started.** It runs to its end, and the call is the `-32006` timeout as before. Its
   message says the step started and that what it changed is not known, so look before retrying.
 
-While the server is `paused` (below 20 TPS, or short of memory) or `stalled` (its thread has
+While the server is `paused` (mean tick over [`health.refuseWritesMspt`](configuration.md#health),
+100 ms by default, or short of memory) or `stalled` (its thread has
 finished no tick for [`health.stallDumpSeconds`](configuration.md#health)), a call to a tool that is
 not read-only is refused before it runs, with the same `busy` block. Read-only tools still run, and
 so do the ones needed to see what is happening and make MCMCP stop or let go: `server_estop`,

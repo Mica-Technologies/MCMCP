@@ -82,6 +82,12 @@ public final class ChunkLoadGovernor {
     private static final HoldLedger LEDGER = new HoldLedger();
     private static final LoadBudget BUDGET = new LoadBudget();
     private static final ServerHealth HEALTH = new ServerHealth();
+    /**
+     * The same readings against health.holdJobsMspt and health.refuseWritesMspt: what jobs, calls that
+     * change the world and the ops' alerts go by ({@link ServerLoad}). Looser than chunk loading's,
+     * since refusing an agent's write costs far more than loading a chunk a little later.
+     */
+    private static final ServerHealth CALLS = new ServerHealth();
     private static final Deque<Request> QUEUE = new ArrayDeque<>();
     private static final Map<Integer, List<ForgeChunkManager.Ticket>> TICKETS = new HashMap<>();
     private static final Map<HoldLedger.Place, ForgeChunkManager.Ticket> FORCED = new HashMap<>();
@@ -764,12 +770,14 @@ public final class ChunkLoadGovernor {
             total += nanos;
         }
         double meanMspt = total / (double) server.tickTimeArray.length / 1.0e6D;
+        double heap = heapPercentAfterGc();
         ServerHealth.State before = HEALTH.state();
-        ServerHealth.State after = HEALTH.update(meanMspt, heapPercentAfterGc(), now,
+        ServerHealth.State after = HEALTH.update(meanMspt, heap, now,
             McmcpConfig.getChunkThrottleMspt(), McmcpConfig.getChunkPauseMspt(),
             McmcpConfig.getChunkPauseHeapPercent());
-        ServerLoad.measured(ServerLoad.Level.valueOf(after.name()), meanMspt, HEALTH.lastHeapPercent(),
-            HEALTH.millisUntilRecovery(now));
+        ServerLoad.measured(ServerLoad.fromHealth(CALLS.update(meanMspt, heap, now, McmcpConfig.getHealthHoldJobsMspt(),
+            McmcpConfig.getHealthRefuseWritesMspt(), McmcpConfig.getChunkPauseHeapPercent())), meanMspt, heap,
+            CALLS.millisUntilRecovery(now));
         if (after != before) {
             Mcmcp.LOGGER.warn("MCMCP chunk loading is now " + after.name().toLowerCase(java.util.Locale.ROOT)
                 + ": mean tick " + Math.round(meanMspt * 10.0D) / 10.0D + " ms, heap after GC "

@@ -16,6 +16,17 @@ import javax.annotation.Nullable;
  * finished no tick for a while — the one condition the governor cannot see, because it measures in
  * ticks and a stalled server has none. A stall outranks any measurement.
  *
+ * <p>The levels are measured against the {@code health} thresholds, not chunk loading's own, which
+ * are tighter: chunk loads slow at 40 ms and stop at 50, but a server at 45 ms is still at 20 TPS and
+ * its agents' writes are not what to refuse.
+ *
+ * <ul>
+ *   <li>{@link Level#THROTTLED}: mean tick over {@code health.holdJobsMspt} (60). Jobs wait.</li>
+ *   <li>{@link Level#PAUSED}: mean tick over {@code health.refuseWritesMspt} (100), or heap over
+ *       {@code chunks.pauseHeapPercent}. Calls that change the world are refused, and jobs wait.</li>
+ *   <li>{@link Level#STALLED}: no tick for {@code health.stallDumpSeconds}. As paused.</li>
+ * </ul>
+ *
  * <p>No Minecraft class: state and listeners only, so it can be read from {@code protocol/} and
  * {@code mcp/} and tested as plain Java.
  */
@@ -45,6 +56,18 @@ public final class ServerLoad {
     private static final List<Listener> LISTENERS = new CopyOnWriteArrayList<>();
 
     private ServerLoad() {
+    }
+
+    /** The level a tick-time state names: the same three, read against the health thresholds. */
+    public static Level fromHealth(com.micatechnologies.minecraft.mcmcp.chunkload.ServerHealth.State state) {
+        switch (state) {
+            case PAUSED:
+                return Level.PAUSED;
+            case THROTTLED:
+                return Level.THROTTLED;
+            default:
+                return Level.OK;
+        }
     }
 
     public static void addListener(Listener listener) {

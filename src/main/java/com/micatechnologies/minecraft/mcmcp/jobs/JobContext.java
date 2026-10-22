@@ -15,9 +15,10 @@ import javax.annotation.Nullable;
  * cancellation, progress and chunk holds.
  *
  * <p>Every game-thread step first waits while the job is paused (by its owner, an operator or an
- * emergency stop) or the server is throttled, paused or stalled ({@link ServerLoad#holdsJobs}), so a
- * pause lands within one step, and a job never adds work to a server already behind. Holds are taken as {@code job:<id>}, so neither the owner's
- * {@code server_release_loaded all} nor their logout cuts a job's chunks from under it.
+ * emergency stop) or the server is past health.holdJobsMspt or worse ({@link ServerLoad#holdsJobs}), so
+ * a pause lands within one step, and a job never adds work to a server already behind. Holds are taken
+ * as {@code job:<id>}, so neither the owner's {@code server_release_loaded all} nor their logout cuts a
+ * job's chunks from under it.
  */
 final class JobContext extends ToolContext {
 
@@ -49,8 +50,8 @@ final class JobContext extends ToolContext {
                 if (!job.awaitRunnable()) {
                     throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");
                 }
-                // Throttled too, not only paused (#133): a job is the work that can wait, and a server
-                // past chunks.throttleMspt has none to spare for it.
+                // Before writes are refused, not only once they are (#133): a job is the work that can
+                // wait, and a server past health.holdJobsMspt has none to spare for it.
                 while (ServerLoad.holdsJobs() && !job.cancelRequested()) {
                     job.progress(0.0D, "Waiting: the server is " + ServerLoad.describe());
                     Thread.sleep(1000L);

@@ -541,10 +541,10 @@ Both go through one governor:
   `chunks.holdLongestLeaseSeconds`, and never under an hour.
 - **Server health.** It watches tick time and memory. Loading slows when the server is
   struggling, and stops when it falls below 20 TPS or is short of memory. If that lasts, the
-  longest-idle holds are given back. While it is paused, or a dedicated server's thread is stalled,
-  calls that change the world are refused before they run (see
-  [Error semantics](protocol.md#error-semantics)), and operators are told in chat
-  ([`health`](configuration.md#health)).
+  longest-idle holds are given back. Jobs, calls that change the world and the operators' chat
+  alerts go by looser thresholds of their own ([`health`](configuration.md#health)): jobs wait past
+  60 ms a tick, and past 100 ms, or while a dedicated server's thread is stalled, calls that change
+  the world are refused before they run (see [Error semantics](protocol.md#error-semantics)).
 - **Prompt unloading.** A chunk MCMCP loaded is unloaded as soon as nothing of MCMCP's needs it,
   unless a player can see it.
 

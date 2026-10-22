@@ -468,10 +468,34 @@ recovery. Every change of state is logged with the tick time, heap and MCMCP's h
 
 How a server's MCMCP watches its own server. Every key here is read live.
 
-The tick-time states come from the [`chunks`](#chunks) thresholds: `throttled` above
-`chunks.throttleMspt`, `paused` above `chunks.pauseMspt` or `chunks.pauseHeapPercent`. A dedicated
-server is also `stalled` when its thread has finished no tick at all for a while, which a tick-time
-average cannot see. [`game_health`](tools.md#game_health) shows the state as `serverHealth`.
+The server's health is one of four states, measured every second from the mean tick time over the
+last 100 ticks and the old-generation heap after GC:
+
+| State | When | What MCMCP does | Ops are told in |
+| --- | --- | --- | --- |
+| `ok` | otherwise | everything | green, once it recovers |
+| `throttled` | mean tick over `holdJobsMspt` | background jobs wait | yellow |
+| `paused` | mean tick over `refuseWritesMspt`, or heap over `chunks.pauseHeapPercent` | calls that change the world are refused, and jobs wait | red |
+| `stalled` | a dedicated server's thread has finished no tick for `stallDumpSeconds` | as `paused`, and every thread's stack is written out | red |
+
+Getting worse takes effect at once; getting better waits out 10 seconds of better readings. These
+are looser than chunk loading's own thresholds ([`chunks`](#chunks) `throttleMspt` and `pauseMspt`,
+40 and 50 ms), which keep governing chunk loads alone: a server at 45 ms still runs at 20 TPS, and
+refusing its agents' writes would cost far more than loading a chunk later.
+[`game_health`](tools.md#game_health) shows the state as `serverHealth`.
+
+### `holdJobsMspt`
+
+`integer` 10–2000 · default `60`
+
+Mean tick time, in milliseconds, above which background jobs wait before each step.
+
+### `refuseWritesMspt`
+
+`integer` 10–5000 · default `100`
+
+Mean tick time above which calls that change the world are refused before they run. 100 ms is
+10 TPS. See [Error semantics](protocol.md#error-semantics) for the refusal and what is exempt.
 
 ### `stallDumpSeconds`
 
@@ -485,15 +509,16 @@ resume, the log says so and how long it lasted.
 
 Integrated servers are not watched this way: one stops ticking whenever its player pauses the game.
 
-While the server is paused or stalled, calls that change the world are refused before they run;
-see [Error semantics](protocol.md#error-semantics). Background jobs wait from `throttled` on.
+While the server is stalled, calls that change the world are refused before they run, as when
+it is paused.
 
 ### `notifyOps`
 
 `boolean` · default `true`
 
-Tell operators in chat when the server's health changes: yellow for throttled, red for paused or
-stalled, green when it is back to OK. On a dedicated server only players who may use commands are
+Tell operators in chat when the server's health changes: yellow when jobs are held
+(`throttled`), red when writes are refused (`paused`) or the server thread is stalled, green when
+it is back to OK. On a dedicated server only players who may use commands are
 told; in singleplayer, everyone. Each line has the mean tick, TPS and heap (or how long the stall
 has lasted and where its stacks went), the MCMCP call that has been running longest, and a pointer
 to `/mcmcp estop`.

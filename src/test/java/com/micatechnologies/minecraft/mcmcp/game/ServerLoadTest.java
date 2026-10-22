@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ServerHealth;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -78,6 +79,24 @@ class ServerLoadTest {
         assertEquals("stalled", busy.get("health").getAsString());
         assertEquals(20L, busy.get("stalledSeconds").getAsLong());
         assertEquals(15_000L, busy.get("retryAfterMs").getAsLong());
+    }
+
+    @Test
+    void callsAndJobsGoByLooserThresholdsThanChunkLoading() {
+        // The defaults: chunks.throttleMspt 40, pauseMspt 50; health.holdJobsMspt 60, refuseWritesMspt 100;
+        // chunks.pauseHeapPercent 85 for both.
+        ServerHealth chunks = new ServerHealth();
+        ServerHealth calls = new ServerHealth();
+        assertEquals(ServerHealth.State.PAUSED, chunks.update(55.0D, 40.0D, 0L, 40, 50, 85));
+        assertEquals(ServerLoad.Level.OK, ServerLoad.fromHealth(calls.update(55.0D, 40.0D, 0L, 60, 100, 85)),
+            "a server too busy to load chunks can still take its agents' writes");
+        assertEquals(ServerLoad.Level.THROTTLED, ServerLoad.fromHealth(calls.update(70.0D, 40.0D, 1L, 60, 100, 85)),
+            "past holdJobsMspt, jobs wait");
+        assertEquals(ServerLoad.Level.PAUSED, ServerLoad.fromHealth(calls.update(120.0D, 40.0D, 2L, 60, 100, 85)),
+            "past refuseWritesMspt, writes are refused");
+        assertEquals(ServerLoad.Level.PAUSED,
+            ServerLoad.fromHealth(new ServerHealth().update(20.0D, 90.0D, 0L, 60, 100, 85)),
+            "a nearly full heap refuses writes however fast the ticks are");
     }
 
     @Test

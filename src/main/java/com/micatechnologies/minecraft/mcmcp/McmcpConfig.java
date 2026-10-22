@@ -153,6 +153,8 @@ public class McmcpConfig {
     private static boolean healthNotifyOps = true;
     private static int healthAlertIntervalSeconds = 60;
     private static int healthStallDumpSeconds = 10;
+    private static int healthHoldJobsMspt = 60;
+    private static int healthRefuseWritesMspt = 100;
 
     // Identity
     private static String instanceId = "";
@@ -445,6 +447,12 @@ public class McmcpConfig {
             "A dedicated server's thread that has finished no tick for this long is stalled: every thread's "
                 + "stack is written\nto mcmcp/stalls/ under the game folder (once per stall), and calls that "
                 + "change the world are refused\nuntil it ticks again.");
+        healthHoldJobsMspt = configuration.getInt("holdJobsMspt", CATEGORY_HEALTH, 60, 10, 2000,
+            "Mean tick time, in milliseconds, above which background jobs wait (and ops are told in yellow).\n"
+                + "Looser than chunks.throttleMspt: a server at 45 ms is still at 20 TPS.");
+        healthRefuseWritesMspt = configuration.getInt("refuseWritesMspt", CATEGORY_HEALTH, 100, 10, 5000,
+            "Mean tick time above which calls that change the world are refused before they run (and ops are\n"
+                + "told in red). 100 ms is 10 TPS. Old-generation heap above chunks.pauseHeapPercent refuses them too.");
         healthNotifyOps = configuration.getBoolean("notifyOps", CATEGORY_HEALTH, true,
             "Tell online operators in chat when the server's health changes: throttled, paused or stalled, "
                 + "and back to OK.");
@@ -953,6 +961,14 @@ public class McmcpConfig {
 
     public static int getHealthStallDumpSeconds() {
         return healthStallDumpSeconds;
+    }
+
+    public static int getHealthHoldJobsMspt() {
+        return healthHoldJobsMspt;
+    }
+
+    public static int getHealthRefuseWritesMspt() {
+        return healthRefuseWritesMspt;
     }
 
     public static boolean isJournalEnabled() {

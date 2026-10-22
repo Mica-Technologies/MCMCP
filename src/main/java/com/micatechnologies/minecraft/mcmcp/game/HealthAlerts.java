@@ -59,11 +59,11 @@ public final class HealthAlerts {
             case OK:
                 return text.append("Server health is back to OK: ").append(numbers).append('.').toString();
             case THROTTLED:
-                text.append("Server is throttled: ").append(numbers)
-                    .append(". MCMCP loads chunks slowly and holds back background jobs.");
+                text.append("Server is slow: ").append(numbers)
+                    .append(". MCMCP holds back background jobs until it recovers.");
                 break;
             case PAUSED:
-                text.append("Server is paused: ").append(numbers)
+                text.append("Server is overloaded: ").append(numbers)
                     .append(". MCMCP refuses calls that change the world and holds back jobs until it recovers.");
                 break;
             default:
