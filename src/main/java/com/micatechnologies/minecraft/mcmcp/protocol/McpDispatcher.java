@@ -7,6 +7,7 @@ import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
+import com.micatechnologies.minecraft.mcmcp.game.ServerLoad;
 import com.micatechnologies.minecraft.mcmcp.json.ArgumentNames;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.mcp.CallFilter;
@@ -55,6 +56,14 @@ public class McpDispatcher {
     static final java.util.Set<String> ESTOP_EXEMPT = new java.util.HashSet<>(java.util.Arrays.asList(
         "server_job_cancel", "server_job_pause", "server_estop", "server_release_loaded", "server_stop",
         "server_save_world", "client_screenshot", "client_marks", "client_world_leave", "client_quit"));
+
+    /**
+     * Tools that are not read-only but still run while the server is paused or stalled, beside
+     * {@link #ESTOP_EXEMPT} and every {@code server_job_*}: what someone needs to see what the server
+     * is doing and to make MCMCP stop or let go.
+     */
+    static final java.util.Set<String> ADMISSION_EXEMPT = new java.util.HashSet<>(java.util.Arrays.asList(
+        "game_health", "server_tick_stats", "server_release_loaded", "server_estop", "mcmcp_endpoint_info"));
 
     /** Which tools each session may list and call; null lists and runs everything for the side. */
     @Nullable
@@ -350,6 +359,14 @@ public class McpDispatcher {
                 .toJson(session.getProtocolVersion());
         }
 
+        // A server paused below 20 TPS, or with its thread stalled, gets no new work that changes the
+        // world (#133). Read-only calls still run, and so does what someone needs to see and stop it.
+        String overloaded = admissionRefusal(name, tool.isReadOnly());
+        if (overloaded != null) {
+            return ToolResult.error(overloaded).withStructured(
+                Json.obj("busy", ServerLoad.busy("server_overloaded"))).toJson(session.getProtocolVersion());
+        }
+
         // Another agent holds the client's input exclusively (#94). Read-only tools still answer, and
         // client_input_lock itself decides for its own ops, so an agent can ask or wait.
         com.micatechnologies.minecraft.mcmcp.mcp.CallerId caller =
@@ -441,6 +458,21 @@ public class McpDispatcher {
                     result == null ? null : result.getStructuredContent(), context.timingNotes(), now);
             }
         }
+    }
+
+    /**
+     * Why a call is refused for the server's load, or null when it may run: on the server endpoint,
+     * while {@link ServerLoad} is paused or stalled, a tool that is not read-only and not exempt.
+     */
+    @Nullable
+    String admissionRefusal(String name, boolean readOnly) {
+        if (side.isClient() || readOnly || !ServerLoad.refusesWrites() || ESTOP_EXEMPT.contains(name)
+            || ADMISSION_EXEMPT.contains(name) || name.startsWith("server_job_")) {
+            return null;
+        }
+        return "Refused before it ran: the server is " + ServerLoad.describe() + ", so MCMCP is not starting work "
+            + "that changes the world. Nothing changed. Read-only calls still run. Retry after busy.retryAfterMs; "
+            + "game_health shows the server's state.";
     }
 
     /**

@@ -108,11 +108,6 @@ public final class ChunkLoadGovernor {
         MinecraftForge.EVENT_BUS.register(new Events());
     }
 
-    /** Whether the server is too loaded for MCMCP to add work: background jobs wait while it is. */
-    public static boolean struggling() {
-        return HEALTH.state() == ServerHealth.State.PAUSED;
-    }
-
     /** Who a caller is, for budgets and ownership: one key per player, one for the endpoint. */
     public static String callerOf(Principal principal) {
         return principal.isCompanion() ? "player:" + principal.getPlayerId() : "endpoint";

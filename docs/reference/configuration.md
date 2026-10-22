@@ -485,6 +485,32 @@ resume, the log says so and how long it lasted.
 
 Integrated servers are not watched this way: one stops ticking whenever its player pauses the game.
 
+While the server is paused or stalled, calls that change the world are refused before they run;
+see [Error semantics](protocol.md#error-semantics). Background jobs wait from `throttled` on.
+
+### `notifyOps`
+
+`boolean` · default `true`
+
+Tell operators in chat when the server's health changes: yellow for throttled, red for paused or
+stalled, green when it is back to OK. On a dedicated server only players who may use commands are
+told; in singleplayer, everyone. Each line has the mean tick, TPS and heap (or how long the stall
+has lasted and where its stacks went), the MCMCP call that has been running longest, and a pointer
+to `/mcmcp estop`.
+
+During a stall the server thread cannot send chat, so the line goes from a thread of MCMCP's own to
+the operators online at the last tick: best effort. Every MCP session on the server endpoint gets
+the same news as `notifications/message` with logger `mcmcp.health`, whatever this says:
+`{"message": ..., "health": {...}}`, the latter shaped like `game_health`'s `serverHealth`.
+
+### `alertIntervalSeconds`
+
+`integer` 10–3600 · default `60`
+
+At most one alert per health state in this many seconds, so a server hovering at a threshold does
+not flood chat. A state held back this way is announced once the interval is over, if the server is
+still in it.
+
 ## `journal`
 
 The request journal records each tool call as it starts and as it ends, one line each, in

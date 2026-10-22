@@ -115,6 +115,7 @@ public class Mcmcp {
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.init();
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.init();
         com.micatechnologies.minecraft.mcmcp.game.EndpointNotices.register();
+        com.micatechnologies.minecraft.mcmcp.game.ServerHealthNotices.register();
         proxy.registerSideSpecific();
     }
 
@@ -174,6 +175,7 @@ public class Mcmcp {
         }
         CompanionServer.serverStopping();
         com.micatechnologies.minecraft.mcmcp.game.ServerWatchdog.serverStopping();
+        com.micatechnologies.minecraft.mcmcp.game.ServerHealthNotices.serverStopping();
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.serverStopping();
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStopping();
         com.micatechnologies.minecraft.mcmcp.tools.ServerWatchTools.serverStopping();

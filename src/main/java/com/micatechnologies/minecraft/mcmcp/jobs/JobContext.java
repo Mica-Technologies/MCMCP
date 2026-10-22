@@ -1,8 +1,8 @@
 package com.micatechnologies.minecraft.mcmcp.jobs;
 
 import com.google.gson.JsonObject;
-import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
 import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
+import com.micatechnologies.minecraft.mcmcp.game.ServerLoad;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolBusyException;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
@@ -15,8 +15,8 @@ import javax.annotation.Nullable;
  * cancellation, progress and chunk holds.
  *
  * <p>Every game-thread step first waits while the job is paused (by its owner, an operator or an
- * emergency stop) or the server is struggling, so a pause lands within one step, and a job never adds
- * work to a server already behind. Holds are taken as {@code job:<id>}, so neither the owner's
+ * emergency stop) or the server is throttled, paused or stalled ({@link ServerLoad#holdsJobs}), so a
+ * pause lands within one step, and a job never adds work to a server already behind. Holds are taken as {@code job:<id>}, so neither the owner's
  * {@code server_release_loaded all} nor their logout cuts a job's chunks from under it.
  */
 final class JobContext extends ToolContext {
@@ -49,8 +49,10 @@ final class JobContext extends ToolContext {
                 if (!job.awaitRunnable()) {
                     throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");
                 }
-                while (ChunkLoadGovernor.struggling() && !job.cancelRequested()) {
-                    job.progress(0.0D, "Waiting: the server is struggling");
+                // Throttled too, not only paused (#133): a job is the work that can wait, and a server
+                // past chunks.throttleMspt has none to spare for it.
+                while (ServerLoad.holdsJobs() && !job.cancelRequested()) {
+                    job.progress(0.0D, "Waiting: the server is " + ServerLoad.describe());
                     Thread.sleep(1000L);
                 }
                 try {

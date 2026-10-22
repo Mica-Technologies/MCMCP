@@ -123,6 +123,7 @@ This distinction matters more than any other in the implementation:
 | Session unknown, expired, or not initialized | JSON-RPC `error` |
 | Request cancelled, or a step that had started timed out | JSON-RPC `error` |
 | The server thread never started a step in time (overloaded) | Tool error with a `busy` block |
+| The server is paused or stalled and the call would change the world | Tool error with a `busy` block, before it runs |
 | **Tool ran and the action failed** | **Successful response with `isError: true`** |
 
 On the server endpoint every step a tool hands to the server thread is one of two cases when
@@ -135,6 +136,14 @@ On the server endpoint every step a tool hands to the server thread is one of tw
   Background jobs wait and retry the step themselves.
 - **It had started.** It runs to its end, and the call is the `-32006` timeout as before. Its
   message says the step started and that what it changed is not known, so look before retrying.
+
+While the server is `paused` (below 20 TPS, or short of memory) or `stalled` (its thread has
+finished no tick for [`health.stallDumpSeconds`](configuration.md#health)), a call to a tool that is
+not read-only is refused before it runs, with the same `busy` block. Read-only tools still run, and
+so do the ones needed to see what is happening and make MCMCP stop or let go: `server_estop`,
+`server_release_loaded`, every `server_job_*`, `game_health`, `server_tick_stats`,
+`mcmcp_endpoint_info`, and everything the [emergency stop](../guide/jobs.md#the-emergency-stop) lets through. The
+client endpoint is never refused for the server's load.
 
 A tool error is not a protocol error. "There is no player logged in", "that block is out of range",
 "movement control is disabled in the config" are all results the model needs to read and react to. A

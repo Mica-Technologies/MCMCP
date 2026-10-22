@@ -45,8 +45,10 @@ the owner logging out cuts its chunks from under it. A job that was running when
 is listed afterwards as `interrupted`, with how far it got. Resume it with a new job from `lastOp + 1`.
 
 **Pace.** Two jobs run at once and the rest queue. Each player may have four queued or running, and the
-server sixteen. Every game-thread step of a job waits while the job is paused, or while the chunk
-governor reports the server struggling. A part over the writes-per-minute budget
+server sixteen. Every game-thread step of a job waits while the job is paused, or while the server
+is throttled, paused or stalled ([server health](../reference/configuration.md#health)): a job is
+the work that can wait. A step the server thread never got round to is tried again, since nothing
+of it ran. A part over the writes-per-minute budget
 (`limits.writeCellsPerMinutePerCaller`, kept per job) waits for it rather than failing: its status
 `message` says so and how long, and a pause or cancel still lands within a second. So a job of any
 size runs at the budget's rate, a minute's worth at a time. A part refused as busy for anything else

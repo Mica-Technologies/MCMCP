@@ -94,6 +94,8 @@ public final class ServerWatchdog {
             try {
                 Thread.sleep(POLL_MILLIS);
                 observe();
+                // Announces a level the interval held back once it is over, even with no ticks to do it.
+                ServerHealthNotices.poll(System.currentTimeMillis());
             }
             catch (InterruptedException e) {
                 return;
