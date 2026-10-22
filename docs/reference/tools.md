@@ -1,6 +1,6 @@
 # Tools
 
-81 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+82 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -952,13 +952,13 @@ is a dropped item), namespaces ending in `:`, or patterns with `*`; `*` alone is
   first 20 positions. At most 1,024 chunks and 10,000 entities a call. Not undoable.
 - `load: true` loads the box's unloaded chunks for the call.
 
-#### `server_entity_nbt`
+#### `server_get_entity_nbt`
 
-:material-alert: Destructive · writing requires `permissions.allowWorldEdits` · `uuid`, or `x`, `y`, `z` required · optional `mode`, `radius`, `type`, `dimension`, `nbt`, `resync`, `keys`, `maxChars`, `summary`, `load`
+:material-eye: Read-only · `uuid`, or `x`, `y`, `z` required · optional `radius`, `type`, `dimension`, `keys`, `maxChars`, `summary`, `load`
 
-Reads an entity's server-side NBT, or merges NBT into it, as `/entitydata` does but with no player
-near and no command-length limit. Mod entities keep their state here: an Immersive Vehicles (MTS)
-vehicle's parts and fuel are in its NBT. Read it first to see the layout, then write.
+Reads an entity's server-side NBT with no player near. Mod entities keep their state here: an
+Immersive Vehicles (MTS) vehicle's parts and fuel are in its NBT. Read it to see the layout before
+writing with [`server_set_entity_nbt`](#server_set_entity_nbt).
 
 - **Picking the entity.** `uuid` (as [`server_nearby_entities`](#server_nearby_entities) lists it)
   finds a loaded entity in `dimension`, or in any dimension when that is left out. Or `x`, `y`, `z`
@@ -967,10 +967,24 @@ vehicle's parts and fuel are in its NBT. Read it first to see the layout, then w
   the candidates and `others` lists up to five more, so a guess is visible as one. Players are never
   picked: use [`server_player_state`](#server_player_state). `load: true` loads the search box's
   chunks; an entity in an unloaded chunk is not found by UUID.
-- **`mode: "read"`** (the default) returns `nbt`, with `keys`, `maxChars` (default 8,192, up to
-  65,536) and `summary` working as in [`server_get_tile_entities`](#server_get_tile_entities).
-- **`mode: "write"`** merges `nbt` (an SNBT string, or a JSON object) into what the entity writes,
-  then reads it back into the entity. Nested compounds merge; a list or any other value is replaced
+- Returns `nbt`, with `keys`, `maxChars` (default 8,192, up to 65,536) and `summary` working as in
+  [`server_get_tile_entities`](#server_get_tile_entities).
+
+```json
+{"entity": {"uuid": "…", "type": "minecraft:villager", ..., "distance": 0.5}, "matched": 2,
+ "others": [...], "nbt": {"Invulnerable": 0}, "chunks": {...}}
+```
+
+#### `server_set_entity_nbt`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `nbt`, and `uuid` or `x`, `y`, `z` required · optional `radius`, `type`, `dimension`, `resync`, `maxChars`, `load`
+
+Merges NBT into an entity's server-side NBT, as `/entitydata` does but with no player near and no
+command-length limit. The entity is picked exactly as
+[`server_get_entity_nbt`](#server_get_entity_nbt) picks it; read it there first to see the layout.
+
+- **The merge.** `nbt` (an SNBT string, or a JSON object) is merged into what the entity writes,
+  then read back into the entity. Nested compounds merge; a list or any other value is replaced
   whole. UUID and position stay unless the patch names `Pos`, `Motion` or `Rotation`. `UUIDMost`,
   `UUIDLeast` and `Dimension` are refused: the world finds an entity by them, and changing either
   under a live entity loses it rather than moving it.
@@ -981,8 +995,6 @@ vehicle's parts and fuel are in its NBT. Read it first to see the layout, then w
   removed by a merge. Not undoable.
 - `resync` (default true) sends the entity afresh to players who can see it, since some mod state is
   sent to clients only when an entity appears.
-- The tool is one tool for both modes, so it is not read-only: an emergency stop refuses its reads
-  too, and over the companion it is in the `write` class.
 
 ```json
 {"entity": {"uuid": "…", "type": "minecraft:villager", ...}, "matched": 1,
