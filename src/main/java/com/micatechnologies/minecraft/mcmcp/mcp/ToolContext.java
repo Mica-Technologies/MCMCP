@@ -2,8 +2,10 @@ package com.micatechnologies.minecraft.mcmcp.mcp;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.game.BridgeTask;
 import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
+import com.micatechnologies.minecraft.mcmcp.game.ServerLoad;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpLogLevel;
@@ -55,6 +57,9 @@ public class ToolContext {
     private final long gameThreadTimeoutMillis;
     /** Set for the length of one {@link #onGameThread(Callable, long)} call; 0 otherwise. */
     private long extendedTimeoutMillis;
+    /** Set for the length of one {@link #onGameThreadWithCleanup} call; null otherwise. */
+    @Nullable
+    private java.util.function.Consumer<?> orphanCleanup;
 
     @Nullable
     private final JsonElement progressToken;
@@ -259,11 +264,22 @@ public class ToolContext {
                 observer.exit();
             }
         };
+        @SuppressWarnings("unchecked")
+        java.util.function.Consumer<? super T> cleanup = (java.util.function.Consumer<? super T>) orphanCleanup;
         try {
-            return gameThread.callOnGameThread(observed, timeoutMillis);
+            return gameThread.callOnGameThread(observed, timeoutMillis, cleanup, cancellation::isCancelled);
         }
         catch (JsonRpcException e) {
             throw e;
+        }
+        catch (BridgeTask.NotStarted e) {
+            // Certainly nothing ran, so this is safe to retry, and the agent is told to: as a tool error
+            // with a wait in it, not a protocol timeout it would resend at once (#132).
+            throw new ToolBusyException(e.getMessage() + " The server is " + ServerLoad.describe()
+                + "; retry after busy.retryAfterMs.", ServerLoad.busy("server_overloaded"), true);
+        }
+        catch (java.util.concurrent.CancellationException e) {
+            throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, e.getMessage());
         }
         catch (java.util.concurrent.TimeoutException e) {
             throw new JsonRpcException(JsonRpcException.REQUEST_TIMED_OUT, e.getMessage());
@@ -288,6 +304,24 @@ public class ToolContext {
         }
         finally {
             extendedTimeoutMillis = previous;
+        }
+    }
+
+    /**
+     * As {@link #onGameThread(Callable)}, with {@code ifOrphaned} run on the game thread with the
+     * task's value if the task finishes after this call stopped waiting for it: where a task that takes
+     * something — a chunk hold — gives it back when nobody is left to use it. A task that never started
+     * took nothing and runs no cleanup. Goes through {@link #onGameThread(Callable)}, so a subclass's
+     * gate on it still applies.
+     */
+    public <T> T onGameThreadWithCleanup(Callable<T> task, java.util.function.Consumer<? super T> ifOrphaned) {
+        java.util.function.Consumer<?> previous = orphanCleanup;
+        orphanCleanup = ifOrphaned;
+        try {
+            return onGameThread(task);
+        }
+        finally {
+            orphanCleanup = previous;
         }
     }
 

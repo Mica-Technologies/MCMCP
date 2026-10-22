@@ -2,9 +2,8 @@ package com.micatechnologies.minecraft.mcmcp.game;
 
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import javax.annotation.Nullable;
 import net.minecraft.server.MinecraftServer;
 import net.minecraftforge.fml.common.FMLCommonHandler;
@@ -16,6 +15,10 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
  * is why it resolves the {@link MinecraftServer} through {@link FMLCommonHandler} on every call
  * rather than caching one: the integrated server is a fresh instance for every world the player
  * opens, and a cached reference would schedule work onto a dead server after the first world exit.
+ *
+ * <p>Every call goes through a {@link BridgeTask}: a task whose caller timed out or was cancelled
+ * before the server thread reached it is skipped when it is reached, instead of running for nobody
+ * on a server that was already too far behind to run it in time (#132).
  */
 public class ServerThreadBridge implements GameThreadBridge {
 
@@ -50,6 +53,12 @@ public class ServerThreadBridge implements GameThreadBridge {
 
     @Override
     public <T> T callOnGameThread(Callable<T> task, long timeoutMillis) throws Exception {
+        return callOnGameThread(task, timeoutMillis, null, null);
+    }
+
+    @Override
+    public <T> T callOnGameThread(Callable<T> task, long timeoutMillis, @Nullable Consumer<? super T> ifOrphaned,
+                                  @Nullable BooleanSupplier cancelled) throws Exception {
         // Already on the server thread — run inline. Scheduling here and then blocking on the
         // result would deadlock: the task cannot run until this thread returns to the tick loop.
         if (isGameThread()) {
@@ -61,31 +70,14 @@ public class ServerThreadBridge implements GameThreadBridge {
             throw new IllegalStateException("No Minecraft server is running");
         }
 
-        // Our own future rather than the ListenableFuture addScheduledTask returns: that one
+        // Our own completion rather than the ListenableFuture addScheduledTask returns: that one
         // completes with the Runnable's (absent) value, and its exception plumbing differs between
-        // 1.12.2 and the lwjgl3ify launches. This keeps the contract in one place.
-        final CompletableFuture<T> future = new CompletableFuture<>();
-        server.addScheduledTask(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    future.complete(task.call());
-                }
-                catch (Throwable t) {
-                    // Completing exceptionally rather than rethrowing is deliberate: an exception
-                    // escaping a scheduled task propagates into the server tick loop and crashes
-                    // the server. A misbehaving MCP tool must not be able to do that.
-                    future.completeExceptionally(t);
-                }
-            }
-        });
-
-        try {
-            return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
-        }
-        catch (TimeoutException e) {
-            throw new TimeoutException("Server thread did not run the task within " + timeoutMillis + " ms");
-        }
+        // 1.12.2 and the lwjgl3ify launches. BridgeTask completes exceptionally rather than
+        // rethrowing, because an exception escaping a scheduled task propagates into the server tick
+        // loop and crashes the server. A misbehaving MCP tool must not be able to do that.
+        BridgeTask<T> bridged = new BridgeTask<>(task, ifOrphaned);
+        server.addScheduledTask(bridged);
+        return bridged.await(timeoutMillis, cancelled);
     }
 
     @Override

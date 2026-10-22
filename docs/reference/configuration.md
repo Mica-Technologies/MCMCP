@@ -566,6 +566,11 @@ How long a tool waits for the game thread to run its work before failing.
 A timeout on the game thread *getting around to* the task, not on the task itself. A loaded server can
 take several ticks; 5 seconds is generous for that and short enough that a stuck endpoint is noticed.
 
+On the server, a task the server thread has not started when the time runs out is dropped and
+never runs, and the call is a retryable `busy` tool error (`reason: "server_overloaded"`). A task
+that had started finishes, and the call is a timeout that says its effect is unknown. See
+[Error semantics](protocol.md#error-semantics).
+
 ### `maxScanRadius`
 
 `integer` 1–128 · default `32`

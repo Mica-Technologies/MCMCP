@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
+import com.micatechnologies.minecraft.mcmcp.game.ServerLoad;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.mcp.Principal;
@@ -674,6 +675,8 @@ public final class ChunkLoadGovernor {
         ServerHealth.State after = HEALTH.update(meanMspt, heapPercentAfterGc(), now,
             McmcpConfig.getChunkThrottleMspt(), McmcpConfig.getChunkPauseMspt(),
             McmcpConfig.getChunkPauseHeapPercent());
+        ServerLoad.measured(ServerLoad.Level.valueOf(after.name()), meanMspt, HEALTH.lastHeapPercent(),
+            HEALTH.millisUntilRecovery(now));
         if (after != before) {
             Mcmcp.LOGGER.warn("MCMCP chunk loading is now " + after.name().toLowerCase(java.util.Locale.ROOT)
                 + ": mean tick " + Math.round(meanMspt * 10.0D) / 10.0D + " ms, heap after GC "
@@ -955,6 +958,7 @@ public final class ChunkLoadGovernor {
     /** Releases what a server's MCMCP held when the server stops. */
     public static void serverStopping() {
         releaseAll("the server is stopping");
+        ServerLoad.reset();
     }
 
     /** On Forge's bus. */

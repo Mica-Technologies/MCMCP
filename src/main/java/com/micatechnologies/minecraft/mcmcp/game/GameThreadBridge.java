@@ -1,6 +1,7 @@
 package com.micatechnologies.minecraft.mcmcp.game;
 
 import java.util.concurrent.Callable;
+import javax.annotation.Nullable;
 
 /**
  * Marshals work from an MCP worker thread onto the game thread, and back.
@@ -46,6 +47,24 @@ public interface GameThreadBridge {
      *                                               began between the availability check and here
      */
     <T> T callOnGameThread(Callable<T> task, long timeoutMillis) throws Exception;
+
+    /**
+     * As {@link #callOnGameThread(Callable, long)}, telling apart a task that never started from one
+     * that did, where the bridge can (see {@link BridgeTask}).
+     *
+     * <p>The default is the plain call: a bridge that cannot tell the two apart never throws
+     * {@link BridgeTask.NotStarted}, never polls {@code cancelled}, and never runs {@code ifOrphaned}.
+     *
+     * @param ifOrphaned run on the game thread with the value of a task that finished after its caller
+     *                   stopped waiting, to give back what it took; null for nothing
+     * @param cancelled  polled while waiting; a task not yet started when it turns true is dropped
+     * @throws BridgeTask.NotStarted if the time ran out before the task started; it never will
+     */
+    default <T> T callOnGameThread(Callable<T> task, long timeoutMillis,
+                                   @Nullable java.util.function.Consumer<? super T> ifOrphaned,
+                                   @Nullable java.util.function.BooleanSupplier cancelled) throws Exception {
+        return callOnGameThread(task, timeoutMillis);
+    }
 
     /**
      * Schedules {@code task} on the game thread without waiting.

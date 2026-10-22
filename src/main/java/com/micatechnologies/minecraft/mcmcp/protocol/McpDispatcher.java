@@ -16,6 +16,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpResource;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.RequestJournal;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolBusyException;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.util.List;
@@ -399,6 +400,14 @@ public class McpDispatcher {
             return reply;
         }
         catch (JsonRpcException e) {
+            // Too busy to run it: a tool error with its structured busy block, so the agent waits
+            // retryAfterMs instead of resending at once (#132).
+            if (e instanceof ToolBusyException) {
+                status = "busy";
+                result = ((ToolBusyException) e).toResult();
+                reply = result.toJson(session.getProtocolVersion());
+                return reply;
+            }
             // Cancellation and timeouts stay protocol errors — the client's plumbing needs to see
             // those. Everything else that a handler threw describes a failed *action*, which per
             // spec belongs in the result so the model can read it and adapt.

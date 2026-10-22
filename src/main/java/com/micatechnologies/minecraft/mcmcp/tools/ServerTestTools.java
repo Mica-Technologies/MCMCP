@@ -712,6 +712,9 @@ public final class ServerTestTools {
         try {
             result = tool.call(part);
         }
+        catch (com.micatechnologies.minecraft.mcmcp.mcp.ToolBusyException busy) {
+            result = busy.toResult();
+        }
         catch (Exception e) {
             if (run.context.getCancellation().isCancelled()) {
                 throw new Stop("cancelled");

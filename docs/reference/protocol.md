@@ -109,6 +109,10 @@ so long-running tools check the token between steps.
 Cancellation and timeouts are the only handler failures reported as JSON-RPC errors. Everything else
 becomes a tool result with `isError: true`.
 
+On the server endpoint, a cancellation that arrives while a step is still queued for the server
+thread drops that step: it never runs. One that arrives while a step is running waits for it, since
+it cannot be stopped halfway.
+
 ## Error semantics
 
 This distinction matters more than any other in the implementation:
@@ -117,8 +121,20 @@ This distinction matters more than any other in the implementation:
 | --- | --- |
 | Malformed request, unknown method, missing required parameter | JSON-RPC `error` |
 | Session unknown, expired, or not initialized | JSON-RPC `error` |
-| Request cancelled or timed out | JSON-RPC `error` |
+| Request cancelled, or a step that had started timed out | JSON-RPC `error` |
+| The server thread never started a step in time (overloaded) | Tool error with a `busy` block |
 | **Tool ran and the action failed** | **Successful response with `isError: true`** |
+
+On the server endpoint every step a tool hands to the server thread is one of two cases when
+`limits.gameThreadTimeoutMillis` runs out:
+
+- **It never started.** It is dropped, and does nothing when the server thread reaches it. The
+  call is a tool error whose structured content is
+  `{"busy": {"reason": "server_overloaded", "health": "paused", "mspt": 87.2, "heapPercent": 60,
+  "retryAfterMs": 5000}}`. Nothing ran, so retrying after `retryAfterMs` cannot do anything twice.
+  Background jobs wait and retry the step themselves.
+- **It had started.** It runs to its end, and the call is the `-32006` timeout as before. Its
+  message says the step started and that what it changed is not known, so look before retrying.
 
 A tool error is not a protocol error. "There is no player logged in", "that block is out of range",
 "movement control is disabled in the config" are all results the model needs to read and react to. A

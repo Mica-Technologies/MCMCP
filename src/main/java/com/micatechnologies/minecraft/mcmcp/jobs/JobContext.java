@@ -3,6 +3,7 @@ package com.micatechnologies.minecraft.mcmcp.jobs;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
 import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolBusyException;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpSession;
@@ -38,22 +39,40 @@ final class JobContext extends ToolContext {
         return true;
     }
 
+    /** How many times one step the server thread never started is tried again before the part fails. */
+    private static final int NOT_STARTED_RETRIES = 30;
+
     @Override
     public <T> T onGameThread(Callable<T> task) {
-        try {
-            if (!job.awaitRunnable()) {
-                throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");
+        for (int attempt = 0; ; attempt++) {
+            try {
+                if (!job.awaitRunnable()) {
+                    throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");
+                }
+                while (ChunkLoadGovernor.struggling() && !job.cancelRequested()) {
+                    job.progress(0.0D, "Waiting: the server is struggling");
+                    Thread.sleep(1000L);
+                }
+                try {
+                    return super.onGameThread(task);
+                }
+                catch (ToolBusyException busy) {
+                    // The server thread never started this step, so nothing of it ran: a job has the time
+                    // to wait and try the same step again, where a call someone waits on hands it back.
+                    if (!busy.nothingRan() || attempt >= NOT_STARTED_RETRIES || job.cancelRequested()) {
+                        throw busy;
+                    }
+                    long wait = Math.max(1_000L, Math.min(30_000L, busy.retryAfterMillis()));
+                    job.progress(0.0D, "Waiting: the server thread did not get to this step; trying again in "
+                        + wait / 1000L + " s");
+                    Thread.sleep(wait);
+                }
             }
-            while (ChunkLoadGovernor.struggling() && !job.cancelRequested()) {
-                job.progress(0.0D, "Waiting: the server is struggling");
-                Thread.sleep(1000L);
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job's runner was stopped.");
             }
         }
-        catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job's runner was stopped.");
-        }
-        return super.onGameThread(task);
     }
 
     /** A job part waits for the writes-per-minute budget rather than failing the job on it (#131). */

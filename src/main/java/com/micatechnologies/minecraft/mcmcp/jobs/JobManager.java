@@ -248,7 +248,13 @@ public final class JobManager {
                     }
                     JobContext context = new JobContext(job, part.index, count, session, part.args, gameThread,
                         cancellation, timeout);
-                    result = tool.call(context);
+                    try {
+                        result = tool.call(context);
+                    }
+                    catch (com.micatechnologies.minecraft.mcmcp.mcp.ToolBusyException busy) {
+                        // Too busy to start a step: retried below like any other busy refusal.
+                        result = busy.toResult();
+                    }
                     long retryAfter = retryAfter(result);
                     if (retryAfter < 0L || attempt >= BUSY_RETRIES) {
                         break;
