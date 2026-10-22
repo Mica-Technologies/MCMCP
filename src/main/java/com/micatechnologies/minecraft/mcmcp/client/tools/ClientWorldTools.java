@@ -74,6 +74,13 @@ public final class ClientWorldTools {
     /** How long to wait for the integrated server to stop before loading the main menu. */
     private static final long SERVER_STOP_WAIT_MILLIS = 120_000L;
 
+    /**
+     * The same wait while the game is paused. A paused integrated server runs no tick, so it never
+     * reads the disconnect packet and never stops by itself; it needs only long enough for a tick
+     * that began just before the pause to finish.
+     */
+    private static final long PAUSED_SERVER_STOP_WAIT_MILLIS = 1_000L;
+
     /** How often to re-check whether the integrated server has stopped. */
     private static final long SERVER_STOP_POLL_MILLIS = 10L;
 
@@ -557,9 +564,16 @@ public final class ClientWorldTools {
                     //
                     // The wait is bounded, and the server saves on its own thread without
                     // needing this one, so blocking the tick briefly is safe.
+                    //
+                    // Not while the game is paused (a pause menu open). A paused integrated server
+                    // reads no packets, so it would never stop and this waited out all 120 s. The
+                    // race cannot happen then either: the server is not going to exit, and it still
+                    // runs loadWorld's scheduled task while paused, as vanilla's "Save and Quit to
+                    // Title" relies on.
                     IntegratedServer server = mc.getIntegratedServer();
                     if (server != null) {
-                        long deadline = System.currentTimeMillis() + SERVER_STOP_WAIT_MILLIS;
+                        long deadline = System.currentTimeMillis()
+                            + (mc.isGamePaused() ? PAUSED_SERVER_STOP_WAIT_MILLIS : SERVER_STOP_WAIT_MILLIS);
                         while (server.isServerRunning()
                             && System.currentTimeMillis() < deadline) {
                             try {
