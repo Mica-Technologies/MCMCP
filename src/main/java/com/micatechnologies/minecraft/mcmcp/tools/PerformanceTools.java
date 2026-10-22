@@ -279,6 +279,7 @@ public final class PerformanceTools {
      */
     private static JsonObject serverThreadHealth() {
         JsonObject json = ServerLoad.toJson();
+        json.add("tasks", com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.toJson());
         if (ServerLoad.level() == ServerLoad.Level.STALLED) {
             ThreadInfo info = GameThreads.snapshot(GameThreads.find(GameThreads.SERVER));
             if (info != null) {

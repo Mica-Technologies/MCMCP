@@ -5,7 +5,9 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.game.ServerLoad;
+import com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
+import com.micatechnologies.minecraft.mcmcp.game.TaskCaller;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.mcp.Principal;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
@@ -127,11 +129,7 @@ public final class ChunkLoadGovernor {
      * job holds under {@code job:<id>}, a caller of its own.
      */
     public static String holdCallerOf(ToolContext context) {
-        if (context.getHoldCaller() != null) {
-            return context.getHoldCaller();
-        }
-        Principal principal = context.getPrincipal();
-        return principal.isCompanion() ? callerOf(principal) : "endpoint/" + context.getCaller().id();
+        return context.callerKey();
     }
 
     /** How long a call refused by a hold cap waits for calls in progress to give chunks back. */
@@ -380,7 +378,7 @@ public final class ChunkLoadGovernor {
             request.done.completeExceptionally(new Busy("The server stopped.", busy("stopped", null, 0L)));
             return;
         }
-        server.addScheduledTask(() -> {
+        ServerTaskPump.runLater(TaskCaller.MCMCP, () -> {
             if (request.done.isDone()) {
                 return;
             }
@@ -470,7 +468,7 @@ public final class ChunkLoadGovernor {
     public static void release(String holdId, String why) {
         MinecraftServer server = ServerThreadBridge.server();
         if (server != null) {
-            server.addScheduledTask(() -> releaseNow(holdId, why));
+            ServerTaskPump.runLater(TaskCaller.MCMCP, () -> releaseNow(holdId, why));
         }
     }
 
@@ -483,7 +481,7 @@ public final class ChunkLoadGovernor {
     public static void releaseCaller(String caller, boolean callsToo, String why) {
         MinecraftServer server = ServerThreadBridge.server();
         if (server != null) {
-            server.addScheduledTask(() -> {
+            ServerTaskPump.runLater(TaskCaller.MCMCP, () -> {
                 for (String id : LEDGER.ownedBy(caller, callsToo)) {
                     releaseNow(id, why);
                 }

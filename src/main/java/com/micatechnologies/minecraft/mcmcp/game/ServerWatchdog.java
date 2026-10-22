@@ -156,6 +156,8 @@ public final class ServerWatchdog {
             .append(silentMillis / 1000L).append(" s, at ").append(new Date()).append(".\n");
         out.append("Before the stall the server was ").append(ServerLoad.describe()).append(".\n\n");
         List<ToolActivity.RunningCall> calls = ToolActivity.running();
+        out.append("MCMCP server-thread tasks queued: ").append(ServerTaskPump.depth()).append("; recent share of the tick: ")
+            .append(ServerTaskPump.toJson()).append('\n');
         out.append("MCMCP calls running: ").append(calls.size()).append('\n');
         long nowMillis = System.currentTimeMillis();
         for (ToolActivity.RunningCall call : calls) {

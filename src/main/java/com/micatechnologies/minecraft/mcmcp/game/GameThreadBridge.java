@@ -58,11 +58,14 @@ public interface GameThreadBridge {
      * @param ifOrphaned run on the game thread with the value of a task that finished after its caller
      *                   stopped waiting, to give back what it took; null for nothing
      * @param cancelled  polled while waiting; a task not yet started when it turns true is dropped
+     * @param caller     who the task runs for, so a bridge with a queue of its own can take turns
+     *                   between callers; null for MCMCP's own
      * @throws BridgeTask.NotStarted if the time ran out before the task started; it never will
      */
     default <T> T callOnGameThread(Callable<T> task, long timeoutMillis,
                                    @Nullable java.util.function.Consumer<? super T> ifOrphaned,
-                                   @Nullable java.util.function.BooleanSupplier cancelled) throws Exception {
+                                   @Nullable java.util.function.BooleanSupplier cancelled,
+                                   @Nullable TaskCaller caller) throws Exception {
         return callOnGameThread(task, timeoutMillis);
     }
 

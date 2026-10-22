@@ -133,7 +133,8 @@ On the server endpoint every step a tool hands to the server thread is one of tw
   call is a tool error whose structured content is
   `{"busy": {"reason": "server_overloaded", "health": "paused", "mspt": 87.2, "heapPercent": 60,
   "retryAfterMs": 5000}}`. Nothing ran, so retrying after `retryAfterMs` cannot do anything twice.
-  Background jobs wait and retry the step themselves.
+  Background jobs wait and retry the step themselves. A step still queued when the server stops is
+  dropped at once, and the call is a tool error saying nothing changed.
 - **It had started.** It runs to its end, and the call is the `-32006` timeout as before. Its
   message says the step started and that what it changed is not known, so look before retrying.
 

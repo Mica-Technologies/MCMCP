@@ -90,7 +90,7 @@ public final class ServerHealthNotices {
             return;
         }
         final String text = HealthAlerts.message(level, ServerLoad.meanMspt(), ServerLoad.heapPercent(),
-            ServerLoad.stalledForMillis() / 1000L, longestCall(nowMillis),
+            ServerLoad.stalledForMillis() / 1000L, topCaller(nowMillis),
             level == ServerLoad.Level.STALLED ? ServerLoad.lastStallDump() : null);
         final JsonObject health = ServerLoad.toJson();
         try {
@@ -139,9 +139,17 @@ public final class ServerHealthNotices {
         }
     }
 
-    /** The server endpoint's longest-running call, as "who: tool (N s)", or null when none runs. */
+    /**
+     * Who is spending MCMCP's share of the tick, from the task pump, as "who (7.2 ms/tick)"; failing
+     * that — during a stall nothing is spent — the server endpoint's longest-running call, as
+     * "who: tool (N s)"; or null when nothing runs.
+     */
     @Nullable
-    private static String longestCall(long nowMillis) {
+    private static String topCaller(long nowMillis) {
+        String spending = ServerTaskPump.topCaller();
+        if (spending != null && ServerLoad.level() != ServerLoad.Level.STALLED) {
+            return spending;
+        }
         ToolActivity.RunningCall oldest = null;
         for (ToolActivity.RunningCall call : ToolActivity.running()) {
             if (call.getSide() == McmcpSide.SERVER && (oldest == null || call.getStartedMillis() < oldest.getStartedMillis())) {

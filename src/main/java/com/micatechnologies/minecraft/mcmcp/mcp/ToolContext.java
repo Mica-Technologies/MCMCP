@@ -6,6 +6,7 @@ import com.micatechnologies.minecraft.mcmcp.game.BridgeTask;
 import com.micatechnologies.minecraft.mcmcp.game.GameThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import com.micatechnologies.minecraft.mcmcp.game.ServerLoad;
+import com.micatechnologies.minecraft.mcmcp.game.TaskCaller;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.protocol.JsonRpcException;
 import com.micatechnologies.minecraft.mcmcp.protocol.McpLogLevel;
@@ -165,6 +166,28 @@ public class ToolContext {
         this.undoRequired = value;
     }
 
+    /**
+     * Who this call is for chunk holds, budgets and the server's task queue (#121): one key per
+     * player through the companion, whatever agents they run; one per agent on the endpoint; a
+     * background job's own {@code job:<id>}.
+     */
+    public String callerKey() {
+        if (holdCaller != null) {
+            return holdCaller;
+        }
+        Principal principal = getPrincipal();
+        return principal.isCompanion() ? "player:" + principal.getPlayerId() : "endpoint/" + getCaller().id();
+    }
+
+    /** {@link #callerKey()} for people to read: the player's or agent's name, or the job. */
+    public String callerLabel() {
+        if (holdCaller != null) {
+            return holdCaller;
+        }
+        Principal principal = getPrincipal();
+        return principal.isCompanion() ? principal.getPlayerName() : getCaller().label();
+    }
+
     /** The key chunk holds are taken under, or null for the caller's own. */
     @Nullable
     public String getHoldCaller() {
@@ -267,7 +290,8 @@ public class ToolContext {
         @SuppressWarnings("unchecked")
         java.util.function.Consumer<? super T> cleanup = (java.util.function.Consumer<? super T>) orphanCleanup;
         try {
-            return gameThread.callOnGameThread(observed, timeoutMillis, cleanup, cancellation::isCancelled);
+            return gameThread.callOnGameThread(observed, timeoutMillis, cleanup, cancellation::isCancelled,
+                new TaskCaller(callerKey(), callerLabel()));
         }
         catch (JsonRpcException e) {
             throw e;
@@ -277,6 +301,9 @@ public class ToolContext {
             // with a wait in it, not a protocol timeout it would resend at once (#132).
             throw new ToolBusyException(e.getMessage() + " The server is " + ServerLoad.describe()
                 + "; retry after busy.retryAfterMs.", ServerLoad.busy("server_overloaded"), true);
+        }
+        catch (BridgeTask.Dropped e) {
+            throw new JsonRpcException(JsonRpcException.INTERNAL_ERROR, e.getMessage());
         }
         catch (java.util.concurrent.CancellationException e) {
             throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, e.getMessage());

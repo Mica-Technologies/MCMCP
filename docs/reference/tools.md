@@ -187,8 +187,10 @@ On a server, `serverHealth` is MCMCP's view of the server: `level` (`ok`, `throt
 change the world are refused. On a dedicated server, `stalled` means the server thread has
 finished no tick for [`health.stallDumpSeconds`](configuration.md#health); then `stalledSeconds`
 says for how long and `stalled` carries the server thread's state and top frames, as for a client.
-`lastStallDump` is the file the last stall's stacks were written to. Like `clientThread`, this is
-answered off the server thread.
+`lastStallDump` is the file the last stall's stacks were written to. `tasks` is MCMCP's queue onto
+the server thread: `queued` tasks waiting, MCMCP's `msPerTick` over about the last 20 ticks, this
+tick's `budgetMs`, and `byCaller`, the five callers spending most (`caller`, `label`, `msPerTick`).
+Like `clientThread`, this is answered off the server thread.
 
 `previousRun` is what the [request journal](configuration.md#journal) recorded about the run before
 this one: `endedCleanly`, the number of `calls`, and `unfinishedCalls`, each with its tool, start time
@@ -1041,7 +1043,9 @@ and looks broken. A forced chunk keeps the dimension ticking, so
 stopped adds a line to `warnings`.
 
 Worth checking before an expensive scan: ticks are 50 ms apart, so a mean above 50 ms means the
-server is already behind and every scheduled task is queued behind it.
+server is already behind. MCMCP's own work runs within a budget each tick, taking turns between
+callers ([`health.mcmcpTickBudgetMs`](configuration.md#mcmcptickbudgetms)), so a slow server
+slows every call.
 
 ### Performance
 

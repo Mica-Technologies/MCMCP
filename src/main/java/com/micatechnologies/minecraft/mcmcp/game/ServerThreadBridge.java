@@ -18,7 +18,9 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
  *
  * <p>Every call goes through a {@link BridgeTask}: a task whose caller timed out or was cancelled
  * before the server thread reached it is skipped when it is reached, instead of running for nobody
- * on a server that was already too far behind to run it in time (#132).
+ * on a server that was already too far behind to run it in time (#132). Tasks go through
+ * {@link ServerTaskPump}, not {@code addScheduledTask}: offered without a lock, run at the end of each
+ * tick within a budget, callers taking turns (#133).
  */
 public class ServerThreadBridge implements GameThreadBridge {
 
@@ -53,12 +55,12 @@ public class ServerThreadBridge implements GameThreadBridge {
 
     @Override
     public <T> T callOnGameThread(Callable<T> task, long timeoutMillis) throws Exception {
-        return callOnGameThread(task, timeoutMillis, null, null);
+        return callOnGameThread(task, timeoutMillis, null, null, null);
     }
 
     @Override
     public <T> T callOnGameThread(Callable<T> task, long timeoutMillis, @Nullable Consumer<? super T> ifOrphaned,
-                                  @Nullable BooleanSupplier cancelled) throws Exception {
+                                  @Nullable BooleanSupplier cancelled, @Nullable TaskCaller caller) throws Exception {
         // Already on the server thread — run inline. Scheduling here and then blocking on the
         // result would deadlock: the task cannot run until this thread returns to the tick loop.
         if (isGameThread()) {
@@ -70,13 +72,11 @@ public class ServerThreadBridge implements GameThreadBridge {
             throw new IllegalStateException("No Minecraft server is running");
         }
 
-        // Our own completion rather than the ListenableFuture addScheduledTask returns: that one
-        // completes with the Runnable's (absent) value, and its exception plumbing differs between
-        // 1.12.2 and the lwjgl3ify launches. BridgeTask completes exceptionally rather than
-        // rethrowing, because an exception escaping a scheduled task propagates into the server tick
-        // loop and crashes the server. A misbehaving MCP tool must not be able to do that.
+        // BridgeTask completes exceptionally rather than rethrowing, because an exception escaping
+        // onto the server thread propagates into the tick loop and crashes the server. A misbehaving
+        // MCP tool must not be able to do that.
         BridgeTask<T> bridged = new BridgeTask<>(task, ifOrphaned);
-        server.addScheduledTask(bridged);
+        ServerTaskPump.offer(caller == null ? TaskCaller.MCMCP : caller, bridged);
         return bridged.await(timeoutMillis, cancelled);
     }
 
@@ -87,16 +87,6 @@ public class ServerThreadBridge implements GameThreadBridge {
             Mcmcp.LOGGER.warn("Dropped a scheduled MCMCP task: no server is running");
             return;
         }
-        server.addScheduledTask(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    task.run();
-                }
-                catch (Throwable t) {
-                    Mcmcp.LOGGER.error("MCMCP task failed on the server thread", t);
-                }
-            }
-        });
+        ServerTaskPump.runLater(TaskCaller.MCMCP, task);
     }
 }

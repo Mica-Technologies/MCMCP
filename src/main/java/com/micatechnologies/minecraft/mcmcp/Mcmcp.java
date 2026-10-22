@@ -116,6 +116,7 @@ public class Mcmcp {
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.init();
         com.micatechnologies.minecraft.mcmcp.game.EndpointNotices.register();
         com.micatechnologies.minecraft.mcmcp.game.ServerHealthNotices.register();
+        com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.register();
         proxy.registerSideSpecific();
     }
 
@@ -145,6 +146,8 @@ public class Mcmcp {
 
     @EventHandler
     public void serverStarting(FMLServerStartingEvent event) {
+        // Anything offered between servers was for the last one.
+        com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.open();
         event.registerServerCommand(new CommandMcmcp());
         CompanionServer.serverStarting(event.getServer());
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStarting();
@@ -168,6 +171,10 @@ public class Mcmcp {
      */
     @EventHandler
     public void serverStopping(FMLServerStoppingEvent event) {
+        // First: the server thread runs no more queued work, so callers waiting on some hear so now
+        // rather than at their timeouts, before anything below waits for them.
+        com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.close(
+            "The server stopped before this call's work ran: nothing changed.");
         McpEndpoint endpoint = serverEndpoint;
         if (endpoint != null) {
             endpoint.stop();

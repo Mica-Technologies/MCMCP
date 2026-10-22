@@ -94,6 +94,20 @@ through `FMLCommonHandler` on every call rather than caching one, because the in
 fresh instance for every world the player opens and a cached reference would schedule work onto a dead
 server after the first world exit. `ClientThreadBridge` uses `Minecraft.addScheduledTask`.
 
+`ServerThreadBridge` does not use `addScheduledTask`. Vanilla adds to its queue under a lock the
+server thread holds for as long as it runs every queued task, so a worker offering one more waits,
+with no timeout, behind everything already there, and the server thread runs all of it in one tick
+however long that takes. Instead each task is a `BridgeTask` (#132), offered without a lock to
+`ServerTaskPump`, MCMCP's own queue (#133). At the end of every server tick the pump runs tasks one
+caller at a time in turn (`FairDrain`), for at most the tick's budget (`TaskBudget`:
+`health.mcmcpTickBudgetMs` when healthy, 5 ms while jobs are held, one task while writes are
+refused), and always at least one. A `BridgeTask` its caller gave up on before it started does
+nothing when the pump reaches it, and its caller is told it never ran; one that had started runs to
+the end, and a cleanup the caller left gets its value. When a server stops, everything still queued
+is dropped and its callers hear so at once. An integrated server stops ticking while its player has
+the game paused, so there an offer that finds the pump idle for a second also schedules one vanilla
+task to drain it.
+
 Both short-circuit when already on the game thread. Scheduling onto the thread you are already on and
 then waiting for it is an instant deadlock.
 

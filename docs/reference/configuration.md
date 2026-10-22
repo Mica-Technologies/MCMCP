@@ -512,6 +512,23 @@ Integrated servers are not watched this way: one stops ticking whenever its play
 While the server is stalled, calls that change the world are refused before they run, as when
 it is paused.
 
+### `mcmcpTickBudgetMs`
+
+`integer` 1–50 · default `15`
+
+Most of each server tick MCMCP spends running its calls' work, in milliseconds. Every MCMCP task
+for the server thread goes into MCMCP's own queue, which the server thread works through at the end
+of each tick, one caller at a time in turn: each agent on the endpoint, each player through the
+companion and each background job is a caller. While jobs are held the budget is at most 5 ms, and
+while writes are refused or the server is stalled it is one task a tick. A task that has started
+always finishes, so one long slice can overrun the budget, and at least one task runs every tick
+there is one. [`game_health`](tools.md#game_health) shows the queue and who is spending the tick;
+the operators' alerts name the caller spending most.
+
+A call whose work waits in the queue longer than
+[`limits.gameThreadTimeoutMillis`](#gamethreadtimeoutmillis) without starting is dropped and gets a
+retryable `busy` error. When the server stops, everything still queued is dropped at once.
+
 ### `notifyOps`
 
 `boolean` · default `true`
@@ -521,7 +538,8 @@ Tell operators in chat when the server's health changes: yellow when jobs are he
 it is back to OK. On a dedicated server only players who may use commands are
 told; in singleplayer, everyone. Each line has the mean tick, TPS and heap (or how long the stall
 has lasted and where its stacks went), the MCMCP call that has been running longest, and a pointer
-to `/mcmcp estop`.
+to `/mcmcp estop`. The caller named is the one spending most of MCMCP's share of the tick, or
+during a stall the call that has been running longest.
 
 During a stall the server thread cannot send chat, so the line goes from a thread of MCMCP's own to
 the operators online at the last tick: best effort. Every MCP session on the server endpoint gets

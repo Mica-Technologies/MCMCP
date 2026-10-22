@@ -109,7 +109,9 @@ public final class ServerJobs {
         if (server != null) {
             final String line = now == null ? "MCMCP emergency stop lifted. Paused jobs stay paused until resumed."
                 : "MCMCP EMERGENCY STOP by " + now.by + ": " + now.reason;
-            server.addScheduledTask(() -> server.getPlayerList().sendMessage(new TextComponentString(
+            com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.runLater(
+                com.micatechnologies.minecraft.mcmcp.game.TaskCaller.MCMCP,
+                () -> server.getPlayerList().sendMessage(new TextComponentString(
                 (now == null ? TextFormatting.GREEN : TextFormatting.RED) + "[MCMCP] " + line)));
         }
     }
