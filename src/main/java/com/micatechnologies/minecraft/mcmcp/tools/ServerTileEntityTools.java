@@ -11,6 +11,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.regions.NbtGroups;
 import com.micatechnologies.minecraft.mcmcp.regions.NbtProjection;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -53,7 +54,8 @@ public final class ServerTileEntityTools {
                 + "exact blocks with 'positions' instead of a box. A tag over maxChars comes back as a "
                 + "summary of its keys and sizes; summary: true asks for that up front. Paged: when 'next' "
                 + "is present, call again with cursor = next. Unloaded chunks are listed in the 'chunks' "
-                + "block; pass load: true to read them.")
+                + "block; pass load: true to read them. groupBy: [keys] returns groups of identical values "
+                + "with a count and sample positions instead of every entity.")
             .schema(JsonSchema.object()
                 .integer("x", "X of one corner.")
                 .integer("y", "Y of one corner. Defaults to 0.")
@@ -76,6 +78,10 @@ public final class ServerTileEntityTools {
                 .integer("limit", "Entities per page. Default 200.", 1, 2000)
                 .integer("cursor", "Where to continue from: 'next' from the previous page.")
                 .bool("load", "Load the box's unloaded chunks for this read, and release them afterwards.")
+                .array("groupBy", "NBT keys (dot paths, as 'keys') to group by: returns groups of block + "
+                    + "identical values, each with a count and sample positions, not each entity. Not paged; "
+                    + "'limit' caps the groups listed.", Json.obj("type", "string"))
+                .integer("samples", "With groupBy: sample positions per group. Default 3.", 0, 20)
                 .build())
             .serverOnly()
             .readOnly()
@@ -101,6 +107,8 @@ public final class ServerTileEntityTools {
                 final List<String> blocks = Json.getStringList(context.getArguments(), "blocks");
                 final int limit = context.getBoundedInt("limit", 200, 1, 2000);
                 final int cursor = Math.max(0, context.getInt("cursor", 0));
+                final List<String> groupBy = Json.getStringList(context.getArguments(), "groupBy");
+                final int samples = context.getBoundedInt("samples", 3, 0, 20);
                 long chunkCount = ChunkKeys.boxCount(minX, minZ, maxX, maxZ);
                 if (chunkCount > 4096) {
                     return ToolResult.error("That box covers " + chunkCount + " chunks; read at most 4096 "
@@ -129,6 +137,9 @@ public final class ServerTileEntityTools {
                                 }
                             }
                         }
+                        if (!groupBy.isEmpty()) {
+                            return grouped(world, found, groupBy, samples, limit, dimension, chunks, outcome);
+                        }
                         // A fixed order, so a cursor means the same thing on the next page.
                         found.sort(Comparator.<TileEntity>comparingInt(t -> t.getPos().getX())
                             .thenComparingInt(t -> t.getPos().getZ()).thenComparingInt(t -> t.getPos().getY()));
@@ -153,6 +164,44 @@ public final class ServerTileEntityTools {
                 });
             })
             .build());
+    }
+
+    /** Game thread: {@code groupBy}, the found entities as groups of identical values (#124). */
+    private static JsonObject grouped(WorldServer world, List<TileEntity> found, List<String> groupBy, int samples,
+                                      int limit, int dimension, Set<Long> chunks,
+                                      @Nullable ChunkLoadGovernor.Outcome outcome) {
+        found.sort(Comparator.<TileEntity>comparingInt(t -> t.getPos().getX())
+            .thenComparingInt(t -> t.getPos().getZ()).thenComparingInt(t -> t.getPos().getY()));
+        NbtGroups groups = new NbtGroups(samples);
+        int failed = 0;
+        for (TileEntity tile : found) {
+            BlockPos pos = tile.getPos();
+            ResourceLocation name = world.getBlockState(pos).getBlock().getRegistryName();
+            JsonObject value;
+            try {
+                JsonElement tag = NbtJson.toJson(tile.writeToNBT(new NBTTagCompound()));
+                value = NbtProjection.project(tag.isJsonObject() ? tag.getAsJsonObject() : new JsonObject(), groupBy);
+            }
+            catch (RuntimeException e) {
+                failed++;
+                continue;
+            }
+            groups.add(name == null ? "unknown" : name.toString(), value, pos.getX(), pos.getY(), pos.getZ());
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("dimension", dimension);
+        result.addProperty("matched", found.size());
+        result.addProperty("groupCount", groups.size());
+        if (groups.size() > limit) {
+            result.addProperty("groupsNotListed", groups.size() - limit);
+        }
+        if (failed > 0) {
+            result.addProperty("unreadable", failed);
+        }
+        result.add("groups", groups.toJson(limit));
+        ChunkLoadGovernor.touch(dimension, chunks);
+        result.add("chunks", chunksBlock(world, chunks, outcome));
+        return result;
     }
 
     /** {@code positions} mode: the named blocks, in the order named. */

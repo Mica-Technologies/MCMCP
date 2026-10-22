@@ -577,7 +577,7 @@ A call whose hold is ended while it waits fails with a message naming what ended
 
 #### `server_get_tile_entities`
 
-:material-eye: Read-only · `x`, `z` or `positions` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `blocks`, `keys`, `maxChars`, `summary`, `limit`, `cursor`, `load`
+:material-eye: Read-only · `x`, `z` or `positions` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `blocks`, `keys`, `maxChars`, `summary`, `limit`, `cursor`, `load`, `groupBy`, `samples`
 
 Every tile entity in a box, with its **server-side** NBT, in one call. Use it for checking a
 district's signal controllers, alarm devices or elevator controllers. The client's copy of a tile
@@ -596,6 +596,9 @@ entity can lag the server's by minutes.
   `{chars, keys}`, and a list as `{chars, len, each}`.
 - The result is paged in a fixed order. When `next` is present, call again with
   `cursor: next`. `matched` is the total.
+- `groupBy: ["tU", "pU"]` returns `groups` instead of entities: each distinct block and value of
+  those keys, with its `count` and up to `samples` (default 3) positions, largest first. It is not
+  paged; `limit` caps the groups listed and `groupsNotListed` counts the rest. Box mode only.
 - Unloaded chunks appear in the `chunks` block. `load: true` reads them.
 
 ```json
