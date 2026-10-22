@@ -599,6 +599,20 @@ case "$PROFS_BODY" in
   *'"tickMs":'*'"slowestCommands":[{"i":0,'*'"sample":{'*) echo "    a profiled batch names its slowest command, the fill" ;;
   *) mcp_failure "server_run_commands' profile did not report the slowest command: ${PROFS_BODY}" ;;
 esac
+# at moves the player a command runs as (#127). No player joins this server, so what is checked is
+# the refusal: the console has no position to move, and nothing runs.
+AT_BODY="$(mcp_call 921 server_run_commands "{\"commands\":[{\"command\":\"say from there\",\"at\":{\"x\":${SPAWN_X},\"y\":70,\"z\":${SPAWN_Z}}}]}")" \
+  || mcp_failure "server_run_commands with at failed outright: ${AT_BODY}"
+case "$AT_BODY" in
+  *'"isError":true'*'needs asPlayer'* | *'needs asPlayer'*'"isError":true'*) echo "    at without asPlayer is refused as a tool error" ;;
+  *) mcp_failure "at without asPlayer was not refused: ${AT_BODY}" ;;
+esac
+AT_ONE_BODY="$(mcp_call 922 server_run_command "{\"command\":\"say from there\",\"at\":{\"x\":${SPAWN_X},\"y\":70,\"z\":${SPAWN_Z}}}")" \
+  || mcp_failure "server_run_command with at failed outright: ${AT_ONE_BODY}"
+case "$AT_ONE_BODY" in
+  *'"isError":true'*'needs asPlayer'* | *'needs asPlayer'*'"isError":true'*) echo "    and so is server_run_command's" ;;
+  *) mcp_failure "server_run_command's at without asPlayer was not refused: ${AT_ONE_BODY}" ;;
+esac
 
 echo "==> Tile entities: one call reads a box's, filtered, projected and paged"
 TX=$((SPAWN_X + 12)); TY=$((UNDO_Y + 8)); TZ=$((SPAWN_Z + 12))

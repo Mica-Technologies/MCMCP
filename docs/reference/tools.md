@@ -1507,6 +1507,7 @@ Text fields in modded GUIs are not reachable this way; use the client's GUI tool
 | `command` | With or without the leading slash. |
 | `asPlayer` | Run as this player, with their permission level and position. Omit for console authority. |
 | `profile` | Measure the command. See [Profiling a command](#profiling-a-command). |
+| `at` | `{x, y, z, yaw?, pitch?}`, with `asPlayer` only: run the command with the player moved there, then put them back. See [`server_run_commands`](#server_run_commands). Its chunk is loaded for the call. |
 
 Returns everything the command printed, plus its integer result. That matters: without captured
 output, `/tp` failing because the target is offline and `/tp` failing because the coordinates are out
@@ -1607,7 +1608,7 @@ Requires `permissions.allowChat` · `player`, `message` required
 
 #### `server_run_commands`
 
-:material-alert: Destructive · `commands` required · optional `asPlayer`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`, `profile`
+:material-alert: Destructive · `commands` required · optional `asPlayer`, `at`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`, `profile`
 
 Runs up to 10,000 commands in order in one call, with nothing sent to chat in between. It replaces
 scripts that teleport a player around a region and send commands through chat in groups. The
@@ -1651,6 +1652,19 @@ result:
   top-level `warning` says how many did.
 - **Profiling.** `profile` times each command and samples the server thread while they run, to find
   the command behind a slow tick. See [Profiling a command](#profiling-a-command).
+- **Running a command somewhere else.** Some mod commands read their sender's own position and take
+  no coordinates (RCMC's `/rcmc station <name>` picks the track nearest the player). `at:
+  {x, y, z, yaw?, pitch?}`, with `asPlayer`, moves the player there for each command and puts them
+  back after it: position, rotation, motion and flying, in the same game-thread task, even when the
+  command fails or throws. No tick runs in between, so nothing is sent to their client and nothing
+  else on the server sees them move. A command may carry its own, as `{"command": "...", "at":
+  {...}}` in `commands`, which wins over the call's. Each moved command is listed with `movedFrom`,
+  where the player was, and the top level counts them in `moved`. Relative coordinates in a moved
+  command resolve against `at`, and its chunk is loaded like the commands' own. A command that
+  teleports the player itself is still put back, and its client told (`restore` says so); one that
+  takes them to another dimension leaves them there. `at` without `asPlayer` is refused: the console
+  has no position to move. With `profile`, a moved command's `commandMs` includes the move and the
+  restore.
 - **Through the companion,** commands run as you, as with [`server_run_command`](#server_run_command).
 
 ### Lifecycle

@@ -8,6 +8,7 @@ import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.util.concurrent.Callable;
 import net.minecraft.command.ICommandSender;
@@ -62,12 +63,17 @@ public final class ServerCommandTools {
                 + "in the command.\n\n"
                 + "To find out why a command stalls the server, pass profile: {}. The result adds tickMs, "
                 + "commandMs and a stack sample of the command (see game_cpu_sample), and waits up to 60 s "
-                + "for a slow command rather than timing out.")
+                + "for a slow command rather than timing out.\n\n"
+                + "For a mod command that reads its sender's own position, give at with asPlayer: the "
+                + "player is moved there for the command only and put back (position, rotation, flying) "
+                + "in the same tick, even if it fails, and movedFrom says where from. Its chunk is loaded.")
             .schema(JsonSchema.object()
                 .string("command", "The command to run, e.g. 'time set day' or '/give Steve stone 64'.")
                 .string("asPlayer", "Username to run the command as. Omit to run with console "
                     + "authority.")
                 .object("profile", CommandProfiling.DESCRIPTION, CommandProfiling.schema())
+                .property("at", ServerBulkTools.atSchema("With asPlayer: run the command with the player "
+                    + "moved here, and put them back after it."))
                 .required("command")
                 .build())
             .serverOnly()
@@ -91,129 +97,191 @@ public final class ServerCommandTools {
                 }
 
                 final String asPlayer = context.getString("asPlayer", null);
-                // /fill and /clone leave undo points like server_set_blocks does: {dimension, area,
-                // before map}, filled in on the game thread when the command is one of those.
-                final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
-                final Object[] undo = new Object[3];
-                // The command's output, complete once the capture (when it ran as the player) is done.
-                final CapturingCommandSender[] collected = new CapturingCommandSender[1];
-                final java.util.concurrent.CompletableFuture<?>[] captured = new java.util.concurrent.CompletableFuture<?>[1];
-                final CommandProfiling profiling = CommandProfiling.start(context);
+                final double[] at;
                 try {
-                    Callable<JsonObject> task = new Callable<JsonObject>() {
-                        @Override
-                        public JsonObject call() {
-                            MinecraftServer server = ServerThreadBridge.server();
-                            if (server == null) {
-                                throw new IllegalStateException("No Minecraft server is running");
-                            }
-
-                            ICommandSender origin = server;
-                            if (asPlayer != null && !asPlayer.isEmpty()) {
-                                EntityPlayerMP player = server.getPlayerList().getPlayerByUsername(asPlayer);
-                                if (player == null) {
-                                    throw new IllegalStateException("No player named '" + asPlayer
-                                        + "' is connected.");
-                                }
-                                origin = player;
-                            }
-
-                            CapturingCommandSender sender = new CapturingCommandSender(origin);
-                            CommandUndo.Snapshot snapshot = recorder == null ? null
-                                : CommandUndo.before(sender, command, recorder);
-                            if (snapshot != null) {
-                                int[] area = snapshot.area();
-                                undo[0] = snapshot.world.provider.getDimension();
-                                undo[1] = area;
-                                undo[2] = area == null ? null : UndoPoints.drawArea(snapshot.world, area);
-                            }
-                            collected[0] = sender;
-                            // As the player itself where its connection allows, so a command that needs
-                            // its sender to be a player works; its chat comes back here instead (#64).
-                            PlayerChatCapture capture = origin instanceof EntityPlayerMP
-                                ? PlayerChatCapture.attach((EntityPlayerMP) origin) : null;
-                            CommandRunner.Outcome outcome;
-                            long startedNanos = 0L;
-                            if (profiling != null) {
-                                profiling.begin();
-                                startedNanos = System.nanoTime();
-                            }
-                            try {
-                                if (capture != null) {
-                                    capture.into(sender);
-                                    try {
-                                        outcome = CommandRunner.run(server, origin, origin, command);
-                                    }
-                                    finally {
-                                        captured[0] = capture.detach();
-                                    }
-                                }
-                                else {
-                                    outcome = CommandRunner.run(server, origin, sender, command);
-                                }
-                            }
-                            finally {
-                                if (profiling != null) {
-                                    profiling.record(0, command, System.nanoTime() - startedNanos);
-                                    profiling.end();
-                                }
-                            }
-                            if (snapshot != null) {
-                                snapshot.recordChanges(recorder);
-                            }
-
-                            JsonObject json = new JsonObject();
-                            json.addProperty("command", command);
-                            json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
-                            // Minecraft's convention: 0 means the command did not succeed. It is not an
-                            // error code — the reason, when there is one, is in the captured output.
-                            json.addProperty("result", outcome.result);
-                            json.addProperty("succeeded", outcome.succeeded());
-                            if (outcome.cancelled) {
-                                json.addProperty("cancelled", true);
-                                json.addProperty("error", CommandRunner.cancelledMessage(origin, capture != null));
-                            }
-                            return json;
-                        }
-                    };
-                    JsonObject result = profiling == null ? context.onGameThread(task)
-                        : context.onGameThread(task, CommandProfiling.GAME_THREAD_TIMEOUT_MILLIS);
-
-                    PlayerChatCapture.await(captured[0]);
-                    CapturingCommandSender sender = collected[0];
-                    if (!result.has("cancelled") && !sender.getErrors().isEmpty()) {
-                        result.addProperty("error", String.join("\n", sender.getErrors()));
-                    }
-                    JsonArray lines = new JsonArray();
-                    for (String line : sender.getOutput()) {
-                        lines.add(line);
-                    }
-                    result.add("output", lines);
-
-                    if (recorder != null && undo[0] != null) {
-                        ServerUndoTools.finish(context, recorder, "server_run_command", (Integer) undo[0],
-                            (int[]) undo[1], (java.awt.image.BufferedImage) undo[2], result, null);
-                    }
-
-                    String output = result.has("cancelled") ? String.join("\n", result.get("error").getAsString(),
-                            String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json.getStringList(result, "output"))).trim()
-                        : result.get("output").getAsJsonArray().size() == 0
-                        ? "(the command produced no output)"
-                        : String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json
-                            .getStringList(result, "output"));
-                    if (profiling != null) {
-                        profiling.finish(context, result);
-                        output += "\n\n" + CommandProfiling.summaryLine(result);
-                    }
-                    return ToolResult.text(output).withStructured(result);
+                    at = CommandBatch.parseAt(context.getArguments().get("at"), "at");
                 }
-                finally {
-                    if (profiling != null) {
-                        profiling.stop();
-                    }
+                catch (IllegalArgumentException malformed) {
+                    return ToolResult.error(malformed.getMessage());
                 }
+                if (at == null) {
+                    return runOne(context, command, asPlayer, null);
+                }
+                if (asPlayer == null || asPlayer.trim().isEmpty()) {
+                    return ToolResult.error("'at' moves the player the command runs as, so it needs asPlayer. "
+                        + "The console has no position to move: give the command its coordinates, or name a "
+                        + "player.");
+                }
+                // The player stands there for the command, so its chunk is loaded first, as
+                // server_run_commands loads its commands' chunks (#127).
+                int dimension = context.onGameThread(() -> {
+                    MinecraftServer server = ServerThreadBridge.server();
+                    EntityPlayerMP player = server == null ? null : server.getPlayerList().getPlayerByUsername(asPlayer);
+                    if (player == null) {
+                        throw new IllegalStateException("No player named '" + asPlayer + "' is connected.");
+                    }
+                    return player.dimension;
+                });
+                int[] block = CommandBatch.blockOf(at);
+                java.util.Set<Long> chunks = com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys.box(
+                    block[0] - CommandTargets.MARGIN, block[2] - CommandTargets.MARGIN,
+                    block[0] + CommandTargets.MARGIN, block[2] + CommandTargets.MARGIN);
+                return ServerChunkTools.withChunks(context, dimension, chunks, true,
+                    outcome -> runOne(context, command, asPlayer, at));
             })
             .build());
+    }
+
+    private static ToolResult runOne(final ToolContext context, final String command, final String asPlayer,
+                                     @javax.annotation.Nullable final double[] at) throws Exception {
+        // /fill and /clone leave undo points like server_set_blocks does: {dimension, area,
+        // before map}, filled in on the game thread when the command is one of those.
+        final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
+        final Object[] undo = new Object[3];
+        // The command's output, complete once the capture (when it ran as the player) is done.
+        final CapturingCommandSender[] collected = new CapturingCommandSender[1];
+        final java.util.concurrent.CompletableFuture<?>[] captured = new java.util.concurrent.CompletableFuture<?>[1];
+        final CommandProfiling profiling = CommandProfiling.start(context);
+        try {
+            Callable<JsonObject> task = new Callable<JsonObject>() {
+                @Override
+                public JsonObject call() {
+                    MinecraftServer server = ServerThreadBridge.server();
+                    if (server == null) {
+                        throw new IllegalStateException("No Minecraft server is running");
+                    }
+
+                    ICommandSender origin = server;
+                    if (asPlayer != null && !asPlayer.isEmpty()) {
+                        EntityPlayerMP player = server.getPlayerList().getPlayerByUsername(asPlayer);
+                        if (player == null) {
+                            throw new IllegalStateException("No player named '" + asPlayer
+                                + "' is connected.");
+                        }
+                        origin = player;
+                    }
+
+                    CapturingCommandSender sender = new CapturingCommandSender(origin);
+                    // Moved for the command only, and put back in this same task whatever it does
+                    // (#127). The move and the restore count in commandMs, as the command's own.
+                    long moveNanos = System.nanoTime();
+                    final PlayerAt moved = at == null ? null : PlayerAt.move((EntityPlayerMP) origin, at);
+                    moveNanos = System.nanoTime() - moveNanos;
+                    final String[] restoreNote = new String[1];
+                    final boolean[] restored = {moved == null};
+                    PlayerChatCapture capture = null;
+                    CommandRunner.Outcome outcome;
+                    try {
+                        CommandUndo.Snapshot snapshot = recorder == null ? null
+                            : CommandUndo.before(sender, command, recorder);
+                        if (snapshot != null) {
+                            int[] area = snapshot.area();
+                            undo[0] = snapshot.world.provider.getDimension();
+                            undo[1] = area;
+                            undo[2] = area == null ? null : UndoPoints.drawArea(snapshot.world, area);
+                        }
+                        collected[0] = sender;
+                        // As the player itself where its connection allows, so a command that needs
+                        // its sender to be a player works; its chat comes back here instead (#64).
+                        capture = origin instanceof EntityPlayerMP
+                            ? PlayerChatCapture.attach((EntityPlayerMP) origin) : null;
+                        long startedNanos = 0L;
+                        if (profiling != null) {
+                            profiling.begin();
+                            startedNanos = System.nanoTime();
+                        }
+                        try {
+                            if (capture != null) {
+                                capture.into(sender);
+                                try {
+                                    outcome = CommandRunner.run(server, origin, origin, command);
+                                }
+                                finally {
+                                    captured[0] = capture.detach();
+                                }
+                            }
+                            else {
+                                outcome = CommandRunner.run(server, origin, sender, command);
+                            }
+                        }
+                        finally {
+                            if (!restored[0]) {
+                                restored[0] = true;
+                                restoreNote[0] = moved.restore();
+                            }
+                            if (profiling != null) {
+                                profiling.record(0, command, System.nanoTime() - startedNanos + moveNanos);
+                                profiling.end();
+                            }
+                        }
+                        if (snapshot != null) {
+                            snapshot.recordChanges(recorder);
+                        }
+                    }
+                    finally {
+                        // Put back even when the undo snapshot threw before the command ran.
+                        if (!restored[0]) {
+                            restored[0] = true;
+                            restoreNote[0] = moved.restore();
+                        }
+                    }
+
+                    JsonObject json = new JsonObject();
+                    json.addProperty("command", command);
+                    json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
+                    // Minecraft's convention: 0 means the command did not succeed. It is not an
+                    // error code — the reason, when there is one, is in the captured output.
+                    json.addProperty("result", outcome.result);
+                    json.addProperty("succeeded", outcome.succeeded());
+                    if (outcome.cancelled) {
+                        json.addProperty("cancelled", true);
+                        json.addProperty("error", CommandRunner.cancelledMessage(origin, capture != null));
+                    }
+                    if (moved != null) {
+                        json.add("movedFrom", moved.movedFrom());
+                        if (restoreNote[0] != null) {
+                            json.addProperty("restore", restoreNote[0]);
+                        }
+                    }
+                    return json;
+                }
+            };
+            JsonObject result = profiling == null ? context.onGameThread(task)
+                : context.onGameThread(task, CommandProfiling.GAME_THREAD_TIMEOUT_MILLIS);
+
+            PlayerChatCapture.await(captured[0]);
+            CapturingCommandSender sender = collected[0];
+            if (!result.has("cancelled") && !sender.getErrors().isEmpty()) {
+                result.addProperty("error", String.join("\n", sender.getErrors()));
+            }
+            JsonArray lines = new JsonArray();
+            for (String line : sender.getOutput()) {
+                lines.add(line);
+            }
+            result.add("output", lines);
+
+            if (recorder != null && undo[0] != null) {
+                ServerUndoTools.finish(context, recorder, "server_run_command", (Integer) undo[0],
+                    (int[]) undo[1], (java.awt.image.BufferedImage) undo[2], result, null);
+            }
+
+            String output = result.has("cancelled") ? String.join("\n", result.get("error").getAsString(),
+                    String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json.getStringList(result, "output"))).trim()
+                : result.get("output").getAsJsonArray().size() == 0
+                ? "(the command produced no output)"
+                : String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json
+                    .getStringList(result, "output"));
+            if (profiling != null) {
+                profiling.finish(context, result);
+                output += "\n\n" + CommandProfiling.summaryLine(result);
+            }
+            return ToolResult.text(output).withStructured(result);
+        }
+        finally {
+            if (profiling != null) {
+                profiling.stop();
+            }
+        }
     }
 
     private static void registerBroadcast() {

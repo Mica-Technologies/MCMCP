@@ -663,10 +663,16 @@ public final class ServerBulkTools {
                 + "minutes stops and returns nextIndex: call again from there.\n\n"
                 + "To find out which command stalls the server, pass profile: {}. The result adds tickMs (the "
                 + "worst tick the commands ran in), commandMs, slowestCommands, commandMs on each listed "
-                + "result, and a stack sample of the commands (see game_cpu_sample).")
+                + "result, and a stack sample of the commands (see game_cpu_sample).\n\n"
+                + "For a mod command that reads its sender's own position (it takes no coordinates), give "
+                + "at with asPlayer: the player is moved there for that command only and put back "
+                + "(position, rotation, flying) in the same tick, even if it fails; movedFrom says where "
+                + "from. at applies to every command, or per command as {command, at}.")
             .schema(JsonSchema.object()
-                .array("commands", "The commands, with or without the leading slash. At most 10,000.",
-                    Json.obj("type", "string"))
+                .array("commands", "The commands, with or without the leading slash: each a string, or "
+                    + "{command, at} to run that one at its own position. At most 10,000.", commandItem())
+                .property("at", atSchema("With asPlayer: run each command with the player moved here, and "
+                    + "put them back after it. A command's own at wins."))
                 .string("asPlayer", "Run as this connected player. Omit for console authority.")
                 .bool("stopOnError", "Stop at the first command that does not succeed. Default false.")
                 .bool("allResults", "List every command's result, not just the ones that failed. Default false.")
@@ -687,18 +693,48 @@ public final class ServerBulkTools {
             .build());
     }
 
+    /** The schema of an {@code at}: a position, and optionally a rotation, for one command's player. */
+    static JsonObject atSchema(String description) {
+        return JsonSchema.object()
+            .describe(description)
+            .number("x", null, -CommandBatch.MAX_HORIZONTAL, CommandBatch.MAX_HORIZONTAL)
+            .number("y", null, CommandBatch.MIN_Y, CommandBatch.MAX_Y)
+            .number("z", null, -CommandBatch.MAX_HORIZONTAL, CommandBatch.MAX_HORIZONTAL)
+            .number("yaw", "Degrees. Default: the player's own.", -360, 360)
+            .number("pitch", "Degrees. Default: the player's own.", -90, 90)
+            .required("x", "y", "z")
+            .build();
+    }
+
+    /** An item of {@code commands}: a string, or {@code {command, at}}. */
+    private static JsonObject commandItem() {
+        JsonArray kinds = new JsonArray();
+        kinds.add(Json.obj("type", "string"));
+        kinds.add(JsonSchema.object()
+            .string("command", null)
+            .property("at", atSchema("Run this one with the player moved here."))
+            .required("command")
+            .build());
+        return Json.obj("anyOf", kinds);
+    }
+
     private static ToolResult runCommands(final ToolContext context) throws Exception {
         String denied = context.refusal(Capability.COMMANDS, McmcpConfig.isAllowCommands(),
             "Command execution is disabled by permissions.allowCommands in the MCMCP config.");
         if (denied != null) {
             return ToolResult.error(denied);
         }
+        final List<CommandBatch.Entry> entries;
+        try {
+            double[] callAt = CommandBatch.parseAt(context.getArguments().get("at"), "at");
+            entries = CommandBatch.parse(Json.getArray(context.getArguments(), "commands"), callAt);
+        }
+        catch (IllegalArgumentException malformed) {
+            return ToolResult.error(malformed.getMessage());
+        }
         final List<String> commands = new ArrayList<>();
-        for (String raw : Json.getStringList(context.getArguments(), "commands")) {
-            String command = raw.trim().startsWith("/") ? raw.trim().substring(1) : raw.trim();
-            if (!command.isEmpty()) {
-                commands.add(command);
-            }
+        for (CommandBatch.Entry entry : entries) {
+            commands.add(entry.command);
         }
         if (commands.isEmpty()) {
             return ToolResult.error("'commands' is empty.");
@@ -716,6 +752,10 @@ public final class ServerBulkTools {
         final boolean stopOnError = context.getBoolean("stopOnError", false);
         final boolean allResults = context.getBoolean("allResults", false);
         final int maxOutputLines = context.getBoundedInt("maxOutputLines", 20, 1, 500);
+        if (CommandBatch.anyAt(entries) && (asPlayer == null || asPlayer.trim().isEmpty())) {
+            return ToolResult.error("'at' moves the player the commands run as, so it needs asPlayer. The "
+                + "console has no position to move: give the command its coordinates, or name a player.");
+        }
 
         // The chunks the commands name, for load: true.
         final int[] base = context.onGameThread(() -> {
@@ -736,10 +776,17 @@ public final class ServerBulkTools {
         });
         final Set<Long> chunks = new LinkedHashSet<>();
         int unread = 0;
-        for (String command : commands) {
-            List<int[]> boxes = CommandTargets.loadBoxes(command, base);
+        for (CommandBatch.Entry entry : entries) {
+            // A command run at a position of its own resolves ~ against it, and its player stands
+            // there: that chunk is loaded as a command's coordinates are (#127).
+            int[] from = entry.at == null ? base : CommandBatch.blockOf(entry.at);
+            List<int[]> boxes = new ArrayList<>(CommandTargets.loadBoxes(entry.command, from));
             if (boxes.isEmpty()) {
                 unread++;
+            }
+            if (entry.at != null) {
+                boxes.add(new int[] {from[0] - CommandTargets.MARGIN, from[1], from[2] - CommandTargets.MARGIN,
+                    from[0] + CommandTargets.MARGIN, from[1], from[2] + CommandTargets.MARGIN});
             }
             for (int[] box : boxes) {
                 chunks.addAll(ChunkKeys.box(box[0], box[2], box[3], box[5]));
@@ -774,8 +821,8 @@ public final class ServerBulkTools {
         return ServerChunkTools.withChunks(context, base[3], chunks, load, outcome -> {
             final CommandProfiling profiling = CommandProfiling.start(context);
             try {
-                return runCommandsOnLoaded(context, commands, asPlayer, stopOnError, allResults, maxOutputLines,
-                    load, unreadCommands, outcome, profiling);
+                return runCommandsOnLoaded(context, commands, entries, asPlayer, stopOnError, allResults,
+                    maxOutputLines, load, unreadCommands, outcome, profiling);
             }
             finally {
                 if (profiling != null) {
@@ -786,6 +833,7 @@ public final class ServerBulkTools {
     }
 
     private static ToolResult runCommandsOnLoaded(final ToolContext context, final List<String> commands,
+                                                  final List<CommandBatch.Entry> entries,
                                                   final String asPlayer, final boolean stopOnError,
                                                   final boolean allResults, final int maxOutputLines,
                                                   final boolean load, final int unreadCommands,
@@ -803,6 +851,7 @@ public final class ServerBulkTools {
         final int[] next = {0};
         final int[] unloadedReplies = {0};
         final int[] outsideWorld = {0};
+        final int[] movedCount = {0};
         final boolean[] stopped = {false};
         while (next[0] < commands.size() && !stopped[0]) {
             if (System.currentTimeMillis() > deadline || context.getCancellation().isCancelled()) {
@@ -829,57 +878,88 @@ public final class ServerBulkTools {
                     while (next[0] < commands.size() && System.nanoTime() < sliceEnd && !stopped[0]) {
                         int index = next[0]++;
                         String command = commands.get(index);
+                        double[] at = entries.get(index).at;
                         CapturingCommandSender sender = new CapturingCommandSender(origin);
                         if (capture != null) {
                             capture.into(sender);
                         }
-                        CommandUndo.Snapshot snapshot = recorder == null ? null : CommandUndo.before(sender, command, recorder);
-                        if (snapshot != null && undo[0] == null) {
-                            undo[0] = snapshot.world.provider.getDimension();
-                            undo[1] = snapshot.area();
-                            undo[2] = undo[1] == null ? null : UndoPoints.drawArea(snapshot.world, (int[]) undo[1]);
-                        }
-                        int value;
+                        // Moved for this command only, and put back in the same task, whatever the
+                        // command does: no tick sees the player at the borrowed position (#127). The
+                        // move and the restore count in commandMs, as part of running it there.
+                        long moveNanos = System.nanoTime();
+                        PlayerAt moved = at == null ? null : PlayerAt.move((EntityPlayerMP) origin, at);
+                        moveNanos = System.nanoTime() - moveNanos;
+                        boolean restored = moved == null;
+                        String restoreNote = null;
+                        int value = 0;
                         boolean cancelled = false;
                         String thrown = null;
-                        long startedNanos = 0L;
-                        if (profiling != null) {
-                            profiling.begin();
-                            startedNanos = System.nanoTime();
-                        }
-                        try {
-                            CommandRunner.Outcome ran = CommandRunner.run(server, origin,
-                                capture != null ? origin : sender, command);
-                            value = ran.result;
-                            cancelled = ran.cancelled;
-                        }
-                        catch (RuntimeException e) {
-                            value = 0;
-                            thrown = String.valueOf(e.getMessage());
-                        }
                         long tookNanos = 0L;
-                        if (profiling != null) {
-                            tookNanos = System.nanoTime() - startedNanos;
-                            profiling.end();
-                            profiling.record(index, command, tookNanos);
+                        try {
+                            CommandUndo.Snapshot snapshot = recorder == null ? null : CommandUndo.before(sender, command, recorder);
+                            if (snapshot != null && undo[0] == null) {
+                                undo[0] = snapshot.world.provider.getDimension();
+                                undo[1] = snapshot.area();
+                                undo[2] = undo[1] == null ? null : UndoPoints.drawArea(snapshot.world, (int[]) undo[1]);
+                            }
+                            long startedNanos = 0L;
+                            if (profiling != null) {
+                                profiling.begin();
+                                startedNanos = System.nanoTime();
+                            }
+                            try {
+                                CommandRunner.Outcome ran = CommandRunner.run(server, origin,
+                                    capture != null ? origin : sender, command);
+                                value = ran.result;
+                                cancelled = ran.cancelled;
+                            }
+                            catch (RuntimeException e) {
+                                value = 0;
+                                thrown = String.valueOf(e.getMessage());
+                            }
+                            finally {
+                                if (!restored) {
+                                    restored = true;
+                                    restoreNote = moved.restore();
+                                }
+                                if (profiling != null) {
+                                    tookNanos = System.nanoTime() - startedNanos + moveNanos;
+                                    profiling.end();
+                                    profiling.record(index, command, tookNanos);
+                                }
+                            }
+                            if (snapshot != null) {
+                                snapshot.recordChanges(recorder);
+                            }
                         }
-                        if (snapshot != null) {
-                            snapshot.recordChanges(recorder);
+                        finally {
+                            // Put back even when the undo snapshot threw before the command ran.
+                            if (!restored) {
+                                restoreNote = moved.restore();
+                            }
+                            if (moved != null) {
+                                movedCount[0]++;
+                            }
                         }
                         boolean ok = value != 0 && !cancelled;
                         counts[ok ? 0 : 1]++;
                         if (cancelled) {
                             counts[2]++;
                         }
-                        // With load on, every reply is read for "unloaded", so a success that skipped
-                        // its work is listed rather than counted (#106).
-                        if ((allResults || !ok || load) && results.size() < 2000 && pending.size() < 10_000) {
+                        if ((allResults || !ok || load || moved != null) && results.size() < 2000
+                            && pending.size() < 10_000) {
                             JsonObject item = new JsonObject();
                             item.addProperty("i", index);
                             item.addProperty("succeeded", ok);
                             item.addProperty("result", value);
                             if (cancelled) {
                                 item.addProperty("cancelled", true);
+                            }
+                            if (moved != null) {
+                                item.add("movedFrom", moved.movedFrom());
+                                if (restoreNote != null) {
+                                    item.addProperty("restore", restoreNote);
+                                }
                             }
                             if (profiling != null) {
                                 item.addProperty("commandMs", DurationWindow.millis(tookNanos));
@@ -936,7 +1016,7 @@ public final class ServerBulkTools {
                         item.addProperty("saysUnloaded", true);
                         unloadedReplies[0]++;
                     }
-                    else if (!allResults && item.get("succeeded").getAsBoolean()) {
+                    else if (!allResults && item.get("succeeded").getAsBoolean() && !item.has("movedFrom")) {
                         continue;
                     }
                 }
@@ -965,6 +1045,9 @@ public final class ServerBulkTools {
             json.addProperty("cancelled", counts[2]);
         }
         json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
+        if (movedCount[0] > 0) {
+            json.addProperty("moved", movedCount[0]);
+        }
         if (next[0] < commands.size()) {
             json.addProperty("nextIndex", next[0]);
             json.addProperty("stopReason", stopped[0] ? "stopOnError" : "time limit for one call");
