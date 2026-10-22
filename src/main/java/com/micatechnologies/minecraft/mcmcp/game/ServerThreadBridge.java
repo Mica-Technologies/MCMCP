@@ -77,7 +77,16 @@ public class ServerThreadBridge implements GameThreadBridge {
         // MCP tool must not be able to do that.
         BridgeTask<T> bridged = new BridgeTask<>(task, ifOrphaned);
         ServerTaskPump.offer(caller == null ? TaskCaller.MCMCP : caller, bridged);
-        return bridged.await(timeoutMillis, cancelled);
+        if (server.isDedicatedServer()) {
+            return bridged.await(timeoutMillis, cancelled);
+        }
+        // An integrated server stops ticking when its player pauses. If that happened in the second
+        // before this offer, the offer did not schedule the drain a paused game needs, so keep asking
+        // while waiting: polled every 100 ms.
+        return bridged.await(timeoutMillis, () -> {
+            ServerTaskPump.kickIfPaused();
+            return cancelled != null && cancelled.getAsBoolean();
+        });
     }
 
     @Override

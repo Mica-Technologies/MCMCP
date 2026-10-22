@@ -31,9 +31,13 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  * <h2>A paused singleplayer game</h2>
  *
  * An integrated server stops ticking while its player has the game paused, but still runs vanilla's
- * scheduled tasks. So when an integrated server's pump has not drained for a second, an offer also
- * schedules one vanilla task that drains it. Only then does a worker take vanilla's lock; a dedicated
- * server never needs it.
+ * scheduled tasks. So when an integrated server has not ticked for a second, every offer also
+ * schedules a vanilla task (one at a time) that drains the pump until it is empty: with no tick to
+ * protect there is no budget to keep to. Only then does a worker take vanilla's lock; a dedicated
+ * server never needs it. Only a tick's drain counts as the server ticking: a call offered just after
+ * a paused game's drain must not wait for a tick that is not coming. A call offered in the second
+ * after the game paused finds the server ticking still; its caller, while it waits, calls
+ * {@link #kickIfPaused()} until one is scheduled.
  */
 public final class ServerTaskPump {
 
@@ -49,7 +53,11 @@ public final class ServerTaskPump {
     /** Set from a server's stopping until the next one starts: offers then are dropped at once. */
     @Nullable
     private static volatile String closedBecause;
-    private static volatile long lastDrainNanos = System.nanoTime();
+    /** When a server tick last drained the pump. Not moved by a paused game's drain. */
+    private static volatile long lastTickNanos = System.nanoTime();
+
+    /** Most drains one kick runs before leaving the rest to the next offer's kick. */
+    private static final int KICK_MAX_DRAINS = 100;
 
     private static boolean registered;
 
@@ -174,7 +182,6 @@ public final class ServerTaskPump {
 
     /** Server thread: one tick's worth. */
     static void drain() {
-        lastDrainNanos = System.nanoTime();
         ServerLoad.Level level = ServerLoad.level();
         QUEUE.drain(TaskBudget.budgetNanos(level, McmcpConfig.getHealthTickBudgetMs()), TaskBudget.maxTasks(level),
             task -> {
@@ -184,19 +191,24 @@ public final class ServerTaskPump {
                 task.run();
                 return true;
             });
-        lastDrainNanos = System.nanoTime();
     }
 
-    private static void kickIfPaused() {
+    /**
+     * Any thread: when an integrated server has not ticked for a second, schedules one vanilla task
+     * that drains the pump, unless one is already scheduled. Cheap, and a no-op on a dedicated server.
+     */
+    static void kickIfPaused() {
         MinecraftServer server = ServerThreadBridge.server();
-        if (server == null || server.isDedicatedServer() || System.nanoTime() - lastDrainNanos < KICK_AFTER_NANOS
+        if (server == null || server.isDedicatedServer() || System.nanoTime() - lastTickNanos < KICK_AFTER_NANOS
             || !KICK_PENDING.compareAndSet(false, true)) {
             return;
         }
         server.addScheduledTask(() -> {
             KICK_PENDING.set(false);
             try {
-                drain();
+                for (int i = 0; i < KICK_MAX_DRAINS && QUEUE.depth() > 0; i++) {
+                    drain();
+                }
             }
             catch (Throwable t) {
                 Mcmcp.LOGGER.error("MCMCP's task pump failed", t);
@@ -212,6 +224,7 @@ public final class ServerTaskPump {
             if (event.phase != TickEvent.Phase.END) {
                 return;
             }
+            lastTickNanos = System.nanoTime();
             try {
                 drain();
             }

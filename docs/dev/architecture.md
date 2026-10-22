@@ -105,8 +105,8 @@ refused), and always at least one. A `BridgeTask` its caller gave up on before i
 nothing when the pump reaches it, and its caller is told it never ran; one that had started runs to
 the end, and a cleanup the caller left gets its value. When a server stops, everything still queued
 is dropped and its callers hear so at once. An integrated server stops ticking while its player has
-the game paused, so there an offer that finds the pump idle for a second also schedules one vanilla
-task to drain it.
+the game paused, so there, once no tick has drained the pump for a second, an offer, and a caller
+still waiting on one, schedules a vanilla task that drains the pump until it is empty.
 
 Both short-circuit when already on the game thread. Scheduling onto the thread you are already on and
 then waiting for it is an instant deadlock.
