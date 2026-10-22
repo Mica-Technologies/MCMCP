@@ -97,6 +97,9 @@ public final class ChunkLoadGovernor {
 
     private static int ticks;
 
+    /** Server thread: when the health was last measured. */
+    private static long lastMeasuredMillis;
+
     private ChunkLoadGovernor() {
     }
 
@@ -675,7 +678,10 @@ public final class ChunkLoadGovernor {
     private static void tick(MinecraftServer server) {
         long now = System.currentTimeMillis();
         BUDGET.newTick();
-        if (++ticks % 20 == 0) {
+        // Every 20 ticks, or every second when ticks are slower than that: counted in ticks alone, a
+        // server at 1 s a tick was measured every 20 s, and kept reading OK for that long.
+        if (++ticks % 20 == 0 || now - lastMeasuredMillis >= 1_000L) {
+            lastMeasuredMillis = now;
             measure(server, now);
         }
         int perTick = ServerHealth.perTick(HEALTH.state(), McmcpConfig.getChunkLoadsPerTick());
