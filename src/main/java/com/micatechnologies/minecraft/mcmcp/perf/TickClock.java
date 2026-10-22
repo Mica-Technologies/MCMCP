@@ -19,9 +19,14 @@ public final class TickClock {
     /** The client's unit is the frame: that is what hitches, and what the client thread's time is spent on. */
     public static final TickClock CLIENT_FRAMES = new TickClock();
 
+    /** How many recent ticks {@link #durationOf} can still answer for: about thirteen seconds at 20 TPS. */
+    static final int RECENT = 256;
+
     private volatile long lastNanos;
     private volatile long count;
     private volatile long throttledAtNanos = Long.MIN_VALUE;
+    /** Each tick's duration by its index modulo {@link #RECENT}, written before the count publishes it. */
+    private final long[] recent = new long[RECENT];
 
     /**
      * Called by the owning game thread whenever it finds itself throttled: a client in the background
@@ -39,7 +44,23 @@ public final class TickClock {
     /** Called by the owning game thread only. */
     public void completed(long tookNanos) {
         lastNanos = tookNanos;
+        recent[(int) (count % RECENT)] = tookNanos;
         count++;
+    }
+
+    /**
+     * How long tick {@code index} took, counting from zero, so the tick running now is number
+     * {@link #count()}: a caller that read the count during a tick asks for that number once the
+     * count has moved past it. -1 when that tick has not finished yet, or is too old to be kept.
+     */
+    public long durationOf(long index) {
+        long completed = count;
+        if (index < 0L || index >= completed || completed - index > RECENT) {
+            return -1L;
+        }
+        long took = recent[(int) (index % RECENT)];
+        // The writer may have lapped the slot while it was being read.
+        return count - index > RECENT ? -1L : took;
     }
 
     public long count() {

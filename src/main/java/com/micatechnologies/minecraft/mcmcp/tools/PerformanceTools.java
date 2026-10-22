@@ -474,31 +474,41 @@ public final class PerformanceTools {
                 result.add("hottestFrames", tree.hottestFrames(top));
                 result.add("byPackage", tree.byOwner(top));
 
-                File directory = new File(McmcpPaths.gameDirectory(), DUMP_DIRECTORY);
-                File target = new File(directory, "cpu-sample-" + context.getSide().id() + "-"
-                    + System.currentTimeMillis() + ".json");
-                try {
-                    if (!directory.isDirectory() && !directory.mkdirs()) {
-                        throw new IOException("could not create " + directory.getAbsolutePath());
-                    }
-                    JsonObject dump = new JsonObject();
-                    dump.addProperty("thread", resolvedName);
-                    dump.addProperty("samples", tree.samples());
-                    dump.addProperty("intervalMs", intervalMillis);
-                    dump.add("tree", tree.toJson());
-                    Files.write(target.toPath(), Json.writePretty(dump).getBytes(StandardCharsets.UTF_8));
-                    result.addProperty("file", target.getAbsolutePath());
-                } catch (IOException e) {
-                    // The inline summary is the answer; the file is the appendix. Losing the
-                    // appendix is worth a field, not a failed call.
-                    result.addProperty("fileError", e.getMessage());
-                }
+                writeSampleFile(context, "cpu-sample", resolvedName, tree, intervalMillis, result);
 
                 // The tree goes out as text beside the structured summary, not inside it: nesting is
                 // most of what a call tree is, and JSON charges for every level of it.
                 return ToolResult.text(Json.write(result) + "\n\n" + tree.render(minPercent, maxLines));
             })
             .build());
+    }
+
+    /**
+     * Writes a sample's full unpruned tree to the dumps directory and adds its path to {@code into}
+     * as {@code file}, or the reason it could not as {@code fileError}. Shared by
+     * {@code game_cpu_sample} and the commands' {@code profile}.
+     */
+    static void writeSampleFile(ToolContext context, String prefix, String thread, CallTree tree,
+                                int intervalMillis, JsonObject into) {
+        File directory = new File(McmcpPaths.gameDirectory(), DUMP_DIRECTORY);
+        File target = new File(directory, prefix + "-" + context.getSide().id() + "-"
+            + System.currentTimeMillis() + ".json");
+        try {
+            if (!directory.isDirectory() && !directory.mkdirs()) {
+                throw new IOException("could not create " + directory.getAbsolutePath());
+            }
+            JsonObject dump = new JsonObject();
+            dump.addProperty("thread", thread);
+            dump.addProperty("samples", tree.samples());
+            dump.addProperty("intervalMs", intervalMillis);
+            dump.add("tree", tree.toJson());
+            Files.write(target.toPath(), Json.writePretty(dump).getBytes(StandardCharsets.UTF_8));
+            into.addProperty("file", target.getAbsolutePath());
+        } catch (IOException e) {
+            // The inline summary is the answer; the file is the appendix. Losing the
+            // appendix is worth a field, not a failed call.
+            into.addProperty("fileError", e.getMessage());
+        }
     }
 
     // ------------------------------------------------------------------

@@ -262,7 +262,8 @@ parked (the server sleeping out its 50 ms, the client's frame limiter) are dropp
   branching off are folded onto one line: `a > (3) > b` is `a`, three frames elided, then `b`.
 
 The full unpruned tree is written to `mcmcp/dumps/cpu-sample-<side>-<time>.json` and its path
-returned as `file`. Blocks for the duration, so reproduce the load during the window.
+returned as `file`. Blocks for the duration, so reproduce the load during the window. To profile
+a command, use its `profile` argument instead: see [Profiling a command](#profiling-a-command).
 
 !!! tip "Profiling a hitch: `only_over_ms`"
 
@@ -1470,6 +1471,7 @@ Text fields in modded GUIs are not reachable this way; use the client's GUI tool
 | --- | --- |
 | `command` | With or without the leading slash. |
 | `asPlayer` | Run as this player, with their permission level and position. Omit for console authority. |
+| `profile` | Measure the command. See [Profiling a command](#profiling-a-command). |
 
 Returns everything the command printed, plus its integer result. That matters: without captured
 output, `/tp` failing because the target is offline and `/tp` failing because the coordinates are out
@@ -1514,6 +1516,50 @@ Two vanilla behaviours worth knowing when scripting tile-entity state:
   inside a quoted string in `command` is accepted and stored as a newline — the only way to set a
   newline-separated text field with `/blockdata`.
 
+##### Profiling a command
+
+[`game_cpu_sample`](#game_cpu_sample) cannot profile a command: it blocks for its whole window and
+an agent's calls run one at a time, so the sample is over before the command starts. Pass `profile`
+to `server_run_command` or [`server_run_commands`](#server_run_commands) instead, `{}` for the
+defaults:
+
+```json
+{"command": "fill 146 50 -2800 172 53 -2700 stone", "profile": {"top": 15, "min_percent": 2}}
+```
+
+| Option | Type | Notes |
+| --- | --- | --- |
+| `interval_ms` | integer 1–20 | Default 2. Milliseconds between stack samples. |
+| `scope` | `commands` or `tick` | Default `commands`: sample only while the commands run. `tick` also samples the rest of the tick they ran in. |
+| `top` | integer 1–50 | Default 15. Rows in `hottestFrames`, `byPackage` and `slowestCommands`. |
+| `min_percent` | number 0.1–50 | Default 2. Prune tree branches below this share. |
+| `max_lines` | integer 10–300 | Default 40. Cap on tree lines returned. |
+
+The result gains:
+
+- `tickMs`: how long the tick the command ran in took, as [`server_tick_stats`](#server_tick_stats)
+  measures ticks. For a batch, the worst of its ticks. When a tick did not finish within 30 s of the
+  commands, `tickMsUnknown` says so instead.
+- `commandMs`: wall time inside the command. For a batch, the total. A `commandMs` close to `tickMs`
+  means the command is the slow thing. A fast command in a slow tick set off work that ran after it
+  returned; profile again with `scope: "tick"` to sample that work.
+- `sample`: a stack sample of the server thread, taken only while the commands ran, in the shape
+  [`game_cpu_sample`](#game_cpu_sample) uses: `samples`, `hottestFrames`, `byPackage`, the pruned call
+  tree as text in `tree`, and the full tree written to
+  `mcmcp/dumps/command-sample-<side>-<time>.json` and returned as `file`. Unlike `game_cpu_sample`,
+  samples in which the thread was parked are kept and counted in `idlePercent`: a command waiting on
+  a lock or on disk is time that command took. A command shorter than one interval gets no
+  samples, and `sample.note` says so; `commandMs` is then the measurement.
+- For [`server_run_commands`](#server_run_commands) only: `ticks` (how many ticks the commands ran
+  in), `tickMsEach` (per tick, when there was more than one: `tickMs`, `commands`, `commandMs`, the
+  first 50 ticks), `slowestCommands` (`i`, `commandMs`, `command`), and `commandMs` on each listed
+  result.
+
+Chunk loading before the commands, undo snapshots, and everything else in the call are not sampled.
+While profiling, each game-thread task may take up to 60 s before the call gives up on it, instead
+of the configured game-thread timeout, since the slow command is the one being looked for. Without
+`profile` the commands are not timed and no sampler runs.
+
 #### `server_broadcast`
 
 Requires `permissions.allowChat` · `message` required
@@ -1526,7 +1572,7 @@ Requires `permissions.allowChat` · `player`, `message` required
 
 #### `server_run_commands`
 
-:material-alert: Destructive · `commands` required · optional `asPlayer`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`
+:material-alert: Destructive · `commands` required · optional `asPlayer`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`, `profile`
 
 Runs up to 10,000 commands in order in one call, with nothing sent to chat in between. It replaces
 scripts that teleport a player around a region and send commands through chat in groups. The
@@ -1568,6 +1614,8 @@ result:
 - **Unloaded replies.** With loading on, every reply is read: a command that says something was
   "unloaded" or "not loaded" is listed with `saysUnloaded: true` even if it succeeded, and a
   top-level `warning` says how many did.
+- **Profiling.** `profile` times each command and samples the server thread while they run, to find
+  the command behind a slow tick. See [Profiling a command](#profiling-a-command).
 - **Through the companion,** commands run as you, as with [`server_run_command`](#server_run_command).
 
 ### Lifecycle

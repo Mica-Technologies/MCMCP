@@ -15,6 +15,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
 import com.micatechnologies.minecraft.mcmcp.regions.PackedIndices;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
@@ -631,7 +632,10 @@ public final class ServerBulkTools {
                 + "and released afterwards (relative coordinates resolve against the player, or world spawn "
                 + "for the console); load: false skips that. When any command fails, a top-level warning "
                 + "says how many, and how many wrote outside a loaded chunk. A call that runs past two "
-                + "minutes stops and returns nextIndex: call again from there.")
+                + "minutes stops and returns nextIndex: call again from there.\n\n"
+                + "To find out which command stalls the server, pass profile: {}. The result adds tickMs (the "
+                + "worst tick the commands ran in), commandMs, slowestCommands, commandMs on each listed "
+                + "result, and a stack sample of the commands (see game_cpu_sample).")
             .schema(JsonSchema.object()
                 .array("commands", "The commands, with or without the leading slash. At most 10,000.",
                     Json.obj("type", "string"))
@@ -646,6 +650,7 @@ public final class ServerBulkTools {
                     + "numbers: two in a row an x z column, six a box, three a point.")
                 .array("loadBoxes", "Also load these, for coordinates no command spells out: each "
                     + "[x0, z0, x1, z1], or [x, z, radius]. Implies load.", Json.obj("type", "array"))
+                .object("profile", CommandProfiling.DESCRIPTION, CommandProfiling.schema())
                 .required("commands")
                 .build())
             .serverOnly()
@@ -739,208 +744,244 @@ public final class ServerBulkTools {
         final int unreadCommands = unread;
 
         return ServerChunkTools.withChunks(context, base[3], chunks, load, outcome -> {
-            final long deadline = System.currentTimeMillis() + 120_000L;
-            final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
-            final Object[] undo = new Object[3];
-            // Succeeded, failed, and of the failures how many a mod cancelled.
-            final int[] counts = new int[3];
-            final JsonArray results = new JsonArray();
-            // A slice's listed results, {item, lines, sender}, finished once its capture is done.
-            final List<Object[]> pending = new ArrayList<>();
-            final java.util.concurrent.CompletableFuture<?>[] sliceCapture = new java.util.concurrent.CompletableFuture<?>[1];
-            final int[] next = {0};
-            final int[] unloadedReplies = {0};
-            final int[] outsideWorld = {0};
-            final boolean[] stopped = {false};
-            while (next[0] < commands.size() && !stopped[0]) {
-                if (System.currentTimeMillis() > deadline || context.getCancellation().isCancelled()) {
-                    break;
-                }
-                context.onGameThread(() -> {
-                    MinecraftServer server = ServerThreadBridge.server();
-                    ICommandSender origin = server;
-                    if (asPlayer != null && !asPlayer.isEmpty()) {
-                        EntityPlayerMP player = server.getPlayerList().getPlayerByUsername(asPlayer);
-                        if (player == null) {
-                            throw new IllegalStateException("'" + asPlayer + "' left the server.");
-                        }
-                        origin = player;
-                    }
-                    // As the player itself where its connection allows, so commands that need their
-                    // sender to be a player work; each command's chat goes to its own sender (#64).
-                    PlayerChatCapture capture = origin instanceof EntityPlayerMP
-                        ? PlayerChatCapture.attach((EntityPlayerMP) origin) : null;
-                    try {
-                        // A slice of at most 25 ms of the tick, so a long list never holds one tick.
-                        long sliceEnd = System.nanoTime() + 25_000_000L;
-                        while (next[0] < commands.size() && System.nanoTime() < sliceEnd && !stopped[0]) {
-                            int index = next[0]++;
-                            String command = commands.get(index);
-                            CapturingCommandSender sender = new CapturingCommandSender(origin);
-                            if (capture != null) {
-                                capture.into(sender);
-                            }
-                            CommandUndo.Snapshot snapshot = recorder == null ? null : CommandUndo.before(sender, command, recorder);
-                            if (snapshot != null && undo[0] == null) {
-                                undo[0] = snapshot.world.provider.getDimension();
-                                undo[1] = snapshot.area();
-                                undo[2] = undo[1] == null ? null : UndoPoints.drawArea(snapshot.world, (int[]) undo[1]);
-                            }
-                            int value;
-                            boolean cancelled = false;
-                            String thrown = null;
-                            try {
-                                CommandRunner.Outcome ran = CommandRunner.run(server, origin,
-                                    capture != null ? origin : sender, command);
-                                value = ran.result;
-                                cancelled = ran.cancelled;
-                            }
-                            catch (RuntimeException e) {
-                                value = 0;
-                                thrown = String.valueOf(e.getMessage());
-                            }
-                            if (snapshot != null) {
-                                snapshot.recordChanges(recorder);
-                            }
-                            boolean ok = value != 0 && !cancelled;
-                            counts[ok ? 0 : 1]++;
-                            if (cancelled) {
-                                counts[2]++;
-                            }
-                            // With load on, every reply is read for "unloaded", so a success that skipped
-                            // its work is listed rather than counted (#106).
-                            if ((allResults || !ok || load) && results.size() < 2000 && pending.size() < 10_000) {
-                                JsonObject item = new JsonObject();
-                                item.addProperty("i", index);
-                                item.addProperty("succeeded", ok);
-                                item.addProperty("result", value);
-                                if (cancelled) {
-                                    item.addProperty("cancelled", true);
-                                }
-                                // A failure is reported to the sender both as an error and as output.
-                                Set<String> unique = new LinkedHashSet<>();
-                                if (cancelled) {
-                                    unique.add(CommandRunner.cancelledMessage(origin, capture != null));
-                                }
-                                if (thrown != null) {
-                                    unique.add(thrown);
-                                }
-                                // The output is added once the capture has it, after this slice.
-                                pending.add(new Object[] {item, unique, sender});
-                            }
-                            if (!ok && stopOnError) {
-                                stopped[0] = true;
-                            }
-                        }
-                    }
-                    finally {
-                        if (capture != null) {
-                            sliceCapture[0] = capture.detach();
-                        }
-                    }
-                    return null;
-                });
-                PlayerChatCapture.await(sliceCapture[0]);
-                sliceCapture[0] = null;
-                for (Object[] entry : pending) {
-                    JsonObject item = (JsonObject) entry[0];
-                    @SuppressWarnings("unchecked")
-                    Set<String> unique = (Set<String>) entry[1];
-                    CapturingCommandSender sender = (CapturingCommandSender) entry[2];
-                    Set<String> lines = new LinkedHashSet<>(unique);
-                    lines.addAll(sender.getErrors());
-                    lines.addAll(sender.getOutput());
-                    List<String> listed = new ArrayList<>(lines);
-                    boolean saysUnloaded = false;
-                    if (!item.get("succeeded").getAsBoolean()) {
-                        for (String line : listed) {
-                            if (line.toLowerCase(java.util.Locale.ROOT).contains("outside of the world")) {
-                                outsideWorld[0]++;
-                                break;
-                            }
-                        }
-                    }
-                    if (load) {
-                        for (String line : listed) {
-                            String lower = line.toLowerCase(java.util.Locale.ROOT);
-                            saysUnloaded |= lower.contains("unloaded") || lower.contains("not loaded");
-                        }
-                        if (saysUnloaded) {
-                            item.addProperty("saysUnloaded", true);
-                            unloadedReplies[0]++;
-                        }
-                        else if (!allResults && item.get("succeeded").getAsBoolean()) {
-                            continue;
-                        }
-                    }
-                    if (!listed.isEmpty()) {
-                        // Cut at five lines without a word, a builder's 18-line report read as a command that
-                        // stopped after its first step (#103).
-                        item.add("output", Json.arrayOfStrings(listed.size() > maxOutputLines
-                            ? listed.subList(0, maxOutputLines) : listed));
-                        if (listed.size() > maxOutputLines) {
-                            item.addProperty("outputTruncated", listed.size() - maxOutputLines);
-                        }
-                    }
-                    if (results.size() < 2000) {
-                        results.add(item);
-                    }
-                }
-                pending.clear();
-                context.reportProgress(next[0], commands.size(), "Ran " + next[0] + " of " + commands.size());
+            final CommandProfiling profiling = CommandProfiling.start(context);
+            try {
+                return runCommandsOnLoaded(context, commands, asPlayer, stopOnError, allResults, maxOutputLines,
+                    load, unreadCommands, outcome, profiling);
             }
-            JsonObject json = new JsonObject();
-            json.addProperty("commands", commands.size());
-            json.addProperty("ran", next[0]);
-            json.addProperty("succeeded", counts[0]);
-            json.addProperty("failed", counts[1]);
-            if (counts[2] > 0) {
-                json.addProperty("cancelled", counts[2]);
-            }
-            json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
-            if (next[0] < commands.size()) {
-                json.addProperty("nextIndex", next[0]);
-                json.addProperty("stopReason", stopped[0] ? "stopOnError" : "time limit for one call");
-            }
-            json.add("results", results);
-            if (outcome != null) {
-                json.add("chunks", outcome.toJson());
-                if (unreadCommands > 0) {
-                    json.addProperty("noCoordinatesRead", unreadCommands);
+            finally {
+                if (profiling != null) {
+                    profiling.stop();
                 }
             }
-            // Said at the top, not only per command: a script that checks the call returned saw a batch
-            // with failures in it as applied (#117).
-            List<String> warnings = new ArrayList<>();
-            if (counts[1] > 0) {
-                warnings.add(counts[1] + " of " + next[0] + " command(s) failed; see results."
-                    + (outsideWorld[0] > 0 ? " " + outsideWorld[0] + " of them answered 'outside of the world', "
-                        + "which vanilla says both for a y outside 0-255 and for a chunk that is not loaded: check "
-                        + "their y, and " + (load ? "for their chunks hold the area with server_keep_loaded or name "
-                        + "it with loadBoxes" : "run them with load on") + "." : ""));
-            }
-            if (outsideWorld[0] > 0) {
-                json.addProperty("outsideLoadedChunks", outsideWorld[0]);
-                long ungenerated = outcome == null ? 0L : Json.getLong(outcome.toJson(), "ungenerated", 0L);
-                if (ungenerated > 0) {
-                    warnings.add(ungenerated + " chunk(s) the commands name were never generated, and MCMCP does "
-                        + "not generate terrain (see chunks.ungeneratedChunks): a player has to go there first.");
-                }
-            }
-            if (unloadedReplies[0] > 0) {
-                warnings.add(unloadedReplies[0] + " command(s) replied that something was "
-                    + "unloaded although load was on, so their coordinates are not ones MCMCP read from the "
-                    + "text (see saysUnloaded in results). Name the area with loadBoxes, or hold it with "
-                    + "server_keep_loaded, and run them again.");
-            }
-            if (!warnings.isEmpty()) {
-                json.addProperty("warning", String.join(" ", warnings));
-            }
-            if (recorder != null && undo[0] != null) {
-                ServerUndoTools.finish(context, recorder, "server_run_commands", (Integer) undo[0], (int[]) undo[1],
-                    (BufferedImage) undo[2], json, null);
-            }
-            return ToolResult.structured(json);
         });
+    }
+
+    private static ToolResult runCommandsOnLoaded(final ToolContext context, final List<String> commands,
+                                                  final String asPlayer, final boolean stopOnError,
+                                                  final boolean allResults, final int maxOutputLines,
+                                                  final boolean load, final int unreadCommands,
+                                                  @Nullable final ChunkLoadGovernor.Outcome outcome,
+                                                  @Nullable final CommandProfiling profiling) throws Exception {
+        final long deadline = System.currentTimeMillis() + 120_000L;
+        final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
+        final Object[] undo = new Object[3];
+        // Succeeded, failed, and of the failures how many a mod cancelled.
+        final int[] counts = new int[3];
+        final JsonArray results = new JsonArray();
+        // A slice's listed results, {item, lines, sender}, finished once its capture is done.
+        final List<Object[]> pending = new ArrayList<>();
+        final java.util.concurrent.CompletableFuture<?>[] sliceCapture = new java.util.concurrent.CompletableFuture<?>[1];
+        final int[] next = {0};
+        final int[] unloadedReplies = {0};
+        final int[] outsideWorld = {0};
+        final boolean[] stopped = {false};
+        while (next[0] < commands.size() && !stopped[0]) {
+            if (System.currentTimeMillis() > deadline || context.getCancellation().isCancelled()) {
+                break;
+            }
+            // While profiling, a slow command is the one being looked for: wait it out, not 5 s.
+            context.onGameThread(() -> {
+                MinecraftServer server = ServerThreadBridge.server();
+                ICommandSender origin = server;
+                if (asPlayer != null && !asPlayer.isEmpty()) {
+                    EntityPlayerMP player = server.getPlayerList().getPlayerByUsername(asPlayer);
+                    if (player == null) {
+                        throw new IllegalStateException("'" + asPlayer + "' left the server.");
+                    }
+                    origin = player;
+                }
+                // As the player itself where its connection allows, so commands that need their
+                // sender to be a player work; each command's chat goes to its own sender (#64).
+                PlayerChatCapture capture = origin instanceof EntityPlayerMP
+                    ? PlayerChatCapture.attach((EntityPlayerMP) origin) : null;
+                try {
+                    // A slice of at most 25 ms of the tick, so a long list never holds one tick.
+                    long sliceEnd = System.nanoTime() + 25_000_000L;
+                    while (next[0] < commands.size() && System.nanoTime() < sliceEnd && !stopped[0]) {
+                        int index = next[0]++;
+                        String command = commands.get(index);
+                        CapturingCommandSender sender = new CapturingCommandSender(origin);
+                        if (capture != null) {
+                            capture.into(sender);
+                        }
+                        CommandUndo.Snapshot snapshot = recorder == null ? null : CommandUndo.before(sender, command, recorder);
+                        if (snapshot != null && undo[0] == null) {
+                            undo[0] = snapshot.world.provider.getDimension();
+                            undo[1] = snapshot.area();
+                            undo[2] = undo[1] == null ? null : UndoPoints.drawArea(snapshot.world, (int[]) undo[1]);
+                        }
+                        int value;
+                        boolean cancelled = false;
+                        String thrown = null;
+                        long startedNanos = 0L;
+                        if (profiling != null) {
+                            profiling.begin();
+                            startedNanos = System.nanoTime();
+                        }
+                        try {
+                            CommandRunner.Outcome ran = CommandRunner.run(server, origin,
+                                capture != null ? origin : sender, command);
+                            value = ran.result;
+                            cancelled = ran.cancelled;
+                        }
+                        catch (RuntimeException e) {
+                            value = 0;
+                            thrown = String.valueOf(e.getMessage());
+                        }
+                        long tookNanos = 0L;
+                        if (profiling != null) {
+                            tookNanos = System.nanoTime() - startedNanos;
+                            profiling.end();
+                            profiling.record(index, command, tookNanos);
+                        }
+                        if (snapshot != null) {
+                            snapshot.recordChanges(recorder);
+                        }
+                        boolean ok = value != 0 && !cancelled;
+                        counts[ok ? 0 : 1]++;
+                        if (cancelled) {
+                            counts[2]++;
+                        }
+                        // With load on, every reply is read for "unloaded", so a success that skipped
+                        // its work is listed rather than counted (#106).
+                        if ((allResults || !ok || load) && results.size() < 2000 && pending.size() < 10_000) {
+                            JsonObject item = new JsonObject();
+                            item.addProperty("i", index);
+                            item.addProperty("succeeded", ok);
+                            item.addProperty("result", value);
+                            if (cancelled) {
+                                item.addProperty("cancelled", true);
+                            }
+                            if (profiling != null) {
+                                item.addProperty("commandMs", DurationWindow.millis(tookNanos));
+                            }
+                            // A failure is reported to the sender both as an error and as output.
+                            Set<String> unique = new LinkedHashSet<>();
+                            if (cancelled) {
+                                unique.add(CommandRunner.cancelledMessage(origin, capture != null));
+                            }
+                            if (thrown != null) {
+                                unique.add(thrown);
+                            }
+                            // The output is added once the capture has it, after this slice.
+                            pending.add(new Object[] {item, unique, sender});
+                        }
+                        if (!ok && stopOnError) {
+                            stopped[0] = true;
+                        }
+                    }
+                }
+                finally {
+                    if (capture != null) {
+                        sliceCapture[0] = capture.detach();
+                    }
+                }
+                return null;
+            }, profiling == null ? 0L : CommandProfiling.GAME_THREAD_TIMEOUT_MILLIS);
+            PlayerChatCapture.await(sliceCapture[0]);
+            sliceCapture[0] = null;
+            for (Object[] entry : pending) {
+                JsonObject item = (JsonObject) entry[0];
+                @SuppressWarnings("unchecked")
+                Set<String> unique = (Set<String>) entry[1];
+                CapturingCommandSender sender = (CapturingCommandSender) entry[2];
+                Set<String> lines = new LinkedHashSet<>(unique);
+                lines.addAll(sender.getErrors());
+                lines.addAll(sender.getOutput());
+                List<String> listed = new ArrayList<>(lines);
+                boolean saysUnloaded = false;
+                if (!item.get("succeeded").getAsBoolean()) {
+                    for (String line : listed) {
+                        if (line.toLowerCase(java.util.Locale.ROOT).contains("outside of the world")) {
+                            outsideWorld[0]++;
+                            break;
+                        }
+                    }
+                }
+                if (load) {
+                    for (String line : listed) {
+                        String lower = line.toLowerCase(java.util.Locale.ROOT);
+                        saysUnloaded |= lower.contains("unloaded") || lower.contains("not loaded");
+                    }
+                    if (saysUnloaded) {
+                        item.addProperty("saysUnloaded", true);
+                        unloadedReplies[0]++;
+                    }
+                    else if (!allResults && item.get("succeeded").getAsBoolean()) {
+                        continue;
+                    }
+                }
+                if (!listed.isEmpty()) {
+                    // Cut at five lines without a word, a builder's 18-line report read as a command that
+                    // stopped after its first step (#103).
+                    item.add("output", Json.arrayOfStrings(listed.size() > maxOutputLines
+                        ? listed.subList(0, maxOutputLines) : listed));
+                    if (listed.size() > maxOutputLines) {
+                        item.addProperty("outputTruncated", listed.size() - maxOutputLines);
+                    }
+                }
+                if (results.size() < 2000) {
+                    results.add(item);
+                }
+            }
+            pending.clear();
+            context.reportProgress(next[0], commands.size(), "Ran " + next[0] + " of " + commands.size());
+        }
+        JsonObject json = new JsonObject();
+        json.addProperty("commands", commands.size());
+        json.addProperty("ran", next[0]);
+        json.addProperty("succeeded", counts[0]);
+        json.addProperty("failed", counts[1]);
+        if (counts[2] > 0) {
+            json.addProperty("cancelled", counts[2]);
+        }
+        json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
+        if (next[0] < commands.size()) {
+            json.addProperty("nextIndex", next[0]);
+            json.addProperty("stopReason", stopped[0] ? "stopOnError" : "time limit for one call");
+        }
+        json.add("results", results);
+        if (outcome != null) {
+            json.add("chunks", outcome.toJson());
+            if (unreadCommands > 0) {
+                json.addProperty("noCoordinatesRead", unreadCommands);
+            }
+        }
+        // Said at the top, not only per command: a script that checks the call returned saw a batch
+        // with failures in it as applied (#117).
+        List<String> warnings = new ArrayList<>();
+        if (counts[1] > 0) {
+            warnings.add(counts[1] + " of " + next[0] + " command(s) failed; see results."
+                + (outsideWorld[0] > 0 ? " " + outsideWorld[0] + " of them answered 'outside of the world', "
+                    + "which vanilla says both for a y outside 0-255 and for a chunk that is not loaded: check "
+                    + "their y, and " + (load ? "for their chunks hold the area with server_keep_loaded or name "
+                    + "it with loadBoxes" : "run them with load on") + "." : ""));
+        }
+        if (outsideWorld[0] > 0) {
+            json.addProperty("outsideLoadedChunks", outsideWorld[0]);
+            long ungenerated = outcome == null ? 0L : Json.getLong(outcome.toJson(), "ungenerated", 0L);
+            if (ungenerated > 0) {
+                warnings.add(ungenerated + " chunk(s) the commands name were never generated, and MCMCP does "
+                    + "not generate terrain (see chunks.ungeneratedChunks): a player has to go there first.");
+            }
+        }
+        if (unloadedReplies[0] > 0) {
+            warnings.add(unloadedReplies[0] + " command(s) replied that something was "
+                + "unloaded although load was on, so their coordinates are not ones MCMCP read from the "
+                + "text (see saysUnloaded in results). Name the area with loadBoxes, or hold it with "
+                + "server_keep_loaded, and run them again.");
+        }
+        if (!warnings.isEmpty()) {
+            json.addProperty("warning", String.join(" ", warnings));
+        }
+        if (recorder != null && undo[0] != null) {
+            ServerUndoTools.finish(context, recorder, "server_run_commands", (Integer) undo[0], (int[]) undo[1],
+                (BufferedImage) undo[2], json, null);
+        }
+        if (profiling != null) {
+            profiling.finish(context, json);
+        }
+        return ToolResult.structured(json);
     }
 }

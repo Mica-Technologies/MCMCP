@@ -587,6 +587,18 @@ case "$LOADBOX_BODY" in
   *'"chunks":{"inBox":1,'*'"noCoordinatesRead":1'*) echo "    loadBoxes held a chunk no command named, and said none was read from the text" ;;
   *) mcp_failure "loadBoxes did not load its box: ${LOADBOX_BODY}" ;;
 esac
+PROF_BODY="$(mcp_call 611 server_run_command "{\"command\":\"fill ${SPAWN_X} $((UNDO_Y + 20)) ${SPAWN_Z} $((SPAWN_X + 15)) $((UNDO_Y + 23)) $((SPAWN_Z + 15)) minecraft:stone\",\"profile\":{\"interval_ms\":1}}")" \
+  || mcp_failure "server_run_command with profile failed: ${PROF_BODY}"
+case "$PROF_BODY" in
+  *'"tickMs":'*'"commandMs":'*'"sample":{"scope":"commands"'*) echo "    profile measured the command's tick and its own time, and sampled it" ;;
+  *) mcp_failure "server_run_command's profile did not report tickMs, commandMs and a sample: ${PROF_BODY}" ;;
+esac
+PROFS_BODY="$(mcp_call 612 server_run_commands "{\"commands\":[\"fill ${SPAWN_X} $((UNDO_Y + 20)) ${SPAWN_Z} $((SPAWN_X + 15)) $((UNDO_Y + 23)) $((SPAWN_Z + 15)) minecraft:air\",\"say profiled\"],\"profile\":{}}")" \
+  || mcp_failure "server_run_commands with profile failed: ${PROFS_BODY}"
+case "$PROFS_BODY" in
+  *'"tickMs":'*'"slowestCommands":[{"i":0,'*'"sample":{'*) echo "    a profiled batch names its slowest command, the fill" ;;
+  *) mcp_failure "server_run_commands' profile did not report the slowest command: ${PROFS_BODY}" ;;
+esac
 
 echo "==> Tile entities: one call reads a box's, filtered, projected and paged"
 TX=$((SPAWN_X + 12)); TY=$((UNDO_Y + 8)); TZ=$((SPAWN_Z + 12))

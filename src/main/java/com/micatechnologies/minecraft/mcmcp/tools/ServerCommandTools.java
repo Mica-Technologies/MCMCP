@@ -59,11 +59,15 @@ public final class ServerCommandTools {
                 + "did not change'. /setblock with a block state replaces the tile entity and loses "
                 + "its data; change tile-entity data with /blockdata, or server_set_block's nbt. "
                 + "SNBT has no \\n escape: for a line break inside a string, put a literal line feed "
-                + "in the command.")
+                + "in the command.\n\n"
+                + "To find out why a command stalls the server, pass profile: {}. The result adds tickMs, "
+                + "commandMs and a stack sample of the command (see game_cpu_sample), and waits up to 60 s "
+                + "for a slow command rather than timing out.")
             .schema(JsonSchema.object()
                 .string("command", "The command to run, e.g. 'time set day' or '/give Steve stone 64'.")
                 .string("asPlayer", "Username to run the command as. Omit to run with console "
                     + "authority.")
+                .object("profile", CommandProfiling.DESCRIPTION, CommandProfiling.schema())
                 .required("command")
                 .build())
             .serverOnly()
@@ -94,94 +98,120 @@ public final class ServerCommandTools {
                 // The command's output, complete once the capture (when it ran as the player) is done.
                 final CapturingCommandSender[] collected = new CapturingCommandSender[1];
                 final java.util.concurrent.CompletableFuture<?>[] captured = new java.util.concurrent.CompletableFuture<?>[1];
-
-                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
-                    @Override
-                    public JsonObject call() {
-                        MinecraftServer server = ServerThreadBridge.server();
-                        if (server == null) {
-                            throw new IllegalStateException("No Minecraft server is running");
-                        }
-
-                        ICommandSender origin = server;
-                        if (asPlayer != null && !asPlayer.isEmpty()) {
-                            EntityPlayerMP player = server.getPlayerList().getPlayerByUsername(asPlayer);
-                            if (player == null) {
-                                throw new IllegalStateException("No player named '" + asPlayer
-                                    + "' is connected.");
+                final CommandProfiling profiling = CommandProfiling.start(context);
+                try {
+                    Callable<JsonObject> task = new Callable<JsonObject>() {
+                        @Override
+                        public JsonObject call() {
+                            MinecraftServer server = ServerThreadBridge.server();
+                            if (server == null) {
+                                throw new IllegalStateException("No Minecraft server is running");
                             }
-                            origin = player;
-                        }
 
-                        CapturingCommandSender sender = new CapturingCommandSender(origin);
-                        CommandUndo.Snapshot snapshot = recorder == null ? null
-                            : CommandUndo.before(sender, command, recorder);
-                        if (snapshot != null) {
-                            int[] area = snapshot.area();
-                            undo[0] = snapshot.world.provider.getDimension();
-                            undo[1] = area;
-                            undo[2] = area == null ? null : UndoPoints.drawArea(snapshot.world, area);
-                        }
-                        collected[0] = sender;
-                        // As the player itself where its connection allows, so a command that needs
-                        // its sender to be a player works; its chat comes back here instead (#64).
-                        PlayerChatCapture capture = origin instanceof EntityPlayerMP
-                            ? PlayerChatCapture.attach((EntityPlayerMP) origin) : null;
-                        CommandRunner.Outcome outcome;
-                        if (capture != null) {
-                            capture.into(sender);
+                            ICommandSender origin = server;
+                            if (asPlayer != null && !asPlayer.isEmpty()) {
+                                EntityPlayerMP player = server.getPlayerList().getPlayerByUsername(asPlayer);
+                                if (player == null) {
+                                    throw new IllegalStateException("No player named '" + asPlayer
+                                        + "' is connected.");
+                                }
+                                origin = player;
+                            }
+
+                            CapturingCommandSender sender = new CapturingCommandSender(origin);
+                            CommandUndo.Snapshot snapshot = recorder == null ? null
+                                : CommandUndo.before(sender, command, recorder);
+                            if (snapshot != null) {
+                                int[] area = snapshot.area();
+                                undo[0] = snapshot.world.provider.getDimension();
+                                undo[1] = area;
+                                undo[2] = area == null ? null : UndoPoints.drawArea(snapshot.world, area);
+                            }
+                            collected[0] = sender;
+                            // As the player itself where its connection allows, so a command that needs
+                            // its sender to be a player works; its chat comes back here instead (#64).
+                            PlayerChatCapture capture = origin instanceof EntityPlayerMP
+                                ? PlayerChatCapture.attach((EntityPlayerMP) origin) : null;
+                            CommandRunner.Outcome outcome;
+                            long startedNanos = 0L;
+                            if (profiling != null) {
+                                profiling.begin();
+                                startedNanos = System.nanoTime();
+                            }
                             try {
-                                outcome = CommandRunner.run(server, origin, origin, command);
+                                if (capture != null) {
+                                    capture.into(sender);
+                                    try {
+                                        outcome = CommandRunner.run(server, origin, origin, command);
+                                    }
+                                    finally {
+                                        captured[0] = capture.detach();
+                                    }
+                                }
+                                else {
+                                    outcome = CommandRunner.run(server, origin, sender, command);
+                                }
                             }
                             finally {
-                                captured[0] = capture.detach();
+                                if (profiling != null) {
+                                    profiling.record(0, command, System.nanoTime() - startedNanos);
+                                    profiling.end();
+                                }
                             }
-                        }
-                        else {
-                            outcome = CommandRunner.run(server, origin, sender, command);
-                        }
-                        if (snapshot != null) {
-                            snapshot.recordChanges(recorder);
-                        }
+                            if (snapshot != null) {
+                                snapshot.recordChanges(recorder);
+                            }
 
-                        JsonObject json = new JsonObject();
-                        json.addProperty("command", command);
-                        json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
-                        // Minecraft's convention: 0 means the command did not succeed. It is not an
-                        // error code — the reason, when there is one, is in the captured output.
-                        json.addProperty("result", outcome.result);
-                        json.addProperty("succeeded", outcome.succeeded());
-                        if (outcome.cancelled) {
-                            json.addProperty("cancelled", true);
-                            json.addProperty("error", CommandRunner.cancelledMessage(origin, capture != null));
+                            JsonObject json = new JsonObject();
+                            json.addProperty("command", command);
+                            json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
+                            // Minecraft's convention: 0 means the command did not succeed. It is not an
+                            // error code — the reason, when there is one, is in the captured output.
+                            json.addProperty("result", outcome.result);
+                            json.addProperty("succeeded", outcome.succeeded());
+                            if (outcome.cancelled) {
+                                json.addProperty("cancelled", true);
+                                json.addProperty("error", CommandRunner.cancelledMessage(origin, capture != null));
+                            }
+                            return json;
                         }
-                        return json;
+                    };
+                    JsonObject result = profiling == null ? context.onGameThread(task)
+                        : context.onGameThread(task, CommandProfiling.GAME_THREAD_TIMEOUT_MILLIS);
+
+                    PlayerChatCapture.await(captured[0]);
+                    CapturingCommandSender sender = collected[0];
+                    if (!result.has("cancelled") && !sender.getErrors().isEmpty()) {
+                        result.addProperty("error", String.join("\n", sender.getErrors()));
                     }
-                });
+                    JsonArray lines = new JsonArray();
+                    for (String line : sender.getOutput()) {
+                        lines.add(line);
+                    }
+                    result.add("output", lines);
 
-                PlayerChatCapture.await(captured[0]);
-                CapturingCommandSender sender = collected[0];
-                if (!result.has("cancelled") && !sender.getErrors().isEmpty()) {
-                    result.addProperty("error", String.join("\n", sender.getErrors()));
-                }
-                JsonArray lines = new JsonArray();
-                for (String line : sender.getOutput()) {
-                    lines.add(line);
-                }
-                result.add("output", lines);
+                    if (recorder != null && undo[0] != null) {
+                        ServerUndoTools.finish(context, recorder, "server_run_command", (Integer) undo[0],
+                            (int[]) undo[1], (java.awt.image.BufferedImage) undo[2], result, null);
+                    }
 
-                if (recorder != null && undo[0] != null) {
-                    ServerUndoTools.finish(context, recorder, "server_run_command", (Integer) undo[0],
-                        (int[]) undo[1], (java.awt.image.BufferedImage) undo[2], result, null);
+                    String output = result.has("cancelled") ? String.join("\n", result.get("error").getAsString(),
+                            String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json.getStringList(result, "output"))).trim()
+                        : result.get("output").getAsJsonArray().size() == 0
+                        ? "(the command produced no output)"
+                        : String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json
+                            .getStringList(result, "output"));
+                    if (profiling != null) {
+                        profiling.finish(context, result);
+                        output += "\n\n" + CommandProfiling.summaryLine(result);
+                    }
+                    return ToolResult.text(output).withStructured(result);
                 }
-
-                String output = result.has("cancelled") ? String.join("\n", result.get("error").getAsString(),
-                        String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json.getStringList(result, "output"))).trim()
-                    : result.get("output").getAsJsonArray().size() == 0
-                    ? "(the command produced no output)"
-                    : String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json
-                        .getStringList(result, "output"));
-                return ToolResult.text(output).withStructured(result);
+                finally {
+                    if (profiling != null) {
+                        profiling.stop();
+                    }
+                }
             })
             .build());
     }

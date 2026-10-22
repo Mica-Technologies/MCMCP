@@ -53,6 +53,8 @@ public class ToolContext {
     private final GameThreadBridge gameThread;
     private final McpSession.CancellationToken cancellation;
     private final long gameThreadTimeoutMillis;
+    /** Set for the length of one {@link #onGameThread(Callable, long)} call; 0 otherwise. */
+    private long extendedTimeoutMillis;
 
     @Nullable
     private final JsonElement progressToken;
@@ -208,6 +210,7 @@ public class ToolContext {
      * and return {@link ToolResult#error} instead of letting it propagate.
      */
     public <T> T onGameThread(Callable<T> task) {
+        final long timeoutMillis = Math.max(gameThreadTimeoutMillis, extendedTimeoutMillis);
         cancellation.throwIfCancelled();
         if (mutating && com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
             throw new JsonRpcException(JsonRpcException.INTERNAL_ERROR,
@@ -231,7 +234,7 @@ public class ToolContext {
             }
         };
         try {
-            return gameThread.callOnGameThread(observed, gameThreadTimeoutMillis);
+            return gameThread.callOnGameThread(observed, timeoutMillis);
         }
         catch (JsonRpcException e) {
             throw e;
@@ -243,6 +246,22 @@ public class ToolContext {
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             throw new JsonRpcException(JsonRpcException.INTERNAL_ERROR,
                 "Game thread task failed: " + message);
+        }
+    }
+
+    /**
+     * As {@link #onGameThread(Callable)}, waiting at least {@code minTimeoutMillis} for the result:
+     * for a task the caller has asked to measure, which is likeliest to be the slow one. Goes through
+     * {@link #onGameThread(Callable)}, so a subclass's gate on it still applies.
+     */
+    public <T> T onGameThread(Callable<T> task, long minTimeoutMillis) {
+        long previous = extendedTimeoutMillis;
+        extendedTimeoutMillis = Math.max(previous, minTimeoutMillis);
+        try {
+            return onGameThread(task);
+        }
+        finally {
+            extendedTimeoutMillis = previous;
         }
     }
 
