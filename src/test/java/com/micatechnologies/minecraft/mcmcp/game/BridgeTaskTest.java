@@ -109,6 +109,40 @@ class BridgeTaskTest {
     }
 
     @Test
+    void aTaskDroppedBeforeItStartedTellsItsCallerAtOnceAndNeverRuns() {
+        AtomicBoolean ran = new AtomicBoolean();
+        BridgeTask<String> task = new BridgeTask<>(() -> {
+            ran.set(true);
+            return "done";
+        }, null);
+        assertTrue(task.drop("the server stopped"));
+        long before = System.nanoTime();
+        BridgeTask.Dropped dropped = assertThrows(BridgeTask.Dropped.class, () -> task.await(60_000L, null));
+        assertEquals("the server stopped", dropped.getMessage());
+        assertTrue(System.nanoTime() - before < TimeUnit.SECONDS.toNanos(10), "not the minute");
+        assertFalse(task.tryRun(), "it does nothing when the queue reaches it after all");
+        assertFalse(ran.get());
+    }
+
+    @Test
+    void aTaskAlreadyRunningCannotBeDropped() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        BridgeTask<String> task = new BridgeTask<>(() -> {
+            started.countDown();
+            release.await();
+            return "done";
+        }, null);
+        Thread game = new Thread(task);
+        game.start();
+        assertTrue(started.await(5, TimeUnit.SECONDS));
+        assertFalse(task.drop("too late"));
+        release.countDown();
+        assertEquals("done", task.await(5_000L, null));
+        game.join();
+    }
+
+    @Test
     void aTaskThatThrowsTellsItsCallerAndNothingEscapesOntoTheGameThread() {
         BridgeTask<String> task = new BridgeTask<>(() -> {
             throw new IllegalStateException("broken");

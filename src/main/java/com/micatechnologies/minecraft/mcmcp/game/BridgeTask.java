@@ -84,6 +84,19 @@ public final class BridgeTask<T> implements Runnable {
         }
     }
 
+    /**
+     * The task was dropped before it started, by whatever drains the queue — the server stopping —
+     * so it never ran.
+     */
+    public static final class Dropped extends Exception {
+
+        private static final long serialVersionUID = 1L;
+
+        Dropped(String why) {
+            super(why);
+        }
+    }
+
     /** How often a caller that can be cancelled looks at its cancellation while it waits. */
     private static final long CANCEL_POLL_NANOS = 100_000_000L;
 
@@ -114,8 +127,16 @@ public final class BridgeTask<T> implements Runnable {
      */
     @Override
     public void run() {
+        tryRun();
+    }
+
+    /**
+     * As {@link #run()}, saying whether the task ran: false for one its caller abandoned, which cost
+     * nothing and does not count against a tick's budget.
+     */
+    public boolean tryRun() {
         if (!state.compareAndSet(State.PENDING, State.RUNNING)) {
-            return;
+            return false;
         }
         startedNanos = System.nanoTime();
         T value;
@@ -125,11 +146,11 @@ public final class BridgeTask<T> implements Runnable {
         catch (Throwable t) {
             state.compareAndSet(State.RUNNING, State.DONE);
             result.completeExceptionally(t);
-            return;
+            return true;
         }
         if (state.compareAndSet(State.RUNNING, State.DONE)) {
             result.complete(value);
-            return;
+            return true;
         }
         // Orphaned: the caller left while this ran. Nobody will read the value; the cleanup may need it.
         result.complete(value);
@@ -141,6 +162,21 @@ public final class BridgeTask<T> implements Runnable {
                 // The cleanup's own business; it must not take the game thread down with it.
             }
         }
+        return true;
+    }
+
+    /**
+     * Drops a task that has not started, so it never will, and its caller hears {@link Dropped} at
+     * once instead of waiting out its timeout. Does nothing to one already running or done.
+     *
+     * @return whether it was dropped
+     */
+    public boolean drop(String why) {
+        if (!state.compareAndSet(State.PENDING, State.ABANDONED)) {
+            return false;
+        }
+        result.completeExceptionally(new Dropped(why));
+        return true;
     }
 
     /**
@@ -153,6 +189,7 @@ public final class BridgeTask<T> implements Runnable {
      * @throws NotStarted                if the time ran out before the task started; it never will
      * @throws StartedNotFinished        if the time ran out while it was running
      * @throws CancellationException     if cancelled before it started
+     * @throws Dropped                   if the queue dropped it before it started
      * @throws java.util.concurrent.ExecutionException if the task threw
      */
     public T await(long timeoutMillis, @Nullable BooleanSupplier cancelled) throws Exception {
@@ -162,6 +199,12 @@ public final class BridgeTask<T> implements Runnable {
             long wait = cancelled == null ? left : Math.min(left, CANCEL_POLL_NANOS);
             try {
                 return result.get(Math.max(0L, wait), TimeUnit.NANOSECONDS);
+            }
+            catch (java.util.concurrent.ExecutionException failed) {
+                if (failed.getCause() instanceof Dropped) {
+                    throw (Dropped) failed.getCause();
+                }
+                throw failed;
             }
             catch (TimeoutException waiting) {
                 boolean cancel = cancelled != null && cancelled.getAsBoolean();
