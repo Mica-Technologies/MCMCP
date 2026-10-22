@@ -360,7 +360,14 @@ public class ToolContext {
         catch (java.util.concurrent.CancellationException e) {
             throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, e.getMessage());
         }
+        catch (BridgeTask.StartedNotFinished e) {
+            // It started, so it is not safe to resend, and the agent must hear that. As a JSON-RPC timeout
+            // the client's plumbing ate it and the model resent the identical call, which is how #132
+            // piled up: a tool error says plainly that the effect is unknown and to look first.
+            throw ToolBusyException.startedNotFinished(e.timeoutMillis(), e.ranForMillis());
+        }
         catch (java.util.concurrent.TimeoutException e) {
+            // The client bridge, which cannot tell a task that started from one that did not.
             throw new JsonRpcException(JsonRpcException.REQUEST_TIMED_OUT, e.getMessage());
         }
         catch (Exception e) {

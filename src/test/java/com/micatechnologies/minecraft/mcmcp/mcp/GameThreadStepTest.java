@@ -29,6 +29,8 @@ class GameThreadStepTest {
     private static final class Bridge implements GameThreadBridge {
 
         boolean neverStarts;
+        boolean overruns;
+        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
         long timeoutMillis;
         TaskCaller caller;
         BooleanSupplier cancelled;
@@ -54,6 +56,20 @@ class GameThreadStepTest {
             this.timeoutMillis = timeoutMillis;
             this.caller = caller;
             this.cancelled = cancelled;
+            if (overruns) {
+                // A task the game thread starts and is still running when the caller's wait runs out.
+                final java.util.concurrent.CountDownLatch started = new java.util.concurrent.CountDownLatch(1);
+                BridgeTask<T> running = new BridgeTask<>(() -> {
+                    started.countDown();
+                    release.await();
+                    return task.call();
+                }, null);
+                Thread game = new Thread(running, "test-game-thread");
+                game.setDaemon(true);
+                game.start();
+                started.await();
+                return running.await(20L, null);
+            }
             if (neverStarts) {
                 // A real task the game thread never reaches, so the caller's wait runs out before it starts.
                 return new BridgeTask<>(task, null).await(1L, null);
@@ -78,7 +94,25 @@ class GameThreadStepTest {
 
     @AfterEach
     void healthy() {
+        bridge.release.countDown();
         ServerLoad.reset();
+    }
+
+    @Test
+    void aStepThatStartedAndDidNotFinishInTimeIsAToolErrorSayingItsEffectIsUnknown() {
+        bridge.overruns = true;
+        // Not a JSON-RPC timeout: the client's plumbing eats those, and the model resends the call (#132).
+        ToolBusyException busy = assertThrows(ToolBusyException.class, () -> context.onGameThread(() -> 1));
+        assertFalse(busy.nothingRan(), "it started, so neither a job nor the agent may simply try it again");
+        assertTrue(busy.getMessage().contains("effect is not known"), busy.getMessage());
+        assertTrue(busy.getMessage().contains("Check the world"), busy.getMessage());
+        ToolResult result = busy.toResult();
+        assertTrue(result.isError());
+        JsonObject block = result.getStructuredContent().getAsJsonObject("busy");
+        assertEquals("started_not_finished", block.get("reason").getAsString());
+        assertTrue(block.get("effectUnknown").getAsBoolean());
+        assertFalse(block.has("retryAfterMs"), "no wait after which a resend would be safe");
+        assertTrue(block.has("ranForMs"));
     }
 
     @Test

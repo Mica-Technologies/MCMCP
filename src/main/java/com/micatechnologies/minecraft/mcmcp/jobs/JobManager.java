@@ -306,8 +306,8 @@ public final class JobManager {
             String text = String.valueOf(result.getText());
             return text.contains("chunks loaded") || text.contains("too busy") ? 5000L : -1L;
         }
-        // Part of it ran, so running the part again would do that part twice.
-        if (Json.getBoolean(busy, "earlierStepsRan", false)) {
+        // Part of it ran, or may have, so running the part again would do that part twice.
+        if (Json.getBoolean(busy, "earlierStepsRan", false) || Json.getBoolean(busy, "effectUnknown", false)) {
             return -1L;
         }
         long wait = Json.getLong(busy, "retryAfterMs", 5000L);

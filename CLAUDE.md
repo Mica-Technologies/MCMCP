@@ -152,7 +152,11 @@ This distinction is the thing most likely to be got wrong when adding a tool.
 
 A JSON-RPC error is eaten by the client's plumbing and frequently never reaches the model, which then
 retries the identical call forever. `McpDispatcher.handleToolsCall` converts a handler's
-`JsonRpcException` into a tool error, except for cancellation and timeout.
+`JsonRpcException` into a tool error, except for cancellation and a client-thread timeout (the client
+bridge cannot tell a task that started from one that did not). On the server every timeout is a
+`ToolBusyException` tool error: a step that never started says nothing changed and when to retry; one
+that started and did not finish says `busy.effectUnknown` and to check the world before retrying.
+As a `-32006` it had models resending writes that were still running.
 
 ### Registry and side filtering
 

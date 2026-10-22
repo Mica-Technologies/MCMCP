@@ -417,17 +417,18 @@ public class McpDispatcher {
             return reply;
         }
         catch (JsonRpcException e) {
-            // Too busy to run it: a tool error with its structured busy block, so the agent waits
-            // retryAfterMs instead of resending at once (#132).
+            // Too busy to run it, or a step that started and did not finish in time: a tool error with its
+            // structured busy block, so the agent waits retryAfterMs, or looks at the world first, instead
+            // of resending at once (#132).
             if (e instanceof ToolBusyException) {
-                status = "busy";
+                status = ((ToolBusyException) e).nothingRan() ? "busy" : "timeout";
                 result = ((ToolBusyException) e).toResult();
                 reply = result.toJson(session.getProtocolVersion());
                 return reply;
             }
-            // Cancellation and timeouts stay protocol errors — the client's plumbing needs to see
-            // those. Everything else that a handler threw describes a failed *action*, which per
-            // spec belongs in the result so the model can read it and adapt.
+            // Cancellation stays a protocol error, and so does a client-thread timeout, where the bridge
+            // cannot say whether the task started. Everything else that a handler threw describes a
+            // failed *action*, which per spec belongs in the result so the model can read it and adapt.
             if (e.getCode() == JsonRpcException.REQUEST_CANCELLED) {
                 status = "cancelled";
                 throw e;

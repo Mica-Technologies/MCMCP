@@ -106,8 +106,9 @@ add notifications older servers must tolerate.
 running handler thread** — a half-applied world mutation is worse than a slightly late cancellation —
 so long-running tools check the token between steps.
 
-Cancellation and timeouts are the only handler failures reported as JSON-RPC errors. Everything else
-becomes a tool result with `isError: true`.
+Cancellation, and on the client endpoint a timeout, are the only handler failures reported as
+JSON-RPC errors. Everything else becomes a tool result with `isError: true`, including a server step
+that started and did not finish in time (below).
 
 On the server endpoint, a cancellation that arrives while a step is still queued for the server
 thread drops that step: it never runs. One that arrives while a step is running waits for it, since
@@ -121,8 +122,9 @@ This distinction matters more than any other in the implementation:
 | --- | --- |
 | Malformed request, unknown method, missing required parameter | JSON-RPC `error` |
 | Session unknown, expired, or not initialized | JSON-RPC `error` |
-| Request cancelled, or a step that had started timed out | JSON-RPC `error` |
+| Request cancelled, or a client-thread step timed out | JSON-RPC `error` |
 | The server thread never started a step in time (overloaded) | Tool error with a `busy` block |
+| The server thread started a step and had not finished it in time | Tool error with a `busy` block, `effectUnknown: true` |
 | The server is paused or stalled and the call would change the world | Tool error with a `busy` block, before it runs |
 | **Tool ran and the action failed** | **Successful response with `isError: true`** |
 
@@ -139,8 +141,13 @@ On the server endpoint every step a tool hands to the server thread is one of tw
   call may have changed the world in part: look before retrying it. A step that finishes a write
   already made, such as saving its undo point, goes to the front of the server's queue and waits up
   to 60 s instead, so the write is not left without its undo point.
-- **It had started.** It runs to its end, and the call is the `-32006` timeout as before. Its
-  message says the step started and that what it changed is not known, so look before retrying.
+- **It had started.** It runs to its end, since nothing can stop it halfway, and the call is a tool
+  error whose structured content is `{"busy": {"reason": "started_not_finished", "effectUnknown":
+  true, "ranForMs": 5003, "timeoutMs": 5000, "health": "ok", ...}}`, with no `retryAfterMs`. Its
+  message says plainly that the step's effect is not known, that some, all or none of it may have
+  happened, and to check the world before retrying, or it may be done twice. Background jobs do not
+  retry it either: the part fails. Until #133 this was a `-32006` JSON-RPC timeout, which clients
+  often swallowed, so the model resent the identical call.
 
 While the server is `paused` (mean tick over [`health.refuseWritesMspt`](configuration.md#health),
 100 ms by default, or short of memory) or `stalled` (its thread has
@@ -170,7 +177,7 @@ named does not exist" from "your request was shaped wrong":
 | `-32003` | Tool not found |
 | `-32004` | Prompt not found |
 | `-32005` | Request cancelled |
-| `-32006` | Request timed out |
+| `-32006` | Request timed out (the client endpoint only) |
 
 ## Transport
 

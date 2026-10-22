@@ -77,10 +77,24 @@ public final class BridgeTask<T> implements Runnable {
 
         private static final long serialVersionUID = 1L;
 
+        private final long timeoutMillis;
+        private final long ranForMillis;
+
         StartedNotFinished(long timeoutMillis, long ranForMillis) {
             super("The game thread started this call's work but had not finished it after " + timeoutMillis
                 + " ms (it had been running for " + ranForMillis + " ms). It may still finish, so what it "
                 + "changed is not known: look before you retry.");
+            this.timeoutMillis = timeoutMillis;
+            this.ranForMillis = ranForMillis;
+        }
+
+        public long timeoutMillis() {
+            return timeoutMillis;
+        }
+
+        /** How long it had been running when its caller stopped waiting. */
+        public long ranForMillis() {
+            return ranForMillis;
         }
     }
 
