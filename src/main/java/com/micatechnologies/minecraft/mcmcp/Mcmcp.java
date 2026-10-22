@@ -148,6 +148,9 @@ public class Mcmcp {
     public void serverStarting(FMLServerStartingEvent event) {
         // Anything offered between servers was for the last one.
         com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.open();
+        // Before the first tick, whether or not the endpoint is on: whoever turns the profiler on
+        // later, an unbalanced endSection must not take the server down (#134).
+        com.micatechnologies.minecraft.mcmcp.tools.PerformanceTools.guardServerProfiler(event.getServer());
         event.registerServerCommand(new CommandMcmcp());
         CompanionServer.serverStarting(event.getServer());
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStarting();

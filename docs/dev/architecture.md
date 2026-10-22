@@ -233,6 +233,12 @@ it honours at the top of the next tick; the client is asked by forcing `showDebu
 which is why `client_profile_sections` visibly shows F3 and the pie chart while it runs. Disabling
 mid-tick is safe, and is what `/debug stop` does.
 
+Even enabled correctly, a mod that skips its `startSection` while profiling is off and still calls
+`endSection` pops an empty stack. `perf/ProfilerGuard` swaps the profiler's lists for
+`GuardedStack`s, which absorb that pop and count it: the client's before its section profile, the
+server's at server start and for good, with the server thread as owner so that profiler calls from
+any other thread are ignored too.
+
 **`TimeTracker` is static and its call site is in base `World`**, so in singleplayer the client world
 feeds the same tracker from the client thread. Results are filtered on `!world.isRemote`. Its
 `getAverageTimings()` divides by a fixed 99 whether or not the ring is full, so the tools average the

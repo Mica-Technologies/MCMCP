@@ -1173,6 +1173,12 @@ levels 98.2% 5.3ms
       randomTick 10.3% 0.56ms
 ```
 
+The server profiler's section stacks are guarded from server start, whether or not the endpoint is
+on and whoever turns profiling on (this tool, `/debug`, spark): an `endSection` that closes a section
+never opened, which used to crash the server, is ignored, and so is any profiler call from a thread
+other than the server's (an asynchronous world editor). A `NOTE` line above the tree counts either,
+since the sections around them may be misattributed.
+
 This is where scheduled and random block ticks show up (`tickPending`, `tickBlocks`), and block
 entities are broken down by registry key under `blockEntities`. `unspecified` is time spent in a
 section but in none of its sub-sections. The profiler reports shares only; the milliseconds are the

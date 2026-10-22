@@ -19,6 +19,7 @@ import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
 import com.micatechnologies.minecraft.mcmcp.perf.GameThreads;
 import com.micatechnologies.minecraft.mcmcp.perf.GcPauseLog;
 import com.micatechnologies.minecraft.mcmcp.perf.HeapHistogram;
+import com.micatechnologies.minecraft.mcmcp.perf.ProfilerGuard;
 import com.micatechnologies.minecraft.mcmcp.perf.SlowTickFilter;
 import com.micatechnologies.minecraft.mcmcp.perf.StallDetector;
 import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
@@ -1165,7 +1166,10 @@ public final class PerformanceTools {
                 + "and approximate ms per tick: each dimension, its entities, block entities by "
                 + "type, chunk ticking, scheduled block updates, and so on. Use it to find which "
                 + "phase is slow when server_profile_ticking does not explain the tick — "
-                + "scheduled and random block ticks only show up here. Blocks for the duration.")
+                + "scheduled and random block ticks only show up here. Blocks for the duration. "
+                + "The server profiler is guarded from server start: a mod's unbalanced endSection, "
+                + "or a profiler call from another thread, is ignored and counted in a NOTE line "
+                + "rather than crashing the server.")
             .schema(sectionSchema())
             .serverOnly()
             .readOnly()
@@ -1180,6 +1184,10 @@ public final class PerformanceTools {
                     @Override
                     public Boolean call() {
                         MinecraftServer server = requireServer();
+                        // Already guarded at server start; this covers a server started before
+                        // the guard could be put in, and is a no-op otherwise.
+                        guardServerProfiler(server);
+                        ProfilerGuard.take(server.profiler);
                         if (server.profiler.profilingEnabled) {
                             return true;
                         }
@@ -1199,8 +1207,11 @@ public final class PerformanceTools {
                         public String call() {
                             double meanTickMs = DurationWindow.millis(
                                 ServerTickRecorder.ticks().summariseSince(startedNanos).meanNanos());
-                            return "# percent of tick, ~ms per tick (mean tick " + meanTickMs + " ms)\n"
-                                + renderSections(requireServer().profiler, meanTickMs, minPercent, maxDepth);
+                            Profiler profiler = requireServer().profiler;
+                            String rendered = renderSections(profiler, meanTickMs, minPercent, maxDepth);
+                            return guardNotes(ProfilerGuard.take(profiler))
+                                + "# percent of tick, ~ms per tick (mean tick " + meanTickMs + " ms)\n"
+                                + rendered;
                         }
                     });
                     return ToolResult.text(tree);
@@ -1221,6 +1232,35 @@ public final class PerformanceTools {
                 }
             })
             .build());
+    }
+
+    /**
+     * Guards the server profiler's section stacks for the life of the server (#134), so that no
+     * profiler user — this tool, '/debug', spark, or anything else that turns it on — can crash
+     * the server with an unbalanced endSection. Called from server start, on the server thread,
+     * before any tick: the stacks are empty and no profiler call is in progress. Off that thread
+     * no owner is set, so only the empty-pop guard applies.
+     */
+    public static void guardServerProfiler(MinecraftServer server) {
+        Thread owner = server.isCallingFromMinecraftThread() ? Thread.currentThread() : null;
+        if (ProfilerGuard.install(server.profiler, owner) == 0) {
+            com.micatechnologies.minecraft.mcmcp.Mcmcp.LOGGER.warn(
+                "Could not guard the server profiler; an unbalanced endSection can still crash the server");
+        }
+    }
+
+    private static String guardNotes(ProfilerGuard.Counts counts) {
+        String notes = "";
+        if (counts.underflows > 0) {
+            notes += "# NOTE: " + counts.underflows + " endSection call(s) closed a section that was never "
+                + "opened (a mod that skips startSection while profiling is off). Ignored rather than "
+                + "crash the server; nearby sections may be misattributed.\n";
+        }
+        if (counts.foreign > 0) {
+            notes += "# NOTE: " + counts.foreign + " profiler call(s) came from a thread other than the "
+                + "server's (an asynchronous mod) and were ignored.\n";
+        }
+        return notes;
     }
 
     /** Shared by the client's section profile, which takes the same three arguments. */
