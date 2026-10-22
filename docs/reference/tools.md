@@ -605,7 +605,7 @@ entity can lag the server's by minutes.
 
 #### `server_count_blocks`
 
-:material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `include`, `exclude`, `includeAir`, `byState`, `samples`, `limit`, `load`
+:material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `include`, `exclude`, `includeAir`, `byState`, `samples`, `limit`, `extents`, `byY`, `load`
 
 Counts the blocks in a box by type, on the server, without listing them. Use it for "is anything but
 terrain in this footprint?" or "how many signal heads are in this district?" over up to 4,096
@@ -619,6 +619,10 @@ short slices with ticks between them.
 - The reply lists `blocks` most first, each with its `count` and up to `samples` (default 3)
   positions as `[x, y, z]`. `counted` is the total, and `typesNotListed` says how many types fell
   past `limit`.
+- `extents: true` adds each block's bounding box as `min` and `max`, each `[x, y, z]`: where in the
+  footprint a block lives, without reading every cell.
+- `byY: true` adds each block's count per layer as `byY: [[y, count], ...]`, only the layers that
+  have any: counts per floor.
 - Unloaded chunks are not counted and appear in the `chunks` block. `load: true` counts them.
 
 ```json

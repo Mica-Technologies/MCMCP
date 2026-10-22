@@ -108,9 +108,9 @@ public final class ServerAreaTools {
             .description("Count the blocks in a box by type, on the server, without listing them: 'how many "
                 + "X are here' or 'is anything but terrain in this footprint' over a whole district in one "
                 + "call. 'include' and 'exclude' take ids, namespaces ending in ':' or patterns with '*' anywhere. "
-                + "Returns counts per block id, most first, with a few sample positions of each. Air is left "
-                + "out unless includeAir. Unloaded chunks are listed and not counted; pass load: true to count "
-                + "them.")
+                + "Returns counts per block id, most first, with a few sample positions of each; 'extents' adds "
+                + "where each lives (min and max corner), 'byY' its count per layer. Air is left out unless "
+                + "includeAir. Unloaded chunks are listed and not counted; pass load: true to count them.")
             .schema(boxSchema(JsonSchema.object())
                 .array("include", "Only count these blocks.", Json.obj("type", "string"))
                 .array("exclude", "Never count these blocks, e.g. the natural ones.", Json.obj("type", "string"))
@@ -118,6 +118,9 @@ public final class ServerAreaTools {
                 .bool("byState", "Count each metadata value apart ('minecraft:wool:14'). Default false.")
                 .integer("samples", "Sample positions listed per block. Default 3.", 0, 20)
                 .integer("limit", "Block types listed, most first. Default 100.", 1, 1000)
+                .bool("extents", "Add each block's bounding box, min: [x, y, z] and max: [x, y, z]. Default false.")
+                .bool("byY", "Add each block's count per y layer, byY: [[y, count], ...] for the layers that "
+                    + "have any: counts per floor. Default false.")
                 .required("x", "z")
                 .build())
             .serverOnly()
@@ -140,11 +143,13 @@ public final class ServerAreaTools {
         final boolean byState = context.getBoolean("byState", false);
         final int samples = context.getBoundedInt("samples", 3, 0, 20);
         final int limit = context.getBoundedInt("limit", 100, 1, 1000);
+        final boolean extents = context.getBoolean("extents", false);
+        final boolean byY = context.getBoolean("byY", false);
 
         return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
             // State id -> whether it is counted, worked out once per state rather than once per cell.
             final Map<Integer, String> keys = new HashMap<>();
-            final Map<String, long[]> counts = new HashMap<>();
+            final Map<String, Counted> counts = new HashMap<>();
             final Map<String, JsonArray> sampled = new HashMap<>();
             final long[] counted = {0L};
             final List<Long> pending = new ArrayList<>(chunks);
@@ -159,8 +164,8 @@ public final class ServerAreaTools {
                         long key = pending.get(at++);
                         Chunk chunk = world.getChunkProvider().getLoadedChunk(ChunkKeys.x(key), ChunkKeys.z(key));
                         if (chunk != null) {
-                            countChunk(chunk, box, keys, include, exclude, includeAir, byState, counts, sampled,
-                                samples, counted);
+                            countChunk(chunk, box, keys, include, exclude, includeAir, byState, extents, byY, counts,
+                                sampled, samples, counted);
                         }
                     }
                     return at;
@@ -169,16 +174,33 @@ public final class ServerAreaTools {
                     context.reportProgress(done, pending.size(), "Counted " + done + " of " + pending.size() + " chunks");
                 }
             }
-            List<Map.Entry<String, long[]>> sorted = new ArrayList<>(counts.entrySet());
-            sorted.sort((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]));
+            List<Map.Entry<String, Counted>> sorted = new ArrayList<>(counts.entrySet());
+            sorted.sort((a, b) -> Long.compare(b.getValue().count, a.getValue().count));
             JsonArray blocks = new JsonArray();
             for (int i = 0; i < sorted.size() && i < limit; i++) {
+                Counted tally = sorted.get(i).getValue();
                 JsonObject entry = new JsonObject();
                 entry.addProperty("block", sorted.get(i).getKey());
-                entry.addProperty("count", sorted.get(i).getValue()[0]);
+                entry.addProperty("count", tally.count);
                 JsonArray positions = sampled.get(sorted.get(i).getKey());
                 if (positions != null && positions.size() > 0) {
                     entry.add("samples", positions);
+                }
+                if (tally.min != null) {
+                    entry.add("min", xyz(tally.min));
+                    entry.add("max", xyz(tally.max));
+                }
+                if (tally.perY != null) {
+                    JsonArray layers = new JsonArray();
+                    for (int y = 0; y < tally.perY.length; y++) {
+                        if (tally.perY[y] > 0) {
+                            JsonArray layer = new JsonArray();
+                            layer.add(y);
+                            layer.add(tally.perY[y]);
+                            layers.add(layer);
+                        }
+                    }
+                    entry.add("byY", layers);
                 }
                 blocks.add(entry);
             }
@@ -200,11 +222,52 @@ public final class ServerAreaTools {
         });
     }
 
+    /** One block's tally: its count, and its extents and layers when they were asked for (#123). */
+    private static final class Counted {
+        long count;
+        int[] min;
+        int[] max;
+        long[] perY;
+
+        Counted(boolean extents, boolean byY) {
+            if (extents) {
+                min = new int[] {Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE};
+                max = new int[] {Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE};
+            }
+            if (byY) {
+                perY = new long[256];
+            }
+        }
+
+        void add(int x, int y, int z) {
+            count++;
+            if (min != null) {
+                min[0] = Math.min(min[0], x);
+                min[1] = Math.min(min[1], y);
+                min[2] = Math.min(min[2], z);
+                max[0] = Math.max(max[0], x);
+                max[1] = Math.max(max[1], y);
+                max[2] = Math.max(max[2], z);
+            }
+            if (perY != null) {
+                perY[y]++;
+            }
+        }
+    }
+
+    private static JsonArray xyz(int[] cell) {
+        JsonArray json = new JsonArray();
+        json.add(cell[0]);
+        json.add(cell[1]);
+        json.add(cell[2]);
+        return json;
+    }
+
     /** Game thread: one chunk's share of the box, read straight from its sections. */
     private static void countChunk(Chunk chunk, Box box, Map<Integer, String> keys, List<String> include,
-                                   List<String> exclude, boolean includeAir, boolean byState,
-                                   Map<String, long[]> counts, Map<String, JsonArray> sampled, int samples,
-                                   long[] counted) {
+                                   List<String> exclude, boolean includeAir, boolean byState, boolean extents,
+                                   boolean byY, Map<String, Counted> counts, Map<String, JsonArray> sampled,
+                                   int samples, long[] counted) {
         int baseX = chunk.x << 4;
         int baseZ = chunk.z << 4;
         int fromX = Math.max(box.minX, baseX) - baseX;
@@ -238,12 +301,12 @@ public final class ServerAreaTools {
                         continue;
                     }
                     counted[0]++;
-                    long[] count = counts.get(key);
+                    Counted count = counts.get(key);
                     if (count == null) {
-                        count = new long[1];
+                        count = new Counted(extents, byY);
                         counts.put(key, count);
                     }
-                    count[0]++;
+                    count.add(baseX + x, y, baseZ + z);
                     if (samples > 0) {
                         JsonArray positions = sampled.get(key);
                         if (positions == null) {
