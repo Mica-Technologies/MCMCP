@@ -64,15 +64,21 @@ class HealthAlertsTest {
 
     @Test
     void anAlertGivesTheNumbersTheLongestCallAndTheWayToStopMcmcp() {
-        String paused = HealthAlerts.message(ServerLoad.Level.PAUSED, 87.0D, 72.4D, 0L, "orchestrator: server_set_blocks (12 s)",
-            null);
+        String paused = HealthAlerts.message(ServerLoad.Level.PAUSED, 87.0D, -1.0D, 72.4D, 0L,
+            "orchestrator: server_set_blocks (12 s)", null);
         assertTrue(paused.contains("mean tick 87.0 ms (11.5 TPS), heap 72%"), paused);
         assertTrue(paused.contains("Longest MCMCP call: orchestrator: server_set_blocks (12 s)"), paused);
         assertTrue(paused.endsWith("/mcmcp estop stops every MCMCP change."), paused);
-        String stalled = HealthAlerts.message(ServerLoad.Level.STALLED, 0.0D, 0.0D, 14L, null, "/srv/mcmcp/stalls/a.txt");
+        String stalled = HealthAlerts.message(ServerLoad.Level.STALLED, 0.0D, -1.0D, 0.0D, 14L, null, "/srv/mcmcp/stalls/a.txt");
         assertTrue(stalled.contains("no tick in 14 s"), stalled);
         assertTrue(stalled.contains("/srv/mcmcp/stalls/a.txt"), stalled);
-        String ok = HealthAlerts.message(ServerLoad.Level.OK, 31.0D, 50.0D, 0L, "x: y (1 s)", null);
+        String ok = HealthAlerts.message(ServerLoad.Level.OK, 31.0D, -1.0D, 50.0D, 0L, "x: y (1 s)", null);
         assertFalse(ok.contains("estop"), "recovery needs no stop button: " + ok);
+    }
+
+    @Test
+    void anAlertGivesTheRealTpsWhenItIsKnownSinceTheMeanTickCannotSeeTheGaps() {
+        String paused = HealthAlerts.message(ServerLoad.Level.PAUSED, 0.2D, 3.3D, 40.0D, 0L, null, null);
+        assertTrue(paused.contains("mean tick 0.2 ms, real TPS 3.3, heap 40%"), paused);
     }
 }

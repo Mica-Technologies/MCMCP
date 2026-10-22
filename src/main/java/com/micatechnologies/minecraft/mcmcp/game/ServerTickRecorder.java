@@ -72,7 +72,7 @@ public final class ServerTickRecorder {
                 long now = System.nanoTime();
                 TICKS.record(now, now - tickStartedNanos);
                 tickCount++;
-                TickClock.SERVER.completed(now - tickStartedNanos);
+                TickClock.SERVER.completed(now - tickStartedNanos, now);
             }
         }
     }

@@ -35,10 +35,27 @@ public final class ServerHealth {
      */
     public State update(double meanMspt, double heapPercent, long nowMillis, double throttleMspt,
                         double pauseMspt, double pauseHeapPercent) {
+        return update(meanMspt, heapPercent, -1.0D, nowMillis, throttleMspt, pauseMspt, pauseHeapPercent, 0.0D, 0.0D);
+    }
+
+    /**
+     * Takes one reading that includes the real TPS: ticks finished a second by the wall clock. A low one
+     * counts like a long mean tick, since the mean tick time leaves out the time between ticks and so
+     * cannot see a server thread that stops for seconds at a time between quick ticks.
+     *
+     * @param realTps          ticks a second over the last few seconds, or negative when not known
+     * @param throttleBelowTps throttled below this; 0 for never
+     * @param pauseBelowTps    paused below this; 0 for never
+     * @return the state after it
+     */
+    public State update(double meanMspt, double heapPercent, double realTps, long nowMillis, double throttleMspt,
+                        double pauseMspt, double pauseHeapPercent, double throttleBelowTps, double pauseBelowTps) {
         lastMspt = meanMspt;
         lastHeapPercent = heapPercent;
-        State measured = meanMspt > pauseMspt || heapPercent > pauseHeapPercent ? State.PAUSED
-            : meanMspt > throttleMspt ? State.THROTTLED : State.OK;
+        boolean known = realTps >= 0.0D;
+        State measured = meanMspt > pauseMspt || heapPercent > pauseHeapPercent || known && realTps < pauseBelowTps
+            ? State.PAUSED
+            : meanMspt > throttleMspt || known && realTps < throttleBelowTps ? State.THROTTLED : State.OK;
         if (measured.ordinal() >= state.ordinal()) {
             // Worse, or the same: take it at once.
             if (measured == State.PAUSED && state != State.PAUSED) {

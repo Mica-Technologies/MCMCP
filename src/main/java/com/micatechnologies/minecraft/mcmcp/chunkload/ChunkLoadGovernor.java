@@ -12,6 +12,7 @@ import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.mcp.Principal;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryPoolMXBean;
 import java.lang.management.MemoryType;
@@ -99,6 +100,9 @@ public final class ChunkLoadGovernor {
 
     /** Server thread: when the health was last measured. */
     private static long lastMeasuredMillis;
+
+    /** Server thread: when this server's first tick was seen, by nanoTime; 0 before it. */
+    private static long firstTickNanos;
 
     private ChunkLoadGovernor() {
     }
@@ -677,6 +681,9 @@ public final class ChunkLoadGovernor {
 
     private static void tick(MinecraftServer server) {
         long now = System.currentTimeMillis();
+        if (firstTickNanos == 0L) {
+            firstTickNanos = System.nanoTime();
+        }
         BUDGET.newTick();
         // Every 20 ticks, or every second when ticks are slower than that: counted in ticks alone, a
         // server at 1 s a tick was measured every 20 s, and kept reading OK for that long.
@@ -779,9 +786,15 @@ public final class ChunkLoadGovernor {
         ServerHealth.State after = HEALTH.update(meanMspt, heap, now,
             McmcpConfig.getChunkThrottleMspt(), McmcpConfig.getChunkPauseMspt(),
             McmcpConfig.getChunkPauseHeapPercent());
-        ServerLoad.measured(ServerLoad.fromHealth(CALLS.update(meanMspt, heap, now, McmcpConfig.getHealthHoldJobsMspt(),
-            McmcpConfig.getHealthRefuseWritesMspt(), McmcpConfig.getChunkPauseHeapPercent())), meanMspt, heap,
-            CALLS.millisUntilRecovery(now));
+        // Ticks finished a second by the wall clock: the mean tick time leaves out the gaps between ticks,
+        // so a server thread that stops for seconds between quick ticks reads fast by it. Not on an
+        // integrated server, which stops ticking whenever its player pauses the game.
+        double realTps = server.isDedicatedServer()
+            ? ServerLoad.realTps(TickClock.SERVER, System.nanoTime(), firstTickNanos) : -1.0D;
+        ServerLoad.measured(ServerLoad.fromHealth(CALLS.update(meanMspt, heap, realTps, now,
+            McmcpConfig.getHealthHoldJobsMspt(), McmcpConfig.getHealthRefuseWritesMspt(),
+            McmcpConfig.getChunkPauseHeapPercent(), McmcpConfig.getHealthHoldJobsBelowTps(),
+            McmcpConfig.getHealthRefuseWritesBelowTps())), meanMspt, heap, realTps, CALLS.millisUntilRecovery(now));
         if (after != before) {
             Mcmcp.LOGGER.warn("MCMCP chunk loading is now " + after.name().toLowerCase(java.util.Locale.ROOT)
                 + ": mean tick " + Math.round(meanMspt * 10.0D) / 10.0D + " ms, heap after GC "
@@ -1073,6 +1086,7 @@ public final class ChunkLoadGovernor {
     public static void serverStopping() {
         releaseAll("the server is stopping");
         ServerLoad.reset();
+        firstTickNanos = 0L;
     }
 
     /** On Forge's bus. */

@@ -47,13 +47,18 @@ public final class HealthAlerts {
     /**
      * The chat line for {@code level}, without colour.
      *
+     * @param realTps   ticks finished a second by the wall clock, or negative when not known
      * @param topCaller the MCMCP call that has run longest, as "who: tool (N s)", or null
      * @param dumpPath  where the stall's stacks went, or null
      */
-    public static String message(ServerLoad.Level level, double mspt, double heapPercent, long stalledSeconds,
-                                 @Nullable String topCaller, @Nullable String dumpPath) {
-        String numbers = "mean tick " + ServerLoad.round1(mspt) + " ms (" + ServerLoad.round1(ServerLoad.tps(mspt))
-            + " TPS), heap " + Math.round(heapPercent) + "%";
+    public static String message(ServerLoad.Level level, double mspt, double realTps, double heapPercent,
+                                 long stalledSeconds, @Nullable String topCaller, @Nullable String dumpPath) {
+        // The real TPS when it is known: a server that stops between quick ticks has a short mean tick,
+        // and the TPS that implies is not the one players see.
+        String numbers = "mean tick " + ServerLoad.round1(mspt) + " ms"
+            + (realTps >= 0.0D ? ", real TPS " + ServerLoad.round1(realTps)
+                : " (" + ServerLoad.round1(ServerLoad.tps(mspt)) + " TPS)")
+            + ", heap " + Math.round(heapPercent) + "%";
         StringBuilder text = new StringBuilder("[MCMCP] ");
         switch (level) {
             case OK:

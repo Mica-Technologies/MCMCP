@@ -183,8 +183,9 @@ alike; the stack is what tells them apart. This is answered off the game thread,
 client that has stopped answering everything else.
 
 On a server, `serverHealth` is MCMCP's view of the server: `level` (`ok`, `throttled`, `paused` or
-`stalled`), `meanTickMs`, `tps`, `heapPercentAfterGc`, and `refusesWrites`, true while calls that
-change the world are refused. On a dedicated server, `stalled` means the server thread has
+`stalled`), `meanTickMs`, `tps` (what the mean tick allows), `realTps` on a dedicated server (ticks
+finished a second by the wall clock over the last 5 s, which also sees the time between ticks),
+`heapPercentAfterGc`, and `refusesWrites`, true while calls that change the world are refused. On a dedicated server, `stalled` means the server thread has
 finished no tick for [`health.stallDumpSeconds`](configuration.md#health); then `stalledSeconds`
 says for how long and `stalled` carries the server thread's state and top frames, as for a client.
 `lastStallDump` is the file the last stall's stacks were written to. `tasks` is MCMCP's queue onto

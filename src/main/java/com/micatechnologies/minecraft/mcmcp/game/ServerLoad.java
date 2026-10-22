@@ -16,14 +16,21 @@ import javax.annotation.Nullable;
  * finished no tick for a while — the one condition the governor cannot see, because it measures in
  * ticks and a stalled server has none. A stall outranks any measurement.
  *
+ * <p>The real TPS is ticks finished a second by the wall clock over the last five seconds
+ * ({@link com.micatechnologies.minecraft.mcmcp.perf.TickClock#ticksPerSecond}). The mean tick time
+ * leaves out the time between ticks, so a server thread stopped for 2.5 s in every 3 read 0.2 ms and
+ * 20 TPS by it. An integrated server's is not used, since it stops ticking whenever its player pauses.
+ *
  * <p>The levels are measured against the {@code health} thresholds, not chunk loading's own, which
  * are tighter: chunk loads slow at 40 ms and stop at 50, but a server at 45 ms is still at 20 TPS and
  * its agents' writes are not what to refuse.
  *
  * <ul>
- *   <li>{@link Level#THROTTLED}: mean tick over {@code health.holdJobsMspt} (60). Jobs wait.</li>
- *   <li>{@link Level#PAUSED}: mean tick over {@code health.refuseWritesMspt} (100), or heap over
- *       {@code chunks.pauseHeapPercent}. Calls that change the world are refused, and jobs wait.</li>
+ *   <li>{@link Level#THROTTLED}: mean tick over {@code health.holdJobsMspt} (60), or on a dedicated
+ *       server a real TPS below {@code health.holdJobsBelowTps} (15). Jobs wait.</li>
+ *   <li>{@link Level#PAUSED}: mean tick over {@code health.refuseWritesMspt} (100), real TPS below
+ *       {@code health.refuseWritesBelowTps} (8), or heap over {@code chunks.pauseHeapPercent}. Calls
+ *       that change the world are refused, and jobs wait.</li>
  *   <li>{@link Level#STALLED}: no tick for {@code health.stallDumpSeconds}. As paused.</li>
  * </ul>
  *
@@ -47,6 +54,8 @@ public final class ServerLoad {
 
     private static volatile Level measured = Level.OK;
     private static volatile double meanMspt;
+    /** Ticks finished a second by the wall clock, or negative when not known. */
+    private static volatile double realTps = -1.0D;
     private static volatile double heapPercent;
     private static volatile long recoveryMillis;
     private static volatile boolean stalled;
@@ -99,10 +108,22 @@ public final class ServerLoad {
      *
      * @param untilRecoveryMillis the earliest the measured level could next improve
      */
-    public static synchronized void measured(Level level, double mspt, double heap, long untilRecoveryMillis) {
+    public static void measured(Level level, double mspt, double heap, long untilRecoveryMillis) {
+        measured(level, mspt, heap, -1.0D, untilRecoveryMillis);
+    }
+
+    /**
+     * A measurement from the server thread, with the real TPS.
+     *
+     * @param tps                 ticks finished a second by the wall clock, or negative when not known
+     * @param untilRecoveryMillis the earliest the measured level could next improve
+     */
+    public static synchronized void measured(Level level, double mspt, double heap, double tps,
+                                             long untilRecoveryMillis) {
         Level before = level();
         measured = level == Level.STALLED ? Level.PAUSED : level;
         meanMspt = mspt;
+        realTps = tps;
         heapPercent = heap;
         recoveryMillis = untilRecoveryMillis;
         fire(before);
@@ -127,12 +148,24 @@ public final class ServerLoad {
         stalled = false;
         stalledForMillis = 0L;
         meanMspt = 0.0D;
+        realTps = -1.0D;
         heapPercent = 0.0D;
         recoveryMillis = 0L;
     }
 
     public static double meanMspt() {
         return meanMspt;
+    }
+
+    /** Ticks finished a second over the last few seconds, by the wall clock, or negative when not known. */
+    public static double realTps() {
+        return realTps;
+    }
+
+    /** The TPS to tell people: the real one when it is known, else what the mean tick time allows. */
+    public static double reportedTps() {
+        double real = realTps;
+        return real >= 0.0D ? Math.min(20.0D, real) : tps(meanMspt);
     }
 
     public static double heapPercent() {
@@ -146,6 +179,30 @@ public final class ServerLoad {
     @Nullable
     public static String lastStallDump() {
         return lastStallDump;
+    }
+
+    /** How far back the real TPS looks. */
+    public static final long REAL_TPS_WINDOW_NANOS = 5_000_000_000L;
+
+    /** The shortest span the real TPS is taken over: less, just after a server starts, is not known yet. */
+    static final long REAL_TPS_MIN_SPAN_NANOS = 1_000_000_000L;
+
+    /**
+     * The real TPS: ticks {@code clock} finished a second over the last {@link #REAL_TPS_WINDOW_NANOS},
+     * or since {@code startedNanos} when the server started more recently than that.
+     *
+     * @return the rate, or -1 when the server has not been running for {@link #REAL_TPS_MIN_SPAN_NANOS}
+     */
+    public static double realTps(com.micatechnologies.minecraft.mcmcp.perf.TickClock clock, long nowNanos,
+                                 long startedNanos) {
+        long since = nowNanos - REAL_TPS_WINDOW_NANOS;
+        if (since - startedNanos < 0L) {
+            since = startedNanos;
+        }
+        if (nowNanos - since < REAL_TPS_MIN_SPAN_NANOS) {
+            return -1.0D;
+        }
+        return clock.ticksPerSecond(nowNanos, since);
     }
 
     /** Ticks a second the mean tick time allows, at most 20. */
@@ -171,7 +228,7 @@ public final class ServerLoad {
         if (level == Level.STALLED) {
             return "stalled: the server thread has not finished a tick in " + stalledForMillis / 1000L + " s";
         }
-        return level.id() + " (mean tick " + round1(meanMspt) + " ms, " + round1(tps(meanMspt)) + " TPS, heap "
+        return level.id() + " (mean tick " + round1(meanMspt) + " ms, " + round1(reportedTps()) + " TPS, heap "
             + Math.round(heapPercent) + "%)";
     }
 
@@ -181,6 +238,9 @@ public final class ServerLoad {
         json.addProperty("reason", reason);
         json.addProperty("health", level().id());
         json.addProperty("mspt", round1(meanMspt));
+        if (realTps >= 0.0D) {
+            json.addProperty("realTps", round1(realTps));
+        }
         json.addProperty("heapPercent", Math.round(heapPercent));
         if (stalled) {
             json.addProperty("stalledSeconds", stalledForMillis / 1000L);
@@ -195,6 +255,9 @@ public final class ServerLoad {
         json.addProperty("level", level().id());
         json.addProperty("meanTickMs", round1(meanMspt));
         json.addProperty("tps", round1(tps(meanMspt)));
+        if (realTps >= 0.0D) {
+            json.addProperty("realTps", round1(realTps));
+        }
         json.addProperty("heapPercentAfterGc", Math.round(heapPercent));
         json.addProperty("refusesWrites", refusesWrites());
         if (stalled) {

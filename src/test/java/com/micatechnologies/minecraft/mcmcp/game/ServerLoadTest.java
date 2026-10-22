@@ -106,4 +106,43 @@ class ServerLoadTest {
         ServerLoad.stalled(true, 14_500L);
         assertEquals("stalled: the server thread has not finished a tick in 14 s", ServerLoad.describe());
     }
+
+    @Test
+    void aLowRealTpsHoldsJobsAndThenRefusesWritesHoweverShortTheTicks() {
+        // health defaults: holdJobsBelowTps 15, refuseWritesBelowTps 8.
+        ServerHealth calls = new ServerHealth();
+        assertEquals(ServerHealth.State.OK, calls.update(0.2D, 40.0D, 19.5D, 0L, 60, 100, 85, 15, 8));
+        assertEquals(ServerHealth.State.THROTTLED, calls.update(0.2D, 40.0D, 12.0D, 1L, 60, 100, 85, 15, 8),
+            "a mean tick of 0.2 ms says nothing of the time between ticks");
+        assertEquals(ServerHealth.State.PAUSED, calls.update(0.2D, 40.0D, 3.3D, 2L, 60, 100, 85, 15, 8));
+        assertEquals(ServerHealth.State.OK,
+            new ServerHealth().update(0.2D, 40.0D, -1.0D, 0L, 60, 100, 85, 15, 8), "not known: the tick time decides");
+        assertEquals(ServerHealth.State.OK,
+            new ServerHealth().update(0.2D, 40.0D, 3.3D, 0L, 60, 100, 85, 0, 0), "0 turns the TPS thresholds off");
+    }
+
+    @Test
+    void theRealTpsLooksBackFiveSecondsOrToTheServersFirstTickAndNotBeforeASecond() {
+        com.micatechnologies.minecraft.mcmcp.perf.TickClock clock = new com.micatechnologies.minecraft.mcmcp.perf.TickClock();
+        long ms = 1_000_000L;
+        for (int i = 1; i <= 200; i++) {
+            clock.completed(ms, 1_000_000L * ms + i * 50L * ms);
+        }
+        long start = 1_000_000L * ms;
+        assertEquals(-1.0D, ServerLoad.realTps(clock, start + 500L * ms, start), "half a second in: not known yet");
+        assertEquals(20.0D, ServerLoad.realTps(clock, start + 2_000L * ms, start), 0.001D, "since the first tick");
+        assertEquals(20.0D, ServerLoad.realTps(clock, start + 10_000L * ms, start), 0.001D, "the last five seconds");
+        assertEquals(10.0D, ServerLoad.realTps(clock, start + 12_500L * ms, start), 0.001D,
+            "2.5 s of the last 5 without a tick");
+    }
+
+    @Test
+    void theRealTpsIsWhatTheDescriptionAndTheHealthReportGive() {
+        ServerLoad.measured(ServerLoad.Level.PAUSED, 0.2D, 40.0D, 3.33D, 10_000L);
+        assertEquals("paused (mean tick 0.2 ms, 3.3 TPS, heap 40%)", ServerLoad.describe());
+        assertEquals(3.3D, ServerLoad.toJson().get("realTps").getAsDouble(), 0.001D);
+        assertEquals(3.3D, ServerLoad.busy("server_overloaded").get("realTps").getAsDouble(), 0.001D);
+        ServerLoad.measured(ServerLoad.Level.OK, 10.0D, 40.0D, 10_000L);
+        assertFalse(ServerLoad.toJson().has("realTps"), "an integrated server's is not measured");
+    }
 }

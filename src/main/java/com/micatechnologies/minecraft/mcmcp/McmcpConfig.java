@@ -155,6 +155,8 @@ public class McmcpConfig {
     private static int healthStallDumpSeconds = 10;
     private static int healthHoldJobsMspt = 60;
     private static int healthRefuseWritesMspt = 100;
+    private static int healthHoldJobsBelowTps = 15;
+    private static int healthRefuseWritesBelowTps = 8;
     private static int healthTickBudgetMs = 15;
 
     // Identity
@@ -454,6 +456,12 @@ public class McmcpConfig {
         healthRefuseWritesMspt = configuration.getInt("refuseWritesMspt", CATEGORY_HEALTH, 100, 10, 5000,
             "Mean tick time above which calls that change the world are refused before they run (and ops are\n"
                 + "told in red). 100 ms is 10 TPS. Old-generation heap above chunks.pauseHeapPercent refuses them too.");
+        healthHoldJobsBelowTps = configuration.getInt("holdJobsBelowTps", CATEGORY_HEALTH, 15, 0, 20,
+            "Real TPS (ticks a dedicated server finished in the last 5 s, by the wall clock) below which jobs\n"
+                + "wait, as for holdJobsMspt. The mean tick time leaves out the time between ticks, so a server\n"
+                + "thread that stops for seconds between quick ticks reads fast by it and slow by this. 0 turns it off.");
+        healthRefuseWritesBelowTps = configuration.getInt("refuseWritesBelowTps", CATEGORY_HEALTH, 8, 0, 20,
+            "Real TPS below which calls that change the world are refused, as for refuseWritesMspt. 0 turns it off.");
         healthTickBudgetMs = configuration.getInt("mcmcpTickBudgetMs", CATEGORY_HEALTH, 15, 1, 50,
             "Most of each server tick MCMCP spends running its calls' work, in milliseconds, taking turns\n"
                 + "between callers. At most 5 while jobs are held, and one task a tick while writes are refused.\n"
@@ -974,6 +982,14 @@ public class McmcpConfig {
 
     public static int getHealthRefuseWritesMspt() {
         return healthRefuseWritesMspt;
+    }
+
+    public static int getHealthHoldJobsBelowTps() {
+        return healthHoldJobsBelowTps;
+    }
+
+    public static int getHealthRefuseWritesBelowTps() {
+        return healthRefuseWritesBelowTps;
     }
 
     public static int getHealthTickBudgetMs() {

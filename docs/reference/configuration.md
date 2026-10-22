@@ -469,13 +469,17 @@ recovery. Every change of state is logged with the tick time, heap and MCMCP's h
 How a server's MCMCP watches its own server. Every key here is read live.
 
 The server's health is one of four states, measured every second from the mean tick time over the
-last 100 ticks and the old-generation heap after GC:
+last 100 ticks, the old-generation heap after GC and, on a dedicated server, the real TPS: ticks
+finished a second by the wall clock over the last 5 seconds. The mean tick time leaves out the time
+between ticks, so a server thread that stops for seconds at a time between quick ticks reads fast by
+it: frozen 2.5 s in every 3, a server read a mean tick of 0.2 ms and 20 TPS. The real TPS sees it.
+An integrated server's is not used, since it stops ticking whenever its player pauses the game.
 
 | State | When | What MCMCP does | Ops are told in |
 | --- | --- | --- | --- |
 | `ok` | otherwise | everything | green, once it recovers |
-| `throttled` | mean tick over `holdJobsMspt` | background jobs wait | yellow |
-| `paused` | mean tick over `refuseWritesMspt`, or heap over `chunks.pauseHeapPercent` | calls that change the world are refused, and jobs wait | red |
+| `throttled` | mean tick over `holdJobsMspt`, or real TPS below `holdJobsBelowTps` | background jobs wait | yellow |
+| `paused` | mean tick over `refuseWritesMspt`, real TPS below `refuseWritesBelowTps`, or heap over `chunks.pauseHeapPercent` | calls that change the world are refused, and jobs wait | red |
 | `stalled` | a dedicated server's thread has finished no tick for `stallDumpSeconds` | as `paused`, and every thread's stack is written out | red |
 
 Getting worse takes effect at once; getting better waits out 10 seconds of better readings. These
@@ -496,6 +500,20 @@ Mean tick time, in milliseconds, above which background jobs wait before each st
 
 Mean tick time above which calls that change the world are refused before they run. 100 ms is
 10 TPS. See [Error semantics](protocol.md#error-semantics) for the refusal and what is exempt.
+
+### `holdJobsBelowTps`
+
+`integer` 0–20 · default `15`
+
+Real TPS below which background jobs wait, as for `holdJobsMspt`: ticks a dedicated server finished
+in the last 5 seconds, by the wall clock, a second. `0` turns it off.
+
+### `refuseWritesBelowTps`
+
+`integer` 0–20 · default `8`
+
+Real TPS below which calls that change the world are refused before they run, as for
+`refuseWritesMspt`. `0` turns it off.
 
 ### `stallDumpSeconds`
 

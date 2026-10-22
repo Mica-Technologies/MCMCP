@@ -89,7 +89,7 @@ public final class ServerHealthNotices {
         if (level == null) {
             return;
         }
-        final String text = HealthAlerts.message(level, ServerLoad.meanMspt(), ServerLoad.heapPercent(),
+        final String text = HealthAlerts.message(level, ServerLoad.meanMspt(), ServerLoad.realTps(), ServerLoad.heapPercent(),
             ServerLoad.stalledForMillis() / 1000L, topCaller(nowMillis),
             level == ServerLoad.Level.STALLED ? ServerLoad.lastStallDump() : null);
         final JsonObject health = ServerLoad.toJson();

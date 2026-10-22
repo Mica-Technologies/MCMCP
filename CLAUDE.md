@@ -138,7 +138,9 @@ hand-back, the chunks touch, a test's restores — goes through `ToolContext.onG
 other callers' fills, it left writes with no undo point. A new multi-step write tool needs the same.
 
 **Server health gates work.** `ServerLoad` (fed by the governor and by `ServerWatchdog`, a thread off
-the server thread) is ok / throttled / paused / stalled. Jobs wait from throttled; writes are refused
+the server thread) is ok / throttled / paused / stalled, from mean tick time, heap and, on a dedicated
+server, real TPS (`TickClock.ticksPerSecond`: the mean tick leaves out the gaps between ticks, so a
+thread frozen 2.5 s in every 3 read 0.2 ms and 20 TPS). Jobs wait from throttled; writes are refused
 from paused (`McpDispatcher.admissionRefusal`), except diagnostics, estop, release and job control. A
 new diagnostic or control tool that must keep working on a struggling server belongs on that list.
 

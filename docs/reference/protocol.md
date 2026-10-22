@@ -150,7 +150,8 @@ On the server endpoint every step a tool hands to the server thread is one of tw
   often swallowed, so the model resent the identical call.
 
 While the server is `paused` (mean tick over [`health.refuseWritesMspt`](configuration.md#health),
-100 ms by default, or short of memory) or `stalled` (its thread has
+100 ms by default, a dedicated server's real TPS below
+[`health.refuseWritesBelowTps`](configuration.md#health), 8 by default, or short of memory) or `stalled` (its thread has
 finished no tick for [`health.stallDumpSeconds`](configuration.md#health)), a call to a tool that is
 not read-only is refused before it runs, with the same `busy` block. Read-only tools still run, and
 so do the ones needed to see what is happening and make MCMCP stop or let go: `server_estop`,
