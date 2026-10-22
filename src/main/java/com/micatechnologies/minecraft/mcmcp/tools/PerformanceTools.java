@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpEndpoints;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
+import com.micatechnologies.minecraft.mcmcp.game.ServerLoad;
 import com.micatechnologies.minecraft.mcmcp.game.ServerThreadBridge;
 import com.micatechnologies.minecraft.mcmcp.game.ServerTickRecorder;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
@@ -238,6 +239,9 @@ public final class PerformanceTools {
                         json.add("clientThread", clientThread);
                     }
                 }
+                else {
+                    json.add("serverHealth", serverThreadHealth());
+                }
                 return ToolResult.structured(json);
             })
             .build());
@@ -258,6 +262,25 @@ public final class PerformanceTools {
         json.addProperty("lastProgressMsAgo", detector.silentMillis(System.nanoTime()));
         if (detector.isStalled()) {
             ThreadInfo info = GameThreads.snapshot(GameThreads.find(GameThreads.CLIENT));
+            if (info != null) {
+                json.add("stalled", GameThreads.toJson(info, 16));
+            }
+            List<String> deadlocked = GameThreads.deadlocked();
+            if (!deadlocked.isEmpty()) {
+                json.add("deadlocked", Json.arrayOfStrings(deadlocked));
+            }
+        }
+        return json;
+    }
+
+    /**
+     * The server's health as MCMCP sees it, read off the server thread so it answers during a stall,
+     * with where the server thread is stuck when it is (#133).
+     */
+    private static JsonObject serverThreadHealth() {
+        JsonObject json = ServerLoad.toJson();
+        if (ServerLoad.level() == ServerLoad.Level.STALLED) {
+            ThreadInfo info = GameThreads.snapshot(GameThreads.find(GameThreads.SERVER));
             if (info != null) {
                 json.add("stalled", GameThreads.toJson(info, 16));
             }

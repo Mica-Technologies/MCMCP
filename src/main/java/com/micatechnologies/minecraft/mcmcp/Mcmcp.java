@@ -148,6 +148,7 @@ public class Mcmcp {
         CompanionServer.serverStarting(event.getServer());
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStarting();
         com.micatechnologies.minecraft.mcmcp.jobs.ServerJobs.serverStarting(event.getServer());
+        com.micatechnologies.minecraft.mcmcp.game.ServerWatchdog.serverStarting(event.getServer());
         reportServerExposure(event.getServer().isDedicatedServer());
 
         if (!McmcpConfig.isServerEndpointEnabled()) {
@@ -172,6 +173,7 @@ public class Mcmcp {
             serverEndpoint = null;
         }
         CompanionServer.serverStopping();
+        com.micatechnologies.minecraft.mcmcp.game.ServerWatchdog.serverStopping();
         com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.serverStopping();
         com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker.serverStopping();
         com.micatechnologies.minecraft.mcmcp.tools.ServerWatchTools.serverStopping();

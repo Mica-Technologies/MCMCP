@@ -51,6 +51,10 @@ public final class ServerLoad {
         LISTENERS.add(listener);
     }
 
+    public static void removeListener(Listener listener) {
+        LISTENERS.remove(listener);
+    }
+
     /** The level now: a stall if there is one, else the last measurement. */
     public static Level level() {
         return stalled ? Level.STALLED : measured;

@@ -182,6 +182,14 @@ naming any threads the JVM finds deadlocked. A world load, a deadlock and a hang
 alike; the stack is what tells them apart. This is answered off the game thread, so it works on a
 client that has stopped answering everything else.
 
+On a server, `serverHealth` is MCMCP's view of the server: `level` (`ok`, `throttled`, `paused` or
+`stalled`), `meanTickMs`, `tps`, `heapPercentAfterGc`, and `refusesWrites`, true while calls that
+change the world are refused. On a dedicated server, `stalled` means the server thread has
+finished no tick for [`health.stallDumpSeconds`](configuration.md#health); then `stalledSeconds`
+says for how long and `stalled` carries the server thread's state and top frames, as for a client.
+`lastStallDump` is the file the last stall's stacks were written to. Like `clientThread`, this is
+answered off the server thread.
+
 `previousRun` is what the [request journal](configuration.md#journal) recorded about the run before
 this one: `endedCleanly`, the number of `calls`, and `unfinishedCalls`, each with its tool, start time
 and summarised arguments. Its `journal` field says whether recording is `enabled`, `disabled` or

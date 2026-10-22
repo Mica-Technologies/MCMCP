@@ -54,6 +54,7 @@ public class McmcpConfig {
     private static final String CATEGORY_COMPANION = "companion";
     private static final String CATEGORY_CHUNKS = "chunks";
     private static final String CATEGORY_WRITES = "writes";
+    private static final String CATEGORY_HEALTH = "health";
 
     /**
      * Dev-launch overrides injected by {@code addon.gradle}.
@@ -147,6 +148,11 @@ public class McmcpConfig {
     private static int chunkPauseMspt = 50;
     private static int chunkPauseHeapPercent = 85;
     private static int chunkShedAfterSeconds = 30;
+
+    // Server health
+    private static boolean healthNotifyOps = true;
+    private static int healthAlertIntervalSeconds = 60;
+    private static int healthStallDumpSeconds = 10;
 
     // Identity
     private static String instanceId = "";
@@ -430,6 +436,21 @@ public class McmcpConfig {
         chunkShedAfterSeconds = configuration.getInt("shedAfterSeconds", CATEGORY_CHUNKS, 30, 5, 3600,
             "After loading has been paused this long, MCMCP starts giving back what it holds, the "
                 + "longest-idle hold first, until the server recovers.");
+
+        // Server health
+        configuration.setCategoryComment(CATEGORY_HEALTH, "How a server's MCMCP watches its own server: the "
+            + "tick-time states of the chunks category (throttled, paused), a stall when the server thread\n"
+            + "finishes no tick at all, and who is told. All read live.");
+        healthStallDumpSeconds = configuration.getInt("stallDumpSeconds", CATEGORY_HEALTH, 10, 3, 600,
+            "A dedicated server's thread that has finished no tick for this long is stalled: every thread's "
+                + "stack is written\nto mcmcp/stalls/ under the game folder (once per stall), and calls that "
+                + "change the world are refused\nuntil it ticks again.");
+        healthNotifyOps = configuration.getBoolean("notifyOps", CATEGORY_HEALTH, true,
+            "Tell online operators in chat when the server's health changes: throttled, paused or stalled, "
+                + "and back to OK.");
+        healthAlertIntervalSeconds = configuration.getInt("alertIntervalSeconds", CATEGORY_HEALTH, 60, 10, 3600,
+            "At most one chat alert per health state in this many seconds, so a server hovering at a "
+                + "threshold does not flood chat.");
 
         // Orchestrator link
         orchestratorEnabled = configuration.getBoolean("enableOrchestratorLink", CATEGORY_ORCHESTRATOR,
@@ -920,6 +941,18 @@ public class McmcpConfig {
 
     public static int getChunkShedAfterSeconds() {
         return chunkShedAfterSeconds;
+    }
+
+    public static boolean isHealthNotifyOps() {
+        return healthNotifyOps;
+    }
+
+    public static int getHealthAlertIntervalSeconds() {
+        return healthAlertIntervalSeconds;
+    }
+
+    public static int getHealthStallDumpSeconds() {
+        return healthStallDumpSeconds;
     }
 
     public static boolean isJournalEnabled() {

@@ -464,6 +464,27 @@ all make progress rather than the first starving the rest. A chunk already in me
 Loading slows or stops at once when the server gets worse, and only resumes after 10 seconds of
 recovery. Every change of state is logged with the tick time, heap and MCMCP's held count.
 
+## `health`
+
+How a server's MCMCP watches its own server. Every key here is read live.
+
+The tick-time states come from the [`chunks`](#chunks) thresholds: `throttled` above
+`chunks.throttleMspt`, `paused` above `chunks.pauseMspt` or `chunks.pauseHeapPercent`. A dedicated
+server is also `stalled` when its thread has finished no tick at all for a while, which a tick-time
+average cannot see. [`game_health`](tools.md#game_health) shows the state as `serverHealth`.
+
+### `stallDumpSeconds`
+
+`integer` 3–600 · default `10`
+
+A dedicated server's thread that has finished no tick for this long is stalled. A daemon thread
+checks once a second, off the server thread. At the start of each stall, every thread's stack, the
+server thread's first, is written to `mcmcp/stalls/<yyyyMMdd-HHmmss>.txt` under the game folder,
+with the MCMCP calls running at the time, and one warning in the log names the file. When ticks
+resume, the log says so and how long it lasted.
+
+Integrated servers are not watched this way: one stops ticking whenever its player pauses the game.
+
 ## `journal`
 
 The request journal records each tool call as it starts and as it ends, one line each, in
