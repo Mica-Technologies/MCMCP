@@ -251,9 +251,10 @@ public final class ServerApplyOps {
 
         return ServerChunkTools.withChunks(context, dimension, touchedChunks, outcome -> {
             final CellOverlay overlay = new CellOverlay();
+            final StatePalette palette = new StatePalette();
             final Map<Long, NBTTagCompound> tags = new LinkedHashMap<>();
             final long[] unloadedReads = {0L};
-            replay(context, dimension, ready, overlay, tags, unloadedReads);
+            replay(context, dimension, ready, overlay, palette, tags, unloadedReads);
 
             // Cells someone else changed since the caller's token are theirs, not this call's.
             final Set<Long> protectedCells = new HashSet<>();
@@ -277,7 +278,7 @@ public final class ServerApplyOps {
             final UndoPoints.Recorder recorder = dryRun ? null : ServerUndoTools.start(context, false);
             final int[] area = recorder == null ? null : UndoPoints.imageArea(box[0], box[2], box[3], box[5]);
             final BufferedImage beforeImage = recorder == null ? null : ServerUndoTools.drawImage(context, dimension, area);
-            write(context, dimension, overlay, protectedCells, flags, dryRun, tally, recorder);
+            write(context, dimension, overlay, palette, protectedCells, flags, dryRun, tally, recorder);
             if (!dryRun) {
                 mergeTags(context, dimension, tags, protectedCells, tally);
             }
@@ -351,7 +352,7 @@ public final class ServerApplyOps {
      * with a filter and keep read the block underneath, which is the overlay's if an earlier op set it.
      */
     private static void replay(ToolContext context, int dimension, List<Ready> ready, CellOverlay overlay,
-                               Map<Long, NBTTagCompound> tags, long[] unloadedReads) {
+                               StatePalette palette, Map<Long, NBTTagCompound> tags, long[] unloadedReads) {
         final int[] cursor = {0, 0};  // op, cell within it
         while (cursor[0] < ready.size()) {
             context.onGameThread(() -> {
@@ -359,7 +360,7 @@ public final class ServerApplyOps {
                 long started = System.nanoTime();
                 while (cursor[0] < ready.size() && System.nanoTime() - started < SLICE_NANOS) {
                     Ready op = ready.get(cursor[0]);
-                    cursor[1] = replayOp(world, op, overlay, tags, cursor[1], started, unloadedReads);
+                    cursor[1] = replayOp(world, op, overlay, palette, tags, cursor[1], started, unloadedReads);
                     if (cursor[1] < 0) {
                         cursor[0]++;
                         cursor[1] = 0;
@@ -375,8 +376,8 @@ public final class ServerApplyOps {
     }
 
     /** Game thread. @return the next cell to do, or -1 when the op is done. */
-    private static int replayOp(WorldServer world, Ready ready, CellOverlay overlay, Map<Long, NBTTagCompound> tags,
-                                int from, long started, long[] unloadedReads) {
+    private static int replayOp(WorldServer world, Ready ready, CellOverlay overlay, StatePalette palette,
+                                Map<Long, NBTTagCompound> tags, int from, long started, long[] unloadedReads) {
         CommandOps.Op op = ready.op;
         if (op.kind == CommandOps.Kind.BLOCKDATA) {
             long key = new BlockPos(op.x1, op.y1, op.z1).toLong();
@@ -392,8 +393,8 @@ public final class ServerApplyOps {
         int sizeX = op.x2 - op.x1 + 1;
         int sizeZ = op.z2 - op.z1 + 1;
         long total = op.cells();
-        int airId = Block.getStateId(Blocks.AIR.getDefaultState()) + 1;
-        int stateId = Block.getStateId(ready.state) + 1;
+        int airId = palette.value(Blocks.AIR.getDefaultState());
+        int stateId = palette.value(ready.state);
         for (long i = from; i < total; i++) {
             if ((i & 1023) == 0 && i > from && System.nanoTime() - started >= SLICE_NANOS) {
                 return (int) i;
@@ -410,7 +411,7 @@ public final class ServerApplyOps {
                 value = airId;
             }
             if (op.mode == CommandOps.Mode.KEEP || ready.filter != null) {
-                IBlockState current = current(world, overlay, x, y, z);
+                IBlockState current = current(world, overlay, palette, x, y, z);
                 if (current == null) {
                     unloadedReads[0]++;
                     continue;
@@ -438,23 +439,52 @@ public final class ServerApplyOps {
 
     /** The block a cell holds so far: the overlay's, or the world's; null in an unloaded chunk. */
     @Nullable
-    private static IBlockState current(WorldServer world, CellOverlay overlay, int x, int y, int z) {
+    private static IBlockState current(WorldServer world, CellOverlay overlay, StatePalette palette, int x, int y,
+                                       int z) {
         int value = overlay.get(x, y, z);
         if (value != 0) {
-            return Block.getStateById(value - 1);
+            return palette.state(value);
         }
         BlockPos pos = new BlockPos(x, y, z);
         return world.isBlockLoaded(pos) ? world.getBlockState(pos) : null;
     }
 
+    /**
+     * The states this call's overlay holds, by a value of its own (1-based; 0 is the overlay's "unset").
+     *
+     * <p>Not {@link Block#getStateId}: that is the block id plus {@code getMetaFromState}, and back is
+     * {@code getStateFromMeta}. A block whose two mappings disagree (Logistical Automation's conveyor
+     * stairs) came back as a different state, often the one already standing there, so the write was
+     * diffed away as "unchanged" and nothing was placed (#120). This keeps the exact state asked for.
+     */
+    static final class StatePalette {
+        private final List<IBlockState> states = new ArrayList<>();
+        private final Map<IBlockState, Integer> values = new java.util.IdentityHashMap<>();
+
+        int value(IBlockState state) {
+            Integer value = values.get(state);
+            if (value == null) {
+                states.add(state);
+                value = states.size();
+                values.put(state, value);
+            }
+            return value;
+        }
+
+        IBlockState state(int value) {
+            return states.get(value - 1);
+        }
+    }
+
     /** Diffs the overlay against the world and writes the difference, bottom section first. */
-    private static void write(ToolContext context, int dimension, CellOverlay overlay, Set<Long> protectedCells,
-                              int flags, boolean dryRun, Tally tally, @Nullable UndoPoints.Recorder recorder) {
+    private static void write(ToolContext context, int dimension, CellOverlay overlay, StatePalette palette,
+                              Set<Long> protectedCells, int flags, boolean dryRun, Tally tally,
+                              @Nullable UndoPoints.Recorder recorder) {
         final List<Long> sections = overlay.sectionsBottomUp();
         final Map<Long, IBlockState> twoPart = new HashMap<>();
         for (long key : sections) {
             overlay.visit(key, (x, y, z, value) -> {
-                IBlockState state = Block.getStateById(value - 1);
+                IBlockState state = palette.state(value);
                 if (TwoPartBlocks.isTwoPart(state)) {
                     twoPart.put(new BlockPos(x, y, z).toLong(), state);
                 }
@@ -471,12 +501,13 @@ public final class ServerApplyOps {
                 while (cursor[0] < sections.size() && (System.nanoTime() - started < SLICE_NANOS)) {
                     overlay.visit(sections.get(cursor[0]++), (x, y, z, value) -> {
                         BlockPos pos = new BlockPos(x, y, z);
-                        IBlockState target = Block.getStateById(value - 1);
+                        IBlockState target = palette.state(value);
                         try {
                             writeCell(world, pos, target, protectedCells, flags, dryRun, pairs, undo, tally, recorder);
                         }
                         catch (RuntimeException e) {
-                            tally.refuse(pos, BlockWriteFaults.reason(e, pos, ServerRegionTools.describe(value - 1)));
+                            tally.refuse(pos, BlockWriteFaults.reason(e, pos,
+                                ServerRegionTools.describe(Block.getStateId(palette.state(value)))));
                         }
                     });
                 }
