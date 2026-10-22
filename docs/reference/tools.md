@@ -853,7 +853,7 @@ the relight also loads one chunk round the box. Cells it still could not relight
 
 #### `server_find_blocks`
 
-:material-eye: Read-only · `x`, `z` required · `block` or `blocks` · optional `y`, `toX`, `toY`, `toZ`, `radius`, `limit`, `cursor`, `load`, `dimension`
+:material-eye: Read-only · `x`, `z` required · `block` or `blocks` · optional `y`, `toX`, `toY`, `toZ`, `radius`, `limit`, `cursor`, `load`, `near`, `dimension`
 
 Two shapes:
 
@@ -865,6 +865,22 @@ Two shapes:
   entry's `block`, `metadata` and `count` on the page. A page holds about `limit` matches (default
   1,000, at most 5,000). While `complete` is false, pass the returned `cursor`, with the same box,
   for the next page. `load: true` searches unloaded chunks too.
+
+**Near** (box mode only): `near: {blocks, radius, mode}` keeps only the matches that have
+(`mode: "with"`, the default) or lack (`"without"`) one of `near.blocks` within `radius` (1 to 16),
+measured as box (Chebyshev) distance, so radius 1 is the 26 touching cells. A match is never its own
+neighbour. With `"with"`, each position gains a fifth element, up to three nearby blocks' `[x, y, z]`,
+nearest first. The join runs on the server: neighbours outside the box or in an adjacent chunk are
+read from loaded chunks, and `load: true` loads the box's chunks widened by the radius. A match that
+found nothing among the loaded cells but whose neighbourhood reaches an unloaded chunk could go
+either way; it is left out of `positions` and counted in `near.unresolved`, with up to 100 of them in
+`near.unresolvedPositions`. `near.checked` is how many matches were tested on the page; `limit` and
+`cursor` count and page the kept ones. Cost grows with the cube of the radius, per match.
+
+```json
+{"x": 100, "y": 60, "z": 200, "toX": 180, "toY": 90, "toZ": 260,
+ "blocks": ["csm:*fire_alarm*"], "near": {"blocks": ["csm:*panel*"], "radius": 8, "mode": "without"}}
+```
 
 `blocks` takes several ids, namespaces ending in `:`, or patterns with `*` anywhere, e.g.
 `["csm:toilet_*", "csm:urinal_*", "csm:toilet_partition_*"]`. An unregistered exact id is an error,

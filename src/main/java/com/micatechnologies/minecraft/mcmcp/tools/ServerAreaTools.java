@@ -11,6 +11,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.regions.NbtProjection;
+import com.micatechnologies.minecraft.mcmcp.regions.NearQuery;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -348,12 +349,20 @@ public final class ServerAreaTools {
     // Finding (server_find_blocks' box mode, #84)
     // ------------------------------------------------------------------
 
+    /** Positions listed under near.unresolved, at most. */
+    private static final int MAX_UNRESOLVED_LISTED = 100;
+
     /**
      * Lists every cell in a box whose block matches {@code patterns}, chunk by chunk, with its
      * metadata. Pages end on a whole layer of a chunk, so a page holds at most {@code limit} + 255
      * matches; the cursor says where the next one starts.
+     *
+     * <p>With {@code near} (#125), a match is kept only if {@code nearby} blocks are (or are not)
+     * within its radius. Neighbours are read from loaded chunks wherever they are, inside the box or
+     * not, and {@code load} loads the box's chunks widened by the radius.
      */
-    static ToolResult findInBox(final ToolContext context, final List<String> patterns) throws Exception {
+    static ToolResult findInBox(final ToolContext context, final List<String> patterns,
+                                final List<String> nearby, final NearQuery near) throws Exception {
         final Box box = new Box(context, 0, 255);
         final List<Long> pending = new ArrayList<>(box.chunks());
         if (pending.size() > MAX_CHUNKS) {
@@ -373,19 +382,20 @@ public final class ServerAreaTools {
         if (start < 0 || start > end) {
             return ToolResult.error("That cursor is not from a page of this box. Start again without one.");
         }
-        final Set<Long> chunks = new java.util.LinkedHashSet<>(pending);
+        final Set<Long> chunks = near == null ? new java.util.LinkedHashSet<>(pending)
+            : new java.util.LinkedHashSet<>(ChunkKeys.box(box.minX - near.radius(), box.minZ - near.radius(),
+                box.maxX + near.radius(), box.maxZ + near.radius()));
         return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
-            // State id -> palette index, or -1 for a state that does not match.
-            final Map<Integer, Integer> paletteOf = new HashMap<>();
-            final JsonArray palette = new JsonArray();
-            final List<long[]> paletteCounts = new ArrayList<>();
-            final JsonArray matches = new JsonArray();
+            final Finder finder = new Finder(box, patterns, nearby, near);
             final long[] at = {start};
-            while (at[0] < end && matches.size() < limit) {
+            while (at[0] < end && finder.matches.size() < limit) {
                 context.onGameThread(() -> {
                     WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    // Chunks may unload between slices, so what this one looked up is forgotten after it.
+                    finder.beginSlice(world);
                     long started = System.nanoTime();
-                    while (at[0] < end && matches.size() < limit && System.nanoTime() - started < SLICE_NANOS) {
+                    while (at[0] < end && finder.matches.size() < limit
+                        && System.nanoTime() - started < SLICE_NANOS) {
                         int index = (int) (at[0] >> 8);
                         int y = (int) (at[0] & 255);
                         if (y < box.minY) {
@@ -407,9 +417,10 @@ public final class ServerAreaTools {
                             at[0] = ((long) index << 8) + ((y | 15) + 1);
                             continue;
                         }
-                        findInLayer(chunk, section, box, y, patterns, paletteOf, palette, paletteCounts, matches);
+                        finder.layer(chunk, section, y);
                         at[0]++;
                     }
+                    finder.endSlice();
                     return null;
                 });
                 if (pending.size() > 64) {
@@ -417,15 +428,21 @@ public final class ServerAreaTools {
                         + pending.size() + " chunks");
                 }
             }
+            JsonArray palette = finder.palette;
             for (int i = 0; i < palette.size(); i++) {
-                palette.get(i).getAsJsonObject().addProperty("count", paletteCounts.get(i)[0]);
+                palette.get(i).getAsJsonObject().addProperty("count", finder.paletteCounts.get(i)[0]);
             }
             JsonObject json = new JsonObject();
             json.addProperty("dimension", dimension);
-            json.addProperty("matches", matches.size());
-            json.addProperty("format", "[x, y, z, palette index]");
+            json.addProperty("matches", finder.matches.size());
+            json.addProperty("format", near != null && near.mode() == NearQuery.Mode.WITH
+                ? "[x, y, z, palette index, [[x, y, z] of up to " + NearQuery.MAX_REPORTED + " nearby blocks]]"
+                : "[x, y, z, palette index]");
             json.add("palette", palette);
-            json.add("positions", matches);
+            json.add("positions", finder.matches);
+            if (near != null) {
+                json.add("near", finder.nearSummary());
+            }
             json.addProperty("complete", at[0] >= end);
             if (at[0] < end) {
                 json.addProperty("cursor", String.valueOf(at[0]));
@@ -440,47 +457,176 @@ public final class ServerAreaTools {
         });
     }
 
-    /** Game thread: one y layer of one chunk's share of the box. */
-    private static void findInLayer(Chunk chunk, ExtendedBlockStorage section, Box box, int y, List<String> patterns,
-                                    Map<Integer, Integer> paletteOf, JsonArray palette, List<long[]> paletteCounts,
-                                    JsonArray matches) {
-        int baseX = chunk.x << 4;
-        int baseZ = chunk.z << 4;
-        int fromX = Math.max(box.minX, baseX) - baseX;
-        int toX = Math.min(box.maxX, baseX + 15) - baseX;
-        int fromZ = Math.max(box.minZ, baseZ) - baseZ;
-        int toZ = Math.min(box.maxZ, baseZ + 15) - baseZ;
-        for (int z = fromZ; z <= toZ; z++) {
-            for (int x = fromX; x <= toX; x++) {
-                IBlockState state = section.get(x, y & 15, z);
-                int stateId = Block.getStateId(state);
-                Integer entry = paletteOf.get(stateId);
-                if (entry == null) {
-                    entry = -1;
-                    Block block = state.getBlock();
-                    ResourceLocation name = block.getRegistryName();
-                    String id = name == null ? "unknown" : name.toString();
-                    if (block != Blocks.AIR && NbtProjection.matches(id, patterns)) {
-                        entry = palette.size();
-                        JsonObject item = new JsonObject();
-                        item.addProperty("block", id);
-                        item.addProperty("metadata", block.getMetaFromState(state));
-                        palette.add(item);
-                        paletteCounts.add(new long[1]);
+    /**
+     * One box search's state across its slices: the palette, the matches, and for {@code near} the
+     * neighbourhood reads. Game thread only, between {@link #beginSlice} and {@link #endSlice}.
+     */
+    private static final class Finder implements NearQuery.Neighbourhood {
+        final Box box;
+        final List<String> patterns;
+        final List<String> nearby;
+        final NearQuery near;
+        /** State id -> palette index, or -1 for a state that does not match. */
+        final Map<Integer, Integer> paletteOf = new HashMap<>();
+        final JsonArray palette = new JsonArray();
+        final List<long[]> paletteCounts = new ArrayList<>();
+        final JsonArray matches = new JsonArray();
+        /** State id -> whether it is one of the nearby blocks. */
+        final Map<Integer, Boolean> nearbyOf = new HashMap<>();
+        final JsonArray unresolvedListed = new JsonArray();
+        long candidates;
+        long unresolved;
+
+        private WorldServer world;
+        private final Map<Long, Chunk> chunkCache = new HashMap<>();
+        private long lastKey = Long.MIN_VALUE;
+        private Chunk lastChunk;
+
+        Finder(Box box, List<String> patterns, List<String> nearby, NearQuery near) {
+            this.box = box;
+            this.patterns = patterns;
+            this.nearby = nearby;
+            this.near = near;
+        }
+
+        void beginSlice(WorldServer world) {
+            this.world = world;
+        }
+
+        void endSlice() {
+            world = null;
+            chunkCache.clear();
+            lastKey = Long.MIN_VALUE;
+            lastChunk = null;
+        }
+
+        /** One y layer of one chunk's share of the box. */
+        void layer(Chunk chunk, ExtendedBlockStorage section, int y) {
+            int baseX = chunk.x << 4;
+            int baseZ = chunk.z << 4;
+            int fromX = Math.max(box.minX, baseX) - baseX;
+            int toX = Math.min(box.maxX, baseX + 15) - baseX;
+            int fromZ = Math.max(box.minZ, baseZ) - baseZ;
+            int toZ = Math.min(box.maxZ, baseZ + 15) - baseZ;
+            for (int z = fromZ; z <= toZ; z++) {
+                for (int x = fromX; x <= toX; x++) {
+                    IBlockState state = section.get(x, y & 15, z);
+                    int stateId = Block.getStateId(state);
+                    Integer entry = paletteOf.get(stateId);
+                    if (entry == null) {
+                        entry = -1;
+                        Block block = state.getBlock();
+                        String id = idOf(block);
+                        if (block != Blocks.AIR && NbtProjection.matches(id, patterns)) {
+                            entry = palette.size();
+                            JsonObject item = new JsonObject();
+                            item.addProperty("block", id);
+                            item.addProperty("metadata", block.getMetaFromState(state));
+                            palette.add(item);
+                            paletteCounts.add(new long[1]);
+                        }
+                        paletteOf.put(stateId, entry);
                     }
-                    paletteOf.put(stateId, entry);
+                    if (entry < 0) {
+                        continue;
+                    }
+                    int worldX = baseX + x;
+                    int worldZ = baseZ + z;
+                    JsonArray hit = new JsonArray();
+                    hit.add(worldX);
+                    hit.add(y);
+                    hit.add(worldZ);
+                    hit.add(entry);
+                    if (near != null) {
+                        candidates++;
+                        NearQuery.Outcome decided = near.check(worldX, y, worldZ, this);
+                        if (decided.verdict == NearQuery.Verdict.UNRESOLVED) {
+                            unresolved++;
+                            if (unresolvedListed.size() < MAX_UNRESOLVED_LISTED) {
+                                unresolvedListed.add(hit);
+                            }
+                            continue;
+                        }
+                        if (decided.verdict == NearQuery.Verdict.DROPPED) {
+                            continue;
+                        }
+                        if (near.mode() == NearQuery.Mode.WITH) {
+                            JsonArray found = new JsonArray();
+                            for (int[] position : decided.found) {
+                                JsonArray at = new JsonArray();
+                                at.add(position[0]);
+                                at.add(position[1]);
+                                at.add(position[2]);
+                                found.add(at);
+                            }
+                            hit.add(found);
+                        }
+                    }
+                    paletteCounts.get(entry)[0]++;
+                    matches.add(hit);
                 }
-                if (entry < 0) {
-                    continue;
-                }
-                paletteCounts.get(entry)[0]++;
-                JsonArray hit = new JsonArray();
-                hit.add(baseX + x);
-                hit.add(y);
-                hit.add(baseZ + z);
-                hit.add(entry);
-                matches.add(hit);
             }
+        }
+
+        /** Reads a neighbour from a loaded chunk, never loading one. */
+        @Override
+        public int probe(int x, int y, int z) {
+            int chunkX = x >> 4;
+            int chunkZ = z >> 4;
+            long key = ChunkKeys.of(chunkX, chunkZ);
+            Chunk chunk;
+            if (key == lastKey) {
+                chunk = lastChunk;
+            }
+            else {
+                if (chunkCache.containsKey(key)) {
+                    chunk = chunkCache.get(key);
+                }
+                else {
+                    chunk = world.getChunkProvider().getLoadedChunk(chunkX, chunkZ);
+                    chunkCache.put(key, chunk);
+                }
+                lastKey = key;
+                lastChunk = chunk;
+            }
+            if (chunk == null) {
+                return NearQuery.UNLOADED;
+            }
+            ExtendedBlockStorage section = chunk.getBlockStorageArray()[y >> 4];
+            if (section == Chunk.NULL_BLOCK_STORAGE || section.isEmpty()) {
+                return NearQuery.NO_MATCH;
+            }
+            IBlockState state = section.get(x & 15, y & 15, z & 15);
+            int stateId = Block.getStateId(state);
+            Boolean match = nearbyOf.get(stateId);
+            if (match == null) {
+                Block block = state.getBlock();
+                match = block != Blocks.AIR && NbtProjection.matches(idOf(block), nearby);
+                nearbyOf.put(stateId, match);
+            }
+            return match ? NearQuery.MATCH : NearQuery.NO_MATCH;
+        }
+
+        JsonObject nearSummary() {
+            JsonObject json = new JsonObject();
+            json.add("blocks", Json.arrayOfStrings(nearby));
+            json.addProperty("radius", near.radius());
+            json.addProperty("mode", near.mode() == NearQuery.Mode.WITH ? "with" : "without");
+            json.addProperty("distance", "box (Chebyshev)");
+            json.addProperty("checked", candidates);
+            json.addProperty("unresolved", unresolved);
+            if (unresolved > 0) {
+                json.add("unresolvedPositions", unresolvedListed);
+                json.addProperty("unresolvedNote", "These matches found no nearby block among loaded cells, but "
+                    + "their neighbourhood reaches an unloaded chunk, so they could go either way. Pass "
+                    + "load: true to settle them.");
+            }
+            return json;
+        }
+
+        private static String idOf(Block block) {
+            ResourceLocation name = block.getRegistryName();
+            return name == null ? "unknown" : name.toString();
         }
     }
 

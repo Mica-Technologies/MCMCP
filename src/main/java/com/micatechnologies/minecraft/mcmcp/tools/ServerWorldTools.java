@@ -11,6 +11,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.regions.NbtProjection;
+import com.micatechnologies.minecraft.mcmcp.regions.NearQuery;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -148,6 +149,26 @@ public final class ServerWorldTools {
             .build());
     }
 
+    /**
+     * Resolves the exact ids in {@code patterns} in place to their full registry names, so 'stone' finds
+     * minecraft:stone. Returns the first that names nothing, a typo, or null; a namespace or pattern may
+     * simply match nothing and is left as it is.
+     */
+    private static String resolvePatterns(List<String> patterns) {
+        for (int i = 0; i < patterns.size(); i++) {
+            String pattern = patterns.get(i).trim();
+            if (NbtProjection.isPattern(pattern)) {
+                continue;
+            }
+            Block block = BlockIds.resolve(pattern);
+            if (block == null || block.getRegistryName() == null) {
+                return pattern;
+            }
+            patterns.set(i, block.getRegistryName().toString());
+        }
+        return null;
+    }
+
     private static void registerFindBlocks() {
         McpRegistry.registerTool(McpTool.named("server_find_blocks")
             .title("Find blocks")
@@ -156,7 +177,9 @@ public final class ServerWorldTools {
                 + "listing every match with its metadata as [x, y, z, palette index], paged with 'cursor'. "
                 + "'block' is one id; 'blocks' takes several ids, namespaces ending in ':' or patterns "
                 + "with '*' anywhere, e.g. ['csm:toilet_*', '*car_panel*']. Unloaded chunks are skipped; in box "
-                + "mode pass load: true to search them too.")
+                + "mode pass load: true to search them too. Box mode also takes 'near' to keep only the matches "
+                + "with (or without) another block close by: 'redstone next to a lift controller', 'alarm "
+                + "devices with no panel within 8'.")
             .schema(JsonSchema.object()
                 .string("block", "Namespaced block id to search for, e.g. 'minecraft:diamond_ore'.")
                 .array("blocks", "Several blocks to search for at once: ids, namespaces ending in ':', or "
@@ -174,6 +197,17 @@ public final class ServerWorldTools {
                     + ServerAreaTools.MAX_FIND_LIMIT + " (default 1000).", 1, ServerAreaTools.MAX_FIND_LIMIT)
                 .string("cursor", "Box mode: the 'cursor' a previous page returned, to continue from it.")
                 .bool("load", "Box mode: load the box's unloaded chunks for this call, and release them afterwards.")
+                .object("near", "Box mode: keep only the matches that have (mode 'with', the default) or lack "
+                    + "(mode 'without') one of these blocks within 'radius', by box distance (radius 1 is the 26 "
+                    + "touching cells). 'with' adds up to 3 of the nearby blocks' positions to each match. "
+                    + "Neighbours outside the box are read too; a match whose neighbourhood reaches an unloaded "
+                    + "chunk and found nothing is listed under near.unresolved instead.", JsonSchema.object()
+                    .array("blocks", "The nearby blocks: ids, namespaces ending in ':', or patterns with '*'.",
+                        Json.obj("type", "string"))
+                    .integer("radius", "Box distance to look within. Cost grows with its cube.", 1,
+                        NearQuery.MAX_RADIUS)
+                    .enumeration("mode", "'with' (default) or 'without'.", "with", "without")
+                    .required("blocks", "radius"))
                 .required("x", "z")
                 .build())
             .serverOnly()
@@ -187,21 +221,54 @@ public final class ServerWorldTools {
                 if (patterns.isEmpty()) {
                     return ToolResult.error("Name what to find with 'block', or several with 'blocks'.");
                 }
-                // An exact id that names nothing is a typo; a namespace or prefix may simply match nothing.
-                // Exact ids are matched by their full registry name, so 'stone' finds minecraft:stone.
-                for (int i = 0; i < patterns.size(); i++) {
-                    String pattern = patterns.get(i).trim();
-                    if (NbtProjection.isPattern(pattern)) {
-                        continue;
-                    }
-                    Block block = BlockIds.resolve(pattern);
-                    if (block == null || block.getRegistryName() == null) {
-                        return ToolResult.error(BlockIds.describeUnknown(pattern, "search for"));
-                    }
-                    patterns.set(i, block.getRegistryName().toString());
+                String unknown = resolvePatterns(patterns);
+                if (unknown != null) {
+                    return ToolResult.error(BlockIds.describeUnknown(unknown, "search for"));
                 }
-                if (context.has("toX") || context.has("toY") || context.has("toZ")) {
-                    return ServerAreaTools.findInBox(context, patterns);
+                boolean boxMode = context.has("toX") || context.has("toY") || context.has("toZ");
+                if (context.has("near")) {
+                    if (!boxMode) {
+                        return ToolResult.error("'near' works in box mode only: give toX/toY/toZ as well.");
+                    }
+                    JsonObject near = Json.getObject(context.getArguments(), "near");
+                    if (near == null && context.getArguments().get("near").isJsonPrimitive()) {
+                        // Model-written arguments sometimes carry an object as a JSON string.
+                        try {
+                            near = Json.parse(context.getArguments().get("near").getAsString()).getAsJsonObject();
+                        }
+                        catch (RuntimeException e) {
+                            near = null;
+                        }
+                    }
+                    if (near == null) {
+                        return ToolResult.error("'near' is an object: {blocks: [...], radius: 2, mode: 'with'}.");
+                    }
+                    List<String> nearby = new ArrayList<>();
+                    for (String pattern : Json.getStringList(near, "blocks")) {
+                        if (!pattern.trim().isEmpty()) {
+                            nearby.add(pattern.trim());
+                        }
+                    }
+                    if (nearby.isEmpty()) {
+                        return ToolResult.error("Name the nearby blocks in near.blocks.");
+                    }
+                    unknown = resolvePatterns(nearby);
+                    if (unknown != null) {
+                        return ToolResult.error(BlockIds.describeUnknown(unknown, "look near"));
+                    }
+                    NearQuery.Mode mode = NearQuery.Mode.parse(Json.getString(near, "mode", "with"));
+                    if (mode == null) {
+                        return ToolResult.error("near.mode is 'with' or 'without'.");
+                    }
+                    int radius = Json.getInt(near, "radius", 0);
+                    if (radius < 1 || radius > NearQuery.MAX_RADIUS) {
+                        return ToolResult.error("near.radius is a box distance from 1 to " + NearQuery.MAX_RADIUS
+                            + ".");
+                    }
+                    return ServerAreaTools.findInBox(context, patterns, nearby, new NearQuery(radius, mode));
+                }
+                if (boxMode) {
+                    return ServerAreaTools.findInBox(context, patterns, null, null);
                 }
                 if (!context.has("y")) {
                     return ToolResult.error("Give y with x and z for a cube round a point, or toX/toY/toZ for a box.");
