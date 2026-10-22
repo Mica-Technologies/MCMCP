@@ -61,7 +61,9 @@ public final class CompanionPolicy implements CallFilter {
             CLASSES.put(read, Principal.CLASS_READ);
         }
         for (String write : new String[] {"server_set_block", "server_set_blocks", "server_undo", "server_relight", "server_apply_ops",
-            "server_teleport_player", "server_remove_entities", "server_chisel_block"}) {
+            "server_teleport_player", "server_remove_entities", "server_chisel_block",
+            // Write, though it also reads: one tool, and its read mode is the cheaper half to lose.
+            "server_entity_nbt"}) {
             CLASSES.put(write, Principal.CLASS_WRITE);
         }
         for (String command : new String[] {"server_run_command", "server_run_commands", "server_tell_player"}) {

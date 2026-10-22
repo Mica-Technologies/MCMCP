@@ -754,6 +754,20 @@ esac
 echo "==> Removing entities with nobody near: two summoned villagers go, nothing else"
 mcp_call 562 server_run_commands "{\"commands\":[\"summon minecraft:villager ${LX} $((LY + 1)) $((LZ + 2)) {NoAI:1b}\",\"summon minecraft:villager $((LX + 1)) $((LY + 1)) $((LZ + 2)) {NoAI:1b}\"]}" > /dev/null \
   || mcp_failure "could not summon the villagers"
+# server_entity_nbt (#126): the nearest villager's NBT is read, a key merged in, and the change reported
+# before and after as the entity holds it, with the SNBT that puts it back.
+ENBT_READ="$(mcp_call 5621 server_entity_nbt "{\"x\":${LX},\"y\":$((LY + 1)),\"z\":$((LZ + 2)),\"type\":\"villager\",\"keys\":[\"Invulnerable\"]}")" \
+  || mcp_failure "server_entity_nbt read failed: ${ENBT_READ}"
+case "$ENBT_READ" in
+  *'"matched":2'*'"nbt":{"Invulnerable":0}'*) echo "    read the nearest villager's NBT, narrowed to one key" ;;
+  *) mcp_failure "server_entity_nbt did not read the villager: ${ENBT_READ}" ;;
+esac
+ENBT_WRITE="$(mcp_call 5622 server_entity_nbt "{\"mode\":\"write\",\"x\":${LX},\"y\":$((LY + 1)),\"z\":$((LZ + 2)),\"type\":\"villager\",\"nbt\":\"{Invulnerable:1b}\"}")" \
+  || mcp_failure "server_entity_nbt write failed: ${ENBT_WRITE}"
+case "$ENBT_WRITE" in
+  *'"Invulnerable":{"before":0,"after":1}'*'"restore":"{'*'Invulnerable:0b'*) echo "    merged a key, reported before and after, and how to put it back" ;;
+  *) mcp_failure "server_entity_nbt did not report the write: ${ENBT_WRITE}" ;;
+esac
 DRY_BODY="$(mcp_call 563 server_remove_entities "{\"types\":[\"villager\"],\"x\":$((LX - 2)),\"y\":${LY},\"z\":${LZ},\"toX\":$((LX + 3)),\"toY\":$((LY + 3)),\"toZ\":$((LZ + 4)),\"dryRun\":true}")" \
   || mcp_failure "server_remove_entities dry run failed: ${DRY_BODY}"
 case "$DRY_BODY" in

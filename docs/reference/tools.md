@@ -948,6 +948,44 @@ is a dropped item), namespaces ending in `:`, or patterns with `*`; `*` alone is
   first 20 positions. At most 1,024 chunks and 10,000 entities a call. Not undoable.
 - `load: true` loads the box's unloaded chunks for the call.
 
+#### `server_entity_nbt`
+
+:material-alert: Destructive · writing requires `permissions.allowWorldEdits` · `uuid`, or `x`, `y`, `z` required · optional `mode`, `radius`, `type`, `dimension`, `nbt`, `resync`, `keys`, `maxChars`, `summary`, `load`
+
+Reads an entity's server-side NBT, or merges NBT into it, as `/entitydata` does but with no player
+near and no command-length limit. Mod entities keep their state here: an Immersive Vehicles (MTS)
+vehicle's parts and fuel are in its NBT. Read it first to see the layout, then write.
+
+- **Picking the entity.** `uuid` (as [`server_nearby_entities`](#server_nearby_entities) lists it)
+  finds a loaded entity in `dimension`, or in any dimension when that is left out. Or `x`, `y`, `z`
+  picks the nearest entity within `radius` (default 4, up to 128), of `type` when given (an id, a
+  bare vanilla name, a namespace ending in `:`, or a pattern with `*`). The reply's `matched` counts
+  the candidates and `others` lists up to five more, so a guess is visible as one. Players are never
+  picked: use [`server_player_state`](#server_player_state). `load: true` loads the search box's
+  chunks; an entity in an unloaded chunk is not found by UUID.
+- **`mode: "read"`** (the default) returns `nbt`, with `keys`, `maxChars` (default 8,192, up to
+  65,536) and `summary` working as in [`server_get_tile_entities`](#server_get_tile_entities).
+- **`mode: "write"`** merges `nbt` (an SNBT string, or a JSON object) into what the entity writes,
+  then reads it back into the entity. Nested compounds merge; a list or any other value is replaced
+  whole. UUID and position stay unless the patch names `Pos`, `Motion` or `Rotation`. `UUIDMost`,
+  `UUIDLeast` and `Dimension` are refused: the world finds an entity by them, and changing either
+  under a live entity loses it rather than moving it.
+- **The reply is read back from the entity**, not echoed from the patch. `changes` gives each
+  top-level key that differs, `{before, after}` (a value over `maxChars` comes back as a summary).
+  `notKept` names patch keys the entity read back differently: it clamped, normalised or ignored
+  them. `restore` is SNBT that writes the changed keys back; keys the write `added` cannot be
+  removed by a merge. Not undoable.
+- `resync` (default true) sends the entity afresh to players who can see it, since some mod state is
+  sent to clients only when an entity appears.
+- The tool is one tool for both modes, so it is not read-only: an emergency stop refuses its reads
+  too, and over the companion it is in the `write` class.
+
+```json
+{"entity": {"uuid": "…", "type": "minecraft:villager", ...}, "matched": 1,
+ "changed": 1, "changes": {"Invulnerable": {"before": 0, "after": 1}},
+ "restore": "{Invulnerable:0b}", "resynced": true, "chunks": {...}}
+```
+
 #### `server_world_info`
 
 :material-eye: Read-only · no arguments

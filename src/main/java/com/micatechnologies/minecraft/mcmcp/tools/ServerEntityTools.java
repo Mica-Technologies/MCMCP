@@ -191,7 +191,7 @@ public final class ServerEntityTools {
         return key == null ? "unknown:" + entity.getClass().getSimpleName().toLowerCase(Locale.ROOT) : key.toString();
     }
 
-    private static boolean matches(String type, List<String> patterns) {
+    static boolean matches(String type, List<String> patterns) {
         return patterns.contains("*") || NbtProjection.matches(type, patterns);
     }
 }
