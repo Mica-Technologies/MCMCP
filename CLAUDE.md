@@ -124,6 +124,19 @@ Both `GameThreadBridge` implementations short-circuit when already on the game t
 the thread you are on and then waiting is an instant deadlock) and complete futures exceptionally
 rather than rethrowing (an escaping exception on the game thread crashes the game).
 
+**On the server side, work does not go through `addScheduledTask`** (#133). `ServerTaskPump` drains
+MCMCP's own queue at the end of each server tick, round-robin by caller, within a per-tick budget
+that shrinks as the server struggles (`health.mcmcpTickBudgetMs`). Every task is a `BridgeTask`: a
+caller that times out or is cancelled before its task starts marks it abandoned, the pump skips it,
+and the caller gets a retryable `busy` tool error — never a task that runs after nobody is waiting.
+That retried-but-still-queued pile-up is what froze AltoTEST (#132). Do not add a server-side path that
+calls `addScheduledTask` from a worker; the client bridge still uses it.
+
+**Server health gates work.** `ServerLoad` (fed by the governor and by `ServerWatchdog`, a thread off
+the server thread) is ok / throttled / paused / stalled. Jobs wait from throttled; writes are refused
+from paused (`McpDispatcher.admissionRefusal`), except diagnostics, estop, release and job control. A
+new diagnostic or control tool that must keep working on a struggling server belongs on that list.
+
 ### Protocol errors vs tool errors
 
 This distinction is the thing most likely to be got wrong when adding a tool.
@@ -238,7 +251,8 @@ frequently model-generated and arrive with the wrong primitive type.
   singleplayer — filter on `!world.isRemote`. `ForgeTimings.getAverageTimings()` divides by a fixed
   99 regardless of how many slots were written; average `getRawTimingData()`'s non-zero slots.
 - **`Minecraft.profiler`, not `mcProfiler`**, in this mapping.
-- **`addScheduledTask` blocks, with no timeout, while a scheduled task runs.** Minecraft drains the
+- **`addScheduledTask` blocks, with no timeout, while a scheduled task runs** (the client bridge, and
+  vanilla's own network threads on the server). Minecraft drains the
   queue inside `synchronized (scheduledTasks)`, so a long task holds the lock and every other
   thread's `addScheduledTask` waits on it — the bridge's own timeout only starts once a task is
   queued. Anything long (a world launch, a world leave) goes through `ClientDeferredTasks`, never the
