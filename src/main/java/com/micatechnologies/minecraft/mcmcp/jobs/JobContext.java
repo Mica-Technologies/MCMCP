@@ -56,6 +56,31 @@ final class JobContext extends ToolContext {
         return super.onGameThread(task);
     }
 
+    /** A job part waits for the writes-per-minute budget rather than failing the job on it (#131). */
+    @Override
+    public boolean pacesToBudgets() {
+        return true;
+    }
+
+    /** Waits out pauses, shows the wait in the job's status, and stops within one step of a cancel. */
+    @Override
+    public void awaitBudget(long millis, String message) {
+        try {
+            if (!job.awaitRunnable()) {
+                throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");
+            }
+            reportProgress(0.0D, 1.0D, message);
+            Thread.sleep(Math.max(0L, millis));
+            if (job.cancelRequested()) {
+                throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");
+            }
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job's runner was stopped.");
+        }
+    }
+
     @Override
     public void reportProgress(double progress, double total, @Nullable String message) {
         double fraction = total > 0 ? progress / total : 0.5D;

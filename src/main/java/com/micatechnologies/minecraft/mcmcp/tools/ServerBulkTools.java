@@ -537,6 +537,9 @@ public final class ServerBulkTools {
     /**
      * Charges {@code count} cells to the caller's writes-per-minute budget.
      *
+     * <p>A job part waits for the budget instead of being refused (#131), through its context, so a
+     * pause or cancel lands within a second of the wait. An interactive call is refused at once.
+     *
      * @return null if they fit, or the refusal to return, with busy.retryAfterMs
      */
     @Nullable
@@ -544,25 +547,36 @@ public final class ServerBulkTools {
         // Per agent, as chunk holds are (#121): keyed on the endpoint alone, every agent behind the
         // orchestrator shared one budget, and one bulk write starved the rest.
         final String caller = ChunkLoadGovernor.holdCallerOf(context);
-        long now = System.currentTimeMillis();
-        int perMinute = McmcpConfig.getWriteCellsPerMinutePerCaller();
+        final boolean paced = context.pacesToBudgets();
         int cells = (int) Math.min(Integer.MAX_VALUE, count);
-        synchronized (WRITE_BUDGET) {
-            WRITE_BUDGET.newTick();
-            if (WRITE_BUDGET.allowance(caller, cells, now, Integer.MAX_VALUE, Integer.MAX_VALUE, perMinute) < cells) {
-                JsonObject busy = new JsonObject();
-                busy.addProperty("reason", "limit");
-                busy.addProperty("limit", "limits.writeCellsPerMinutePerCaller");
-                busy.addProperty("retryAfterMs", Math.max(1000L,
-                    WRITE_BUDGET.millisUntilRoom(caller, now, Integer.MAX_VALUE, perMinute)));
-                JsonObject structured = new JsonObject();
-                structured.add("busy", busy);
-                return ToolResult.error(count + " more cells would pass the " + perMinute
-                    + " a caller may write in a minute (limits.writeCellsPerMinutePerCaller).").withStructured(structured);
+        while (true) {
+            long now = System.currentTimeMillis();
+            int perMinute = McmcpConfig.getWriteCellsPerMinutePerCaller();
+            long wait;
+            synchronized (WRITE_BUDGET) {
+                long used = WRITE_BUDGET.lastMinute(caller, now);
+                if (WritePacing.fits(used, cells, perMinute, paced)) {
+                    WRITE_BUDGET.record(caller, cells, now);
+                    return null;
+                }
+                if (!paced) {
+                    JsonObject busy = new JsonObject();
+                    busy.addProperty("reason", "limit");
+                    busy.addProperty("limit", "limits.writeCellsPerMinutePerCaller");
+                    busy.addProperty("retryAfterMs", Math.max(1000L,
+                        WRITE_BUDGET.millisUntilRoom(caller, now, Integer.MAX_VALUE, perMinute)));
+                    JsonObject structured = new JsonObject();
+                    structured.add("busy", busy);
+                    return ToolResult.error(count + " more cells would pass the " + perMinute
+                        + " a caller may write in a minute (limits.writeCellsPerMinutePerCaller). A job "
+                        + "(server_job_submit) waits for the budget instead.").withStructured(structured);
+                }
+                wait = WRITE_BUDGET.millisUntilFits(caller, cells, now, perMinute);
             }
-            WRITE_BUDGET.record(caller, cells, now);
+            context.awaitBudget(WritePacing.waitStep(wait), "Waiting for the write budget "
+                + "(limits.writeCellsPerMinutePerCaller, " + perMinute + " a minute): " + cells + " cells fit in about "
+                + Math.max(1L, (wait + 999L) / 1000L) + " s");
         }
-        return null;
     }
 
     @Nullable

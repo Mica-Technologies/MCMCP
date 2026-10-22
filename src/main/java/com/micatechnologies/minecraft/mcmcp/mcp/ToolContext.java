@@ -105,6 +105,32 @@ public class ToolContext {
         return false;
     }
 
+    /**
+     * True when a rate budget this call runs over (the writes-per-minute budget) should make it wait
+     * rather than refuse it. A job part paces itself: nobody is waiting on it, and a refusal would fail
+     * the whole job (#131). An interactive call is refused with {@code busy.retryAfterMs}.
+     */
+    public boolean pacesToBudgets() {
+        return false;
+    }
+
+    /**
+     * Waits up to {@code millis} for a budget to free up, showing {@code message} as progress. Only
+     * called when {@link #pacesToBudgets()}. A job's context waits out its pauses here too and throws
+     * a cancellation if the job is cancelled; this default only honours the call's own cancellation.
+     */
+    public void awaitBudget(long millis, String message) {
+        cancellation.throwIfCancelled();
+        try {
+            Thread.sleep(Math.max(0L, millis));
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "Interrupted while waiting for a budget.");
+        }
+        cancellation.throwIfCancelled();
+    }
+
     /** Marks this call as one an emergency stop must end. Set by the dispatcher for every tool that is not read-only. */
     public void setMutating(boolean value) {
         this.mutating = value;
@@ -403,6 +429,16 @@ public class ToolContext {
                 String labelled = messagePrefix == null ? message
                     : message == null ? messagePrefix : messagePrefix + " · " + message;
                 whole.reportProgress(base + fraction, total, labelled);
+            }
+
+            @Override
+            public boolean pacesToBudgets() {
+                return whole.pacesToBudgets();
+            }
+
+            @Override
+            public void awaitBudget(long millis, String message) {
+                whole.awaitBudget(millis, message);
             }
         };
         part.timings = timings;

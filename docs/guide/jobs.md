@@ -18,8 +18,8 @@ server_job_submit {"kind": "apply_ops", "label": "Castleton block 4",
 
 | `kind` | Runs | Split by |
 | --- | --- | --- |
-| `apply_ops` | [`server_apply_ops`](../reference/tools.md#server_apply_ops) | Ops, so that each part reaches at most 4 × `limits.maxWriteCells` cells |
-| `set_blocks` | [`server_set_blocks`](../reference/tools.md#server_set_blocks) | Palette cells, list placements, or the layers of a fill |
+| `apply_ops` | [`server_apply_ops`](../reference/tools.md#server_apply_ops) | Ops, so that each part reaches at most 4 × `limits.maxWriteCells` cells, and no more than `limits.writeCellsPerMinutePerCaller` |
+| `set_blocks` | [`server_set_blocks`](../reference/tools.md#server_set_blocks) | Palette cells (at most `limits.maxWriteCells`, and no more than the write budget), list placements, or the layers of a fill |
 | `get_blocks` | [`server_get_blocks`](../reference/tools.md#server_get_blocks) | The box, into reads of at most `limits.maxBlockVolume` cells; each comes back as a page |
 | `relight` | [`server_relight`](../reference/tools.md#server_relight) | The box |
 | `test` | [`server_run_test`](../reference/tools.md#server_run_test) | Not split: one script, one run. Its status carries the `verdict`, and a cancel still restores what the script marked |
@@ -46,8 +46,11 @@ is listed afterwards as `interrupted`, with how far it got. Resume it with a new
 
 **Pace.** Two jobs run at once and the rest queue. Each player may have four queued or running, and the
 server sixteen. Every game-thread step of a job waits while the job is paused, or while the chunk
-governor reports the server struggling. A part refused as busy (chunk loads, the write budget) is
-retried after the wait it asks for, up to eight times.
+governor reports the server struggling. A part over the writes-per-minute budget
+(`limits.writeCellsPerMinutePerCaller`, kept per job) waits for it rather than failing: its status
+`message` says so and how long, and a pause or cancel still lands within a second. So a job of any
+size runs at the budget's rate, a minute's worth at a time. A part refused as busy for anything else
+(chunk loads) is retried after the wait it asks for, up to eight times.
 
 **Control.** [`server_job_pause`, `server_job_resume` and `server_job_cancel`](../reference/tools.md#server_job_cancel-server_job_pause-server_job_resume)
 act on the next step. Cancelling keeps what was already written, with its undo points. Through the

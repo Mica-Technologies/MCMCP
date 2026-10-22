@@ -704,8 +704,9 @@ The counts add up to `attempted` (the cells the ops reach): `written` (or `would
 `unchanged`, `conflicts`, `unloaded`, `refused` and `byPartner`. Lines that could not be replayed
 are listed in `refusedOps` with their line number and reason; the rest still run. `nbt` counts the
 merges, and `bbox` is the box the ops cover. One call reaches at most 4 × `limits.maxWriteCells`
-cells, charged to the writes-per-minute budget, and leaves one undo point. Submit a larger list as a
-[job](#server_job_submit).
+cells, charged to the writes-per-minute budget (past it, a `busy` error with `retryAfterMs`), and
+leaves one undo point. Submit a larger list as a [job](#server_job_submit), which waits for the
+budget instead of failing on it.
 
 A cell whose block's own code throws while it is written (an old block's `breakBlock`, a new one's
 `onBlockAdded`, a neighbour's update) is refused, and the write goes on. Its reason in `refusedAt`
@@ -1309,7 +1310,8 @@ The result counts `applied`, `unchanged`, `conflicts`, `skippedTileEntity`, `unl
 `conflictList` holds the first 50 conflicts as `{pos, expected, actual}`, so a generator can see
 exactly which cells a person changed since it last read them, and leave them alone.
 Writes per caller (each agent, companion player or job) are limited to `limits.writeCellsPerMinutePerCaller` (1,000,000) a minute. Past
-that, the result is a `busy` error with `retryAfterMs`.
+that, the result is a `busy` error with `retryAfterMs`. A [job](#server_job_submit) is not refused:
+its part waits for the budget, and its status `message` says so.
 
 ##### Holding physics
 

@@ -82,6 +82,32 @@ public final class LoadBudget {
         return Math.max(0L, wait);
     }
 
+    /**
+     * When enough of {@code caller}'s last-minute loads will have aged out for {@code wanted} more to
+     * fit under {@code perMinutePerCaller}, in milliseconds from now; 0 if they fit already. When
+     * {@code wanted} alone is over the budget, when all of them will have aged out. How long a paced
+     * write waits, rather than looking again every few milliseconds.
+     */
+    public long millisUntilFits(String caller, int wanted, long nowMillis, int perMinutePerCaller) {
+        expire(nowMillis);
+        Deque<long[]> mine = byCaller.get(caller);
+        if (mine == null) {
+            return 0L;
+        }
+        long used = count(mine);
+        long target = Math.max(0L, (long) perMinutePerCaller - wanted);
+        if (used <= target) {
+            return 0L;
+        }
+        for (long[] entry : mine) {
+            used -= entry[1];
+            if (used <= target) {
+                return Math.max(0L, entry[0] + MINUTE_MILLIS - nowMillis);
+            }
+        }
+        return 0L;
+    }
+
     private void expire(long nowMillis) {
         long cutoff = nowMillis - MINUTE_MILLIS;
         while (!all.isEmpty() && all.peekFirst()[0] <= cutoff) {

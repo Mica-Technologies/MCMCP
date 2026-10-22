@@ -166,8 +166,11 @@ public final class ServerJobTools {
         }
         int maxWrite = McmcpConfig.getMaxWriteCells();
         int volume = McmcpConfig.getMaxBlockVolume();
-        JobParts.Limits limits = new JobParts.Limits(maxWrite, (long) maxWrite * 4L, (long) volume * 32L,
-            (long) volume * 32L, volume, 4_194_304L);
+        // Write parts no bigger than the writes-per-minute budget, so a job paces to it a part at a
+        // time (#131) rather than one oversized part waiting for the whole minute to clear.
+        long perMinute = McmcpConfig.getWriteCellsPerMinutePerCaller();
+        JobParts.Limits limits = new JobParts.Limits(Math.min(maxWrite, perMinute),
+            Math.min((long) maxWrite * 4L, perMinute), (long) volume * 32L, (long) volume * 32L, volume, 4_194_304L);
         Job job;
         try {
             job = JobManager.submit(kind, tool, args, context.getString("label", null),
