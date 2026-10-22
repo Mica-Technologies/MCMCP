@@ -1034,6 +1034,17 @@ case "$HEALTH_BODY" in
   *'previousRun'*'journal'*'enabled'*) echo "    journal is on, and game_health reports the previous run" ;;
   *) mcp_failure "game_health did not report previousRun with the journal enabled: ${HEALTH_BODY}" ;;
 esac
+# The server's health, read off the server thread so it answers during a stall (#133).
+SERVER_HEALTH_BODY="$(mcp_call 1002 game_health '{}')" || mcp_failure "game_health failed: ${SERVER_HEALTH_BODY}"
+case "$SERVER_HEALTH_BODY" in
+  *'"serverHealth":{"level":"'*'"refusesWrites":'*) echo "    game_health reports the server's health level" ;;
+  *) mcp_failure "game_health did not report serverHealth: ${SERVER_HEALTH_BODY}" ;;
+esac
+awk '/^health \{/,/^\}/' "$CONFIG_FILE" | grep -q 'I:stallDumpSeconds=10' \
+  || mcp_failure "health.stallDumpSeconds was not generated with its default"
+if grep -q "MCMCP's server watchdog hit an error" "$LOG"; then
+  mcp_failure "the server watchdog threw: see ${LOG}"
+fi
 
 # ---------------------------------------------------------------------------
 # Orchestrator link
