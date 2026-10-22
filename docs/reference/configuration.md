@@ -517,7 +517,7 @@ it is paused.
 `integer` 1–50 · default `15`
 
 Most of each server tick MCMCP spends running its calls' work, in milliseconds. Every MCMCP task
-for the server thread goes into MCMCP's own queue, which the server thread works through at the end
+for the server thread goes into MCMCP's own queue, which the server thread works through at the start
 of each tick, one caller at a time in turn: each agent on the endpoint, each player through the
 companion and each background job is a caller. While jobs are held the budget is at most 5 ms, and
 while writes are refused or the server is stalled it is one task a tick. A task that has started

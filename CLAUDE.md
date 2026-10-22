@@ -125,10 +125,11 @@ the thread you are on and then waiting is an instant deadlock) and complete futu
 rather than rethrowing (an escaping exception on the game thread crashes the game).
 
 **On the server side, work does not go through `addScheduledTask`** (#133). `ServerTaskPump` drains
-MCMCP's own queue at the end of each server tick, round-robin by caller, within a per-tick budget
-that shrinks as the server struggles (`health.mcmcpTickBudgetMs`). Every task is a `BridgeTask`: a
-caller that times out or is cancelled before its task starts marks it abandoned, the pump skips it,
-and the caller gets a retryable `busy` tool error — never a task that runs after nobody is waiting.
+MCMCP's own queue at the start of each server tick (inside vanilla's tick timing, so health sees
+it), round-robin by caller, within a per-tick budget that shrinks as the server struggles
+(`health.mcmcpTickBudgetMs`). Every task is a `BridgeTask`: a caller that times out or is cancelled
+before its task starts marks it abandoned, the pump skips it, and the caller gets a retryable `busy`
+tool error — never a task that runs after nobody is waiting.
 That retried-but-still-queued pile-up is what froze AltoTEST (#132). Do not add a server-side path that
 calls `addScheduledTask` from a worker; the client bridge still uses it.
 

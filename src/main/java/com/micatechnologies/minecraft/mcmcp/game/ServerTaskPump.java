@@ -17,10 +17,15 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
 /**
  * MCMCP's own way onto the server thread, in place of {@code addScheduledTask} (#133).
  *
- * <p>Workers offer tasks to a {@link FairDrain} without a lock; at the end of every server tick the
+ * <p>Workers offer tasks to a {@link FairDrain} without a lock; at the start of every server tick the
  * server thread runs them, taking turns between callers, for at most the tick's {@link TaskBudget}:
  * 15 ms when the server is healthy, 5 ms while jobs are held, one task while writes are refused. A
  * task its caller gave up on is skipped.
+ *
+ * <p>At the start, not the end: vanilla times a tick from just before {@code ServerTickEvent}'s START
+ * to just before its END, so work done in END is missing from {@code tickTimeArray}, and with it from
+ * the mean tick time that health, admission and jobs go by. Drained in END, MCMCP spending 500 ms a
+ * tick left the server reading 2 ms and OK.
  *
  * <h2>Stopping</h2>
  *
@@ -221,7 +226,8 @@ public final class ServerTaskPump {
 
         @SubscribeEvent
         public void onTick(TickEvent.ServerTickEvent event) {
-            if (event.phase != TickEvent.Phase.END) {
+            // START, inside the window vanilla times; see the class comment.
+            if (event.phase != TickEvent.Phase.START) {
                 return;
             }
             lastTickNanos = System.nanoTime();

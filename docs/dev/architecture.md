@@ -98,12 +98,14 @@ server after the first world exit. `ClientThreadBridge` uses `Minecraft.addSched
 server thread holds for as long as it runs every queued task, so a worker offering one more waits,
 with no timeout, behind everything already there, and the server thread runs all of it in one tick
 however long that takes. Instead each task is a `BridgeTask` (#132), offered without a lock to
-`ServerTaskPump`, MCMCP's own queue (#133). At the end of every server tick the pump runs tasks one
+`ServerTaskPump`, MCMCP's own queue (#133). At the start of every server tick the pump runs tasks one
 caller at a time in turn (`FairDrain`), for at most the tick's budget (`TaskBudget`:
 `health.mcmcpTickBudgetMs` when healthy, 5 ms while jobs are held, one task while writes are
 refused), and always at least one. A `BridgeTask` its caller gave up on before it started does
 nothing when the pump reaches it, and its caller is told it never ran; one that had started runs to
-the end, and a cleanup the caller left gets its value. When a server stops, everything still queued
+the end, and a cleanup the caller left gets its value. The start, not the end, because vanilla's
+`tickTimeArray` stops timing before `ServerTickEvent`'s END: work drained there would be missing from
+the mean tick time that health and admission go by. When a server stops, everything still queued
 is dropped and its callers hear so at once. An integrated server stops ticking while its player has
 the game paused, so there, once no tick has drained the pump for a second, an offer, and a caller
 still waiting on one, schedules a vanilla task that drains the pump until it is empty.
