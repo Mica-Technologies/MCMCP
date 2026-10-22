@@ -116,6 +116,24 @@ public final class ChunkLoadGovernor {
         return principal.isCompanion() ? "player:" + principal.getPlayerId() : "endpoint";
     }
 
+    /**
+     * Who a call's chunk holds belong to, for the per-caller cap and ownership (#121). A player is
+     * one caller however many agents they run, since their access is theirs. On the endpoint each
+     * agent is its own — through the orchestrator every agent shares one link session, and keyed on
+     * the endpoint alone five agents shared one caller's cap and starved each other. A background
+     * job holds under {@code job:<id>}, a caller of its own.
+     */
+    public static String holdCallerOf(ToolContext context) {
+        if (context.getHoldCaller() != null) {
+            return context.getHoldCaller();
+        }
+        Principal principal = context.getPrincipal();
+        return principal.isCompanion() ? callerOf(principal) : "endpoint/" + context.getCaller().id();
+    }
+
+    /** How long a call refused by a hold cap waits for calls in progress to give chunks back. */
+    private static final long CAP_WAIT_MILLIS = 10_000L;
+
     // ------------------------------------------------------------------
     // Asking for chunks
     // ------------------------------------------------------------------
@@ -126,6 +144,9 @@ public final class ChunkLoadGovernor {
         private static final long serialVersionUID = 1L;
 
         private final transient JsonObject busy;
+
+        /** A hold cap that calls in progress count against: it may clear in a moment. */
+        private boolean capMayClear;
 
         Busy(String message, JsonObject busy) {
             super(message);
@@ -201,10 +222,29 @@ public final class ChunkLoadGovernor {
      */
     public static Outcome acquire(ToolContext context, final int dimension, final Set<Long> chunks,
                                   final boolean temporary, final long idleMillis, final long maxMillis) throws Busy {
-        final String caller = context.getHoldCaller() != null ? context.getHoldCaller() : callerOf(context.getPrincipal());
+        final String caller = holdCallerOf(context);
+        final String label = context.getHoldCaller() != null || context.getPrincipal().isCompanion()
+            ? null : context.getCaller().label();
         final long started = System.currentTimeMillis();
-        Object admitted = context.onGameThread(() -> admit(caller, dimension, chunks, temporary, idleMillis,
-            maxMillis, started));
+        Object admitted;
+        while (true) {
+            admitted = context.onGameThread(() -> admit(caller, label, dimension, chunks, temporary, idleMillis,
+                maxMillis, System.currentTimeMillis()));
+            // A cap that calls in progress count against clears when they end, usually within seconds:
+            // a short wait then saves the caller a retry round. A lasting hold does not end that soon,
+            // so a cap made of those is refused at once.
+            if (!(admitted instanceof Busy) || !((Busy) admitted).capMayClear
+                || System.currentTimeMillis() - started >= CAP_WAIT_MILLIS || context.getCancellation().isCancelled()) {
+                break;
+            }
+            try {
+                Thread.sleep(250L);
+            }
+            catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
         if (admitted instanceof Busy) {
             throw (Busy) admitted;
         }
@@ -275,25 +315,16 @@ public final class ChunkLoadGovernor {
     }
 
     /** Server thread: limits, the hold itself, and what is already loaded. */
-    private static Object admit(String caller, int dimension, Set<Long> chunks, boolean temporary,
-                                long idleMillis, long maxMillis, long nowMillis) {
+    private static Object admit(String caller, @Nullable String label, int dimension, Set<Long> chunks,
+                                boolean temporary, long idleMillis, long maxMillis, long nowMillis) {
         WorldServer world = DimensionManager.getWorld(dimension);
         if (world == null) {
             return new Busy("Dimension " + dimension + " is not loaded.", busy("limit", "dimension", 0L));
         }
-        int adding = LEDGER.added(dimension, chunks);
-        int maxTotal = McmcpConfig.getChunkMaxHeld();
-        int maxCaller = McmcpConfig.getChunkMaxHeldPerCaller();
-        if (LEDGER.heldChunks() + adding > maxTotal) {
-            return new Busy("That needs " + adding + " more chunk(s) held, and MCMCP already holds "
-                + LEDGER.heldChunks() + " of the " + maxTotal + " chunks.maxHeldChunks allows. Release a hold "
-                + "or ask for less.", busy("limit", "chunks.maxHeldChunks", 0L));
-        }
-        if (LEDGER.heldChunks(caller) + adding > maxCaller) {
-            return new Busy("That needs " + adding + " more chunk(s) held, and you already hold "
-                + LEDGER.heldChunks(caller) + " of the " + maxCaller + " chunks.maxHeldChunksPerCaller allows. "
-                + "Release a hold (server_release_loaded) or work in smaller pieces.",
-                busy("limit", "chunks.maxHeldChunksPerCaller", 0L));
+        HoldLedger.CapRefusal cap = LEDGER.checkCaps(caller, dimension, chunks, McmcpConfig.getChunkMaxHeld(),
+            McmcpConfig.getChunkMaxHeldPerCaller());
+        if (cap != null) {
+            return capBusy(cap);
         }
         if (QUEUE.size() >= MAX_QUEUED_REQUESTS) {
             return new Busy("MCMCP chunk loading is saturated: " + QUEUE.size() + " requests are waiting.",
@@ -301,6 +332,7 @@ public final class ChunkLoadGovernor {
         }
 
         HoldLedger.Hold hold = LEDGER.create(caller, dimension, chunks, temporary, nowMillis, idleMillis, maxMillis);
+        hold.label = label;
         LEDGER.add(hold);
         Outcome outcome = new Outcome(hold.id, chunks.size());
         Deque<Long> pending = new ArrayDeque<>();
@@ -447,7 +479,8 @@ public final class ChunkLoadGovernor {
         if (hold == null || hold.temporary) {
             return "There is no hold '" + holdId + "'.";
         }
-        if (!hold.caller.equals(caller) && !"endpoint".equals(caller)) {
+        // The endpoint's agents may renew any hold, as before each had its own (#121); a player only theirs.
+        if (!hold.caller.equals(caller) && !caller.startsWith("endpoint")) {
             return "Hold '" + holdId + "' is not yours.";
         }
         long now = System.currentTimeMillis();
@@ -724,6 +757,19 @@ public final class ChunkLoadGovernor {
         return Math.max(1_000L, Math.max(budget, Math.max(health, queue)));
     }
 
+    /** A hold cap's refusal: which cap, who holds what, and the caller's own share. */
+    private static Busy capBusy(HoldLedger.CapRefusal cap) {
+        JsonObject json = busy("limit", cap.limit, cap.callsInProgress ? 2_000L : 0L);
+        json.addProperty("cap", cap.cap);
+        json.addProperty("adding", cap.adding);
+        json.addProperty("heldChunks", cap.heldChunks);
+        json.addProperty("callers", cap.callers);
+        json.addProperty("yourHeldChunks", cap.callerHeldChunks);
+        Busy busy = new Busy(cap.message(), json);
+        busy.capMayClear = cap.callsInProgress;
+        return busy;
+    }
+
     private static JsonObject busy(String reason, @Nullable String limit, long retryAfterMillis) {
         JsonObject json = new JsonObject();
         json.addProperty("reason", reason);
@@ -821,6 +867,15 @@ public final class ChunkLoadGovernor {
 
     /** For {@code /mcmcp chunks}, {@code server_tick_stats} and {@code game_health}. Server thread. */
     public static JsonObject status(@Nullable String onlyCaller) {
+        return status(onlyCaller, null);
+    }
+
+    /**
+     * As above, with {@code you} the asker's hold caller, to report their own count beside the caps.
+     * With {@code onlyCaller} null every caller's share is listed: who holds what, so a stale hold
+     * can be found and released when a cap is in the way (#121).
+     */
+    public static JsonObject status(@Nullable String onlyCaller, @Nullable String you) {
         long now = System.currentTimeMillis();
         JsonObject json = new JsonObject();
         json.addProperty("state", HEALTH.state().name().toLowerCase(java.util.Locale.ROOT));
@@ -828,23 +883,58 @@ public final class ChunkLoadGovernor {
         json.addProperty("heapPercentAfterGc", Math.round(HEALTH.lastHeapPercent()));
         json.addProperty("heldChunks", LEDGER.heldChunks());
         json.addProperty("maxHeldChunks", McmcpConfig.getChunkMaxHeld());
+        json.addProperty("maxHeldChunksPerCaller", McmcpConfig.getChunkMaxHeldPerCaller());
+        json.addProperty("callers", LEDGER.callers());
+        if (you != null) {
+            json.addProperty("you", you);
+            json.addProperty("yourHeldChunks", LEDGER.heldChunks(you));
+        }
         json.addProperty("loadsLastMinute", BUDGET.lastMinute(now));
         json.addProperty("waitingRequests", QUEUE.size());
+        Map<String, String> labels = new HashMap<>();
         JsonArray holds = new JsonArray();
         for (HoldLedger.Hold hold : LEDGER.holds()) {
+            if (hold.label != null) {
+                labels.put(hold.caller, hold.label);
+            }
             if (onlyCaller != null && !onlyCaller.equals(hold.caller)) {
                 continue;
             }
             JsonObject entry = new JsonObject();
             entry.addProperty("id", hold.id);
             entry.addProperty("owner", hold.caller);
+            if (hold.label != null) {
+                entry.addProperty("ownerLabel", hold.label);
+            }
             entry.addProperty("dimension", hold.dimension);
             entry.addProperty("chunks", hold.chunks.size());
             entry.addProperty("temporary", hold.temporary);
             entry.addProperty("expiresInSeconds", Math.max(0L, (hold.expiresAtMillis() - now) / 1000L));
+            if (!hold.temporary) {
+                entry.addProperty("leaseEndsInSeconds",
+                    Math.max(0L, (hold.createdMillis + hold.maxMillis - now) / 1000L));
+            }
             holds.add(entry);
         }
         json.add("holds", holds);
+        if (onlyCaller == null) {
+            JsonArray byCaller = new JsonArray();
+            for (HoldLedger.Share share : LEDGER.shares()) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("caller", share.caller);
+                if (labels.containsKey(share.caller)) {
+                    entry.addProperty("label", labels.get(share.caller));
+                }
+                entry.addProperty("chunks", share.chunks);
+                entry.addProperty("holds", share.holds);
+                entry.addProperty("calls", share.calls);
+                if (share.nextExpiryMillis != Long.MAX_VALUE) {
+                    entry.addProperty("nextExpiresInSeconds", Math.max(0L, (share.nextExpiryMillis - now) / 1000L));
+                }
+                byCaller.add(entry);
+            }
+            json.add("byCaller", byCaller);
+        }
         synchronized (SHED_LOG) {
             if (!SHED_LOG.isEmpty()) {
                 json.add("recentlyShed", Json.arrayOfStrings(new ArrayList<>(SHED_LOG)));

@@ -517,6 +517,11 @@ call needs chunks that aren't loaded, ask for them:
 Both go through one governor:
 - **Pacing.** Loads are paced (`chunks.loadsPerTick`) and budgeted per minute, server-wide and per
   caller. Chunks that are already loaded never count against either.
+- **Hold caps.** At most `chunks.maxHeldChunks` chunks are held at once, and at most
+  `chunks.maxHeldChunksPerCaller` by any one caller, so one agent cannot take them all. A caller is
+  one player through the companion, one agent on the endpoint (each agent through the orchestrator
+  counts apart), or one background job. A request that a running call's chunks stand in the way of
+  waits up to 10 seconds for them before it is refused.
 - **Server health.** It watches tick time and memory. Loading slows when the server is
   struggling, and stops when it falls below 20 TPS or is short of memory. If that lasts, the
   longest-idle holds are given back.
@@ -537,7 +542,16 @@ When the governor refuses or gives up, the call returns a tool error whose struc
 ```
 
 `reason` is `throttled`, `paused`, `saturated` (too many requests waiting) or `limit` (with the
-`limit` that was hit). Wait `retryAfterMs` and try again.
+`limit` that was hit). Wait `retryAfterMs` and try again. A hold cap's refusal says which cap and
+who holds what:
+
+```json
+{"busy": {"reason": "limit", "limit": "chunks.maxHeldChunks", "cap": 1024, "adding": 200,
+ "heldChunks": 900, "callers": 3, "yourHeldChunks": 100, "mspt": 21.4, "heapPercent": 38}}
+```
+
+It carries `retryAfterMs` only when calls still running hold some of those chunks; otherwise a hold
+has to be released first ([`server_keep_loaded`](#server_keep_loaded) `list` shows them).
 
 #### `server_keep_loaded`
 
@@ -558,10 +572,15 @@ when its owner leaves the server. Reading or writing inside it renews the idle t
 lease; `renew` renews both. A read inside a hold whose lease ends within two minutes carries
 `holdLeaseEndsInSeconds` in its `chunks` block, so a long test hears of it before its region
 unloads. For a test that reads nothing for minutes at a time, pass a long `idleSeconds`. `list`
-shows the governor's state and your holds.
+shows the governor's state, both caps, `yourHeldChunks`, and each hold with its `owner` (and
+`ownerLabel`, the agent's name), `chunks`, `expiresInSeconds` and `leaseEndsInSeconds`. On the
+endpoint it also lists every caller's share in `byCaller` (`caller`, `label`, `chunks`, `holds`,
+`calls` in progress, `nextExpiresInSeconds`), biggest first, so a stale hold in the way can be found
+and released by id. A player through the companion sees only their own holds.
 
 Limited to `chunks.maxHeldChunksPerCaller` (512, about 360 × 360 blocks) per caller and
-`chunks.maxHeldChunks` server-wide. Work a larger area in pieces.
+`chunks.maxHeldChunks` server-wide. Each agent and each job is its own caller. Work a larger area in
+pieces.
 
 #### `server_release_loaded`
 
@@ -571,7 +590,7 @@ Ends a hold. Chunks MCMCP loaded are unloaded straight away unless a player can 
 another hold still needs them. Returns `{released: [ids], heldChunks}`, `heldChunks` being what you
 still hold.
 
-`all: true` ends your `server_keep_loaded` holds only. A read or write still loading chunks for another
+`all: true` ends your `server_keep_loaded` holds only; on the endpoint, "yours" means this agent's. A read or write still loading chunks for another
 of your calls keeps its own, so one script cleaning up cannot fail another running on the same account.
 A call whose hold is ended while it waits fails with a message naming what ended it.
 

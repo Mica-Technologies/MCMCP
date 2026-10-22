@@ -40,6 +40,9 @@ public final class HoldLedger {
         public long maxMillis;
         /** Shed after every other lasting hold: small and bounded in time, like a watch's (#98). */
         public boolean pinned;
+        /** Who the caller is, for people to read (the agent's name); null when only the id is known. */
+        @Nullable
+        public String label;
 
         Hold(String id, String caller, int dimension, Set<Long> chunks, boolean temporary,
              long nowMillis, long idleMillis, long maxMillis) {
@@ -173,6 +176,10 @@ public final class HoldLedger {
 
     /** Distinct chunks held by one caller. */
     public int heldChunks(String caller) {
+        return placesOf(caller).size();
+    }
+
+    private Set<Place> placesOf(String caller) {
         Set<Place> places = new HashSet<>();
         for (Hold hold : holds.values()) {
             if (hold.caller.equals(caller)) {
@@ -181,7 +188,162 @@ public final class HoldLedger {
                 }
             }
         }
-        return places.size();
+        return places;
+    }
+
+    /** How many distinct callers hold anything, calls in progress included. */
+    public int callers() {
+        Set<String> callers = new HashSet<>();
+        for (Hold hold : holds.values()) {
+            callers.add(hold.caller);
+        }
+        return callers.size();
+    }
+
+    public static final String LIMIT_TOTAL = "chunks.maxHeldChunks";
+    public static final String LIMIT_PER_CALLER = "chunks.maxHeldChunksPerCaller";
+
+    /** Why a new hold would pass a cap: which one, and who holds what. */
+    public static final class CapRefusal {
+
+        /** The config key of the cap: {@link #LIMIT_TOTAL} or {@link #LIMIT_PER_CALLER}. */
+        public final String limit;
+        public final int cap;
+        /** What the hold would add to the count that cap bounds. */
+        public final int adding;
+        public final int heldChunks;
+        public final int callers;
+        public final int callerHeldChunks;
+        /**
+         * Whether a call in progress holds chunks that count against this cap. Those end with their
+         * call, so a moment's wait may make room; a lasting hold never frees up that soon.
+         */
+        public final boolean callsInProgress;
+
+        CapRefusal(String limit, int cap, int adding, int heldChunks, int callers, int callerHeldChunks,
+                   boolean callsInProgress) {
+            this.limit = limit;
+            this.cap = cap;
+            this.adding = adding;
+            this.heldChunks = heldChunks;
+            this.callers = callers;
+            this.callerHeldChunks = callerHeldChunks;
+            this.callsInProgress = callsInProgress;
+        }
+
+        public boolean perCaller() {
+            return LIMIT_PER_CALLER.equals(limit);
+        }
+
+        /** The refusal as a caller reads it: which cap, the server's count and callers, and their own. */
+        public String message() {
+            StringBuilder text = new StringBuilder();
+            if (perCaller()) {
+                text.append("Hold cap reached for you (").append(limit).append(" = ").append(cap)
+                    .append("): you hold ").append(callerHeldChunks).append(" chunk(s) and this needs ")
+                    .append(adding).append(" more. The server holds ").append(heldChunks).append(" for ")
+                    .append(callers).append(" caller(s). Release a hold of yours (server_release_loaded) or ")
+                    .append("work in smaller pieces.");
+            }
+            else {
+                text.append("Server hold cap reached (").append(limit).append(" = ").append(cap).append("): ")
+                    .append(heldChunks).append(" chunk(s) held by ").append(callers).append(" caller(s), ")
+                    .append(callerHeldChunks).append(" of them yours, and this needs ").append(adding)
+                    .append(" more. server_keep_loaded op 'list' shows who holds what.");
+            }
+            if (callsInProgress) {
+                text.append(" Calls still running hold some of these and give them back when they end: retry ")
+                    .append("after busy.retryAfterMs.");
+            }
+            return text.toString();
+        }
+    }
+
+    /**
+     * Whether {@code caller} may take a hold over {@code chunks} under both caps. The server-wide cap
+     * counts the chunks nobody holds yet; the caller's own counts the chunks this caller does not hold
+     * yet, so overlapping another caller's hold is free for the server but not for the caller. A
+     * background job's holds are taken under {@code job:<id>}, so a job is a caller of its own.
+     *
+     * @param maxPerCaller 0 for no per-caller cap
+     * @return null when it fits
+     */
+    @Nullable
+    public CapRefusal checkCaps(String caller, int dimension, Set<Long> chunks, int maxTotal, int maxPerCaller) {
+        int held = heldChunks();
+        Set<Place> mine = placesOf(caller);
+        int addingTotal = added(dimension, chunks);
+        if (held + addingTotal > maxTotal) {
+            return new CapRefusal(LIMIT_TOTAL, maxTotal, addingTotal, held, callers(), mine.size(),
+                hasCallInProgress(null));
+        }
+        if (maxPerCaller > 0) {
+            int addingMine = 0;
+            for (long chunk : chunks) {
+                if (!mine.contains(new Place(dimension, chunk))) {
+                    addingMine++;
+                }
+            }
+            if (mine.size() + addingMine > maxPerCaller) {
+                return new CapRefusal(LIMIT_PER_CALLER, maxPerCaller, addingMine, held, callers(), mine.size(),
+                    hasCallInProgress(caller));
+            }
+        }
+        return null;
+    }
+
+    private boolean hasCallInProgress(@Nullable String caller) {
+        for (Hold hold : holds.values()) {
+            if (hold.temporary && (caller == null || hold.caller.equals(caller))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** One caller's share of what is held. */
+    public static final class Share {
+
+        public final String caller;
+        public final int chunks;
+        /** Lasting holds: server_keep_loaded, a watch's. */
+        public final int holds;
+        /** Calls in progress holding chunks for themselves. */
+        public final int calls;
+        /** When the first of this caller's lasting holds ends if untouched, or {@link Long#MAX_VALUE}. */
+        public final long nextExpiryMillis;
+
+        Share(String caller, int chunks, int holds, int calls, long nextExpiryMillis) {
+            this.caller = caller;
+            this.chunks = chunks;
+            this.holds = holds;
+            this.calls = calls;
+            this.nextExpiryMillis = nextExpiryMillis;
+        }
+    }
+
+    /** Who holds what, the biggest holder first: what to read when a cap is in the way. */
+    public List<Share> shares() {
+        Map<String, int[]> counts = new LinkedHashMap<>();
+        Map<String, Long> expiry = new HashMap<>();
+        for (Hold hold : holds.values()) {
+            int[] count = counts.computeIfAbsent(hold.caller, key -> new int[2]);
+            if (hold.temporary) {
+                count[1]++;
+            }
+            else {
+                count[0]++;
+                expiry.merge(hold.caller, hold.expiresAtMillis(), Math::min);
+            }
+        }
+        List<Share> shares = new ArrayList<>();
+        for (Map.Entry<String, int[]> entry : counts.entrySet()) {
+            String caller = entry.getKey();
+            shares.add(new Share(caller, heldChunks(caller), entry.getValue()[0], entry.getValue()[1],
+                expiry.getOrDefault(caller, Long.MAX_VALUE)));
+        }
+        shares.sort(Comparator.comparingInt((Share share) -> -share.chunks).thenComparing(share -> share.caller));
+        return shares;
     }
 
     /** How many of {@code chunks} are not already held by anyone: what a new hold would add. */

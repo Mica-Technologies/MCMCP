@@ -87,10 +87,13 @@ public final class ServerChunkTools {
                 + "hours by default), on server_release_loaded, or when you leave the server. Reading or "
                 + "writing in it renews the idle timer but not the lease; op 'renew' renews both. A read "
                 + "inside a hold whose lease ends within two minutes says so (holdLeaseEndsInSeconds). For a "
-                + "long test nothing reads during, pass a long idleSeconds. op 'list' shows your holds.\n\n"
+                + "long test nothing reads during, pass a long idleSeconds. op 'list' shows the holds, who "
+                + "holds what (byCaller) and when each ends.\n\n"
                 + "Limited per caller (chunks.maxHeldChunksPerCaller, 512 by default, about 360 x 360 "
-                + "blocks) and for the server. When the server is busy the call fails with a structured "
-                + "'busy' block carrying retryAfterMs: wait that long and retry.")
+                + "blocks; each agent and each job is its own caller) and for the server "
+                + "(chunks.maxHeldChunks). A refusal names the cap, the count held and by how many callers, "
+                + "and yours. When the server is busy the call fails with a structured 'busy' block carrying "
+                + "retryAfterMs: wait that long and retry.")
             .schema(JsonSchema.object()
                 .enumeration("op", "hold (default), renew or list.", "hold", "renew", "list")
                 .integer("x", "hold: X of one corner of the block box.")
@@ -107,10 +110,10 @@ public final class ServerChunkTools {
             .serverOnly()
             .handler(context -> {
                 String op = context.getString("op", "hold");
-                String caller = ChunkLoadGovernor.callerOf(context.getPrincipal());
+                String caller = ChunkLoadGovernor.holdCallerOf(context);
                 boolean everyone = !context.getPrincipal().isCompanion();
                 if ("list".equals(op)) {
-                    JsonObject status = context.onGameThread(() -> ChunkLoadGovernor.status(everyone ? null : caller));
+                    JsonObject status = context.onGameThread(() -> ChunkLoadGovernor.status(everyone ? null : caller, caller));
                     return ToolResult.structured(status);
                 }
                 int longest = McmcpConfig.getChunkHoldLongestLeaseSeconds();
@@ -144,9 +147,13 @@ public final class ServerChunkTools {
                 int x2 = context.getInt("toX", x1);
                 int z2 = context.getInt("toZ", z1);
                 long count = ChunkKeys.boxCount(x1, z1, x2, z2);
-                if (count > McmcpConfig.getChunkMaxHeldPerCaller()) {
-                    return ToolResult.error("That box covers " + count + " chunks; one caller may hold "
-                        + McmcpConfig.getChunkMaxHeldPerCaller() + " (chunks.maxHeldChunksPerCaller). Hold it in "
+                int perCaller = McmcpConfig.getChunkMaxHeldPerCaller();
+                boolean callerBound = perCaller > 0 && perCaller < McmcpConfig.getChunkMaxHeld();
+                int most = callerBound ? perCaller : McmcpConfig.getChunkMaxHeld();
+                if (count > most) {
+                    return ToolResult.error("That box covers " + count + " chunks; " + (callerBound
+                        ? "one caller may hold " + most + " (chunks.maxHeldChunksPerCaller)"
+                        : "MCMCP may hold " + most + " (chunks.maxHeldChunks)") + ". Hold it in "
                         + "pieces, releasing each when you are done with it.");
                 }
                 int dimension = context.getInt("dimension", 0);
@@ -185,7 +192,7 @@ public final class ServerChunkTools {
             .serverOnly()
             .idempotent()
             .handler(context -> {
-                String caller = ChunkLoadGovernor.callerOf(context.getPrincipal());
+                String caller = ChunkLoadGovernor.holdCallerOf(context);
                 if (context.getBoolean("all", false)) {
                     return ToolResult.structured(context.onGameThread(() -> released(caller,
                         ChunkLoadGovernor.releaseCallerNow(caller, "server_release_loaded all"))));

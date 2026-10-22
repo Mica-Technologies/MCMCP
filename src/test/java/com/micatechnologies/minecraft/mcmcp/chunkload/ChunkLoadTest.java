@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.chunkload;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Arrays;
@@ -220,5 +221,104 @@ class ChunkLoadTest {
         assertEquals(Arrays.asList(kept.id), ledger.ownedBy("p", false),
             "another script on the same account cleaning up must not fail this one's read");
         assertEquals(Arrays.asList(call.id, kept.id), ledger.ownedBy("p", true), "logout ends everything");
+    }
+
+    // ------------------------------------------------------------------
+    // Hold caps (#121)
+    // ------------------------------------------------------------------
+
+    private static Set<Long> range(long from, long count) {
+        Set<Long> set = new HashSet<>();
+        for (long i = 0; i < count; i++) {
+            set.add(from + i);
+        }
+        return set;
+    }
+
+    @Test
+    void oneCallerAtItsCapDoesNotStopAnotherCallerTakingAHold() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("agent-a", 0, range(0, 512), false, 0L, 1L, 1L));
+        HoldLedger.CapRefusal more = ledger.checkCaps("agent-a", 0, range(512, 1), 1024, 512);
+        assertEquals(HoldLedger.LIMIT_PER_CALLER, more.limit, "agent a has used its own share");
+        assertNull(ledger.checkCaps("agent-b", 0, range(512, 400), 1024, 512),
+            "agent b still has its whole share");
+    }
+
+    @Test
+    void aBackgroundJobIsACallerOfItsOwnAgainstThePerCallerCap() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("endpoint/orchestrator:1", 0, range(0, 500), false, 0L, 1L, 1L));
+        assertNull(ledger.checkCaps("job:7", 0, range(500, 500), 2048, 512),
+            "a job the agent submitted does not draw on the agent's share");
+    }
+
+    @Test
+    void theServerCapIsReportedWithTheCountHeldTheCallersAndTheAskersShare() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("a", 0, range(0, 400), false, 0L, 1L, 1L));
+        ledger.add(ledger.create("b", 0, range(400, 400), false, 0L, 1L, 1L));
+        ledger.add(ledger.create("c", 0, range(800, 100), false, 0L, 1L, 1L));
+        HoldLedger.CapRefusal refusal = ledger.checkCaps("c", 0, range(900, 200), 1024, 512);
+        assertEquals(HoldLedger.LIMIT_TOTAL, refusal.limit);
+        assertEquals(900, refusal.heldChunks);
+        assertEquals(3, refusal.callers);
+        assertEquals(100, refusal.callerHeldChunks);
+        assertEquals(200, refusal.adding);
+        assertFalse(refusal.callsInProgress, "only lasting holds: no point waiting");
+        String message = refusal.message();
+        assertTrue(message.contains("chunks.maxHeldChunks = 1024"), message);
+        assertTrue(message.contains("900 chunk(s) held by 3 caller(s)"), message);
+        assertTrue(message.contains("100 of them yours"), message);
+    }
+
+    @Test
+    void thePerCallerCapCountsChunksTheCallerDoesNotHoldEvenIfAnotherCallerDoes() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("a", 0, range(0, 10), false, 0L, 1L, 1L));
+        ledger.add(ledger.create("b", 0, range(100, 8), false, 0L, 1L, 1L));
+        HoldLedger.CapRefusal refusal = ledger.checkCaps("b", 0, range(0, 5), 1024, 10);
+        assertEquals(HoldLedger.LIMIT_PER_CALLER, refusal.limit,
+            "a's chunks cost the server nothing more, but b would hold 13");
+        assertEquals(5, refusal.adding);
+        assertEquals(8, refusal.callerHeldChunks);
+        assertTrue(refusal.message().contains("you hold 8 chunk(s)"), refusal.message());
+        assertNull(ledger.checkCaps("b", 0, range(100, 8), 1024, 10), "re-holding its own chunks adds nothing");
+    }
+
+    @Test
+    void aPerCallerCapOfZeroLeavesOnlyTheServerCap() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("a", 0, range(0, 900), false, 0L, 1L, 1L));
+        assertNull(ledger.checkCaps("a", 0, range(900, 100), 1024, 0));
+        assertEquals(HoldLedger.LIMIT_TOTAL, ledger.checkCaps("a", 0, range(900, 200), 1024, 0).limit);
+    }
+
+    @Test
+    void aCapThatCallsInProgressCountAgainstSaysItMayClearSoon() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("a", 0, range(0, 10), true, 0L, 1L, 1L));
+        ledger.add(ledger.create("b", 0, range(10, 10), false, 0L, 1L, 1L));
+        assertTrue(ledger.checkCaps("b", 0, range(20, 5), 20, 0).callsInProgress, "a's call ends soon");
+        assertFalse(ledger.checkCaps("b", 0, range(20, 5), 1024, 10).callsInProgress,
+            "b's own share is all lasting holds");
+    }
+
+    @Test
+    void sharesListWhoHoldsWhatTheBiggestFirstWithTheSoonestExpiry() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("small", 0, range(0, 2), false, 0L, 60_000L, 900_000L));
+        ledger.add(ledger.create("big", 0, range(10, 5), false, 0L, 120_000L, 900_000L));
+        ledger.add(ledger.create("big", 0, range(12, 5), false, 0L, 30_000L, 900_000L));
+        ledger.add(ledger.create("big", 0, range(40, 1), true, 0L, 1L, 1L));
+        List<HoldLedger.Share> shares = ledger.shares();
+        assertEquals(2, shares.size());
+        assertEquals("big", shares.get(0).caller);
+        assertEquals(8, shares.get(0).chunks, "overlapping holds count each chunk once");
+        assertEquals(2, shares.get(0).holds);
+        assertEquals(1, shares.get(0).calls);
+        assertEquals(30_000L, shares.get(0).nextExpiryMillis);
+        assertEquals(60_000L, shares.get(1).nextExpiryMillis);
+        assertEquals(2, ledger.callers());
     }
 }

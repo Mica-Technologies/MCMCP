@@ -398,11 +398,14 @@ public class McmcpConfig {
         chunkLoadsPerMinute = configuration.getInt("loadsPerMinute", CATEGORY_CHUNKS, 600, 20, 100000,
             "Most chunk loads MCMCP causes in any minute, for everyone together.");
         chunkLoadsPerMinutePerCaller = configuration.getInt("loadsPerMinutePerCaller", CATEGORY_CHUNKS, 400, 20,
-            100000, "Most chunk loads one caller (one player's agent, or the endpoint) causes in any minute.");
+            100000, "Most chunk loads one caller (one player, one agent on the endpoint, or one job) causes in any minute.");
         chunkMaxHeld = configuration.getInt("maxHeldChunks", CATEGORY_CHUNKS, 1024, 1, 65536,
             "Most chunks MCMCP keeps loaded at once, for everyone together: the bound on its memory.");
-        chunkMaxHeldPerCaller = configuration.getInt("maxHeldChunksPerCaller", CATEGORY_CHUNKS, 512, 1, 65536,
-            "Most chunks one caller keeps loaded at once. 512 chunks is about 360 x 360 blocks.");
+        chunkMaxHeldPerCaller = configuration.getInt("maxHeldChunksPerCaller", CATEGORY_CHUNKS, 512, 0, 65536,
+            "Most chunks one caller keeps loaded at once, so one agent cannot take the whole of\n"
+                + "maxHeldChunks. A caller is one player, one agent on the endpoint (each agent through the\n"
+                + "orchestrator counts apart), or one background job. 512 chunks is about 360 x 360 blocks.\n"
+                + "0 for no per-caller limit.");
         chunkHoldIdleSeconds = configuration.getInt("holdIdleSeconds", CATEGORY_CHUNKS, 120, 10, 3600,
             "A hold nothing has read from or written to for this long is released.");
         chunkHoldMaxSeconds = configuration.getInt("holdMaxSeconds", CATEGORY_CHUNKS, 900, 60, 3600,

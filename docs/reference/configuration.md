@@ -447,9 +447,9 @@ read live.
 | --- | --- | --- | --- |
 | `loadsPerTick` | 8 | 1–64 | Chunks loaded from disk in one tick (about 0.5 ms each for vanilla; at most 2 while throttled). |
 | `loadsPerMinute` | 600 | 20+ | Loads in any minute, everyone together. |
-| `loadsPerMinutePerCaller` | 400 | 20+ | Loads in any minute by one caller: one player's agent, or the endpoint. |
-| `maxHeldChunks` | 1024 | 1–65536 | Chunks MCMCP keeps loaded at once: the bound on its memory. |
-| `maxHeldChunksPerCaller` | 512 | 1–65536 | Chunks one caller keeps loaded (512 is about 360 × 360 blocks). |
+| `loadsPerMinutePerCaller` | 400 | 20+ | Loads in any minute by one caller: one player, one agent on the endpoint, or one job. |
+| `maxHeldChunks` | 1024 | 1–65536 | Chunks MCMCP keeps loaded at once: the bound on its memory. Raise it on a server with memory to spare. |
+| `maxHeldChunksPerCaller` | 512 | 0–65536 | Chunks one caller keeps loaded (512 is about 360 × 360 blocks), so one agent cannot take all of `maxHeldChunks`. Each agent through the orchestrator, and each background job, is its own caller. 0 for no per-caller limit. |
 | `holdIdleSeconds` | 120 | 10–3600 | A hold unused for this long is released. |
 | `holdMaxSeconds` | 900 | 60–3600 | The lease a hold gets when it asks for none. |
 | `holdLongestLeaseSeconds` | 14400 | 60–86400 | The longest lease a hold may ask for with `maxSeconds`. The idle release still applies. |

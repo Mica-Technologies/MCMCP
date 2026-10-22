@@ -380,7 +380,8 @@ public class CommandMcmcp extends CommandBase {
             com.google.gson.JsonObject hold = entry.getAsJsonObject();
             reply(sender, TextFormatting.GRAY, "  " + hold.get("id").getAsString() + ": "
                 + hold.get("chunks").getAsInt() + " chunks in dim " + hold.get("dimension").getAsInt() + " for "
-                + hold.get("owner").getAsString() + ", " + hold.get("expiresInSeconds").getAsLong() + " s left");
+                + (hold.has("ownerLabel") ? hold.get("ownerLabel").getAsString() : hold.get("owner").getAsString())
+                + ", " + hold.get("expiresInSeconds").getAsLong() + " s left");
         }
     }
 
