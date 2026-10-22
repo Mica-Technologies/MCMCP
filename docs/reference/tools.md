@@ -2123,7 +2123,9 @@ them settle again. `view.tileEntities` reports `inRange`, `drawn`, and `rebuilt`
 
 **A view beyond the render distance.** `bringPlayer: true` moves the player to the camera first, so
 the chunks there load, waits for them, captures, and puts the player back where they were, facing the
-same way and flying or not as before. `view.playerReturnedTo` says where. The move is the server's own
+same way and flying or not as before. `view.playerReturnedTo` says where. The return is retried for a
+few seconds; if it still fails, the error says the player was left at the camera, and the next
+`bringPlayer` call returns them to where they started, as long as nothing moved them meanwhile. The move is the server's own
 teleport: the integrated server's in singleplayer, and `server_teleport_player` over the companion on
 a remote server, which needs the player's companion `write` access there. It needs creative or
 spectator mode, because the player hovers at the camera, and a survival player put in the air is

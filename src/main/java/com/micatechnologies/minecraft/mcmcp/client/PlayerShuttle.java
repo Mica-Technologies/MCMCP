@@ -52,6 +52,17 @@ public final class PlayerShuttle {
         }
     }
 
+    /** Attempts at the return teleport before the player is reported stranded (#129). */
+    private static final int RETURN_ATTEMPTS = 5;
+
+    /**
+     * A return that failed: where the player should have gone, and where they were left. A later
+     * {@link #bring} that finds the player still where they were left goes back from here, not from the
+     * camera, so one failed return cannot become every later shot's "home" (#129).
+     */
+    private static volatile Trip stranded;
+    private static volatile double[] strandedAt;
+
     private PlayerShuttle() {
     }
 
@@ -77,6 +88,15 @@ public final class PlayerShuttle {
                 return "The game window has focus, so a person may be playing: bringPlayer moves the player only "
                     + "while the agent holds client_input_lock, or the window is in the background.";
             }
+            Trip owed = stranded;
+            double[] leftAt = strandedAt;
+            if (owed != null && leftAt != null
+                && mc.player.getDistanceSq(leftAt[0], leftAt[1], leftAt[2]) < 4.0D) {
+                return owed;
+            }
+            // Moved since: whoever moved them chose the new spot, so it is the one to come back to.
+            stranded = null;
+            strandedAt = null;
             return new Trip(mc.player.posX, mc.player.posY, mc.player.posZ, mc.player.rotationYaw,
                 mc.player.rotationPitch, mc.player.capabilities.isFlying);
         });
@@ -85,14 +105,55 @@ public final class PlayerShuttle {
         }
         Trip trip = (Trip) checked;
         teleport(context, to[0], to[1], to[2], trip.yaw, trip.pitch, true);
-        waitUntilAt(context, to[0], to[1], to[2]);
+        try {
+            waitUntilAt(context, to[0], to[1], to[2]);
+        }
+        catch (IllegalStateException e) {
+            // The teleport was accepted, so the player may be anywhere between: put them back first.
+            back(context, trip, to);
+            throw e;
+        }
         return trip;
     }
 
-    /** Puts the player back where {@link #bring} found them, facing and flying as they were. */
-    public static void back(ToolContext context, Trip trip) throws Exception {
-        teleport(context, trip.x, trip.y, trip.z, trip.yaw, trip.pitch, trip.flying);
-        waitUntilAt(context, trip.x, trip.y, trip.z);
+    /**
+     * Puts the player back where {@link #bring} found them, facing and flying as they were.
+     *
+     * <p>Retried with backoff: the return is the move that matters most, and on a remote server it can
+     * be refused for a reason that passes in seconds, such as another session's calls filling
+     * {@code companion.maxConcurrentCalls} (#129).
+     *
+     * @param from where the player is being brought back from, to recognise them there next call
+     * @throws IllegalStateException when every attempt failed; the player is left at {@code from}
+     */
+    public static void back(ToolContext context, Trip trip, double[] from) throws Exception {
+        Exception last = null;
+        long pause = 500L;
+        for (int attempt = 0; attempt < RETURN_ATTEMPTS; attempt++) {
+            if (attempt > 0) {
+                Thread.sleep(pause);
+                pause *= 2L;
+            }
+            try {
+                teleport(context, trip.x, trip.y, trip.z, trip.yaw, trip.pitch, trip.flying);
+                waitUntilAt(context, trip.x, trip.y, trip.z);
+                stranded = null;
+                strandedAt = null;
+                return;
+            }
+            catch (InterruptedException e) {
+                throw e;
+            }
+            catch (Exception e) {
+                last = e;
+            }
+        }
+        stranded = trip;
+        strandedAt = from.clone();
+        throw new IllegalStateException("The player was NOT returned and is still at the camera, " + Math.round(from[0])
+            + " " + Math.round(from[1]) + " " + Math.round(from[2]) + ": " + last.getMessage() + " They belong at "
+            + Math.round(trip.x) + " " + Math.round(trip.y) + " " + Math.round(trip.z) + "; the next bringPlayer "
+            + "call returns them there if they have not been moved meanwhile.");
     }
 
     private static void teleport(ToolContext context, double x, double y, double z, float yaw, float pitch,

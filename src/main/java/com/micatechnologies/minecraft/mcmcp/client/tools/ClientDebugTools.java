@@ -289,8 +289,10 @@ public final class ClientDebugTools {
                         }
                         finally {
                             if (broughtFrom != null) {
-                                // Back where they were even if the capture failed.
-                                com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.back(context, broughtFrom);
+                                // Back where they were even if the capture failed. Retried, and a
+                                // failure says so loudly: it leaves the player at the camera (#129).
+                                com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.back(context, broughtFrom,
+                                    from);
                             }
                         }
                         if (broughtFrom != null) {
