@@ -106,6 +106,56 @@ class UndoPointsTest {
         deleteFolder(folder);
     }
 
+    @Test
+    void aPruneCountsWhatItDeletedForSizeAndForCountSeparately() throws IOException {
+        File folder = Files.createTempDirectory("mcmcp-undo-test").toFile();
+        owned(folder, "u1", "orchestrator:c1");
+        owned(folder, "u2", "orchestrator:c1");
+        owned(folder, "u3", "orchestrator:c1");
+        point(folder, "u4", 500);
+        point(folder, "u5", 600);
+        // Newest first: u5 600 fits alone, u4 500 does not fit beside it, and everything older goes with it.
+        UndoPoints.Pruned bySize = UndoPoints.prune(folder, 50, 1000);
+        assertEquals(4, bySize.bySize);
+        assertEquals(0, bySize.byCount);
+        assertFalse(bySize.newestOverLimit);
+        deleteFolder(folder);
+
+        folder = Files.createTempDirectory("mcmcp-undo-test").toFile();
+        owned(folder, "u1", "orchestrator:c1");
+        owned(folder, "u2", "orchestrator:c1");
+        owned(folder, "u3", "orchestrator:c1");
+        UndoPoints.Pruned byCount = UndoPoints.prune(folder, 2, 0);
+        assertEquals(0, byCount.bySize);
+        assertEquals(1, byCount.byCount);
+        deleteFolder(folder);
+    }
+
+    @Test
+    void aPointOverTheSizeLimitOnItsOwnIsReportedWithTheLimitAndAWayToKeepUndo() throws IOException {
+        File folder = Files.createTempDirectory("mcmcp-undo-test").toFile();
+        point(folder, "u1", 3 * 1024 * 1024);
+        UndoPoints.Pruned pruned = UndoPoints.prune(folder, 50, 1024L * 1024L);
+        assertTrue(pruned.newestOverLimit);
+        String note = pruned.note(1, 50, false);
+        assertTrue(note.contains("3.0 MB"), note);
+        assertTrue(note.contains("undo.maxUndoMegabytes (1 MB)"), note);
+        assertTrue(note.contains("config/mcmcp.cfg"), note);
+        deleteFolder(folder);
+    }
+
+    @Test
+    void anOlderPointGivingWayIsNewsToAJobButNotToAnInteractiveWrite() {
+        UndoPoints.Pruned pruned = new UndoPoints.Pruned();
+        pruned.bySize = 2;
+        pruned.byCount = 1;
+        assertNull(pruned.note(64, 50, false), "an interactive write's ring turning over is not a warning");
+        String note = pruned.note(64, 50, true);
+        assertTrue(note.contains("2 older undo point(s)") && note.contains("(64 MB)"), note);
+        assertTrue(note.contains("undo.maxUndoPoints (50 per writer)"), note);
+        assertNull(new UndoPoints.Pruned().note(64, 50, true), "nothing deleted, nothing said");
+    }
+
     /** An undo point made by {@code owner}. */
     private static void owned(File folder, String id, String owner) throws IOException {
         Files.write(new File(folder, id + ".json").toPath(),

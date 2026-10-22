@@ -72,6 +72,9 @@ public final class Job {
     @Nullable
     private String error;
     private final JsonObject totals = new JsonObject();
+    /** The latest part's word on undo history it had to delete (#131), shown in every status. */
+    @Nullable
+    private String undoWarning;
     /** A test job's verdict, once its run has ended. */
     @Nullable
     private JsonObject verdict;
@@ -111,6 +114,9 @@ public final class Job {
         job.endedMillis = saved.has("ended") ? saved.get("ended").getAsLong() : 0L;
         job.error = saved.has("error") ? saved.get("error").getAsString()
             : was.settled() ? null : "The server stopped while this job ran. Resume from lastOp + 1 with a new job.";
+        if (saved.has("undoWarning")) {
+            job.undoWarning = saved.get("undoWarning").getAsString();
+        }
         if (saved.has("totals") && saved.get("totals").isJsonObject()) {
             for (Map.Entry<String, JsonElement> entry : saved.getAsJsonObject("totals").entrySet()) {
                 job.totals.add(entry.getKey(), entry.getValue());
@@ -245,6 +251,10 @@ public final class Job {
         }
         else if (result != null) {
             JobParts.fold(totals, lists, result, part.opOffset);
+            JsonElement warning = result.get("undoWarning");
+            if (warning != null && warning.isJsonPrimitive()) {
+                undoWarning = warning.getAsString();
+            }
             if (keepAsPage) {
                 JsonObject page = new JsonObject();
                 if (part.region != null) {
@@ -329,6 +339,9 @@ public final class Job {
         }
         if (totals.size() > 0) {
             json.add("totals", totals);
+        }
+        if (undoWarning != null) {
+            json.addProperty("undoWarning", undoWarning);
         }
         if (verdict != null) {
             json.add("verdict", verdict);

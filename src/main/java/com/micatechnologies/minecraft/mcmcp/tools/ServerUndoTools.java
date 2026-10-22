@@ -330,8 +330,16 @@ public final class ServerUndoTools {
             meta.addProperty("by", context.getPrincipal().isCompanion() ? context.getPrincipal().getPlayerName()
                 : context.getCaller().label());
             BufferedImage afterImage = beforeImage == null ? null : drawImage(context, dimension, area);
-            UndoPoints.save(folder, meta, (NBTTagCompound) taken[1], beforeImage, afterImage);
+            UndoPoints.Pruned pruned = UndoPoints.save(folder, meta, (NBTTagCompound) taken[1], beforeImage, afterImage);
             result.addProperty("undoPoint", id);
+            // Undo is bounded, and past its bounds history goes without a word unless said here (#131).
+            String note = pruned.note(McmcpConfig.getMaxUndoMegabytes(), McmcpConfig.getMaxUndoPoints(), context.isJob());
+            if (note != null) {
+                if (pruned.dropped() > 0) {
+                    result.addProperty("undoDropped", pruned.dropped());
+                }
+                result.addProperty("undoWarning", note);
+            }
             return id;
         }
         catch (IOException | RuntimeException e) {

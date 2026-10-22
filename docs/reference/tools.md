@@ -844,7 +844,11 @@ A job's `state` (`queued`, `running`, `paused`, `done`, `failed`, `cancelled` or
 `partsDone` of `parts`, `percent`, `elapsedMs` and `etaMs`. Also:
 
 - `pausedBy`: `owner`, `operator` or `estop`, while it is paused.
-- `totals`: every part's counts summed.
+- `totals`: every part's counts summed. `undoDropped` among them counts undo points deleted to stay
+  within the undo limits while the job ran.
+- `undoWarning`: present once a part's write deleted undo history (or made a point over
+  `undo.maxUndoMegabytes` on its own), naming the limit and how to keep undo. The job's earliest
+  parts may then not be undoable. See [`server_undo`](#server_undo).
 - `refused`: the first 100 refusals, each with its `list` and, for an op, its line in the whole list.
 - `lastOp`: for an op replay, the last op finished. Resume an interrupted job from `lastOp + 1`.
 - `pages`: for a `get_blocks` job, how many pages there are. Pass `page` to read one; it comes back
@@ -1398,6 +1402,13 @@ connection that called. Each writer keeps its newest `undo.maxUndoPoints` points
 building at once do not push each other's history out. All of them together stay within
 `undo.maxUndoMegabytes` (64 MB by default), the oldest removed first, so an agent that builds around
 the clock does not grow the save without limit.
+
+The newest point is always kept, but one over `undo.maxUndoMegabytes` on its own lasts only until
+the next write. A write whose point is that large says so in `undoWarning`, with its size, the limit,
+and how to keep undo (raise the limit, `0` for none, or write in smaller jobs). A job part also
+reports there, and in `undoDropped`, any older point deleted for size or past `undo.maxUndoPoints`,
+since a long job is what pushes out its own first parts; an ordinary call does not, as an old point
+giving way to a new one is the limit working.
 
 | `op` | Does |
 | --- | --- |

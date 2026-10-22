@@ -115,6 +115,22 @@ class JobPartsTest {
     }
 
     @Test
+    void aJobsStatusSaysPlainlyWhenItsPartsDeletedUndoHistoryAndCountsHowMuch() {
+        Job job = new Job("j2", "apply_ops", "server_apply_ops", null, "p", "player:p",
+            JobParts.split("apply_ops", args("{\"ops\":[\"setblock 0 0 0 a:b\",\"setblock 1 0 0 a:b\"]}"), LIMITS), 0L);
+        job.started(1L);
+        JobParts.Part part = job.parts.get(0);
+        job.partDone(part, args("{\"written\":5,\"undoPoint\":\"u1\"}"), false, 1L << 20);
+        assertFalse(job.toJson(false).has("undoWarning"), "nothing deleted, nothing said");
+        job.partDone(part, args("{\"written\":5,\"undoPoint\":\"u2\",\"undoDropped\":3,"
+            + "\"undoWarning\":\"3 older undo point(s) were deleted\"}"), false, 1L << 20);
+        job.partDone(part, args("{\"written\":5,\"undoPoint\":\"u3\",\"undoDropped\":1}"), false, 1L << 20);
+        JsonObject status = job.toJson(false);
+        assertTrue(status.get("undoWarning").getAsString().contains("deleted"), "kept once said, not only in full");
+        assertEquals(4, status.getAsJsonObject("totals").get("undoDropped").getAsInt());
+    }
+
+    @Test
     void aJobReadBackAfterARestartIsInterruptedAndSaysWhereToResume() {
         JsonObject saved = args("{\"id\":\"j9\",\"kind\":\"apply_ops\",\"state\":\"running\",\"partsDone\":3,\"parts\":7,"
             + "\"lastOp\":4410,\"owner\":\"p\",\"ownerKey\":\"player:p\",\"totals\":{\"written\":12}}");

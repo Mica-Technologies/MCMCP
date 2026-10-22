@@ -211,8 +211,9 @@ public final class UndoPoints {
      * thread: {@code record} is plain NBT by now.
      *
      * @param meta id, tool, dimension, blocks, from/to and anything else to list it by
+     * @return what the prune after it deleted, and whether this point is itself over the size limit
      */
-    public static void save(File folder, JsonObject meta, NBTTagCompound record,
+    public static Pruned save(File folder, JsonObject meta, NBTTagCompound record,
                             @Nullable BufferedImage beforeImage, @Nullable BufferedImage afterImage)
         throws IOException {
         if (!folder.isDirectory() && !folder.mkdirs()) {
@@ -235,7 +236,63 @@ public final class UndoPoints {
         // The listing file last: an undo point is listed only once everything it names exists.
         Files.write(new File(folder, id + ".json").toPath(),
             Json.write(meta).getBytes(StandardCharsets.UTF_8));
-        prune(folder, McmcpConfig.getMaxUndoPoints(), McmcpConfig.getMaxUndoMegabytes() * 1024L * 1024L);
+        return prune(folder, McmcpConfig.getMaxUndoPoints(), McmcpConfig.getMaxUndoMegabytes() * 1024L * 1024L);
+    }
+
+    /**
+     * What one prune deleted (#131). Undo is bounded, and past its bounds history is deleted
+     * silently: a 1.7M-cell job once finished with none of its early parts undoable and nothing
+     * saying so. This is what lets the write's result say so instead.
+     */
+    public static final class Pruned {
+        /** Points deleted because the folder was over {@code undo.maxUndoMegabytes}. */
+        int bySize;
+        /** Points deleted past their writer's {@code undo.maxUndoPoints}. */
+        int byCount;
+        /** The newest point's size, and whether it alone is over the size limit. */
+        long newestBytes;
+        boolean newestOverLimit;
+
+        public int dropped() {
+            return bySize + byCount;
+        }
+
+        /**
+         * One plain sentence for the write's result, or null when there is nothing worth saying.
+         * An interactive write hears only that its own point is over the limit: an older point
+         * giving way to a newer one is the ring working. A job part also hears of any deletion,
+         * since a long job is what pushes out its own first parts.
+         */
+        @Nullable
+        public String note(int maxMegabytes, int keep, boolean job) {
+            StringBuilder note = new StringBuilder();
+            if (newestOverLimit) {
+                note.append("This write's undo point is ").append(megabytes(newestBytes))
+                    .append(" MB, over undo.maxUndoMegabytes (").append(maxMegabytes)
+                    .append(" MB): it is kept only until the next write, which deletes it. ");
+            }
+            if (job && bySize > 0) {
+                note.append(bySize).append(" older undo point(s) were deleted to stay within undo.maxUndoMegabytes (")
+                    .append(maxMegabytes).append(" MB), oldest first, so this job's earliest parts may no longer be undoable. ");
+            }
+            if (job && byCount > 0) {
+                note.append(byCount).append(" older undo point(s) were deleted past undo.maxUndoPoints (")
+                    .append(keep).append(" per writer), oldest first. ");
+            }
+            if (note.length() == 0) {
+                return null;
+            }
+            note.append("To keep undo for writes this large, raise undo.maxUndoMegabytes (0 for no limit)");
+            if (job && byCount > 0) {
+                note.append(" and undo.maxUndoPoints");
+            }
+            note.append(" in config/mcmcp.cfg before writing, or write in smaller jobs and check each before the next.");
+            return note.toString();
+        }
+
+        private static String megabytes(long bytes) {
+            return String.valueOf(Math.round(bytes * 10.0D / (1024L * 1024L)) / 10.0D);
+        }
     }
 
     /** Every undo point's listing, newest first. */
@@ -318,10 +375,11 @@ public final class UndoPoints {
      * 32,768-block fill over tile entities can outweigh hundreds of small writes, and an agent
      * building around the clock makes nothing but large writes.
      */
-    static void prune(File folder, int keep, long maxBytes) {
+    static Pruned prune(File folder, int keep, long maxBytes) {
+        Pruned pruned = new Pruned();
         File[] listings = folder.listFiles((directory, name) -> isId(stripSuffix(name, ".json")));
         if (listings == null) {
-            return;
+            return pruned;
         }
         List<String> ids = new ArrayList<>();
         for (File listing : listings) {
@@ -341,15 +399,26 @@ public final class UndoPoints {
             long bytes = size(folder, id);
             String owner = ownerOf(folder, id);
             int ownerKept = kept.getOrDefault(owner, 0);
+            if (i == 0) {
+                pruned.newestBytes = bytes;
+                pruned.newestOverLimit = maxBytes > 0 && bytes > maxBytes;
+            }
             full = full || i > 0 && maxBytes > 0 && total + bytes > maxBytes;
             if (full || ownerKept >= keep) {
                 delete(folder, id);
+                if (full) {
+                    pruned.bySize++;
+                }
+                else {
+                    pruned.byCount++;
+                }
             }
             else {
                 total += bytes;
                 kept.put(owner, ownerKept + 1);
             }
         }
+        return pruned;
     }
 
     /** Who made a point, from its listing; empty when it does not say or cannot be read. */
