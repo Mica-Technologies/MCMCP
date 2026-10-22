@@ -157,6 +157,73 @@ public final class CommandBatch {
         return new int[] {(int) Math.floor(at[0]), (int) Math.floor(at[1]), (int) Math.floor(at[2])};
     }
 
+    /** The most {@code loadMargin} grows a command's load box by, in blocks. */
+    static final int MAX_LOAD_MARGIN = 64;
+
+    /**
+     * A load box grown by {@code margin} blocks on x and z, for a command whose effect reaches past the
+     * coordinates it names (#119): LDME's {@code /elevator install x z ...} names the controller
+     * column, and builds doorways on the cab's front, which can be in the next chunk.
+     *
+     * @param box {@code {minX, minY, minZ, maxX, maxY, maxZ}}
+     */
+    public static int[] grow(int[] box, int margin) {
+        int m = Math.max(0, Math.min(MAX_LOAD_MARGIN, margin));
+        return new int[] {box[0] - m, box[1], box[2] - m, box[3] + m, box[4], box[5] + m};
+    }
+
+    /**
+     * Whether a reply line says something was not loaded: {@code doors.landing_unloaded(...)}, "chunk
+     * not loaded". A command that skipped work there often still returns success.
+     */
+    public static boolean saysUnloaded(String line) {
+        String lower = line.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("unloaded") || lower.contains("not loaded");
+    }
+
+    /** How many lines {@link #unloadedWarning} quotes, and how long each may be. */
+    static final int QUOTED_LINES = 3;
+
+    static final int QUOTED_LENGTH = 160;
+
+    /**
+     * The top-level warning for commands whose replies said something was unloaded, quoting the first
+     * few such lines so a silent partial install is visible without reading every command's output.
+     *
+     * @param commands  how many commands said so
+     * @param succeeded how many of those still counted as succeeded
+     * @param quoted    the first lines, each already prefixed with its command's index
+     * @param load      whether the call loaded the commands' chunks
+     */
+    public static String unloadedWarning(int commands, int succeeded, List<String> quoted, boolean load) {
+        StringBuilder text = new StringBuilder();
+        text.append(commands).append(" command(s) replied that something was unloaded");
+        if (succeeded > 0) {
+            text.append(", ").append(succeeded == commands ? "all" : succeeded + " of them")
+                .append(" still counted as succeeded");
+        }
+        text.append(" (see saysUnloaded in results)");
+        if (!quoted.isEmpty()) {
+            text.append(": ");
+            for (int i = 0; i < quoted.size() && i < QUOTED_LINES; i++) {
+                String line = quoted.get(i);
+                text.append(i == 0 ? "" : "; ").append(line.length() > QUOTED_LENGTH
+                    ? line.substring(0, QUOTED_LENGTH) + "..." : line);
+            }
+        }
+        text.append(". ");
+        if (load) {
+            text.append("Their reach is past the coordinates MCMCP read from their text: grow every command's "
+                + "load box with loadMargin, name the area with loadBoxes, or hold it with server_keep_loaded, "
+                + "and run them again.");
+        }
+        else {
+            text.append("Run them again with load on, and a loadMargin if their reach is past the coordinates "
+                + "they name.");
+        }
+        return text.toString();
+    }
+
     private static String bare(String raw) {
         String trimmed = raw.trim();
         return trimmed.startsWith("/") ? trimmed.substring(1).trim() : trimmed;

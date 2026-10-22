@@ -613,6 +613,20 @@ case "$AT_ONE_BODY" in
   *'"isError":true'*'needs asPlayer'* | *'needs asPlayer'*'"isError":true'*) echo "    and so is server_run_command's" ;;
   *) mcp_failure "server_run_command's at without asPlayer was not refused: ${AT_ONE_BODY}" ;;
 esac
+# loadMargin grows each command's load box (#119): a point 16 blocks out each way is 3 x 3 chunks.
+MARGIN_BODY="$(mcp_call 923 server_run_commands "{\"commands\":[\"setblock ${FAR_X} 70 ${SPAWN_Z} minecraft:stone\"],\"loadMargin\":16}")" \
+  || mcp_failure "server_run_commands with loadMargin failed outright: ${MARGIN_BODY}"
+case "$MARGIN_BODY" in
+  *'"chunks":{"inBox":9,'*) echo "    loadMargin 16 grew one point's chunk to nine" ;;
+  *) mcp_failure "loadMargin did not grow the load box: ${MARGIN_BODY}" ;;
+esac
+# A reply naming something unloaded is quoted at the top. The player name is echoed in the reply.
+UNLOADED_BODY="$(mcp_call 924 server_run_commands "{\"commands\":[\"scoreboard players list landing_unloaded\"]}")" \
+  || mcp_failure "server_run_commands with an unloaded reply failed outright: ${UNLOADED_BODY}"
+case "$UNLOADED_BODY" in
+  *'"saysUnloaded":true'*'"warning":"'*'replied that something was unloaded'*'#0 '*'landing_unloaded'*) echo "    a reply saying unloaded is quoted in the top-level warning" ;;
+  *) mcp_failure "an unloaded reply was not quoted at the top: ${UNLOADED_BODY}" ;;
+esac
 
 echo "==> Tile entities: one call reads a box's, filtered, projected and paged"
 TX=$((SPAWN_X + 12)); TY=$((UNDO_Y + 8)); TZ=$((SPAWN_Z + 12))

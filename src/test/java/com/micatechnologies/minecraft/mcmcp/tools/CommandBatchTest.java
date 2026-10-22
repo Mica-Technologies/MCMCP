@@ -13,7 +13,7 @@ import com.micatechnologies.minecraft.mcmcp.json.Json;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-/** How server_run_commands reads its commands and where each one's player runs it from (#127). */
+/** How server_run_commands reads its commands, where each one runs from (#127), and how far it loads (#119). */
 class CommandBatchTest {
 
     private static JsonArray array(String json) {
@@ -81,6 +81,62 @@ class CommandBatchTest {
     void anAbsentOrNullAtMeansTheCommandRunsWhereThePlayerStands() {
         assertNull(CommandBatch.parseAt(null, "at"));
         assertNull(CommandBatch.parse(array("[{\"command\":\"say\",\"at\":null}]"), null).get(0).at);
+    }
+
+    @Test
+    void aLoadMarginOfEightReachesTheElevatorDoorwaysInTheNextChunk() {
+        // #119: /elevator install 68 -2719 ... builds doorways on the cab front at x 63, chunk 3, while
+        // the controller column read from the text (68, grown by 4 to 64..72) is all in chunk 4.
+        int[] column = CommandTargets.loadBoxes("elevator install 68 -2719 west 65:Mezzanine 78:Street",
+            new int[] {0, 64, 0}).get(0);
+        assertEquals(4, column[0] >> 4, "the default reaches chunk 4 only");
+        int[] grown = CommandBatch.grow(column, 8);
+        assertEquals(3, grown[0] >> 4);
+        assertEquals(column[1], grown[1], "y is not grown: chunks are columns");
+        assertEquals(column[4], grown[4]);
+        assertEquals(column[5] + 8, grown[5]);
+    }
+
+    @Test
+    void aMarginOfZeroLeavesTheBoxAsItWasAndOnePastTheCeilingIsHeldToIt() {
+        int[] box = {10, 0, 20, 30, 255, 40};
+        assertArrayEquals(box, CommandBatch.grow(box, 0));
+        assertArrayEquals(new int[] {10 - 64, 0, 20 - 64, 30 + 64, 255, 40 + 64}, CommandBatch.grow(box, 1000));
+        assertArrayEquals(box, CommandBatch.grow(box, -5));
+    }
+
+    @Test
+    void repliesNamingSomethingUnloadedAreRecognisedWhateverTheirCaseOrSeparator() {
+        assertTrue(CommandBatch.saysUnloaded("doors.landing_unloaded(65, 63 65 -2719)"));
+        assertTrue(CommandBatch.saysUnloaded("Chunk NOT LOADED at 1 2"));
+        assertTrue(CommandBatch.saysUnloaded("callpanel.Unloaded"));
+        assertFalse(CommandBatch.saysUnloaded("doors.summary(0, 2, double)"));
+        assertFalse(CommandBatch.saysUnloaded("Loaded 4 chunks"));
+    }
+
+    @Test
+    void theUnloadedWarningQuotesTheFirstLinesAndSaysTheyStillCountedAsSucceeded() {
+        String warning = CommandBatch.unloadedWarning(1, 1, java.util.Arrays.asList(
+            "#0 doors.landing_unloaded(65, 63 65 -2719)", "#0 doors.landing_unloaded(78, 63 78 -2719)"), true);
+        assertTrue(warning.startsWith("1 command(s) replied that something was unloaded, all still counted as "
+            + "succeeded"), warning);
+        assertTrue(warning.contains("#0 doors.landing_unloaded(65, 63 65 -2719); #0 doors.landing_unloaded(78"),
+            warning);
+        assertTrue(warning.contains("loadMargin"), warning);
+    }
+
+    @Test
+    void theUnloadedWarningCutsLongLinesAndWithLoadOffSaysToTurnItOn() {
+        StringBuilder longLine = new StringBuilder("#3 ");
+        for (int i = 0; i < 50; i++) {
+            longLine.append("unloaded ");
+        }
+        String warning = CommandBatch.unloadedWarning(3, 1, java.util.Collections.singletonList(longLine.toString()),
+            false);
+        assertTrue(warning.contains("1 of them still counted as succeeded"), warning);
+        assertTrue(warning.contains("..."), warning);
+        assertTrue(warning.length() < 400, warning);
+        assertTrue(warning.contains("with load on"), warning);
     }
 
     @Test

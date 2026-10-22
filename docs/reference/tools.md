@@ -1608,7 +1608,7 @@ Requires `permissions.allowChat` · `player`, `message` required
 
 #### `server_run_commands`
 
-:material-alert: Destructive · `commands` required · optional `asPlayer`, `at`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`, `profile`
+:material-alert: Destructive · `commands` required · optional `asPlayer`, `at`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`, `loadMargin`, `profile`
 
 Runs up to 10,000 commands in order in one call, with nothing sent to chat in between. It replaces
 scripts that teleport a player around a region and send commands through chat in groups. The
@@ -1647,9 +1647,15 @@ result:
   counts the commands nothing was read from.
 - **`loadBoxes`** names more to load, each `[x0, z0, x1, z1]` or `[x, z, radius]`, for coordinates no
   command spells out. It implies `load`.
-- **Unloaded replies.** With loading on, every reply is read: a command that says something was
-  "unloaded" or "not loaded" is listed with `saysUnloaded: true` even if it succeeded, and a
-  top-level `warning` says how many did.
+- **`loadMargin`** (0-64 blocks, default 0) grows every command's load box on x and z, for a command
+  whose effect reaches past the coordinates it names. LDME's `/elevator install x z ...` names the
+  controller column and builds doorways and call panels on the cab's front, which can be in the next
+  chunk: with the default its doorways there answered `doors.landing_unloaded` while the install
+  still succeeded. A margin of the cab's size covers it.
+- **Unloaded replies.** Every reply is read: a command that says something was "unloaded" or "not
+  loaded" (`landing_unloaded` included) is listed with `saysUnloaded: true` even if it succeeded, and
+  the top-level `warning` says how many did, how many of those still counted as succeeded, and quotes
+  the first three such lines, so a silent partial install shows without reading every output.
 - **Profiling.** `profile` times each command and samples the server thread while they run, to find
   the command behind a slow tick. See [Profiling a command](#profiling-a-command).
 - **Running a command somewhere else.** Some mod commands read their sender's own position and take

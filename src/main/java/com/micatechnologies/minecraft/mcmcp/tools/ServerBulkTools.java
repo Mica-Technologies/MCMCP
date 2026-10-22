@@ -658,9 +658,10 @@ public final class ServerBulkTools {
                 + "permissions.blockedCommands are refused before anything runs.\n\n"
                 + "Commands only act on loaded chunks, so the chunks their coordinates name are loaded first "
                 + "and released afterwards (relative coordinates resolve against the player, or world spawn "
-                + "for the console); load: false skips that. When any command fails, a top-level warning "
-                + "says how many, and how many wrote outside a loaded chunk. A call that runs past two "
-                + "minutes stops and returns nextIndex: call again from there.\n\n"
+                + "for the console); load: false skips that, and loadMargin grows what is loaded. When any "
+                + "command fails, a top-level warning says how many, and how many wrote outside a loaded "
+                + "chunk; one also quotes replies that said something was unloaded, success or not. A call "
+                + "that runs past two minutes stops and returns nextIndex: call again from there.\n\n"
                 + "To find out which command stalls the server, pass profile: {}. The result adds tickMs (the "
                 + "worst tick the commands ran in), commandMs, slowestCommands, commandMs on each listed "
                 + "result, and a stack sample of the commands (see game_cpu_sample).\n\n"
@@ -685,6 +686,9 @@ public final class ServerBulkTools {
                 .array("loadBoxes", "Also load these, for coordinates no command spells out: each "
                     + "[x0, z0, x1, z1], or [x, z, radius]. Implies load.", Json.obj("type", "array"))
                 .object("profile", CommandProfiling.DESCRIPTION, CommandProfiling.schema())
+                .integer("loadMargin", "Blocks to grow every command's load box by on x and z, for a command "
+                    + "whose effect reaches past the coordinates it names (one that builds around the column "
+                    + "it is given). Default 0.", 0, CommandBatch.MAX_LOAD_MARGIN)
                 .required("commands")
                 .build())
             .serverOnly()
@@ -752,6 +756,7 @@ public final class ServerBulkTools {
         final boolean stopOnError = context.getBoolean("stopOnError", false);
         final boolean allResults = context.getBoolean("allResults", false);
         final int maxOutputLines = context.getBoundedInt("maxOutputLines", 20, 1, 500);
+        final int loadMargin = context.getBoundedInt("loadMargin", 0, 0, CommandBatch.MAX_LOAD_MARGIN);
         if (CommandBatch.anyAt(entries) && (asPlayer == null || asPlayer.trim().isEmpty())) {
             return ToolResult.error("'at' moves the player the commands run as, so it needs asPlayer. The "
                 + "console has no position to move: give the command its coordinates, or name a player.");
@@ -789,7 +794,8 @@ public final class ServerBulkTools {
                     from[0] + CommandTargets.MARGIN, from[1], from[2] + CommandTargets.MARGIN});
             }
             for (int[] box : boxes) {
-                chunks.addAll(ChunkKeys.box(box[0], box[2], box[3], box[5]));
+                int[] grown = CommandBatch.grow(box, loadMargin);
+                chunks.addAll(ChunkKeys.box(grown[0], grown[2], grown[3], grown[5]));
             }
         }
         JsonArray extra = Json.getArray(context.getArguments(), "loadBoxes");
@@ -852,6 +858,8 @@ public final class ServerBulkTools {
         final int[] unloadedReplies = {0};
         final int[] outsideWorld = {0};
         final int[] movedCount = {0};
+        final int[] unloadedSucceeded = {0};
+        final List<String> unloadedLines = new ArrayList<>();
         final boolean[] stopped = {false};
         while (next[0] < commands.size() && !stopped[0]) {
             if (System.currentTimeMillis() > deadline || context.getCancellation().isCancelled()) {
@@ -946,8 +954,9 @@ public final class ServerBulkTools {
                         if (cancelled) {
                             counts[2]++;
                         }
-                        if ((allResults || !ok || load || moved != null) && results.size() < 2000
-                            && pending.size() < 10_000) {
+                        // Every reply is read for "unloaded", so a success that skipped its work is
+                        // listed rather than counted (#106, #119); the rest are dropped below.
+                        if (pending.size() < 10_000) {
                             JsonObject item = new JsonObject();
                             item.addProperty("i", index);
                             item.addProperty("succeeded", ok);
@@ -1007,18 +1016,25 @@ public final class ServerBulkTools {
                         }
                     }
                 }
-                if (load) {
-                    for (String line : listed) {
-                        String lower = line.toLowerCase(java.util.Locale.ROOT);
-                        saysUnloaded |= lower.contains("unloaded") || lower.contains("not loaded");
+                // Every reply is read for "unloaded", so a success that skipped its work is listed
+                // and said at the top, with the lines quoted (#106, #119).
+                for (String line : listed) {
+                    if (CommandBatch.saysUnloaded(line)) {
+                        if (!saysUnloaded && item.get("succeeded").getAsBoolean()) {
+                            unloadedSucceeded[0]++;
+                        }
+                        saysUnloaded = true;
+                        if (unloadedLines.size() < CommandBatch.QUOTED_LINES) {
+                            unloadedLines.add("#" + item.get("i").getAsInt() + " " + line);
+                        }
                     }
-                    if (saysUnloaded) {
-                        item.addProperty("saysUnloaded", true);
-                        unloadedReplies[0]++;
-                    }
-                    else if (!allResults && item.get("succeeded").getAsBoolean() && !item.has("movedFrom")) {
-                        continue;
-                    }
+                }
+                if (saysUnloaded) {
+                    item.addProperty("saysUnloaded", true);
+                    unloadedReplies[0]++;
+                }
+                else if (!allResults && item.get("succeeded").getAsBoolean() && !item.has("movedFrom")) {
+                    continue;
                 }
                 if (!listed.isEmpty()) {
                     // Cut at five lines without a word, a builder's 18-line report read as a command that
@@ -1078,10 +1094,7 @@ public final class ServerBulkTools {
             }
         }
         if (unloadedReplies[0] > 0) {
-            warnings.add(unloadedReplies[0] + " command(s) replied that something was "
-                + "unloaded although load was on, so their coordinates are not ones MCMCP read from the "
-                + "text (see saysUnloaded in results). Name the area with loadBoxes, or hold it with "
-                + "server_keep_loaded, and run them again.");
+            warnings.add(CommandBatch.unloadedWarning(unloadedReplies[0], unloadedSucceeded[0], unloadedLines, load));
         }
         if (!warnings.isEmpty()) {
             json.addProperty("warning", String.join(" ", warnings));
