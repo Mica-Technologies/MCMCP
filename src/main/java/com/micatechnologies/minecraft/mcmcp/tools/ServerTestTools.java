@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.companion.CompanionPolicy;
@@ -74,6 +75,11 @@ public final class ServerTestTools {
 
     static final int DEFAULT_SECONDS = 300;
     static final int MAX_SECONDS = 1800;
+    /**
+     * The longest a direct call may ask for. The orchestrator stops waiting for any one call at 600 s
+     * (its CALL_CEILING), and a test cut there was one nobody heard the end of, restores included (#122).
+     */
+    static final int MAX_DIRECT_SECONDS = 540;
     static final int MAX_ROWS = 500;
     static final int MAX_FAILURES_LISTED = 20;
 
@@ -132,7 +138,8 @@ public final class ServerTestTools {
                     Json.obj("type", "array"))
                 .integer("dimension", "Dimension of 'hold'. Default 0.")
                 .integer("maxSeconds", "Stop after this long, restoring as usual. Default " + DEFAULT_SECONDS
-                    + ".", 1, MAX_SECONDS)
+                    + ". Over " + MAX_DIRECT_SECONDS + " only in a job (server_job_submit kind 'test').", 1,
+                    MAX_SECONDS)
                 .bool("stopOnFail", "Stop at the first failed check. Default false.")
                 .array("return", "Variables to hand back in the result's 'values', as saved: several reads "
                     + "in one call, e.g. steps that each call and save, then return them all.",
@@ -219,6 +226,12 @@ public final class ServerTestTools {
                 + (problems.size() > 5 ? " (and " + (problems.size() - 5) + " more)" : ""));
         }
         int seconds = context.getBoundedInt("maxSeconds", DEFAULT_SECONDS, 1, MAX_SECONDS);
+        if (seconds > MAX_DIRECT_SECONDS && !context.isJob()) {
+            return ToolResult.error("Nothing was run. maxSeconds " + seconds + " is longer than a direct call can "
+                + "be waited for (the orchestrator stops waiting at 600 s, and the verdict would be lost). Run it "
+                + "as a job: server_job_submit with kind 'test' and these arguments, then server_job_status. "
+                + "Or keep maxSeconds at " + MAX_DIRECT_SECONDS + " or less.");
+        }
         final Run run = new Run(context, context.getBoolean("stopOnFail", false),
             System.currentTimeMillis() + seconds * 1000L);
         JsonObject vars = Json.getObject(context.getArguments(), "vars");
@@ -296,6 +309,16 @@ public final class ServerTestTools {
                 run.failed += after.failed;
                 run.passed += after.passed;
                 run.restoreFailures.addAll(after.restoreFailures);
+            }
+            if (stopped != null || finallyStopped != null || !run.restoreFailures.isEmpty()) {
+                // In the game log as well: a cancelled call's result reaches nobody, and a cell left
+                // unrestored on a live server is otherwise found by hand, much later (#122).
+                Mcmcp.LOGGER.warn("MCMCP server_run_test for " + context.getCaller() + " ended"
+                    + (stopped == null ? "" : ", stopped: " + stopped)
+                    + (finallyStopped == null ? "" : ", finally stopped: " + finallyStopped)
+                    + "; restored " + (run.restoreNames.size() - run.restoreFailures.size()) + " of "
+                    + run.restoreNames.size() + (run.restoreFailures.isEmpty() ? ""
+                    : "; NOT restored: " + String.join("; ", run.restoreFailures)));
             }
             JsonObject json = new JsonObject();
             json.addProperty("passed", stopped == null && finallyStopped == null && run.failed == 0);
@@ -621,32 +644,45 @@ public final class ServerTestTools {
         });
         final String what = cells.size() + " cell(s) before " + tool;
         run.restoreNames.add(what);
+        final Set<Long> cellChunks = new LinkedHashSet<>();
+        for (int[] cell : cells) {
+            cellChunks.add(ChunkKeys.ofBlock(cell[0], cell[2]));
+        }
         run.restores.push(() -> {
+            ToolContext clean = cleanContext(run.context);
             try {
-                cleanContext(run.context).onGameThread((Callable<Void>) () -> {
-                    net.minecraft.world.WorldServer world = ServerWorldTools.requireWorld(dimension);
-                    for (int i = 0; i < cells.size(); i++) {
-                        net.minecraft.util.math.BlockPos pos = new net.minecraft.util.math.BlockPos(cells.get(i)[0], cells.get(i)[1], cells.get(i)[2]);
-                        if (!world.isBlockLoaded(pos)) {
-                            throw new IllegalStateException(pos + " was unloaded before it could be put back");
+                // Loaded for the put-back if they unloaded meanwhile: a long wait between the write and
+                // the restore can outlast the chunk, and a cell left as written is the worst outcome.
+                ToolResult put = ServerChunkTools.withChunks(clean, dimension, cellChunks, true, outcome -> {
+                    clean.onGameThread((Callable<Void>) () -> {
+                        net.minecraft.world.WorldServer world = ServerWorldTools.requireWorld(dimension);
+                        for (int i = 0; i < cells.size(); i++) {
+                            net.minecraft.util.math.BlockPos pos = new net.minecraft.util.math.BlockPos(cells.get(i)[0], cells.get(i)[1], cells.get(i)[2]);
+                            if (!world.isBlockLoaded(pos)) {
+                                throw new IllegalStateException(pos + " was unloaded before it could be put back");
+                            }
+                            net.minecraft.block.state.IBlockState state = net.minecraft.block.Block.getStateById((Integer) before[i * 2]);
+                            if (world.getBlockState(pos) != state) {
+                                world.setBlockState(pos, state, 3);
+                            }
+                            String snbt = (String) before[i * 2 + 1];
+                            net.minecraft.nbt.NBTTagCompound tag = snbt == null ? null : JsonToNBT.getTagFromJson(snbt);
+                            net.minecraft.tileentity.TileEntity entity = tag == null ? null : world.getTileEntity(pos);
+                            if (entity != null) {
+                                entity.readFromNBT(tag);
+                                entity.markDirty();
+                                world.notifyBlockUpdate(pos, state, state, 3);
+                            }
                         }
-                        net.minecraft.block.state.IBlockState state = net.minecraft.block.Block.getStateById((Integer) before[i * 2]);
-                        if (world.getBlockState(pos) != state) {
-                            world.setBlockState(pos, state, 3);
-                        }
-                        String snbt = (String) before[i * 2 + 1];
-                        net.minecraft.nbt.NBTTagCompound tag = snbt == null ? null : JsonToNBT.getTagFromJson(snbt);
-                        net.minecraft.tileentity.TileEntity entity = tag == null ? null : world.getTileEntity(pos);
-                        if (entity != null) {
-                            entity.readFromNBT(tag);
-                            entity.markDirty();
-                            world.notifyBlockUpdate(pos, state, state, 3);
-                        }
-                    }
-                    return null;
+                        return null;
+                    });
+                    return ToolResult.ok();
                 });
+                if (put.isError()) {
+                    run.restoreFailures.add(what + ": " + put.getText());
+                }
             }
-            catch (RuntimeException e) {
+            catch (Exception e) {
                 run.restoreFailures.add(what + ": " + e.getMessage());
             }
         });

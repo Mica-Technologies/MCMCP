@@ -34,6 +34,11 @@ final class JobContext extends ToolContext {
     }
 
     @Override
+    public boolean isJob() {
+        return true;
+    }
+
+    @Override
     public <T> T onGameThread(Callable<T> task) {
         try {
             if (!job.awaitRunnable()) {

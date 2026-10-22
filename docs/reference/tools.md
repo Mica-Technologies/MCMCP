@@ -744,7 +744,10 @@ error, `maxSeconds`, or a cancel) every `restore: true` call is undone and every
 given back, last first, and then the `finally` steps run. They see the run's variables, `defs` and
 marks, so `finally` can `include` the same reset the steps use. A `finally` that stops early (an
 error, a missing def) makes `passed` false and names why in `finallyStopped`. Only an emergency stop
-prevents it, since nothing writes then; `restoreFailures` names what was left.
+prevents it, since nothing writes then; `restoreFailures` names what was left. A `restore` cell
+whose chunk unloaded meanwhile is loaded to be put back. A run that stopped early, or left anything
+unrestored, is also logged as a warning in the game log, since a cancelled call's result reaches
+nobody.
 
 **Checked first.** Every step's tool and argument names are checked before the first step runs, so a
 misspelt argument in step nine leaves steps one to eight unapplied. A step cannot call
@@ -753,7 +756,8 @@ needs its own tool's class.
 
 **The verdict.** `passed`, `checksPassed`, `checksFailed`, the first 20 `failures` by label,
 `stopped` with the reason when it stopped early, `calls`, `seconds`, the `table` of rows as `columns`
-and `rows`, and `restored`. Default `maxSeconds` is 300, at most 1,800. Run a long test as a
+and `rows`, and `restored`. Default `maxSeconds` is 300. A direct call may ask for up to 540, since
+the orchestrator stops waiting for any call at 600 s; up to 1,800 only in a job. Run a long test as a
 `server_job_submit` `kind: "test"` job: it survives the caller disconnecting, and its status carries
 the verdict.
 

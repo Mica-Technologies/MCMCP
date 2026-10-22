@@ -98,6 +98,11 @@ public class ToolContext {
         return session;
     }
 
+    /** True when this call is a part of a background job rather than a call someone is waiting on. */
+    public boolean isJob() {
+        return false;
+    }
+
     /** Marks this call as one an emergency stop must end. Set by the dispatcher for every tool that is not read-only. */
     public void setMutating(boolean value) {
         this.mutating = value;
