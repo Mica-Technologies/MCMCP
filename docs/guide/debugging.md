@@ -153,6 +153,19 @@ nothing.
 The `diagnose_errors` prompt does the usual first pass for you: recent `ERROR` and `WARN` lines,
 already collected.
 
+### What a mod logs at DEBUG
+
+DEBUG lines never reach `latest.log`, and a packaged game writes no `debug.log`. To read them, raise
+the logger for a while and read its capture, with no restart:
+
+```json
+{"name": "game_set_log_level", "arguments": {"logger": "rcmc-tts", "level": "DEBUG"}}
+{"name": "game_read_log", "arguments": {"logger": "rcmc-tts"}}
+```
+
+The second call's header gives `next`; pass it back as `since` after the next action to see only what
+that action logged. See [`game_set_log_level`](../reference/tools.md#game_set_log_level).
+
 ## After a game dies with no crash report
 
 Some exits leave nothing: no crash report, no `hs_err_pid` file, a log that simply stops. To tell

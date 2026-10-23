@@ -9,6 +9,8 @@ import com.micatechnologies.minecraft.mcmcp.McmcpIdentity;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
+import com.micatechnologies.minecraft.mcmcp.logging.LogCapture;
+import com.micatechnologies.minecraft.mcmcp.logging.LogRing;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
@@ -34,6 +36,7 @@ public final class CommonTools {
         registerEndpointInfo();
         registerModList();
         registerReadLog();
+        registerSetLogLevel();
         RegistryDumpTools.register();
         PerformanceTools.register();
 
@@ -196,12 +199,17 @@ public final class CommonTools {
             .description("Read the tail of the game's log file (logs/latest.log). Use this to diagnose "
                 + "errors, confirm that an action had an effect, or read output that never reached the "
                 + "chat window. Supports a case-insensitive substring filter, which searches further "
-                + "back through the file than an unfiltered read.")
+                + "back through the file than an unfiltered read. With 'logger', reads instead what "
+                + "game_set_log_level captured from that logger, DEBUG lines included.")
             .schema(JsonSchema.object()
                 .integer("lines", "How many log lines to return, newest last.", 1, 5000)
                 .string("filter", "Case-insensitive substring; only matching lines are returned.")
                 .string("file", "Log file name inside the logs/ directory. Defaults to latest.log. "
                     + "Path separators are rejected.")
+                .string("logger", "A logger game_set_log_level is capturing (or captured): read its lines "
+                    + "from memory, not a file.")
+                .integer("since", "With 'logger': the 'next' value a previous read returned, for only the "
+                    + "lines after it, oldest first. Without it, the newest lines.")
                 .build())
             .readOnly()
             .closedWorld()
@@ -214,6 +222,11 @@ public final class CommonTools {
 
                 int lineCount = context.getBoundedInt("lines", 100, 1, McmcpConfig.getMaxLogLines());
                 String filter = context.getString("filter", null);
+                String logger = context.getString("logger", null);
+                if (logger != null && !logger.trim().isEmpty()) {
+                    return readCaptured(logger.trim(), context.has("since") ? (long) context.getInt("since", 0) : null,
+                        lineCount, filter);
+                }
                 String fileName = context.getString("file", "latest.log");
 
                 // Reject any path syntax outright rather than trying to sanitise it. This tool takes
@@ -255,6 +268,100 @@ public final class CommonTools {
                     text.append('\n').append(line);
                 }
                 return ToolResult.text(text.toString());
+            })
+            .build());
+    }
+
+    /** game_read_log's 'logger' read: a capture's ring, as text, with the cursor in the header. */
+    private static ToolResult readCaptured(String logger, Long since, int lineCount, String filter) {
+        LogRing ring = LogCapture.ring(logger);
+        if (ring == null) {
+            return ToolResult.error("Nothing is capturing '" + logger + "'. Call game_set_log_level with logger '"
+                + logger + "' and level 'DEBUG' first; lines are kept from then on.");
+        }
+        LogRing.Page page = ring.read(since, lineCount, filter);
+        boolean filtered = filter != null && !filter.isEmpty();
+        StringBuilder text = new StringBuilder("# logger ").append(logger).append(" — ").append(page.entries.size())
+            .append(page.entries.size() == 1 ? " line" : " lines");
+        if (filtered) {
+            text.append(" matching \"").append(filter).append('"');
+        }
+        text.append(" · next: ").append(page.next);
+        text.append(LogCapture.isActive(logger) ? " · capturing" : " · capture ended, level put back");
+        if (page.missed > 0) {
+            text.append(" · ").append(page.missed).append(" earlier lines were overwritten (the ring keeps ")
+                .append(LogCapture.RING_LINES).append(')');
+        }
+        if (page.more) {
+            text.append(" · more follow: read again with since ").append(page.next);
+        }
+        if (page.entries.isEmpty()) {
+            text.append(filtered ? "\n(no lines match)" : "\n(no lines yet)");
+        }
+        for (LogRing.Entry entry : page.entries) {
+            text.append('\n').append(entry.format());
+        }
+        return ToolResult.text(text.toString());
+    }
+
+    /**
+     * Raises a logger's level for a while and keeps its lines for game_read_log (#136). DEBUG traces
+     * (a mod's spoken announcements, a network handshake) never reach latest.log, and the packaged
+     * game writes no debug.log, so this is the only way to read them without a restart.
+     */
+    private static void registerSetLogLevel() {
+        McpRegistry.registerTool(McpTool.named("game_set_log_level")
+            .title("Capture a logger's output")
+            .description("Set a log4j logger (a mod's logger name, e.g. 'rcmc-tts') to DEBUG or another level "
+                + "for a while, and keep what it writes in memory for game_read_log {logger}. No restart; "
+                + "the level is put back when the time runs out, or now with level 'default'. A capture also "
+                + "takes the logger's children ('rcmc' takes 'rcmc.tts'). Lines may also land in the game's "
+                + "own log files, depending on its log configuration.")
+            .schema(JsonSchema.object()
+                .string("logger", "The logger's name, as it appears in [brackets] in the log.")
+                .enumeration("level", "The level to set, or 'default' to put it back now.", "TRACE", "DEBUG",
+                    "INFO", "WARN", "ERROR", "default")
+                .integer("durationSeconds", "How long until the level is put back. Default "
+                    + LogCapture.DEFAULT_SECONDS + ".", LogCapture.MIN_SECONDS, LogCapture.MAX_SECONDS)
+                .required("logger", "level")
+                .build())
+            .idempotent()
+            .closedWorld()
+            .offGameThread()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowLogAccess()) {
+                    return ToolResult.error("Log access is disabled by permissions.allowLogAccess in the "
+                        + "MCMCP config.");
+                }
+                String logger = context.getString("logger", "").trim();
+                if (logger.isEmpty()) {
+                    return ToolResult.error("Name the logger: 'logger' is its name as the log shows it in "
+                        + "brackets, e.g. 'rcmc-tts'. The root logger is not taken.");
+                }
+                String asked = context.getString("level", "").trim();
+                JsonObject json = new JsonObject();
+                json.addProperty("logger", logger);
+                if ("default".equalsIgnoreCase(asked)) {
+                    json.addProperty("restored", LogCapture.stop(logger));
+                }
+                else {
+                    String level = LogCapture.parseLevel(asked);
+                    if (level == null) {
+                        return ToolResult.error("'level' is TRACE, DEBUG, INFO, WARN, ERROR or 'default'.");
+                    }
+                    int seconds = context.getBoundedInt("durationSeconds", LogCapture.DEFAULT_SECONDS,
+                        LogCapture.MIN_SECONDS, LogCapture.MAX_SECONDS);
+                    String refused = LogCapture.start(logger, level, seconds);
+                    if (refused != null) {
+                        return ToolResult.error(refused);
+                    }
+                    json.addProperty("level", level);
+                    json.addProperty("secondsLeft", seconds);
+                    json.addProperty("read", "game_read_log {logger: '" + logger + "'}, then pass back its 'next' "
+                        + "as since for only the newer lines.");
+                }
+                json.add("captures", LogCapture.describe());
+                return ToolResult.structured(json);
             })
             .build());
     }

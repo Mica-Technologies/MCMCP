@@ -122,6 +122,8 @@ SHA-256 and block count.
 | `lines` | integer 1–5000 | Default 100. Capped by `limits.maxLogLines`. |
 | `filter` | string | Case-insensitive substring. |
 | `file` | string | File name inside `logs/`. Default `latest.log`. No path separators. |
+| `logger` | string | Read what [`game_set_log_level`](#game_set_log_level) captured from this logger instead of a file. |
+| `since` | integer | With `logger`: the `next` from a previous read, for only the lines after it, oldest first. |
 
 Reads the tail of a log file, seeking backwards from the end. A filtered read scans up to 200,000
 lines back; an unfiltered one stops as soon as it has enough.
@@ -130,6 +132,50 @@ Returns text only: a header line — `# <path> — N lines matching "<filter>"` 
 There is deliberately no structured form. A client may show `structuredContent` in place of the text
 when both are present, so a structured payload carrying only the counts hid the lines themselves, and
 one carrying the lines as well doubled the cost of every log read.
+
+With `logger`, the lines come from that capture's memory, laid out as `latest.log` lays them out but
+with milliseconds. The header carries `next: <n>`; pass it back as `since` to read only newer lines.
+It also says whether the capture is still running, whether more lines follow a page cut short by
+`lines`, and how many lines were lost if the capture wrapped past `since`. A capture's lines stay
+readable after its level is put back.
+
+### `game_set_log_level`
+
+:material-cog: Idempotent · `logger`, `level` required · optional `durationSeconds`
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `logger` | string | The logger's name, as the log shows it in brackets, e.g. `rcmc-tts`. |
+| `level` | `TRACE` · `DEBUG` · `INFO` · `WARN` · `ERROR` · `default` | `default` puts the level back now. |
+| `durationSeconds` | integer 10–3600 | Default 600. When the level is put back by itself. |
+
+Mods trace at DEBUG: RCMC's `rcmc-tts` writes every announcement it speaks (CHIME, SEND, RECV,
+HANDOFF, with the text), and CSM's `CSM-TTS` does the same. The game's log configuration keeps DEBUG
+out of `latest.log`, and a packaged game writes no `debug.log`, so those lines go nowhere an agent
+can read. This sets the logger's level in log4j for a while, with no restart, and keeps what it
+writes (up to 2,000 lines, each up to 4,000 characters) for
+[`game_read_log`](#game_read_log)`{logger}`. Calling it again on a running capture changes the
+level and restarts the clock.
+
+- **Children come too.** A capture of `rcmc` also takes `rcmc.tts` unless the game's log
+  configuration names that child separately.
+- **What is put back.** A logger the log configuration names keeps its own level, restored at the
+  end; one it does not name inherits again, and MCMCP removes what it added.
+- **The game's own files may see the lines.** The capture is additive, so the lines still reach the
+  appenders they always would: a log configuration whose file appender has no level of its own writes
+  the DEBUG lines into `latest.log` too while the capture runs.
+- **Shared by a singleplayer game.** A client and its integrated server share one log4j, so a
+  capture set from either endpoint is the same capture.
+- At most 8 loggers at once; a finished capture is dropped to make room. The result lists every
+  capture as `captures`, with its level, `secondsLeft`, what it `restoresTo` and its line count.
+
+Gated by `permissions.allowLogAccess`, like `game_read_log`. It still runs during an emergency stop and
+on a paused server: it only changes what is recorded.
+
+```json
+{"name": "game_set_log_level", "arguments": {"logger": "rcmc-tts", "level": "DEBUG", "durationSeconds": 900}}
+{"name": "game_read_log", "arguments": {"logger": "rcmc-tts", "filter": "SEND"}}
+```
 
 ### `game_storage`
 

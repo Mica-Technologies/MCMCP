@@ -814,6 +814,27 @@ case "$AIR_FIND_BODY" in
   *) mcp_failure "a search for air was not refused: ${AIR_FIND_BODY}" ;;
 esac
 
+echo "==> Capturing a logger at DEBUG with no restart (#136)"
+# MCMCP's own logger says "ignoring unknown notification" at DEBUG, which latest.log never shows.
+mcp_call 5603 game_set_log_level '{"logger":"mcmcp","level":"DEBUG","durationSeconds":60}' > /dev/null \
+  || mcp_failure "game_set_log_level failed"
+curl -fsS --max-time 20 -X POST "http://127.0.0.1:${MCP_PORT}/mcp" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Mcp-Session-Id: ${SESSION_ID}" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json' \
+  -d '{"jsonrpc":"2.0","method":"notifications/mcmcp_smoke_debug"}' > /dev/null 2>&1 || true
+CAPTURED_BODY="$(mcp_call 5604 game_read_log '{"logger":"mcmcp","filter":"mcmcp_smoke_debug"}')" \
+  || mcp_failure "game_read_log of a capture failed: ${CAPTURED_BODY}"
+case "$CAPTURED_BODY" in
+  *'/DEBUG] [mcmcp]: MCMCP ignoring unknown notification'*'mcmcp_smoke_debug'*) echo "    read a DEBUG line latest.log never gets" ;;
+  *) mcp_failure "the DEBUG line was not captured: ${CAPTURED_BODY}" ;;
+esac
+RESTORE_BODY="$(mcp_call 5605 game_set_log_level '{"logger":"mcmcp","level":"default"}')" \
+  || mcp_failure "putting the level back failed: ${RESTORE_BODY}"
+case "$RESTORE_BODY" in
+  *'"restored":true'*'"active":false'*) echo "    and put the level back" ;;
+  *) mcp_failure "the level was not put back: ${RESTORE_BODY}" ;;
+esac
+
 echo "==> Removing entities with nobody near: two summoned villagers go, nothing else"
 mcp_call 562 server_run_commands "{\"commands\":[\"summon minecraft:villager ${LX} $((LY + 1)) $((LZ + 2)) {NoAI:1b}\",\"summon minecraft:villager $((LX + 1)) $((LY + 1)) $((LZ + 2)) {NoAI:1b}\"]}" > /dev/null \
   || mcp_failure "could not summon the villagers"

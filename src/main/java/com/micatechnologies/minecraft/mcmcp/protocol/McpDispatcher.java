@@ -51,11 +51,13 @@ public class McpDispatcher {
     /**
      * Tools that are not read-only but still run during an emergency stop, because each only makes
      * things stop or let go (stopping a job, setting the stop again, releasing chunk holds, leaving),
-     * or only looks and notes (a screenshot, a mark, a save) — what someone needs to see what happened.
+     * or only looks and notes (a screenshot, a mark, a save, a logger's level) — what someone needs to see
+     * what happened.
      */
     static final java.util.Set<String> ESTOP_EXEMPT = new java.util.HashSet<>(java.util.Arrays.asList(
         "server_job_cancel", "server_job_pause", "server_estop", "server_release_loaded", "server_stop",
-        "server_save_world", "client_screenshot", "client_marks", "client_world_leave", "client_quit"));
+        "server_save_world", "client_screenshot", "client_marks", "client_world_leave", "client_quit",
+        "game_set_log_level"));
 
     /**
      * Tools that are not read-only but still run while the server is paused or stalled, beside
@@ -63,7 +65,8 @@ public class McpDispatcher {
      * is doing and to make MCMCP stop or let go.
      */
     static final java.util.Set<String> ADMISSION_EXEMPT = new java.util.HashSet<>(java.util.Arrays.asList(
-        "game_health", "server_tick_stats", "server_release_loaded", "server_estop", "mcmcp_endpoint_info"));
+        "game_health", "server_tick_stats", "server_release_loaded", "server_estop", "mcmcp_endpoint_info",
+        "game_set_log_level"));
 
     /** Which tools each session may list and call; null lists and runs everything for the side. */
     @Nullable
