@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
@@ -115,6 +117,37 @@ class NearQueryTest {
     void aRadiusOutsideTheBoundsIsRefused() {
         assertThrows(IllegalArgumentException.class, () -> new NearQuery(0, NearQuery.Mode.WITH));
         assertThrows(IllegalArgumentException.class, () -> new NearQuery(NearQuery.MAX_RADIUS + 1, NearQuery.Mode.WITH));
+    }
+
+    @Test
+    void withFacesOnlyTheSixCellsSharingAFaceAreNeighboursAtRadiusOne() {
+        NearQuery faces = new NearQuery(1, NearQuery.Mode.WITH, true);
+        assertEquals(NearQuery.Verdict.DROPPED, faces.check(0, 64, 0, new FakeWorld().with(1, 65, 0)).verdict,
+            "an edge neighbour does not count");
+        assertEquals(NearQuery.Verdict.LISTED, faces.check(0, 64, 0, new FakeWorld().with(0, 65, 0)).verdict);
+        FakeWorld nothing = new FakeWorld();
+        faces.check(0, 64, 0, nothing);
+        assertEquals(6, nothing.probes);
+    }
+
+    @Test
+    void withFacesALargerRadiusReachesFurtherAlongEachAxisOnly() {
+        NearQuery faces = new NearQuery(3, NearQuery.Mode.WITH, true);
+        assertEquals(NearQuery.Verdict.LISTED, faces.check(0, 64, 0, new FakeWorld().with(0, 64, -3)).verdict);
+        assertEquals(NearQuery.Verdict.DROPPED, faces.check(0, 64, 0, new FakeWorld().with(1, 64, -3)).verdict);
+        int[] offsets = NearQuery.axisOffsets(3);
+        assertEquals(18 * 3, offsets.length);
+        assertArrayEquals(new int[] {-1, 0, 0}, new int[] {offsets[0], offsets[1], offsets[2]}, "nearest first");
+    }
+
+    @Test
+    void airIsAskedForOnlyWhenAPatternNamesIt() {
+        assertEquals(true, NearQuery.namesAir(Arrays.asList("minecraft:stone", "minecraft:air")));
+        assertEquals(true, NearQuery.namesAir(Collections.singletonList(" *:AIR ")));
+        assertEquals(false, NearQuery.namesAir(Collections.singletonList("minecraft:")));
+        assertEquals(false, NearQuery.namesAir(Collections.singletonList("*")));
+        assertEquals(false, NearQuery.namesAir(Collections.singletonList("minecraft:*")));
+        assertEquals(false, NearQuery.namesAir(Collections.singletonList("minecraft:stairs")));
     }
 
     @Test

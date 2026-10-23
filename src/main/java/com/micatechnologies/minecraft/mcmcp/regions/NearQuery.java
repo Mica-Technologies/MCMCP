@@ -9,7 +9,9 @@ import java.util.Locale;
 /**
  * The proximity join behind server_find_blocks' {@code near} option (#125): whether a cell has (or
  * lacks) a block of another kind within a radius. "Distance" is Chebyshev, the box distance: a radius
- * of 1 is the 26 cells touching the centre, faces, edges and corners.
+ * of 1 is the 26 cells touching the centre, faces, edges and corners. With {@code faces}, only the
+ * cells straight along an axis count: radius 1 is the 6 cells sharing a face, the "exposed surface"
+ * question (#135).
  *
  * <p>Imports no Minecraft class. The world is reached through a {@link Neighbourhood}, which the tool
  * implements over loaded chunks and a test implements over a map, so the scan order, early stopping
@@ -76,16 +78,40 @@ public final class NearQuery {
 
     private final Mode mode;
     private final int radius;
+    private final boolean faces;
     /** Offsets as dx, dy, dz triples, nearest first, the centre left out. */
     private final int[] offsets;
 
     public NearQuery(int radius, Mode mode) {
+        this(radius, mode, false);
+    }
+
+    public NearQuery(int radius, Mode mode, boolean faces) {
         if (radius < 1 || radius > MAX_RADIUS) {
             throw new IllegalArgumentException("radius " + radius + " is outside 1.." + MAX_RADIUS);
         }
         this.radius = radius;
         this.mode = mode;
-        this.offsets = offsets(radius);
+        this.faces = faces;
+        this.offsets = faces ? axisOffsets(radius) : offsets(radius);
+    }
+
+    /** The id {@link #namesAir} tests patterns against. */
+    public static final String AIR = "minecraft:air";
+
+    /**
+     * Whether block patterns ask for air (#135). Air counts only when a pattern names it:
+     * "minecraft:air", "*:air", "*air". A bare namespace or "*" does not sweep it in, or "anything from
+     * minecraft: within 1" would match every cell with an open side.
+     */
+    public static boolean namesAir(List<String> patterns) {
+        for (String pattern : patterns) {
+            String p = pattern.trim().toLowerCase(Locale.ROOT);
+            if (p.contains("air") && NbtProjection.matches(AIR, Collections.singletonList(p))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public Mode mode() {
@@ -94,6 +120,11 @@ public final class NearQuery {
 
     public int radius() {
         return radius;
+    }
+
+    /** Whether only the cells straight along an axis count. */
+    public boolean faces() {
+        return faces;
     }
 
     /**
@@ -129,6 +160,21 @@ public final class NearQuery {
             return new Outcome(Verdict.UNRESOLVED, Collections.<int[]>emptyList());
         }
         return new Outcome(mode == Mode.WITH ? Verdict.DROPPED : Verdict.LISTED, Collections.<int[]>emptyList());
+    }
+
+    /** The offsets straight along an axis within {@code radius}, nearest first, then x, y, z. */
+    static int[] axisOffsets(int radius) {
+        int[] flat = new int[radius * 6 * 3];
+        int n = 0;
+        for (int d = 1; d <= radius; d++) {
+            int[][] ring = {{-d, 0, 0}, {0, -d, 0}, {0, 0, -d}, {0, 0, d}, {0, d, 0}, {d, 0, 0}};
+            for (int[] offset : ring) {
+                flat[n++] = offset[0];
+                flat[n++] = offset[1];
+                flat[n++] = offset[2];
+            }
+        }
+        return flat;
     }
 
     /** Every offset within {@code radius}, by box distance, then straight-line distance, then x, y, z. */

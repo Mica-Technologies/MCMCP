@@ -931,9 +931,21 @@ either way; it is left out of `positions` and counted in `near.unresolved`, with
 `near.unresolvedPositions`. `near.checked` is how many matches were tested on the page; `limit` and
 `cursor` count and page the kept ones. Cost grows with the cube of the radius, per match.
 
+`near.faces: true` counts only the cells straight along an axis, so radius 1 is the 6 cells sharing
+a face rather than 26. Air is a neighbour like any other, and an empty chunk section counts as air,
+but only when `near.blocks` names it (`minecraft:air`, `*:air`): a namespace or `*` never sweeps it
+in. Exposed surfaces are therefore `near: {blocks: ["minecraft:air"], radius: 1, faces: true}`.
+Searching *for* air itself is refused: both shapes skip it, so use
+[`server_count_blocks`](#server_count_blocks) with `includeAir: true` to measure it.
+
 ```json
 {"x": 100, "y": 60, "z": 200, "toX": 180, "toY": 90, "toZ": 260,
  "blocks": ["csm:*fire_alarm*"], "near": {"blocks": ["csm:*panel*"], "radius": 8, "mode": "without"}}
+```
+
+```json
+{"x": -4, "y": 223, "z": -246, "toX": 94, "toY": 223, "toZ": -170, "block": "minecraft:bedrock",
+ "near": {"blocks": ["minecraft:air"], "radius": 1, "faces": true}}
 ```
 
 `blocks` takes several ids, namespaces ending in `:`, or patterns with `*` anywhere, e.g.

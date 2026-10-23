@@ -466,6 +466,8 @@ public final class ServerAreaTools {
         final List<String> patterns;
         final List<String> nearby;
         final NearQuery near;
+        /** Whether air, including an empty section, is one of the nearby blocks. */
+        final boolean nearAir;
         /** State id -> palette index, or -1 for a state that does not match. */
         final Map<Integer, Integer> paletteOf = new HashMap<>();
         final JsonArray palette = new JsonArray();
@@ -487,6 +489,7 @@ public final class ServerAreaTools {
             this.patterns = patterns;
             this.nearby = nearby;
             this.near = near;
+            this.nearAir = nearby != null && NearQuery.namesAir(nearby);
         }
 
         void beginSlice(WorldServer world) {
@@ -593,15 +596,17 @@ public final class ServerAreaTools {
                 return NearQuery.UNLOADED;
             }
             ExtendedBlockStorage section = chunk.getBlockStorageArray()[y >> 4];
+            // An empty section is all air, and so is an air cell: both match only if near.blocks names
+            // air (#135), never through a namespace or "*".
             if (section == Chunk.NULL_BLOCK_STORAGE || section.isEmpty()) {
-                return NearQuery.NO_MATCH;
+                return nearAir ? NearQuery.MATCH : NearQuery.NO_MATCH;
             }
             IBlockState state = section.get(x & 15, y & 15, z & 15);
             int stateId = Block.getStateId(state);
             Boolean match = nearbyOf.get(stateId);
             if (match == null) {
                 Block block = state.getBlock();
-                match = block != Blocks.AIR && NbtProjection.matches(idOf(block), nearby);
+                match = block == Blocks.AIR ? nearAir : NbtProjection.matches(idOf(block), nearby);
                 nearbyOf.put(stateId, match);
             }
             return match ? NearQuery.MATCH : NearQuery.NO_MATCH;
@@ -612,7 +617,7 @@ public final class ServerAreaTools {
             json.add("blocks", Json.arrayOfStrings(nearby));
             json.addProperty("radius", near.radius());
             json.addProperty("mode", near.mode() == NearQuery.Mode.WITH ? "with" : "without");
-            json.addProperty("distance", "box (Chebyshev)");
+            json.addProperty("distance", near.faces() ? "faces only (along an axis)" : "box (Chebyshev)");
             json.addProperty("checked", candidates);
             json.addProperty("unresolved", unresolved);
             if (unresolved > 0) {

@@ -201,12 +201,16 @@ public final class ServerWorldTools {
                     + "(mode 'without') one of these blocks within 'radius', by box distance (radius 1 is the 26 "
                     + "touching cells). 'with' adds up to 3 of the nearby blocks' positions to each match. "
                     + "Neighbours outside the box are read too; a match whose neighbourhood reaches an unloaded "
-                    + "chunk and found nothing is listed under near.unresolved instead.", JsonSchema.object()
-                    .array("blocks", "The nearby blocks: ids, namespaces ending in ':', or patterns with '*'.",
+                    + "chunk and found nothing is listed under near.unresolved instead. For exposed surfaces "
+                    + "use blocks ['minecraft:air'] with faces: true.", JsonSchema.object()
+                    .array("blocks", "The nearby blocks: ids, namespaces ending in ':', or patterns with '*'. "
+                        + "Air counts only when named ('minecraft:air'), not through a namespace or '*'.",
                         Json.obj("type", "string"))
                     .integer("radius", "Box distance to look within. Cost grows with its cube.", 1,
                         NearQuery.MAX_RADIUS)
                     .enumeration("mode", "'with' (default) or 'without'.", "with", "without")
+                    .bool("faces", "Only the cells straight along an axis: radius 1 is the 6 face neighbours, "
+                        + "not 26. Default false.")
                     .required("blocks", "radius"))
                 .required("x", "z")
                 .build())
@@ -224,6 +228,12 @@ public final class ServerWorldTools {
                 String unknown = resolvePatterns(patterns);
                 if (unknown != null) {
                     return ToolResult.error(BlockIds.describeUnknown(unknown, "search for"));
+                }
+                if (NearQuery.namesAir(patterns)) {
+                    // Both shapes skip air, so naming it would answer "0 matches" (#135).
+                    return ToolResult.error("server_find_blocks does not list air. To find blocks with air beside "
+                        + "them, search for those blocks with near: {blocks: ['minecraft:air'], radius: 1, "
+                        + "faces: true}; to measure air, use server_count_blocks with includeAir: true.");
                 }
                 boolean boxMode = context.has("toX") || context.has("toY") || context.has("toZ");
                 if (context.has("near")) {
@@ -265,7 +275,8 @@ public final class ServerWorldTools {
                         return ToolResult.error("near.radius is a box distance from 1 to " + NearQuery.MAX_RADIUS
                             + ".");
                     }
-                    return ServerAreaTools.findInBox(context, patterns, nearby, new NearQuery(radius, mode));
+                    return ServerAreaTools.findInBox(context, patterns, nearby,
+                        new NearQuery(radius, mode, Json.getBoolean(near, "faces", false)));
                 }
                 if (boxMode) {
                     return ServerAreaTools.findInBox(context, patterns, null, null);

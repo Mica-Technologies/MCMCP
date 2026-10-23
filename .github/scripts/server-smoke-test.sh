@@ -799,6 +799,21 @@ case "$LEVER_BODY" in
   *) mcp_failure "the fake player did not flip the lever: ${LEVER_BODY}" ;;
 esac
 
+# server_find_blocks near air (#135): the lever's stone stands in open sky, so it has air on four faces.
+# Air was never a neighbour, which answered "0 matches" to every exposed-surface question.
+EXPOSED_BODY="$(mcp_call 5601 server_find_blocks "{\"block\":\"minecraft:stone\",\"x\":${LX},\"y\":${LY},\"z\":${LZ},\"toX\":${LX},\"toY\":${LY},\"toZ\":${LZ},\"near\":{\"blocks\":[\"minecraft:air\"],\"radius\":1,\"faces\":true}}")" \
+  || mcp_failure "server_find_blocks near air failed: ${EXPOSED_BODY}"
+case "$EXPOSED_BODY" in
+  *'"matches":1'*) echo "    found the stone by the air beside it" ;;
+  *) mcp_failure "server_find_blocks did not see air as a neighbour: ${EXPOSED_BODY}" ;;
+esac
+AIR_FIND_BODY="$(mcp_call 5602 server_find_blocks "{\"block\":\"minecraft:air\",\"x\":${LX},\"y\":${LY},\"z\":${LZ},\"toX\":${LX},\"toY\":$((LY + 2)),\"toZ\":${LZ}}")" \
+  || mcp_failure "server_find_blocks for air failed: ${AIR_FIND_BODY}"
+case "$AIR_FIND_BODY" in
+  *'does not list air'*) echo "    a search for air itself is refused, not answered with 0" ;;
+  *) mcp_failure "a search for air was not refused: ${AIR_FIND_BODY}" ;;
+esac
+
 echo "==> Removing entities with nobody near: two summoned villagers go, nothing else"
 mcp_call 562 server_run_commands "{\"commands\":[\"summon minecraft:villager ${LX} $((LY + 1)) $((LZ + 2)) {NoAI:1b}\",\"summon minecraft:villager $((LX + 1)) $((LY + 1)) $((LZ + 2)) {NoAI:1b}\"]}" > /dev/null \
   || mcp_failure "could not summon the villagers"
