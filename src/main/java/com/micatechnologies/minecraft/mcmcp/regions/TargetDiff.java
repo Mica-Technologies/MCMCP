@@ -139,7 +139,7 @@ public final class TargetDiff {
         }
 
         /** Whether a block id matches a pattern, where {@code *} matches any run of characters. */
-        static boolean matches(String pattern, String id) {
+        public static boolean matches(String pattern, String id) {
             if (!pattern.contains("*")) {
                 return pattern.equals(id);
             }

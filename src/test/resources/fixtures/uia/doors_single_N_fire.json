@@ -1,0 +1,1 @@
+{"tool":"server_place_doors","input":{"openings":[{"x":413,"y":78,"z":-564,"block":"csm:door_metal_fire","facing":"N","width":1}]},"expected":{"cells":[[413,78,-564,"csm:door_metal_fire:2"],[413,79,-564,"csm:door_metal_fire:10"]],"rule":"lower=facing S0 W1 N2 E3; upper=8+right+2*closer; pair: lo_left = facing in (N,E); write lower then upper"}}
