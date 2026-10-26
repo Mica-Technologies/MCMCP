@@ -15,6 +15,16 @@ mirrors=(
   http://azure.archive.ubuntu.com/ubuntu/
 )
 
+# Written with priorities: without them apt spreads downloads across every mirror in the list, so
+# Azure still served a third of the packages. With them it uses the first that works.
+write_list() {
+  local i=1
+  for mirror in "${mirrors[@]}"; do
+    printf '%s\tpriority:%d\n' "$mirror" "$i"
+    i=$((i + 1))
+  done | sudo tee "$1" > /dev/null
+}
+
 sources=()
 for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
   [ -f "$file" ] && sources+=("$file")
@@ -25,7 +35,7 @@ lists=$(grep -ohE 'mirror\+file:[^ ]+' "${sources[@]}" 2>/dev/null | sed 's#^mir
 changed=0
 for list in $lists; do
   echo "Replacing $list, which was: $(tr '\n\t' '  ' < "$list" 2>/dev/null || echo missing)"
-  printf '%s\n' "${mirrors[@]}" | sudo tee "$list" > /dev/null
+  write_list "$list"
   changed=1
 done
 
@@ -33,7 +43,7 @@ done
 own=/etc/apt/mcmcp-mirrors.txt
 for file in "${sources[@]}"; do
   if grep -qE 'http://azure\.archive\.ubuntu\.com/ubuntu/?( |$)' "$file"; then
-    printf '%s\n' "${mirrors[@]}" | sudo tee "$own" > /dev/null
+    write_list "$own"
     sudo sed -i -E "s#http://azure\.archive\.ubuntu\.com/ubuntu/?( |\$)#mirror+file:${own}\1#" "$file"
     changed=1
   fi
