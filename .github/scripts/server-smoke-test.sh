@@ -443,6 +443,19 @@ sed -i 's/B:allowWorldEdits=false/B:allowWorldEdits=true/' "$CONFIG_FILE"
 RELOAD_BODY="$(mcp_call 20 server_run_command '{"command":"mcmcp reload"}')" \
   || mcp_failure "reloading the config failed: ${RELOAD_BODY}"
 
+# A cold CI runner's first ticks are slow enough to put the server in "paused", which refuses writes
+# until it has been healthy for a while (#133). That is the health gate working, not a fault; wait it
+# out rather than fail the first write on it. A server still refusing after a minute is a real failure.
+for _ in $(seq 1 60); do
+  HEALTH_BODY="$(mcp_call 19 game_health '{}')" || mcp_failure "game_health failed: ${HEALTH_BODY}"
+  case "$HEALTH_BODY" in *'"refusesWrites":false'*) break ;; esac
+  sleep 1
+done
+case "$HEALTH_BODY" in
+  *'"refusesWrites":false'*) ;;
+  *) mcp_failure "the server still refused writes a minute after start: ${HEALTH_BODY}" ;;
+esac
+
 UNDO_Y=$((SPAWN_Y + 40))
 echo "==> undo points: fill gold at ${SPAWN_X} ${UNDO_Y} ${SPAWN_Z}"
 FILL_BODY="$(mcp_call 21 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:gold_block\",\"x\":${SPAWN_X},\"y\":${UNDO_Y},\"z\":${SPAWN_Z},\"toX\":$((SPAWN_X + 2)),\"toY\":$((UNDO_Y + 1)),\"toZ\":$((SPAWN_Z + 2))}")" \
