@@ -856,13 +856,24 @@ difference a count and a few samples (`{at, want, is}`):
 | `protectedChanged` | a protected cell no longer as it was kept; not counted in `differ` |
 | `unloaded` | not checked; pass `load: true` |
 
-What changes by itself in a built world is not a difference. That covers properties `open`,
-`powered`, `lit`, `power`, `triggered`, `enabled`, `shape`, fence and pane connections, `slope`,
-leaf decay, `snowy` and fluid `level`. It also covers ids that swap at runtime: `csm:lightupair` and
-`snow_layer` count as air, grass as dirt, and lit or powered blocks as their unlit forms. `ignore` adds
-properties, `compare` takes defaults back out, and `sameAs` adds id equivalences. `skipBoxes` leaves
-volumes out entirely, such as a lift shaft whose cab moves. `detail: "file"` writes every difference
-to a file and returns its path.
+Both sides are compared **as their block stores them**, through the block's metadata round trip.
+That drops exactly what a block does not store (fence and pane connections, stair `shape`, a
+railing's slope) and keeps all it does, so a CSM railing's edges and a rail's `shape` are checked.
+
+On top of that, stored state that changes by itself is not a difference. That covers properties
+`open`, `powered`, `lit`, `power`, `triggered`, `enabled`, leaf decay, `snowy` and fluid `level`. It
+also covers ids that swap at runtime: `csm:lightupair` and `snow_layer` count as air, and lit or
+powered blocks count as their unlit forms, keeping their facing. Grass counts as dirt only under a
+block that stops light, where vanilla turns it, so a design's missing sod is still found.
+
+- `ignore` adds properties everywhere, and `compare` takes defaults back out.
+- `ignoreFor: {"csm:*": ["state"]}` ignores properties for matching blocks only, `*` matching any
+  run. CSM bright lights flip a stored `state` with redstone.
+- `sameAs` adds id equivalences.
+- `server_target op: "defaults"` with `rules: {ignore, compare, sameAs, ignoreFor}` saves a world's
+  own defaults, applied before each call's, so a modpack's runtime state is set once.
+- `skipBoxes` leaves volumes out entirely, such as a lift shaft whose cab moves.
+- `detail: "file"` writes every difference to a file and returns its path.
 
 ##### `server_repair`
 

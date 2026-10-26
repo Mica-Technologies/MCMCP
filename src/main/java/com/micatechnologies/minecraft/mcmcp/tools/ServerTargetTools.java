@@ -29,6 +29,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.IntFunction;
 import javax.annotation.Nullable;
+import net.minecraft.block.Block;
+import net.minecraft.block.state.IBlockState;
+import net.minecraft.command.CommandBase;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
 import net.minecraftforge.common.DimensionManager;
@@ -98,9 +101,12 @@ public final class ServerTargetTools {
                 + "describes a name or pattern; 'capture' saves the live blocks of a box as a layer (\"this is "
                 + "right\"); 'protect' does the same but marks the cells must-stay-as-is (a hand edit): "
                 + "server_verify reports them apart and server_repair never writes them; 'delete' removes a "
-                + "name or pattern.")
+                + "name or pattern. 'defaults' shows this world's verify defaults, or with 'rules' "
+                + "({ignore, compare, sameAs, ignoreFor}) replaces them: a modpack's runtime state set once, "
+                + "e.g. {ignoreFor: {'csm:*': ['state']}}.")
             .schema(ServerChunkTools.loadArgument(JsonSchema.object()
-                .enumeration("op", "What to do. Default list.", "list", "info", "capture", "protect", "delete")
+                .enumeration("op", "What to do. Default list.", "list", "info", "capture", "protect", "delete",
+                    "defaults")
                 .string("name", "Target name, or a pattern ending '/*' for info and delete.")
                 .integer("x", "capture/protect: X of one corner.")
                 .integer("y", "capture/protect: Y of one corner.")
@@ -110,7 +116,8 @@ public final class ServerTargetTools {
                 .integer("toZ", "Z of the opposite corner. Defaults to z.")
                 .integer("dimension", "Dimension id. Defaults to 0.")
                 .bool("skipAir", "capture/protect: leave air cells out (don't care) instead of wanting them clear.")
-                .bool("replace", "capture/protect: start the layer over instead of merging into it."))
+                .bool("replace", "capture/protect: start the layer over instead of merging into it.")
+                .property("rules", Json.obj("type", "object")))
                 .build())
             .serverOnly()
             .idempotent()
@@ -166,6 +173,13 @@ public final class ServerTargetTools {
                 }
                 return ToolResult.structured(Json.obj("deleted", Json.arrayOfStrings(deleted)));
             }
+            case "defaults": {
+                JsonObject rules = Json.getObject(context.getArguments(), "rules");
+                if (rules != null) {
+                    store.writeDefaults(rules);
+                }
+                return ToolResult.structured(Json.obj("defaults", store.readDefaults()));
+            }
             case "capture":
             case "protect":
                 return capture(context, name, "protect".equals(op));
@@ -214,7 +228,7 @@ public final class ServerTargetTools {
                                 unloaded[0]++;
                                 continue;
                             }
-                            String state = world.getBlockState(pos).toString();
+                            String state = canonical(world.getBlockState(pos));
                             if (skipAir && "minecraft:air".equals(state)) {
                                 continue;
                             }
@@ -250,13 +264,18 @@ public final class ServerTargetTools {
             .string("target", "A target name, or a pattern ending '/*' to check the union of its layers.")
             .property("skipBoxes", described("array", "Boxes not checked at all, each "
                 + "[x1, y1, z1, x2, y2, z2]: a lift shaft whose cab moves, a room left for later."))
-            .array("ignore", "More block-state properties to ignore, on top of the defaults (open, powered, lit, "
-                + "shape, fence/pane connections, slope, leaf decay, snowy, fluid level).", Json.obj("type", "string"))
+            .array("ignore", "More block-state properties to ignore everywhere, on top of the defaults (open, "
+                + "powered, lit, power, triggered, enabled, leaf decay, snowy, fluid level). Properties a block "
+                + "does not store (fence connections, stair shape) are never compared.", Json.obj("type", "string"))
             .array("compare", "Default-ignored properties to compare after all, e.g. ['open'].",
                 Json.obj("type", "string"))
+            .property("ignoreFor", described("object", "Properties to ignore for some blocks only, {pattern: "
+                + "[props]}, '*' matching any run: {'csm:*': ['state']}. Added to this world's defaults "
+                + "(server_target op 'defaults')."))
             .property("sameAs", described("object", "More block ids to treat as equal, "
-                + "{id: id}. Defaults already equate csm:lightupair and snow_layer with air, grass with dirt, "
-                + "and lit/powered block swaps (lit_redstone_lamp...) with their unlit forms.")));
+                + "{id: id}. Defaults already equate csm:lightupair and snow_layer with air, and lit/powered block "
+                + "swaps (lit_redstone_lamp...) with their unlit forms; grass counts as dirt under a block that "
+                + "stops light.")));
     }
 
     private static void registerVerify() {
@@ -298,11 +317,16 @@ public final class ServerTargetTools {
             .build());
     }
 
-    private static TargetDiff.Normaliser normaliser(ToolContext context) {
-        Set<String> ignore = new HashSet<>(Json.getStringList(context.getArguments(), "ignore"));
-        Set<String> compare = new HashSet<>(Json.getStringList(context.getArguments(), "compare"));
+    /** The built-in rules, then this world's defaults file, then the call's own arguments. */
+    private static TargetDiff.Normaliser normaliser(ToolContext context, TargetStore store) {
+        return apply(apply(TargetDiff.Normaliser.defaults(), store.readDefaults()), context.getArguments());
+    }
+
+    private static TargetDiff.Normaliser apply(TargetDiff.Normaliser base, JsonObject rules) {
+        Set<String> ignore = new HashSet<>(Json.getStringList(rules, "ignore"));
+        Set<String> compare = new HashSet<>(Json.getStringList(rules, "compare"));
         Map<String, String> same = new HashMap<>();
-        JsonObject sameAs = Json.getObject(context.getArguments(), "sameAs");
+        JsonObject sameAs = Json.getObject(rules, "sameAs");
         if (sameAs != null) {
             for (Map.Entry<String, JsonElement> entry : sameAs.entrySet()) {
                 if (entry.getValue().isJsonPrimitive()) {
@@ -310,7 +334,63 @@ public final class ServerTargetTools {
                 }
             }
         }
-        return TargetDiff.Normaliser.defaults().with(ignore, same).without(compare);
+        Map<String, Set<String>> ignoreFor = new HashMap<>();
+        JsonObject forBlocks = Json.getObject(rules, "ignoreFor");
+        if (forBlocks != null) {
+            for (Map.Entry<String, JsonElement> entry : forBlocks.entrySet()) {
+                ignoreFor.put(entry.getKey(), new HashSet<>(Json.getStringList(forBlocks, entry.getKey())));
+            }
+        }
+        return base.with(ignore, same, ignoreFor).without(compare);
+    }
+
+    /**
+     * A state as its block stores it: through the metadata round trip, which drops what the block does
+     * not store (fence connections, stair shape, a railing's slope) and keeps all it does. Game thread.
+     */
+    static String canonical(IBlockState state) {
+        try {
+            Block block = state.getBlock();
+            return block.getStateFromMeta(block.getMetaFromState(state)).toString();
+        }
+        catch (RuntimeException e) {
+            return state.toString();
+        }
+    }
+
+    /** A target's wanted state text, canonical as {@link #canonical(IBlockState)}. Game thread; cached. */
+    static String canonical(String want, Map<String, String> cache) {
+        String known = cache.get(want);
+        if (known != null) {
+            return known;
+        }
+        String result = want;
+        try {
+            int open = want.indexOf('[');
+            Block block = BlockIds.resolve(open < 0 ? want : want.substring(0, open));
+            if (block != null) {
+                IBlockState state = open < 0 || !want.endsWith("]") ? block.getDefaultState()
+                    : CommandBase.convertArgToBlockState(block, want.substring(open + 1, want.length() - 1));
+                result = canonical(state);
+            }
+        }
+        catch (Exception e) {
+            // Not a state this game knows: compared as written.
+        }
+        cache.put(want, result);
+        return result;
+    }
+
+    /**
+     * Whether a dirt cell where grass is wanted is grass that vanilla turned to dirt: under a block that
+     * stops light. Anywhere else it is a missing sod, and a real difference. Game thread.
+     */
+    private static boolean grassTurnedToDirt(WorldServer world, BlockPos pos, String want, String live) {
+        if (!want.startsWith("minecraft:grass") || !live.startsWith("minecraft:dirt") || !live.contains("variant=dirt")) {
+            return false;
+        }
+        BlockPos up = pos.up();
+        return world.getBlockState(up).getLightOpacity(world, up) > 2;
     }
 
     @Nullable
@@ -350,7 +430,8 @@ public final class ServerTargetTools {
         }
         final int samples = repair ? 3 : context.getBoundedInt("samples", 5, 0, 50);
         final boolean toFile = !repair && "file".equals(context.getString("detail", "summary"));
-        final TargetDiff diff = new TargetDiff(normaliser(context), samples, skip);
+        final TargetDiff diff = new TargetDiff(normaliser(context, store), samples, skip);
+        final Map<String, String> wanted = new HashMap<>();
         final int dimension = target.dimension();
         final List<String> fixes = new ArrayList<>();
         final List<String> detail = new ArrayList<>();
@@ -369,15 +450,19 @@ public final class ServerTargetTools {
                     BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
                     long started = System.nanoTime();
                     while (cursor[0] < keys.size() && System.nanoTime() - started < SLICE_NANOS) {
-                        target.forEachCellIn(keys.get(cursor[0]++), (x, y, z, want, protect) -> {
+                        target.forEachCellIn(keys.get(cursor[0]++), (x, y, z, rawWant, protect) -> {
                             pos.setPos(x, y, z);
-                            String live = world.isBlockLoaded(pos) ? world.getBlockState(pos).toString() : null;
+                            String want = canonical(rawWant, wanted);
+                            String live = world.isBlockLoaded(pos) ? canonical(world.getBlockState(pos)) : null;
+                            if (live != null && grassTurnedToDirt(world, pos, want, live)) {
+                                live = want;
+                            }
                             TargetDiff.Kind kind = diff.add(x, y, z, want, protect, live);
                             if (kind == null || kind == TargetDiff.Kind.MATCH || kind == TargetDiff.Kind.UNLOADED) {
                                 return;
                             }
                             if (repair && kind != TargetDiff.Kind.PROTECTED_CHANGED) {
-                                fixes.add(setblock(x, y, z, want));
+                                fixes.add(setblock(x, y, z, rawWant));
                             }
                             if (toFile && detail.size() < MAX_DETAIL_LINES) {
                                 detail.add(x + " " + y + " " + z + " " + kind.key + " want " + want + " is " + live);

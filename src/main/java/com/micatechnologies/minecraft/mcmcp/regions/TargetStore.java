@@ -208,6 +208,33 @@ public final class TargetStore {
         return deleted;
     }
 
+    private static final String DEFAULTS = "verify-defaults.json";
+
+    /**
+     * This world's verify defaults ({@code ignore}, {@code compare}, {@code sameAs}, {@code ignoreFor}),
+     * applied before a call's own: a modpack's runtime state, set once rather than passed every call.
+     */
+    public synchronized JsonObject readDefaults() {
+        File file = new File(folder, DEFAULTS);
+        if (!file.isFile()) {
+            return new JsonObject();
+        }
+        try {
+            JsonElement parsed = Json.parse(new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
+            return parsed != null && parsed.isJsonObject() ? parsed.getAsJsonObject() : new JsonObject();
+        }
+        catch (IOException | RuntimeException e) {
+            return new JsonObject();
+        }
+    }
+
+    public synchronized void writeDefaults(JsonObject defaults) throws IOException {
+        if (!folder.isDirectory() && !folder.mkdirs()) {
+            throw new IOException("could not create " + folder);
+        }
+        Files.write(new File(folder, DEFAULTS).toPath(), Json.writePretty(defaults).getBytes(StandardCharsets.UTF_8));
+    }
+
     private File file(String name) {
         return new File(folder, name.replace('/', File.separatorChar) + SUFFIX);
     }
