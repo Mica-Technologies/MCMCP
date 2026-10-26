@@ -926,6 +926,81 @@ places nobody gets to: a room with no way in). `separate` floods each seed with 
 Both checks were ported from the UIA builder's own scripts and are tested against their fixtures: the
 basilica's 14,771 leaking cells in 17 clusters, and ALTO 1873 L13's 1,486 / 303 walkable cells.
 
+#### Building components
+
+Every write below goes through [`server_apply_ops`](#server_apply_ops), so each takes `dryRun`,
+`saveTarget`, `replaceTarget`, `load` and `dimension`, and leaves an undo point. Blocks are
+parameters. States are set by property name, and only where the block has the property, so the tools
+serve vanilla and modded blocks alike.
+
+##### `server_build`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `origin`, `parts` required · optional `palette` and the write options
+
+A building as a short spec instead of a generator script. The server expands it to fill and setblock
+ops and writes only what differs. Coordinates are relative to `origin`, boxes are two corners
+inclusive, and later parts overwrite earlier ones. `palette` maps a character to a block: `id`,
+`id:meta` or `id[prop=value,...]`; a part may also name a block id directly.
+
+| Part | Meaning |
+| --- | --- |
+| `{box: [x1,y1,z1,x2,y2,z2], fill, mode?}` | a fill; `mode` is `hollow`, `outline`, `keep` or `replace` |
+| `{shell: box, wall, floor?, floorsEvery?, roof?, clear?}` | four walls, the inside cleared (default), a floor at the base and every N up, a roof |
+| `{line: box, fill}` | a straight line; one fill along an axis, cell by cell otherwise |
+| `{columns: box, every: [dx, dz], size?: [sx, sz], fill}` | piers on a grid, the box's full height |
+| `{plan: ["WW.GG", ...], at?, axis?, height?}` | rows of palette characters, runs merged into fills; `.` and space leave a cell. `axis: xz` (default) is a floor plan, rows along z, extruded up `height`; `xy` and `zy` are facades, rows top down |
+| `{repeat: part, step: [dx,dy,dz], count}` | a part, stepped |
+| `{mirror: part, axis: x\|z, about: n}` | a part and its reflection across `x` (or `z`) = `about` |
+| `{stamp: "<target>", at}` | a saved [build target](#build-targets) as a component, smallest corner at `at` |
+
+```json
+{"origin": [100, 64, 200],
+ "palette": {"W": "minecraft:brick_block", "F": "minecraft:planks", "G": "minecraft:glass"},
+ "parts": [{"shell": [0, 0, 0, 12, 9, 8], "wall": "W", "floor": "F", "floorsEvery": 4, "roof": "F"},
+           {"repeat": {"box": [2, 2, 0, 3, 3, 0], "fill": "G"}, "step": [4, 0, 0], "count": 3}],
+ "saveTarget": "house/shell"}
+```
+
+Up to 50,000 ops a call. A larger spec is a job: `server_job_submit {kind: "build", args: <the
+same arguments>}` expands it once and replays it as an op job.
+
+##### `server_place_doors`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `openings` required · optional the write options
+
+Each opening is `{x, y, z, block, facing, width, axis?, closer?, hinge?, header?}`:
+
+- `x, y, z` is the lower cell, and `facing` (`N`/`E`/`S`/`W`) is the way you walk in.
+- `width: 2` is a pair. `axis` (`x` or `z`) is its direction, default across the facing. A pair hinges
+  on its outer edges: the leaf at the lower coordinate is hinged left when facing north or east.
+- `hinge` (`left`/`right`) sets a single door's hinge.
+- `closer` (default true) applies where the block has one.
+- `header: "auto"` fills the cell over a 2-high door in a 3-high opening with the wall beside it; a
+  block id fills it with that block.
+
+Each door is written lower half then upper. For CSM's doors this gives exactly the metadata the
+builder verified live: lower = facing (S0 W1 N2 E3), upper = 8 + hinge right + 2 x closer. Returns
+`pairs`, `singles`, `headers`, `rejected` and the write's counts.
+
+##### `server_place_railing`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `style` required · `cells` or a box · optional `mode`, `edges`, `replace`, `dropDepth` and the write options
+
+Places a railing whose `north`/`east`/`south`/`west` properties are the edges its guard runs along
+(CSM railings and handrails). It goes at `cells` `[[x, y, z]...]`, or in a box at the cells holding a
+block matching `replace` or the style itself.
+
+- **`mode: auto`** (default) sets each edge whose neighbouring column has nothing solid in the
+  `dropDepth - 1` cells below (default 4): a terrace's outside, an atrium's void. A ring corner with
+  no side dropping takes both edges toward a dropping diagonal. A cell with no drop at all, a short
+  step, is skipped and listed.
+- **`mode: edges`** sets `edges` (`"NE"`...) everywhere.
+- **`replace`** lists the guards to swap out, as id patterns (`*` matches any run), such as
+  `["minecraft:glass_pane", "novablocks:thin_guardrail"]`.
+
+Returns `placed`, `byEdges` (`{"N": 3, "NW": 1, ...}`), `replaced`, `skipped` and the write's
+counts.
+
 #### `server_run_test`
 
 :material-alert: Destructive · `steps` required · optional `finally`, `vars`, `defs`, `hold`, `dimension`, `maxSeconds`, `stopOnFail`, `return`
@@ -1013,7 +1088,7 @@ them. Steps that each `call` a read and `save` it, then `return` them all, bring
 :material-alert: Destructive · `kind`, `args` required · optional `label`
 
 Starts a long write or read as a background job and returns its id at once. `kind` is `apply_ops`,
-`set_blocks`, `get_blocks`, `relight`, `test` or `pregen`. `args` are the arguments that tool takes, of any
+`set_blocks`, `get_blocks`, `relight`, `test`, `pregen` or `build`. `args` are the arguments that tool takes, of any
 size: the server splits them into ordinary calls and works through them at its own pace. A `test`
 job runs one [`server_run_test`](#server_run_test) script, and its status carries the `verdict`. A
 `pregen` job runs [`server_pregen_chunks`](#server_pregen_chunks) over an area of any size. To

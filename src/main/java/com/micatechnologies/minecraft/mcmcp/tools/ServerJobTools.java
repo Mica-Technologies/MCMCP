@@ -44,13 +44,14 @@ public final class ServerJobTools {
                 + "arguments; cells, blocks or a fill of any size), 'get_blocks' (server_get_blocks' arguments "
                 + "over a box of any size; results come back as pages), 'relight', 'test' (server_run_test's "
                 + "arguments; its verdict is in server_job_status), or 'pregen' (server_pregen_chunks' "
-                + "arguments over an area of any size; submit it again to resume). The server splits it into "
+                + "arguments over an area of any size; submit it again to resume), or 'build' (server_build's spec of any "
+                + "size, expanded on submit and replayed as ops). The server splits it into "
                 + "ordinary calls and works through them at its own pace, pausing while it struggles. Poll "
                 + "server_job_status; the job survives your script or client restarting, and its chunk holds are "
                 + "its own.")
             .schema(JsonSchema.object()
                 .enumeration("kind", "What to run.", "apply_ops", "set_blocks", "get_blocks", "relight", "test",
-                    "pregen")
+                    "pregen", "build")
                 .property("args", Json.obj("type", "object"))
                 .string("label", "A name to know it by in lists and the orchestrator.")
                 .required("kind", "args")
@@ -142,6 +143,7 @@ public final class ServerJobTools {
             return ToolResult.error(Estop.refusal());
         }
         String kind = context.getString("kind", "");
+        String asked = kind;
         String toolName = JobParts.toolFor(kind);
         if (toolName == null) {
             return ToolResult.error("'kind' is one of " + JobParts.kindList() + ".");
@@ -161,6 +163,33 @@ public final class ServerJobTools {
         JsonObject args = Json.getObject(context.getArguments(), "args");
         if (args == null) {
             return ToolResult.error("'args' is the arguments " + toolName + " would take, as an object.");
+        }
+        if ("build".equals(asked)) {
+            // A spec needs the world's components to expand, so it is expanded here, once, and the job is
+            // an ordinary op replay from then on: split, paced and resumable like any other.
+            JsonObject replay = new JsonObject();
+            try {
+                replay.add("ops", Json.arrayOfStrings(com.micatechnologies.minecraft.mcmcp.building.BuildProgram.expand(args,
+                    name -> {
+                        try {
+                            return ServerTargetTools.store().union(name);
+                        }
+                        catch (java.io.IOException e) {
+                            return null;
+                        }
+                    }, Integer.MAX_VALUE)));
+            }
+            catch (com.micatechnologies.minecraft.mcmcp.building.BuildProgram.SpecException e) {
+                return ToolResult.error(e.getMessage() + " Nothing was submitted.");
+            }
+            for (String key : new String[] {"dimension", "dryRun", "saveTarget", "replaceTarget", "load",
+                "neighbourUpdates"}) {
+                if (args.has(key)) {
+                    replay.add(key, args.get(key));
+                }
+            }
+            args = replay;
+            kind = "apply_ops";
         }
         String unknown = ArgumentNames.describeUnknown(toolName, tool.getInputSchema(), args);
         if (unknown != null) {

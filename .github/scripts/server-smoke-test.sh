@@ -1080,6 +1080,57 @@ case "$ENC_BODY" in
   *) mcp_failure "the leak was not reported as a cluster: ${ENC_BODY}" ;;
 esac
 
+echo "==> Components: a door pair with its header, and railings that face the drop"
+CX=$((SPAWN_X + 110)); CY=$((UNDO_Y + 50)); CZ=$((SPAWN_Z + 110))
+mcp_call 690 server_target '{"op":"delete","name":"smoke-doors"}' > /dev/null
+mcp_call 691 server_apply_ops "{\"ops\":[\"fill ${CX} ${CY} ${CZ} $((CX + 5)) $((CY + 4)) $((CZ + 2)) minecraft:air\",\"fill ${CX} ${CY} $((CZ + 1)) $((CX + 5)) ${CY} $((CZ + 1)) minecraft:stone\",\"fill ${CX} $((CY + 1)) $((CZ + 1)) $((CX + 5)) $((CY + 3)) $((CZ + 1)) minecraft:brick_block\",\"fill $((CX + 2)) $((CY + 1)) $((CZ + 1)) $((CX + 3)) $((CY + 3)) $((CZ + 1)) minecraft:air\"]}" > /dev/null \
+  || mcp_failure "could not build the wall"
+DOOR_BODY="$(mcp_call 692 server_place_doors "{\"openings\":[{\"x\":$((CX + 2)),\"y\":$((CY + 1)),\"z\":$((CZ + 1)),\"block\":\"minecraft:wooden_door\",\"facing\":\"S\",\"width\":2,\"header\":\"auto\"}],\"saveTarget\":\"smoke-doors\"}")" \
+  || mcp_failure "server_place_doors failed: ${DOOR_BODY}"
+case "$DOOR_BODY" in
+  *'"pairs":1,"singles":0,"headers":2'*'"refused":0'*) echo "    a pair and the brick header over a 3-high opening" ;;
+  *) mcp_failure "the door pair was not placed: ${DOOR_BODY}" ;;
+esac
+DVER_BODY="$(mcp_call 693 server_verify '{"target":"smoke-doors"}')" || mcp_failure "verify failed: ${DVER_BODY}"
+case "$DVER_BODY" in
+  *'"matching":6,"differ":0'*) echo "    and the halves and hinges hold in the world (verify: 0 differ)" ;;
+  *) mcp_failure "the doors did not verify: ${DVER_BODY}" ;;
+esac
+mcp_call 694 server_target '{"op":"delete","name":"smoke-doors"}' > /dev/null
+RX=$((CX + 10)); RY=$((CY + 2)); RZ=${CZ}
+mcp_call 695 server_apply_ops "{\"ops\":[\"fill ${RX} $((RY - 4)) ${RZ} $((RX + 4)) $((RY + 2)) $((RZ + 4)) minecraft:air\",\"fill ${RX} ${RY} ${RZ} $((RX + 4)) ${RY} $((RZ + 4)) minecraft:stone\"]}" > /dev/null
+RAIL_BODY="$(mcp_call 696 server_place_railing "{\"style\":\"minecraft:fence\",\"cells\":[[${RX},$((RY + 1)),${RZ}],[$((RX + 1)),$((RY + 1)),${RZ}],[$((RX + 2)),$((RY + 1)),${RZ}],[${RX},$((RY + 1)),$((RZ + 1))],[$((RX + 2)),$((RY + 1)),$((RZ + 2))]],\"dryRun\":true}")" \
+  || mcp_failure "server_place_railing failed: ${RAIL_BODY}"
+case "$RAIL_BODY" in
+  *'"placed":4'*'"byEdges":{"N":2,"W":1,"NW":1}'*'"skipped":1'*) echo "    railings: north edge on the north side, both at the corner, an inner cell skipped" ;;
+  *) mcp_failure "the railing edges were wrong: ${RAIL_BODY}" ;;
+esac
+
+echo "==> Build programs: a house from a spec, verified, and the same spec as a job"
+HX=$((SPAWN_X + 130)); HY=$((UNDO_Y + 50)); HZ=$((SPAWN_Z + 130))
+mcp_call 700 server_target '{"op":"delete","name":"smoke-house/*"}' > /dev/null
+HOUSE="\"origin\":[${HX},${HY},${HZ}],\"palette\":{\"W\":\"minecraft:brick_block\",\"F\":\"minecraft:planks\",\"G\":\"minecraft:glass\",\"S\":\"minecraft:stone\"},\"parts\":[{\"shell\":[0,0,0,12,9,8],\"wall\":\"W\",\"floor\":\"F\",\"floorsEvery\":4,\"roof\":\"F\"},{\"repeat\":{\"box\":[2,2,0,3,3,0],\"fill\":\"G\"},\"step\":[4,0,0],\"count\":3},{\"mirror\":{\"box\":[1,10,1,1,12,1],\"fill\":\"S\"},\"axis\":\"x\",\"about\":6},{\"plan\":[\"SSSSS\"],\"at\":[4,0,-1]}]"
+BUILD_BODY="$(mcp_call 701 server_build "{${HOUSE},\"saveTarget\":\"smoke-house/shell\"}")" || mcp_failure "server_build failed: ${BUILD_BODY}"
+case "$BUILD_BODY" in
+  *'"isError":true'*) mcp_failure "server_build refused: ${BUILD_BODY}" ;;
+  *'"ops":15'*'"written":'*'"target":{"name":"smoke-house/shell"'*) echo "    a house from a 4-part spec: 15 ops, saved as smoke-house/shell" ;;
+  *) mcp_failure "the house was not built: ${BUILD_BODY}" ;;
+esac
+HVER_BODY="$(mcp_call 702 server_verify '{"target":"smoke-house/*"}')" || mcp_failure "verify failed: ${HVER_BODY}"
+case "$HVER_BODY" in
+  *'"differ":0'*) echo "    and it verifies clean against its own target" ;;
+  *) mcp_failure "the house did not verify: ${HVER_BODY}" ;;
+esac
+BJOB_BODY="$(mcp_call 703 server_job_submit "{\"kind\":\"build\",\"args\":{${HOUSE},\"dryRun\":true}}")" || mcp_failure "a build job failed to start: ${BJOB_BODY}"
+BJOB_ID="$(printf '%s' "$BJOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$BJOB_ID" ] || mcp_failure "no build job id: ${BJOB_BODY}"
+BJOB_STATE="$(mcp_call 704 server_job_status "{\"id\":\"${BJOB_ID}\",\"wait\":30}")" || mcp_failure "status failed: ${BJOB_STATE}"
+case "$BJOB_STATE" in
+  *'"state":"done"'*'"wouldWrite":0'*) echo "    as a job it expands, replays, and finds nothing left to write" ;;
+  *) mcp_failure "the build job did not finish clean: ${BJOB_STATE}" ;;
+esac
+mcp_call 705 server_target '{"op":"delete","name":"smoke-house/*"}' > /dev/null
+
 echo "==> Test scripts: power a lamp, wait for it, check, and put the world back"
 LX=$((SPAWN_X + 30)); LY=$((UNDO_Y + 12)); LZ=$((SPAWN_Z + 30))
 mcp_call 595 server_set_block "{\"x\":${LX},\"y\":${LY},\"z\":${LZ},\"block\":\"minecraft:redstone_lamp\"}" > /dev/null \

@@ -35,6 +35,8 @@ public final class JobParts {
         {"relight", "server_relight"},
         {"test", "server_run_test"},
         {"pregen", "server_pregen_chunks"},
+        // Expanded to ops when submitted (it needs the world's components), then run as an op replay.
+        {"build", "server_apply_ops"},
     };
 
     /** A pregeneration part is at most this many chunks on a side: about a region file's quarter. */
