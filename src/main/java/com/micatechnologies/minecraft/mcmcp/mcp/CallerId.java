@@ -36,6 +36,17 @@ public final class CallerId {
             return new CallerId("orchestrator:" + connection,
                 (name == null || name.isEmpty() ? "agent" : name) + " (" + connection + ")");
         }
+        if (!session.isOrchestratorLink() && session.getPrincipal().isCompanion() && stamped != null
+            && Json.getString(stamped, "id", null) != null) {
+            // Through the companion, every agent the orchestrator routes to one player arrives on one
+            // session; the client forwards the orchestrator's stamp unchanged. It names which agent, so
+            // one agent's 'release all' is its own (#142). It cannot widen anything: access is the
+            // player's, and the player's cap still counts all their agents together.
+            String connection = Json.getString(stamped, "id", "");
+            String name = Json.getString(stamped, "name", null);
+            return new CallerId("agent:" + connection,
+                (name == null || name.isEmpty() ? "agent" : name) + " (" + connection + ")");
+        }
         if (session.isOrchestratorLink()) {
             // An orchestrator too old to stamp callers: all its agents are one caller, as before.
             return new CallerId("orchestrator", "an agent through the orchestrator");

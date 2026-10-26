@@ -363,4 +363,52 @@ class ChunkLoadTest {
         assertEquals(60_000L, shares.get(1).nextExpiryMillis);
         assertEquals(2, ledger.callers());
     }
+
+    @Test
+    void oneCompanionAgentsReleaseAllLeavesAnotherAgentsHoldsOfTheSamePlayer() {
+        // #142: two agents through one player's companion. 'release all' from one is its own.
+        HoldLedger ledger = new HoldLedger();
+        HoldLedger.Hold mine = ledger.create("player:u1~agent:a", 0, chunks(1, 2), false, 0L, 120_000L, 900_000L);
+        HoldLedger.Hold theirs = ledger.create("player:u1~agent:b", 0, chunks(3), false, 0L, 120_000L, 900_000L);
+        ledger.add(mine);
+        ledger.add(theirs);
+
+        assertEquals(Arrays.asList(mine.id), ledger.ownedBy("player:u1~agent:a", false));
+    }
+
+    @Test
+    void aLogoutReleasesEveryAgentOfThePlayerAndNoOneElse() {
+        HoldLedger ledger = new HoldLedger();
+        HoldLedger.Hold a = ledger.create("player:u1~agent:a", 0, chunks(1), false, 0L, 120_000L, 900_000L);
+        HoldLedger.Hold b = ledger.create("player:u1~agent:b", 0, chunks(2), true, 0L, 120_000L, 900_000L);
+        HoldLedger.Hold other = ledger.create("player:u2~agent:a", 0, chunks(3), false, 0L, 120_000L, 900_000L);
+        ledger.add(a);
+        ledger.add(b);
+        ledger.add(other);
+
+        List<String> released = ledger.ownedBy("player:u1", true);
+
+        assertEquals(new HashSet<>(Arrays.asList(a.id, b.id)), new HashSet<>(released));
+    }
+
+    @Test
+    void aPlayersCapCountsAllTheirAgentsTogether() {
+        // The access is the player's: five agents must not get five caps.
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("player:u1~agent:a", 0, chunks(1, 2, 3), false, 0L, 120_000L, 900_000L));
+
+        HoldLedger.CapRefusal refusal = ledger.checkCaps("player:u1~agent:b", 0, chunks(4, 5), 1000, 4);
+
+        assertTrue(refusal != null && refusal.perCaller(), "3 held by agent a + 2 more for agent b > 4");
+        assertNull(ledger.checkCaps("player:u2~agent:b", 0, chunks(4, 5), 1000, 4), "another player is not counted");
+    }
+
+    @Test
+    void aCallerKeyGroupsByThePlayerAndCoversOnlyWhatItShould() {
+        assertEquals("player:u1", HoldLedger.groupOf("player:u1~agent:a"));
+        assertEquals("endpoint/agent:x", HoldLedger.groupOf("endpoint/agent:x"));
+        assertTrue(HoldLedger.covers("player:u1", "player:u1~agent:a"));
+        assertFalse(HoldLedger.covers("player:u1~agent:b", "player:u1~agent:a"));
+        assertFalse(HoldLedger.covers("player:u1", "player:u10~agent:a"));
+    }
 }

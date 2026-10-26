@@ -208,7 +208,10 @@ public class ToolContext {
             return holdCaller;
         }
         Principal principal = getPrincipal();
-        return principal.isCompanion() ? "player:" + principal.getPlayerId() : "endpoint/" + getCaller().id();
+        // A companion player's agents each hold under their own key within the player's (#142), so one
+        // agent's 'release all' is its own; the player's cap still counts them together.
+        return principal.isCompanion() ? "player:" + principal.getPlayerId() + "~" + getCaller().id()
+            : "endpoint/" + getCaller().id();
     }
 
     /** {@link #callerKey()} for people to read: the player's or agent's name, or the job. */
@@ -217,7 +220,7 @@ public class ToolContext {
             return holdCaller;
         }
         Principal principal = getPrincipal();
-        return principal.isCompanion() ? principal.getPlayerName() : getCaller().label();
+        return principal.isCompanion() ? principal.getPlayerName() + ", " + getCaller().label() : getCaller().label();
     }
 
     /** The key chunk holds are taken under, or null for the caller's own. */

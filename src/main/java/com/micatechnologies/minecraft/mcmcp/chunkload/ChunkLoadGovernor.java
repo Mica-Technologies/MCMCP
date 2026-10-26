@@ -1030,7 +1030,7 @@ public final class ChunkLoadGovernor {
             if (hold.label != null) {
                 labels.put(hold.caller, hold.label);
             }
-            if (onlyCaller != null && !onlyCaller.equals(hold.caller)) {
+            if (onlyCaller != null && !HoldLedger.covers(onlyCaller, hold.caller)) {
                 continue;
             }
             JsonObject entry = new JsonObject();

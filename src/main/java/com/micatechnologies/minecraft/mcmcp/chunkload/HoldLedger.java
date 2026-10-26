@@ -200,9 +200,41 @@ public final class HoldLedger {
         return references.size();
     }
 
+    /** Distinct chunks held by every caller of one group: a player's agents, for the player's cap. */
+    private Set<Place> placesOfGroup(String group) {
+        Set<Place> places = new HashSet<>();
+        for (Hold hold : holds.values()) {
+            if (groupOf(hold.caller).equals(group)) {
+                for (long chunk : hold.chunks) {
+                    places.add(new Place(hold.dimension, chunk));
+                }
+            }
+        }
+        return places;
+    }
+
     /** Distinct chunks held by one caller. */
     public int heldChunks(String caller) {
         return placesOf(caller).size();
+    }
+
+    /**
+     * The group a caller belongs to. A companion agent holds under {@code player:<uuid>~<agent>} (#142):
+     * its holds are its own to release, but its player's cap counts every agent of that player, since
+     * the access is the player's. Any other caller is a group of one.
+     */
+    public static String groupOf(String caller) {
+        int agent = caller.indexOf('~');
+        return agent < 0 ? caller : caller.substring(0, agent);
+    }
+
+    /**
+     * Whether {@code key} covers holds taken under {@code holdCaller}: an agent's key covers only its
+     * own; a player's key ({@code player:<uuid>}, as a logout or a revoked access names it) covers every
+     * agent of that player.
+     */
+    public static boolean covers(String key, String holdCaller) {
+        return holdCaller.equals(key) || (key.indexOf('~') < 0 && groupOf(holdCaller).equals(key));
     }
 
     private Set<Place> placesOf(String caller) {
@@ -309,7 +341,7 @@ public final class HoldLedger {
     @Nullable
     public CapRefusal checkCaps(String caller, int dimension, Set<Long> chunks, int maxTotal, int maxPerCaller) {
         int held = heldChunks();
-        Set<Place> mine = placesOf(caller);
+        Set<Place> mine = placesOfGroup(groupOf(caller));
         int addingTotal = added(dimension, chunks);
         if (held + addingTotal > maxTotal) {
             return new CapRefusal(LIMIT_TOTAL, maxTotal, addingTotal, held, callers(), mine.size(),
@@ -445,7 +477,7 @@ public final class HoldLedger {
     public List<String> ownedBy(String caller, boolean callsToo) {
         List<String> ids = new ArrayList<>();
         for (Hold hold : holds.values()) {
-            if (hold.caller.equals(caller) && (callsToo || !hold.temporary)) {
+            if (covers(caller, hold.caller) && (callsToo || !hold.temporary)) {
                 ids.add(hold.id);
             }
         }

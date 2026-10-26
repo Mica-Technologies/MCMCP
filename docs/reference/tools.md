@@ -662,7 +662,9 @@ Ends a hold. Chunks MCMCP loaded are unloaded straight away unless a player can 
 another hold still needs them. Returns `{released: [ids], heldChunks}`, `heldChunks` being what you
 still hold.
 
-`all: true` ends your `server_keep_loaded` holds only; on the endpoint, "yours" means this agent's. A read or write still loading chunks for another
+`all: true` ends your `server_keep_loaded` holds only. "Yours" means this agent's, both on the
+endpoint and through the companion: several agents driving one player each own their holds, though
+the player's `chunks.maxHeldChunksPerCaller` counts them all together. A read or write still loading chunks for another
 of your calls keeps its own, so one script cleaning up cannot fail another running on the same account.
 A call whose hold is ended while it waits fails with a message naming what ended it.
 
