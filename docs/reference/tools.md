@@ -730,6 +730,21 @@ entity can lag the server's by minutes.
  "block": "csm:controller", "nbt": {"tcCp": 3, "tcFm": ""}}], "chunks": {...}}
 ```
 
+#### `server_reload_tile_entities`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `x`, `y`, `z` required · optional `toX`, `toY`, `toZ`, `blocks`, `dimension`, `dryRun`, `load`
+
+Puts the tile entities in a box through what a chunk reload does to them, without unloading
+anything. Each one's unload hook runs, it is removed and re-created from its own NBT, and adding it
+back runs its load hook. The block is then resent to the players watching it. The blocks themselves
+are not changed, so nothing breaks or drops.
+
+It is for blocks that only finish setting up when their chunk loads, such as CSM's HVAC vents
+registering with their system. On a shared server a real reload can be impossible, because a chunk
+near any player never unloads. `blocks` (patterns) limits it to some, and `dryRun` counts. Returns
+`reloaded`, `byBlock`, and any `failed`; a tile entity that cannot be re-created from its NBT is put
+back as it was. At most 4,096 a call.
+
 #### `server_count_blocks`
 
 :material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `include`, `exclude`, `includeAir`, `byState`, `samples`, `limit`, `extents`, `byY`, `load`

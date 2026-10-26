@@ -1154,6 +1154,22 @@ case "$PLAN_BODY" in
 esac
 mcp_call 705 server_target '{"op":"delete","name":"smoke-house/*"}' > /dev/null
 
+echo "==> Tile entities reloaded in place (#141): a chest keeps its contents"
+KX=$((SPAWN_X + 170)); KY=$((UNDO_Y + 50)); KZ=$((SPAWN_Z + 170))
+mcp_call 720 server_apply_ops "{\"ops\":[\"setblock ${KX} ${KY} ${KZ} minecraft:chest 0 {Items:[{Slot:0b,id:\\\"minecraft:diamond\\\",Count:3b}]}\"]}" > /dev/null \
+  || mcp_failure "could not place the chest"
+RELOAD_TE="$(mcp_call 721 server_reload_tile_entities "{\"x\":$((KX - 1)),\"y\":${KY},\"z\":$((KZ - 1)),\"toX\":$((KX + 1)),\"toZ\":$((KZ + 1))}")" \
+  || mcp_failure "server_reload_tile_entities failed: ${RELOAD_TE}"
+case "$RELOAD_TE" in
+  *'"reloaded":1'*'"minecraft:chest":1'*) ;;
+  *) mcp_failure "the chest was not reloaded: ${RELOAD_TE}" ;;
+esac
+CHEST_TE="$(mcp_call 722 server_get_tile_entities "{\"x\":${KX},\"y\":${KY},\"z\":${KZ}}")" || mcp_failure "reading the chest failed: ${CHEST_TE}"
+case "$CHEST_TE" in
+  *'minecraft:diamond'*) echo "    the chest went through an unload and load in place, diamonds and all" ;;
+  *) mcp_failure "the chest lost its contents: ${CHEST_TE}" ;;
+esac
+
 echo "==> A switchback stair core: planned, audited, built"
 SX=$((SPAWN_X + 150)); SY=$((UNDO_Y + 60)); SZ=$((SPAWN_Z + 150))
 STAIR_BODY="$(mcp_call 710 server_build_stair "{\"box\":[${SX},${SZ},$((SX + 11)),$((SZ + 8))],\"axis\":\"x\",\"width\":3,\"floors\":[${SY},$((SY + 8)),$((SY + 16)),$((SY + 24))],\"doors\":{\"${SY}\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 8))\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 16))\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 24))\":[[$((SX + 2)),$((SZ + 8))]]},\"palette\":{\"floor\":\"minecraft:concrete:8\",\"wall\":\"minecraft:concrete:7\",\"tread\":\"minecraft:stone_brick_stairs\",\"rail\":\"minecraft:glass_pane\",\"sconce\":\"minecraft:torch\"}}")" \
