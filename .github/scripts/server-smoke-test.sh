@@ -1147,6 +1147,12 @@ case "$STAIR_BODY" in
   *'"cells":3519'*'"auditFailures":0'*'"refused":0'*) echo "    four floors: 3,519 cells, 6 flights, its own audit clean, every cell written" ;;
   *) mcp_failure "the stair was not built as planned: $(printf '%s' "$STAIR_BODY" | cut -c1-800)" ;;
 esac
+DEFAULT_STAIR="$(mcp_call 712 server_build_stair "{\"box\":[$((SX + 20)),${SZ},$((SX + 31)),$((SZ + 8))],\"axis\":\"x\",\"floors\":[${SY},$((SY + 8))],\"doors\":{\"${SY}\":[[$((SX + 22)),$((SZ + 8))]],\"$((SY + 8))\":[[$((SX + 22)),$((SZ + 8))]]},\"dryRun\":true}")" \
+  || mcp_failure "server_build_stair with defaults failed: ${DEFAULT_STAIR}"
+case "$DEFAULT_STAIR" in
+  *'"auditFailures":0'*'"refused":0'*) echo "    with no palette, the defaults this game has (iron bars, torches) pass the audit" ;;
+  *) mcp_failure "the default palette did not resolve cleanly: $(printf '%s' "$DEFAULT_STAIR" | cut -c1-800)" ;;
+esac
 NARROW_BODY="$(mcp_call 711 server_build_stair "{\"box\":[${SX},${SZ},$((SX + 6)),$((SZ + 13))],\"width\":3,\"floors\":[${SY},$((SY + 8))]}")" \
   || mcp_failure "server_build_stair failed: ${NARROW_BODY}"
 case "$NARROW_BODY" in

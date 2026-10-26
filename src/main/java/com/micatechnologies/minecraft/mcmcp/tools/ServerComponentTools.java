@@ -122,6 +122,31 @@ public final class ServerComponentTools {
             .build());
     }
 
+    /** The default rail and sconce, the first of each this game knows. */
+    static final String[] STAIR_RAILS = {"csm:railing_pipe_galvanized", "minecraft:iron_bars"};
+    static final String[] STAIR_SCONCES = {"csm:sconcehalfshellnickel", "minecraft:torch"};
+
+    private static String firstKnown(String[] ids) {
+        for (String id : ids) {
+            if (BlockIds.resolve(id) != null) {
+                return id;
+            }
+        }
+        return ids[ids.length - 1];
+    }
+
+    /**
+     * A vanilla torch for a sconce: the planner gives sconces CSM's meta (facing x 4 + 3, facing as the
+     * horizontal index S0 W1 N2 E3, the way it faces off the wall); a torch's meta for the same facing is
+     * east 1, west 2, south 3, north 4.
+     */
+    static String torchFor(String cell) {
+        int colon = cell.lastIndexOf(':');
+        int meta = Integer.parseInt(cell.substring(colon + 1));
+        int[] torch = {3, 2, 4, 1};
+        return "minecraft:torch:" + torch[(meta >> 2) & 3];
+    }
+
     /** Patterns a stair never overwrites by default: what is fitted into a core after it is built. */
     static final List<String> STAIR_KEEP = java.util.Arrays.asList("*door*", "*sign*", "*panel*", "*sconce*",
         "*pull*", "*standpipe*");
@@ -171,6 +196,19 @@ public final class ServerComponentTools {
         if (!cfg.has("walls")) {
             cfg.addProperty("walls", true);
         }
+        // Generic defaults that still pass a builder's rules where its blocks exist: a guard rail rather
+        // than a bare pane, a sconce rather than nothing. The first of each list this game has is used.
+        JsonObject palette = Json.getObject(cfg, "palette");
+        if (palette == null) {
+            palette = new JsonObject();
+            cfg.add("palette", palette);
+        }
+        if (!palette.has("rail")) {
+            palette.addProperty("rail", firstKnown(STAIR_RAILS));
+        }
+        if (!palette.has("sconce")) {
+            palette.addProperty("sconce", firstKnown(STAIR_SCONCES));
+        }
         final com.micatechnologies.minecraft.mcmcp.building.StairDesign.Input input;
         final com.micatechnologies.minecraft.mcmcp.building.StairDesign.Plan plan;
         try {
@@ -184,6 +222,16 @@ public final class ServerComponentTools {
         final List<String> keep = context.has("keep") ? Json.getStringList(context.getArguments(), "keep") : STAIR_KEEP;
         final List<Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String>> cells =
             new ArrayList<>(plan.cells.entrySet());
+        final String rail = input.palette == null ? null : input.palette.rail;
+        // A rail whose edges are stored (a CSM railing, not a pane) faces the drop: the plan is the world
+        // it stands in, and a deck rail drops to the treads one or more blocks below.
+        final java.util.Set<String> railProps = rail == null ? java.util.Collections.<String>emptySet()
+            : storedEdges(rail);
+        final RailEdges.Solid planSolid = (x, y, z) -> {
+            String b = plan.cells.get(new com.micatechnologies.minecraft.mcmcp.building.Pos(x, y, z));
+            return b == null || !(b.equals(com.micatechnologies.minecraft.mcmcp.building.StairDesign.AIR)
+                || b.startsWith("minecraft:air") || b.contains("lightupair") || b.equals(rail));
+        };
         Set<Long> chunks = new LinkedHashSet<>();
         for (Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell : cells) {
             chunks.add(ChunkKeys.ofBlock(cell.getKey().x, cell.getKey().z));
@@ -208,7 +256,23 @@ public final class ServerComponentTools {
                                 continue;
                             }
                         }
-                        ops.add(BuildProgram.setblockLine(p.x, p.y, p.z, cell.getValue()));
+                        String block = cell.getValue();
+                        if (block.startsWith("minecraft:torch:")) {
+                            block = torchFor(block);
+                        }
+                        if (rail != null && block.equals(rail) && !railProps.isEmpty()) {
+                            int mask = RailEdges.edges(planSolid, p.x, p.y, p.z, 2);
+                            if (mask != 0) {
+                                Map<String, String> edges = new LinkedHashMap<>();
+                                edges.put("north", String.valueOf((mask & RailEdges.NORTH) != 0));
+                                edges.put("east", String.valueOf((mask & RailEdges.EAST) != 0));
+                                edges.put("south", String.valueOf((mask & RailEdges.SOUTH) != 0));
+                                edges.put("west", String.valueOf((mask & RailEdges.WEST) != 0));
+                                ops.add(setblock(p.x, p.y, p.z, rail, edges, railProps));
+                                continue;
+                            }
+                        }
+                        ops.add(BuildProgram.setblockLine(p.x, p.y, p.z, block));
                     }
                     return null;
                 });
@@ -246,6 +310,39 @@ public final class ServerComponentTools {
             write(context, dimension, ops, json);
             return ToolResult.structured(json);
         });
+    }
+
+    /**
+     * The edge properties a block stores, of north/east/south/west: those that survive its metadata round
+     * trip. Empty for a pane, bars or a fence, whose connections are computed from neighbours.
+     */
+    static java.util.Set<String> storedEdges(String id) {
+        java.util.Set<String> stored = new java.util.LinkedHashSet<>();
+        Block block = BlockIds.resolve(id);
+        if (block == null) {
+            return stored;
+        }
+        IBlockState state = block.getDefaultState();
+        for (IProperty<?> property : state.getPropertyKeys()) {
+            String name = property.getName();
+            if (!("north".equals(name) || "east".equals(name) || "south".equals(name) || "west".equals(name))
+                || property.getValueClass() != Boolean.class) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            IProperty<Boolean> edge = (IProperty<Boolean>) property;
+            try {
+                IBlockState on = state.withProperty(edge, !state.getValue(edge));
+                IBlockState back = block.getStateFromMeta(block.getMetaFromState(on));
+                if (back.getValue(edge).equals(on.getValue(edge))) {
+                    stored.add(name);
+                }
+            }
+            catch (RuntimeException e) {
+                // A block whose meta mapping throws stores nothing we can rely on.
+            }
+        }
+        return stored.size() == 4 ? stored : java.util.Collections.<String>emptySet();
     }
 
     /** A spec expanded to ops, components resolved from this world's build targets. */

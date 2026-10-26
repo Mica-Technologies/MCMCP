@@ -994,7 +994,11 @@ Plans and builds a compliant switchback stair core inside an enclosure:
 - `width` is 3 (the minimum) or 4, and `axis` is the long axis (default the longer interior).
 - `start` (`lo`/`hi`) is where the first flight leaves.
 - `walls` (default true) builds the ring and the bulkhead roof.
-- `palette` is `{floor, wall, tread, rail, sconce}`.
+- `palette` is `{floor, wall, tread, rail, sconce}`, by default `minecraft:concrete:8`,
+  `minecraft:concrete:7`, `minecraft:stone_brick_stairs`, then for `rail` the first of
+  `csm:railing_pipe_galvanized` / `minecraft:iron_bars` this game has, and for `sconce` the first of
+  `csm:sconcehalfshellnickel` / `minecraft:torch` (a torch gets the sconce's facing). A rail that stores
+  its edges (a CSM railing) gets them facing the drop, as [`server_place_railing`](#server_place_railing) would.
 
 The rules are those of the UIA builder's stair planner, ported exactly and tested against its
 fixtures: +1 steps, 3 clear over every tread and landing, landings at least the width deep, a divider
