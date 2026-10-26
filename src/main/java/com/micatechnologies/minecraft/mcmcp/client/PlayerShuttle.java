@@ -84,6 +84,12 @@ public final class PlayerShuttle {
                 return "bringPlayer needs creative or spectator mode, so the player can hover at the camera: a "
                     + "survival player put in the air is kicked for flying.";
             }
+            String leased = mc.getIntegratedServer() == null ? null : com.micatechnologies.minecraft.mcmcp.mcp
+                .PlayerLeases.get().refusalFor(mc.player.getName(), context.callerKey(), System.currentTimeMillis());
+            if (leased != null) {
+                // On a remote server, the server's teleport refuses this instead (#144).
+                return leased;
+            }
             if (Display.isActive() && !ClientInputLock.isLocked()) {
                 return "The game window has focus, so a person may be playing: bringPlayer moves the player only "
                     + "while the agent holds client_input_lock, or the window is in the background.";
@@ -189,7 +195,8 @@ public final class PlayerShuttle {
         args.addProperty("yaw", yaw);
         args.addProperty("pitch", pitch);
         args.addProperty("fly", fly);
-        JsonObject result = ClientCompanion.callServerTool("server_teleport_player", args, 15_000L);
+        JsonObject result = ClientCompanion.callServerTool("server_teleport_player", args, 15_000L,
+            context.getCaller().stamp());
         if (result.has("isError") && result.get("isError").getAsBoolean()) {
             throw new IllegalStateException("The server refused the teleport: " + ClientCompanion.textOf(result));
         }

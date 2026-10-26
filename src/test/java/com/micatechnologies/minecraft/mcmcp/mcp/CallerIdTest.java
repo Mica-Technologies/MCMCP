@@ -41,6 +41,18 @@ class CallerIdTest {
     }
 
     @Test
+    void anAgentsStampPassedOnByTheClientNamesTheSameAgentOnTheServer() {
+        // #144: bringPlayer's teleport is the agent's own, so its lease must not refuse it.
+        McpSession link = new McpSession("link", 0L, true);
+        CallerId onClient = CallerId.of(link, stamped("c1", "agent-a"));
+
+        JsonObject forwarded = new JsonObject();
+        forwarded.add("_meta", onClient.stamp());
+
+        assertEquals("agent:c1", CallerId.of(companion(), forwarded).id());
+    }
+
+    @Test
     void aStampOnAPlainEndpointSessionIsNotTrusted() {
         // Only the orchestrator link (and, through it, the companion) carries stamps it vouches for.
         McpSession session = new McpSession("direct", 0L);

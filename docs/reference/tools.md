@@ -1880,6 +1880,26 @@ use's `result` and `changed`. A use outside the build limit, spawn protection or
 `readBackKeys` the named tile-entity fields. `lentAfter` gives each lent stack's count at the end.
 `stopOnError` stops at the first failed or refused use. One undo point covers the call.
 
+#### `server_player_lease`
+
+`player` required · optional `op` (`acquire`, `release`, `status`), `purpose`, `slots`, `leaseSeconds`, `waitSeconds`, `force`
+
+Borrows a player that several agents share, for work spanning calls, such as linking devices with
+an item held in a hotbar slot. While one agent holds the lease, other agents are refused when they
+use that player in `server_use_item_on_block(s)` or `server_activate_block`, or move them with
+`server_teleport_player`. A `client_screenshot` `bringPlayer` is refused the same way. The refusal
+is a tool error with a `busy` block naming the holder and the purpose.
+
+`slots` (0–8 hotbar, 9–35 inventory, 40 offhand) are recorded when the lease is granted. They are
+put back when it ends; anything the agent left in one is moved to a free slot, or dropped at the
+player's feet when there is none. `waitSeconds` (up to 120) queues the caller: first come, first
+served, and a waiter that stops asking for five seconds loses its place.
+
+A lease ends on `release`, after `leaseSeconds` (default 300) without the holder using the player,
+when the player logs out, or when their companion access ends. `force` ends another agent's lease
+and restores its slots; use it only for a lease you are sure is abandoned. Through the companion, a
+player can lease only themselves.
+
 #### `server_activate_block`
 
 :material-alert: Destructive · as above, without `slot`; `player` optional, with `dimension`

@@ -1170,6 +1170,22 @@ case "$CHEST_TE" in
   *) mcp_failure "the chest lost its contents: ${CHEST_TE}" ;;
 esac
 
+echo "==> A shared player's lease (#144): status, and a refusal for a player not online"
+# No player joins this server, so the lease itself is unit-tested (PlayerLeasesTest); this checks the
+# tool is served and answers.
+LEASE_STATUS="$(mcp_call 723 server_player_lease '{"op":"status","player":"Nobody"}')" \
+  || mcp_failure "server_player_lease status failed: ${LEASE_STATUS}"
+case "$LEASE_STATUS" in
+  *'"leased":false'*) ;;
+  *) mcp_failure "an unleased player did not read as unleased: ${LEASE_STATUS}" ;;
+esac
+LEASE_OFFLINE="$(mcp_call 724 server_player_lease '{"player":"Nobody","purpose":"smoke"}')" \
+  || mcp_failure "server_player_lease acquire failed outright: ${LEASE_OFFLINE}"
+case "$LEASE_OFFLINE" in
+  *'"isError":true'*'is online'* | *'is online'*'"isError":true'*) echo "    status answers, and acquiring a player not online is a tool error" ;;
+  *) mcp_failure "leasing a player not online was not refused: ${LEASE_OFFLINE}" ;;
+esac
+
 echo "==> A switchback stair core: planned, audited, built"
 SX=$((SPAWN_X + 150)); SY=$((UNDO_Y + 60)); SZ=$((SPAWN_Z + 150))
 STAIR_BODY="$(mcp_call 710 server_build_stair "{\"box\":[${SX},${SZ},$((SX + 11)),$((SZ + 8))],\"axis\":\"x\",\"width\":3,\"floors\":[${SY},$((SY + 8)),$((SY + 16)),$((SY + 24))],\"doors\":{\"${SY}\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 8))\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 16))\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 24))\":[[$((SX + 2)),$((SZ + 8))]]},\"palette\":{\"floor\":\"minecraft:concrete:8\",\"wall\":\"minecraft:concrete:7\",\"tread\":\"minecraft:stone_brick_stairs\",\"rail\":\"minecraft:glass_pane\",\"sconce\":\"minecraft:torch\"}}")" \

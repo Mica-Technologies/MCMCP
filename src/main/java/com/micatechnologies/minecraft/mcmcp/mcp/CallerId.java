@@ -20,10 +20,18 @@ public final class CallerId {
 
     private final String id;
     private final String label;
+    /** The orchestrator's stamp this came from, to pass on to the server over the companion; or null. */
+    @Nullable
+    private final JsonObject stamp;
 
     private CallerId(String id, String label) {
+        this(id, label, null);
+    }
+
+    private CallerId(String id, String label, @Nullable JsonObject stamp) {
         this.id = id;
         this.label = label;
+        this.stamp = stamp;
     }
 
     /** Who sent a {@code tools/call} with these params on this session. */
@@ -34,7 +42,7 @@ public final class CallerId {
             String connection = Json.getString(stamped, "id", "");
             String name = Json.getString(stamped, "name", null);
             return new CallerId("orchestrator:" + connection,
-                (name == null || name.isEmpty() ? "agent" : name) + " (" + connection + ")");
+                (name == null || name.isEmpty() ? "agent" : name) + " (" + connection + ")", stamped);
         }
         if (!session.isOrchestratorLink() && session.getPrincipal().isCompanion() && stamped != null
             && Json.getString(stamped, "id", null) != null) {
@@ -53,6 +61,21 @@ public final class CallerId {
         }
         String shortId = session.getId().length() > 8 ? session.getId().substring(0, 8) : session.getId();
         return new CallerId("session:" + session.getId(), session.describeClient() + " (session " + shortId + ")");
+    }
+
+    /**
+     * The {@code _meta} stamp to put on a call this client makes to the server for this agent, such as
+     * {@code bringPlayer}'s teleport, so the server sees the same agent the call came from (#144). Null
+     * when the call did not come through the orchestrator.
+     */
+    @Nullable
+    public JsonObject stamp() {
+        if (stamp == null) {
+            return null;
+        }
+        JsonObject meta = new JsonObject();
+        meta.add(META_KEY, Json.parse(Json.write(stamp)));
+        return meta;
     }
 
     /** Stable for the life of the agent's connection; compare these, never labels. */

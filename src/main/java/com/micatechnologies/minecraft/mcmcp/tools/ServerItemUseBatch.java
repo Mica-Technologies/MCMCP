@@ -173,6 +173,10 @@ public final class ServerItemUseBatch {
         if (playerName == null || playerName.isEmpty()) {
             return ToolResult.error("Name the 'player' who clicks.");
         }
+        ToolResult leased = ServerPlayerLeaseTools.refusal(context, playerName);
+        if (leased != null) {
+            return leased;
+        }
         JsonArray rawUses = Json.getArray(context.getArguments(), "uses");
         if (rawUses == null || rawUses.size() == 0 || rawUses.size() > MAX_USES) {
             return ToolResult.error("'uses' takes 1 to " + MAX_USES + " clicks.");

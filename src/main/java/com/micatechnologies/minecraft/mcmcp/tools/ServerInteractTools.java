@@ -116,6 +116,11 @@ public final class ServerInteractTools {
             return ToolResult.error("Name the 'player' who clicks. To press a block with no player online, use "
                 + "server_activate_block without 'player'.");
         }
+        // Another agent's lease on this player: its slots and position are theirs (#144).
+        ToolResult leased = fake ? null : ServerPlayerLeaseTools.refusal(context, playerName);
+        if (leased != null) {
+            return leased;
+        }
         final BlockPos pos = new BlockPos(context.requireInt("x"), context.requireInt("y"), context.requireInt("z"));
         final EnumFacing face = EnumFacing.byName(context.getString("face", "up").toLowerCase(Locale.ROOT));
         if (face == null) {

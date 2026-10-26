@@ -228,6 +228,7 @@ public final class CompanionServer {
                 peer.closeSessions();
                 com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor.releaseCaller("player:" + peer.playerId, true,
                     "its player lost companion access");
+                com.micatechnologies.minecraft.mcmcp.tools.ServerPlayerLeaseTools.holderGoneLater("player:" + peer.playerId);
                 send(peer, CompanionProtocol.TYPE_BYE, CompanionHandshake.bye(reason));
                 Mcmcp.LOGGER.info("MCMCP companion: " + peer.playerName + " no longer has access: " + reason);
             }

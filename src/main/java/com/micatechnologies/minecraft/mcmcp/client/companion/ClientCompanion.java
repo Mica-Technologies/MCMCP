@@ -107,7 +107,17 @@ public final class ClientCompanion {
      * @return the call's {@code result}
      * @throws IllegalStateException when there is no companion access, or the call fails at the protocol level
      */
-    public static synchronized JsonObject callServerTool(String name, JsonObject arguments, long timeoutMillis) {
+    public static JsonObject callServerTool(String name, JsonObject arguments, long timeoutMillis) {
+        return callServerTool(name, arguments, timeoutMillis, null);
+    }
+
+    /**
+     * {@link #callServerTool(String, JsonObject, long)} on behalf of one agent: {@code meta} is its
+     * {@link com.micatechnologies.minecraft.mcmcp.mcp.CallerId#stamp()}, so the server counts the call
+     * as that agent's, as it would the agent's own calls forwarded through the companion.
+     */
+    public static synchronized JsonObject callServerTool(String name, JsonObject arguments, long timeoutMillis,
+                                                         @javax.annotation.Nullable JsonObject meta) {
         CompanionForwarder current = forwarder;
         McpEndpoint local = endpoint;
         if (current == null || local == null) {
@@ -134,6 +144,9 @@ public final class ClientCompanion {
         JsonObject params = new JsonObject();
         params.addProperty("name", name);
         params.add("arguments", arguments);
+        if (meta != null) {
+            params.add("_meta", meta);
+        }
         JsonObject reply = current.dispatch(ownSession, com.micatechnologies.minecraft.mcmcp.protocol.JsonRpc.request(
             new com.google.gson.JsonPrimitive(OWN_IDS.getAndIncrement()),
             com.micatechnologies.minecraft.mcmcp.protocol.McpProtocol.METHOD_TOOLS_CALL, params));

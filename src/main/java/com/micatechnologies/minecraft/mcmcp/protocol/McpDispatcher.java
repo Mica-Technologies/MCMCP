@@ -57,7 +57,7 @@ public class McpDispatcher {
     static final java.util.Set<String> ESTOP_EXEMPT = new java.util.HashSet<>(java.util.Arrays.asList(
         "server_job_cancel", "server_job_pause", "server_estop", "server_release_loaded", "server_stop",
         "server_save_world", "client_screenshot", "client_marks", "client_world_leave", "client_quit",
-        "game_set_log_level"));
+        "game_set_log_level", "server_player_lease"));
 
     /**
      * Tools that are not read-only but still run while the server is paused or stalled, beside
@@ -66,7 +66,7 @@ public class McpDispatcher {
      */
     static final java.util.Set<String> ADMISSION_EXEMPT = new java.util.HashSet<>(java.util.Arrays.asList(
         "game_health", "server_tick_stats", "server_release_loaded", "server_estop", "mcmcp_endpoint_info",
-        "game_set_log_level"));
+        "game_set_log_level", "server_player_lease"));
 
     /** Which tools each session may list and call; null lists and runs everything for the side. */
     @Nullable

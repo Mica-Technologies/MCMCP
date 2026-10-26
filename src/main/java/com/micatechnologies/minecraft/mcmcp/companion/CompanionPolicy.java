@@ -73,7 +73,8 @@ public final class CompanionPolicy implements CallFilter {
         for (String load : new String[] {"server_keep_loaded", "server_release_loaded", "server_pregen_chunks"}) {
             CLASSES.put(load, Principal.CLASS_LOAD);
         }
-        for (String use : new String[] {"server_use_item_on_block", "server_use_item_on_blocks", "server_activate_block"}) {
+        for (String use : new String[] {"server_use_item_on_block", "server_use_item_on_blocks", "server_activate_block",
+            "server_player_lease"}) {
             CLASSES.put(use, Principal.CLASS_USE);
         }
         // What is eating a live server's tick could only be answered with Spark, uploading the profile
@@ -91,6 +92,7 @@ public final class CompanionPolicy implements CallFilter {
         PLAYER_ARGUMENTS.put("server_use_item_on_block", "player");
         PLAYER_ARGUMENTS.put("server_use_item_on_blocks", "player");
         PLAYER_ARGUMENTS.put("server_activate_block", "player");
+        PLAYER_ARGUMENTS.put("server_player_lease", "player");
     }
 
     /** The class a tool belongs to, or null when the companion never serves it. */

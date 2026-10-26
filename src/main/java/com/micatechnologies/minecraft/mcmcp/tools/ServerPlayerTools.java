@@ -258,6 +258,10 @@ public final class ServerPlayerTools {
                 }
 
                 final String username = context.requireString("player");
+                ToolResult leased = ServerPlayerLeaseTools.refusal(context, username);
+                if (leased != null) {
+                    return leased;
+                }
                 final double x = context.requireDouble("x");
                 final double y = context.requireDouble("y");
                 final double z = context.requireDouble("z");
