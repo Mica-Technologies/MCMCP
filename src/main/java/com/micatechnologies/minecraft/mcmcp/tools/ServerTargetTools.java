@@ -318,7 +318,7 @@ public final class ServerTargetTools {
     }
 
     /** The built-in rules, then this world's defaults file, then the call's own arguments. */
-    private static TargetDiff.Normaliser normaliser(ToolContext context, TargetStore store) {
+    static TargetDiff.Normaliser normaliser(ToolContext context, TargetStore store) {
         return apply(apply(TargetDiff.Normaliser.defaults(), store.readDefaults()), context.getArguments());
     }
 

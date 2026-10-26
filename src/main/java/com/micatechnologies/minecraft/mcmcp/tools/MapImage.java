@@ -129,7 +129,7 @@ public final class MapImage {
     }
 
     /** The image pixel at which block coordinate {@code block} starts. */
-    static int toPixel(int block, int min, int scale, int cell) {
+    public static int toPixel(int block, int min, int scale, int cell) {
         return (block - min) / scale * cell;
     }
 

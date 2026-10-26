@@ -320,7 +320,7 @@ public final class BuildProgram {
             origin[2] + offset[2] + cell[2], block));
     }
 
-    static String setblockLine(int x, int y, int z, String block) {
+    public static String setblockLine(int x, int y, int z, String block) {
         return "setblock " + x + " " + y + " " + z + " " + blockArgs(block);
     }
 

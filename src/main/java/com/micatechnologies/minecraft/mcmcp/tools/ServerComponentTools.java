@@ -122,6 +122,132 @@ public final class ServerComponentTools {
             .build());
     }
 
+    /** Patterns a stair never overwrites by default: what is fitted into a core after it is built. */
+    static final List<String> STAIR_KEEP = java.util.Arrays.asList("*door*", "*sign*", "*panel*", "*sconce*",
+        "*pull*", "*standpipe*");
+
+    public static void registerStair() {
+        McpRegistry.registerTool(McpTool.named("server_build_stair")
+            .title("Build a switchback stair core")
+            .description("Plan and build a compliant switchback stair inside an enclosure: box [x0, z0, x1, z1] (the "
+                + "walls, inclusive), floors (the stand y of each floor's door, bottom up; the last is the roof "
+                + "landing), doors {\"y\": [[x, z]...]} (door cells in the wall per floor), width (3, the minimum, "
+                + "or 4), axis (x|z; default the longer interior), start (lo|hi: where the first flight leaves), "
+                + "inset {\"y\": n}, top, walls (default true: the ring and bulkhead roof), palette {floor, wall, "
+                + "tread, rail, sconce}. Rules: +1 steps, 3 headroom over every tread and landing, landings at "
+                + "least the width deep, uneven rises split shorter first so each storey lands at its door's end, a "
+                + "divider between the lanes, guards beside every drop, a light near every landing. A box that "
+                + "cannot hold a compliant stair is refused with the fix ('core needs 2 more cells in x...'). "
+                + "Cells holding doors, signs, panels, sconces, pulls or standpipes are kept ('keep' to change). "
+                + "Returns the flights, the plan's own audit by rule (0 = compliant) and the write "
+                + "(server_apply_ops: undo point, dryRun, saveTarget).")
+            .schema(componentSchema(JsonSchema.object())
+                .array("box", "[x0, z0, x1, z1]: the enclosure walls, inclusive.", Json.obj("type", "integer"))
+                .array("floors", "Stand y of each floor's door, bottom up; the last is the roof landing.",
+                    Json.obj("type", "integer"))
+                .property("doors", Json.obj("type", "object"))
+                .integer("width", "Flight width, 3 or more. Default 3.", 3, 8)
+                .enumeration("axis", "The long axis flights run along. Default the longer interior.", "x", "z")
+                .enumeration("start", "The end the first flight leaves from. Default lo.", "lo", "hi")
+                .property("inset", Json.obj("type", "object"))
+                .integer("top", "Last interior air row, to cap under an existing roof.", 1, 255)
+                .bool("walls", "Build the enclosure ring and the bulkhead roof. Default true.")
+                .property("palette", Json.obj("type", "object"))
+                .array("keep", "Block patterns never overwritten. Default doors, signs, panels, sconces, pulls, "
+                    + "standpipes; [] overwrites everything.", Json.obj("type", "string"))
+                .required("box", "floors")
+                .build())
+            .serverOnly()
+            .destructive()
+            .handler(ServerComponentTools::stair)
+            .build());
+    }
+
+    private static ToolResult stair(final ToolContext context) throws Exception {
+        JsonObject cfg = new JsonObject();
+        for (Map.Entry<String, JsonElement> entry : context.getArguments().entrySet()) {
+            cfg.add(entry.getKey(), entry.getValue());
+        }
+        if (!cfg.has("walls")) {
+            cfg.addProperty("walls", true);
+        }
+        final com.micatechnologies.minecraft.mcmcp.building.StairDesign.Input input;
+        final com.micatechnologies.minecraft.mcmcp.building.StairDesign.Plan plan;
+        try {
+            input = com.micatechnologies.minecraft.mcmcp.building.StairDesign.Input.fromJson(cfg);
+            plan = com.micatechnologies.minecraft.mcmcp.building.StairDesign.plan(input);
+        }
+        catch (com.micatechnologies.minecraft.mcmcp.building.StairDesign.DesignException e) {
+            return ToolResult.error("Refused: " + e.getMessage() + ". Nothing was written.");
+        }
+        final int dimension = context.getInt("dimension", 0);
+        final List<String> keep = context.has("keep") ? Json.getStringList(context.getArguments(), "keep") : STAIR_KEEP;
+        final List<Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String>> cells =
+            new ArrayList<>(plan.cells.entrySet());
+        Set<Long> chunks = new LinkedHashSet<>();
+        for (Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell : cells) {
+            chunks.add(ChunkKeys.ofBlock(cell.getKey().x, cell.getKey().z));
+        }
+        return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
+            final List<String> ops = new ArrayList<>();
+            final int[] kept = {0};
+            final int[] cursor = {0};
+            while (cursor[0] < cells.size()) {
+                context.onGameThread(() -> {
+                    WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+                    long started = System.nanoTime();
+                    while (cursor[0] < cells.size() && System.nanoTime() - started < 25_000_000L) {
+                        Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell = cells.get(cursor[0]++);
+                        com.micatechnologies.minecraft.mcmcp.building.Pos p = cell.getKey();
+                        if (!keep.isEmpty()) {
+                            pos.setPos(p.x, p.y, p.z);
+                            String id = world.isBlockLoaded(pos) ? idOf(world.getBlockState(pos)) : null;
+                            if (id != null && !world.isAirBlock(pos) && matchesAny(keep, id)) {
+                                kept[0]++;
+                                continue;
+                            }
+                        }
+                        ops.add(BuildProgram.setblockLine(p.x, p.y, p.z, cell.getValue()));
+                    }
+                    return null;
+                });
+            }
+            JsonObject json = new JsonObject();
+            json.addProperty("axis", plan.axis);
+            json.addProperty("run", plan.run);
+            json.addProperty("top", plan.top);
+            json.addProperty("cells", cells.size());
+            JsonArray flights = new JsonArray();
+            for (com.micatechnologies.minecraft.mcmcp.building.StairDesign.Flight flight : plan.flights) {
+                JsonArray row = new JsonArray();
+                row.add(flight.storey);
+                row.add(flight.ys);
+                row.add(flight.n);
+                row.add(flight.lane);
+                flights.add(row);
+            }
+            json.add("flights", flights);
+            json.addProperty("flightsAre", "[storey, start y, treads, lane]");
+            JsonObject audit = new JsonObject();
+            int failures = 0;
+            for (Map.Entry<String, List<com.micatechnologies.minecraft.mcmcp.building.StairAudit.Failure>> rule
+                : com.micatechnologies.minecraft.mcmcp.building.StairAudit.selfAudit(input, plan).byRule().entrySet()) {
+                audit.addProperty(rule.getKey(), rule.getValue().size());
+                failures += rule.getValue().size();
+            }
+            json.addProperty("auditFailures", failures);
+            if (failures > 0) {
+                json.add("audit", audit);
+            }
+            if (kept[0] > 0) {
+                json.addProperty("kept", kept[0]);
+            }
+            write(context, dimension, ops, json);
+            return ToolResult.structured(json);
+        });
+    }
+
     /** A spec expanded to ops, components resolved from this world's build targets. */
     public static List<String> expand(JsonObject spec) {
         final com.micatechnologies.minecraft.mcmcp.regions.TargetStore store = ServerTargetTools.store();

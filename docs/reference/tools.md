@@ -926,6 +926,24 @@ places nobody gets to: a room with no way in). `separate` floods each seed with 
 Both checks were ported from the UIA builder's own scripts and are tested against their fixtures: the
 basilica's 14,771 leaking cells in 17 clusters, and ALTO 1873 L13's 1,486 / 303 walkable cells.
 
+##### `server_plan_view`
+
+:material-eye: Read-only · `x`, `z`, `toX`, `toZ` or `target` · optional `diffTarget`, `y_max`, `y_min`, `scale`, `grid`, `highlight`, `max_dimension`, `inline`, `dimension`, `load`
+
+A top-down plan drawn by the server and returned as an image: each column in its top block's map
+colour, shaded by height, with a labelled grid. Unlike [`client_render_map`](#client_render_map) it
+needs no player and no render distance.
+
+- `y_max` cuts away everything above a height: just under a storey's ceiling gives its floor plan.
+  With `target` the box is the target's bounds and `y_max` its top.
+- `diffTarget` paints red every column where the world differs from a [build target](#build-targets)
+  (as `server_verify` judges it, between `y_min` and `y_max`). Where a storey is unfinished or wrong
+  then shows in one picture. The reply has `differCells` and `differColumns`.
+- `highlight` paints matching blocks magenta.
+- `max_dimension` (default 768) caps the long edge; an image costs about width × height / 750 tokens.
+
+The PNG is also written under `mcmcp-plans/` in the game directory, and its path returned.
+
 #### Building components
 
 Every write below goes through [`server_apply_ops`](#server_apply_ops), so each takes `dryRun`,
@@ -963,6 +981,30 @@ inclusive, and later parts overwrite earlier ones. `palette` maps a character to
 
 Up to 50,000 ops a call. A larger spec is a job: `server_job_submit {kind: "build", args: <the
 same arguments>}` expands it once and replays it as an op job.
+
+##### `server_build_stair`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `box`, `floors` required · optional `doors`, `width`, `axis`, `start`, `inset`, `top`, `walls`, `palette`, `keep` and the write options
+
+Plans and builds a compliant switchback stair core inside an enclosure:
+
+- `box` is `[x0, z0, x1, z1]`, the walls inclusive.
+- `floors` are the stand y of each floor's door, bottom up; the last is the roof landing.
+- `doors` is `{"y": [[x, z]...]}`, the door cells in the wall per floor.
+- `width` is 3 (the minimum) or 4, and `axis` is the long axis (default the longer interior).
+- `start` (`lo`/`hi`) is where the first flight leaves.
+- `walls` (default true) builds the ring and the bulkhead roof.
+- `palette` is `{floor, wall, tread, rail, sconce}`.
+
+The rules are those of the UIA builder's stair planner, ported exactly and tested against its
+fixtures: +1 steps, 3 clear over every tread and landing, landings at least the width deep, a divider
+between the lanes, guards beside every drop, and a light near every landing. An uneven rise splits
+shorter first, so each storey lands at its door's end: a rise of 11 is flights of 2, 3, 3, 3. A box
+that cannot hold a compliant stair is refused with the fix ("core needs 2 more cells in x: two 3-wide
+flights + a 1-cell divider = 7, interior is 5"). Cells holding doors, signs, panels, sconces, pulls
+or standpipes are kept (`keep` changes the patterns; `[]` overwrites everything). Returns `flights`
+(`[storey, start y, treads, lane]`), `auditFailures` (the plan's own audit; 0 is compliant, with
+`audit` by rule otherwise), `kept` and the write's counts.
 
 ##### `server_place_doors`
 
@@ -2621,9 +2663,16 @@ when the player lands.
 #### `client_screenshot`
 
 Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
-`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`, `burst`, `crop`
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`, `burst`, `crop`, `views`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
+
+**More perspectives.** One perspective is the default. `views: [{from, look_at | yaw/pitch, fov?,
+fullbright?}...]` (up to 8) adds more. Each is captured as its own frame (`<name>_2.png` onwards), with
+this call's own view as frame 1. They are tiled, numbered in reading order, into one contact sheet
+(`<name>_sheet.png`) no larger than `max_dimension`. Several angles of a build are then one image and
+one call, rather than a turn and a full-size image each. Returns `sheet`, `frames` (paths), the
+sheet's size and `approximateTokens`; `inline: true` includes the sheet. Not with `burst`.
 
 **A burst.** `burst: {count, interval_ticks}` saves `count` frames (2-32), one every `interval_ticks`
 (1-40, at 50 ms a tick) from the first, as `<name>_1.png` onwards, and returns `shots`: each one's

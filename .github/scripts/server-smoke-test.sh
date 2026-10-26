@@ -1129,7 +1129,30 @@ case "$BJOB_STATE" in
   *'"state":"done"'*'"wouldWrite":0'*) echo "    as a job it expands, replays, and finds nothing left to write" ;;
   *) mcp_failure "the build job did not finish clean: ${BJOB_STATE}" ;;
 esac
+mcp_call 706 server_set_block "{\"x\":$((HX + 12)),\"y\":$((HY + 2)),\"z\":$((HZ + 4)),\"block\":\"minecraft:air\"}" > /dev/null
+PLAN_BODY="$(mcp_call 707 server_plan_view '{"target":"smoke-house/*","diffTarget":"smoke-house/*","max_dimension":256}')" \
+  || mcp_failure "server_plan_view failed: ${PLAN_BODY}"
+case "$PLAN_BODY" in
+  *'"type":"image"'*'"differColumns":1'*|*'"differColumns":1'*'"type":"image"'*) echo "    plan view: the house drawn from the server, the one broken column in red" ;;
+  *) mcp_failure "the plan view did not show the broken column: $(printf '%s' "$PLAN_BODY" | cut -c1-600)" ;;
+esac
 mcp_call 705 server_target '{"op":"delete","name":"smoke-house/*"}' > /dev/null
+
+echo "==> A switchback stair core: planned, audited, built"
+SX=$((SPAWN_X + 150)); SY=$((UNDO_Y + 60)); SZ=$((SPAWN_Z + 150))
+STAIR_BODY="$(mcp_call 710 server_build_stair "{\"box\":[${SX},${SZ},$((SX + 11)),$((SZ + 8))],\"axis\":\"x\",\"width\":3,\"floors\":[${SY},$((SY + 8)),$((SY + 16)),$((SY + 24))],\"doors\":{\"${SY}\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 8))\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 16))\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 24))\":[[$((SX + 2)),$((SZ + 8))]]},\"palette\":{\"floor\":\"minecraft:concrete:8\",\"wall\":\"minecraft:concrete:7\",\"tread\":\"minecraft:stone_brick_stairs\",\"rail\":\"minecraft:glass_pane\",\"sconce\":\"minecraft:torch\"}}")" \
+  || mcp_failure "server_build_stair failed: ${STAIR_BODY}"
+case "$STAIR_BODY" in
+  *'"isError":true'*) mcp_failure "the stair was refused: ${STAIR_BODY}" ;;
+  *'"cells":3519'*'"auditFailures":0'*'"refused":0'*) echo "    four floors: 3,519 cells, 6 flights, its own audit clean, every cell written" ;;
+  *) mcp_failure "the stair was not built as planned: $(printf '%s' "$STAIR_BODY" | cut -c1-800)" ;;
+esac
+NARROW_BODY="$(mcp_call 711 server_build_stair "{\"box\":[${SX},${SZ},$((SX + 6)),$((SZ + 13))],\"width\":3,\"floors\":[${SY},$((SY + 8))]}")" \
+  || mcp_failure "server_build_stair failed: ${NARROW_BODY}"
+case "$NARROW_BODY" in
+  *'core needs'*'"isError":true'*) echo "    and a core too narrow is refused with the fix" ;;
+  *) mcp_failure "a too-narrow core was not refused: ${NARROW_BODY}" ;;
+esac
 
 echo "==> Test scripts: power a lamp, wait for it, check, and put the world back"
 LX=$((SPAWN_X + 30)); LY=$((UNDO_Y + 12)); LZ=$((SPAWN_Z + 30))

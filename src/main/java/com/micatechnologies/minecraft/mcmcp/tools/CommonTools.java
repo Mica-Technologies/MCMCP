@@ -59,6 +59,8 @@ public final class CommonTools {
         ServerSpaceTools.register();
         ServerComponentTools.register();
         ServerComponentTools.registerBuild();
+        ServerPlanTools.register();
+        ServerComponentTools.registerStair();
         ServerJobTools.register();
         ServerTestTools.register();
         StorageTools.register();
