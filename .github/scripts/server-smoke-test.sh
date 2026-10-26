@@ -440,12 +440,10 @@ mcp_call() {
 echo "==> undo points: enable world edits"
 WORLD_EDITS_WERE="$(grep -o 'B:allowWorldEdits=[a-z]*' "$CONFIG_FILE" | head -1)"
 sed -i 's/B:allowWorldEdits=false/B:allowWorldEdits=true/' "$CONFIG_FILE"
-RELOAD_BODY="$(mcp_call 20 server_run_command '{"command":"mcmcp reload"}')" \
-  || mcp_failure "reloading the config failed: ${RELOAD_BODY}"
-
 # A cold CI runner's first ticks are slow enough to put the server in "paused", which refuses writes
 # until it has been healthy for a while (#133). That is the health gate working, not a fault; wait it
-# out rather than fail the first write on it. A server still refusing after a minute is a real failure.
+# out rather than fail on it: first, because the reload below is refused while paused too, and then
+# nothing says so. A server still refusing after a minute is a real failure.
 for _ in $(seq 1 60); do
   HEALTH_BODY="$(mcp_call 19 game_health '{}')" || mcp_failure "game_health failed: ${HEALTH_BODY}"
   case "$HEALTH_BODY" in *'"refusesWrites":false'*) break ;; esac
@@ -454,6 +452,11 @@ done
 case "$HEALTH_BODY" in
   *'"refusesWrites":false'*) ;;
   *) mcp_failure "the server still refused writes a minute after start: ${HEALTH_BODY}" ;;
+esac
+RELOAD_BODY="$(mcp_call 20 server_run_command '{"command":"mcmcp reload"}')" \
+  || mcp_failure "reloading the config failed: ${RELOAD_BODY}"
+case "$RELOAD_BODY" in
+  *'"isError":true'*) mcp_failure "the config reload was refused: ${RELOAD_BODY}" ;;
 esac
 
 UNDO_Y=$((SPAWN_Y + 40))
