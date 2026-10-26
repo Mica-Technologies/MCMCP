@@ -1055,6 +1055,31 @@ case "$LIST_BODY" in
   *) mcp_failure "delete by pattern did not remove both layers: ${LIST_BODY}" ;;
 esac
 
+echo "==> Space checks: a sealed room with a door, then a hole in its wall"
+EX=$((SPAWN_X + 90)); EY=$((UNDO_Y + 50)); EZ=$((SPAWN_Z + 90))
+ROOM_BODY="$(mcp_call 680 server_apply_ops "{\"ops\":[\"fill ${EX} ${EY} ${EZ} $((EX + 8)) $((EY + 6)) $((EZ + 8)) minecraft:air\",\"fill ${EX} ${EY} ${EZ} $((EX + 8)) ${EY} $((EZ + 8)) minecraft:stone\",\"fill $((EX + 2)) $((EY + 1)) $((EZ + 2)) $((EX + 6)) $((EY + 4)) $((EZ + 6)) minecraft:stonebrick 0 hollow\",\"setblock $((EX + 4)) $((EY + 2)) $((EZ + 2)) minecraft:wooden_door facing=south,half=lower\",\"setblock $((EX + 4)) $((EY + 3)) $((EZ + 2)) minecraft:wooden_door half=upper\"]}")" \
+  || mcp_failure "could not build the room: ${ROOM_BODY}"
+SEED="[$((EX + 4)),$((EY + 2)),$((EZ + 4))]"
+ENC_BOX="[$((EX - 1)),$((EY - 1)),$((EZ - 1)),$((EX + 9)),$((EY + 7)),$((EZ + 9))]"
+ENC_BODY="$(mcp_call 681 server_check_enclosure "{\"box\":${ENC_BOX},\"seeds\":[${SEED}]}")" || mcp_failure "server_check_enclosure failed: ${ENC_BODY}"
+case "$ENC_BODY" in
+  *'"interiorCells":18,"leakCells":0'*) echo "    sealed: 18 interior cells, no leaks (the closed door is a designed opening)" ;;
+  *) mcp_failure "the sealed room did not check sealed: ${ENC_BODY}" ;;
+esac
+WALK_BODY="$(mcp_call 682 server_check_walk "{\"box\":[${EX},${EY},${EZ},$((EX + 8)),$((EY + 6)),$((EZ + 8))],\"seeds\":[{\"name\":\"inside\",\"at\":${SEED}}]}")" \
+  || mcp_failure "server_check_walk failed: ${WALK_BODY}"
+case "$WALK_BODY" in
+  *'"doorsOpen":{"reached":66'*'"doorsClosed":{"reached":9'*) echo "    walk: 9 cells with the door shut, 66 with it open (inside, the doorway, the deck)" ;;
+  *) mcp_failure "the walk did not reach what it should: ${WALK_BODY}" ;;
+esac
+mcp_call 683 server_set_block "{\"x\":$((EX + 6)),\"y\":$((EY + 2)),\"z\":$((EZ + 4)),\"block\":\"minecraft:air\"}" > /dev/null
+ENC_BODY="$(mcp_call 684 server_check_enclosure "{\"box\":${ENC_BOX},\"seeds\":[${SEED}]}")" || mcp_failure "server_check_enclosure failed: ${ENC_BODY}"
+case "$ENC_BODY" in
+  *'"leakCells":0'*) mcp_failure "a hole in the wall was not found: ${ENC_BODY}" ;;
+  *'"leakClusters":'*'"clusters":[{"count":'*) echo "    a missing wall block is found as a leak cluster" ;;
+  *) mcp_failure "the leak was not reported as a cluster: ${ENC_BODY}" ;;
+esac
+
 echo "==> Test scripts: power a lamp, wait for it, check, and put the world back"
 LX=$((SPAWN_X + 30)); LY=$((UNDO_Y + 12)); LZ=$((SPAWN_Z + 30))
 mcp_call 595 server_set_block "{\"x\":${LX},\"y\":${LY},\"z\":${LZ},\"block\":\"minecraft:redstone_lamp\"}" > /dev/null \

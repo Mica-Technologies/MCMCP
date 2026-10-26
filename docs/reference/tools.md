@@ -884,6 +884,48 @@ write budget and two-part pairing as for any write. Protected cells are never wr
 are cells that match after the ignore rules (an open door stays open). The reply's `repair` has the
 cells it found, `written` and the undo points.
 
+#### Space checks
+
+Is the inside sealed, and can people walk where they should and only there? Each is one call that
+reads the box once into memory and answers with counts and clusters. Both take `box`
+`[x1, y1, z1, x2, y2, z2]`, or `target` (a [build target](#build-targets) whose bounds plus `margin`,
+default 2, are the box), up to 16,000,000 cells. Both also take:
+
+- `seeds`: cells inside, as `[x, y, z]` or `{name, at: [x, y, z]}`.
+- `separate: true`: flood each seed on its own and report which other seeds it reaches, a mixed-use
+  separation check where suites must not open into each other.
+- `passable`: more block ids to treat as open.
+- `clusters`: how many to list, default 10.
+
+A cell is **open** when it has no collision box (air, `csm:lightupair`, torches, signs), a **door**
+when it is a door, trapdoor or gate, and **solid** otherwise. Unloaded cells count as solid and are
+counted in `unloaded`; pass `load: true`.
+
+##### `server_check_enclosure`
+
+:material-eye: Read-only · `seeds` and `box` or `target` required · optional `openZones`, `separate`, `passable`, `clusters`, `margin`, `dimension`, `load`
+
+Floods the interior air from the seeds through open cells only, so doors, glass, panes, fences and
+slabs are closed and count as designed openings rather than holes. A cell is outside when it has open
+sky straight up or a clear line of open cells to the box edge along x or z. `openZones` (boxes) adds
+designed open-air spaces, such as roof decks, terraces and atria, that count as outside. A leak is
+interior air next to outside air. Returns `interiorCells`, `leakCells`, `leakClusters`, and the
+largest `clusters` (26-connected; `count`, `min`, `max`, one `sample`).
+
+##### `server_check_walk`
+
+:material-eye: Read-only · `seeds` and `box` or `target` required · optional `headroom`, `step`, `doors`, `separate`, `passable`, `clusters`, `margin`, `dimension`, `load`
+
+A cell is standable when it and the cells above it up to `headroom` (default 2) are open, or doors
+with the doors open, and the cell below is solid. From each cell a person moves to one of the four
+neighbours: at the same height first, then up to `step` (default 1) up, then down. Moves stay
+strictly inside the box's y range. `doors: "both"` (default) gives `doorsOpen` and `doorsClosed`,
+each with `reached`, and `unreachedCells` / `unreachedAreas` / `unreached` (clusters of standable
+places nobody gets to: a room with no way in). `separate` floods each seed with doors closed.
+
+Both checks were ported from the UIA builder's own scripts and are tested against their fixtures: the
+basilica's 14,771 leaking cells in 17 clusters, and ALTO 1873 L13's 1,486 / 303 walkable cells.
+
 #### `server_run_test`
 
 :material-alert: Destructive · `steps` required · optional `finally`, `vars`, `defs`, `hold`, `dimension`, `maxSeconds`, `stopOnFail`, `return`
