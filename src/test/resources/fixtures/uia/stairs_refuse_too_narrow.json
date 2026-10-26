@@ -1,0 +1,1 @@
+{"tool":"server_build_stair","input":{"name":"R","box":[0,0,6,13],"width":3,"walls":true,"floors":[64,72,80],"doors":{"64":[[0,2]],"72":[[0,2]],"80":[[0,2]]}},"expected":{"refused":"core needs 2 more cells in x: two 3-wide flights + a 1-cell divider = 7, interior is 5"}}
