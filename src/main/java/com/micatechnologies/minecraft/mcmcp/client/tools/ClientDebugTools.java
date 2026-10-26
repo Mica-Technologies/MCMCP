@@ -122,7 +122,11 @@ public final class ClientDebugTools {
                 + "interval_ticks (1-40, at 50 ms a tick) from the first, named <name>_1 ... and returned as "
                 + "paths, each with the ms after the first it was taken: an animation of a few ticks (a "
                 + "door's swing) in one call. Not with inline. To shoot right after an action, use a "
-                + "client_sequence with a screenshot step.")
+                + "client_sequence with a screenshot step.\n\n"
+                + "One perspective is the default. 'views' adds more: [{from, look_at | yaw/pitch, fov?, "
+                + "fullbright?}...] (up to " + MAX_VIEWS + "), each rendered as above, and with this call's own "
+                + "view as frame 1, tiled and numbered into one contact sheet under max_dimension: one image "
+                + "and one call where several would each cost a turn and a full-size image.")
             .schema(JsonSchema.object()
                 .string("name", "File name for the screenshot, without a path. '.png' is appended if "
                     + "missing. Defaults to a timestamped name.")
@@ -150,6 +154,7 @@ public final class ClientDebugTools {
                 .bool("bringPlayer", "With 'from': move the player to the camera first, so its chunks load, "
                     + "and back to where they were, facing the same way, after the capture.")
                 .property("burst", Json.obj("type", "object"))
+                .property("views", Json.obj("type", "array"))
                 .array("crop", "Keep only [x, y, width, height] of the frame: pixels, or fractions of it "
                     + "when all four are 0-1 ([0.25, 0.25, 0.5, 0.5] is the middle). Saved beside the full "
                     + "frame and returned as the path, at full resolution: an image costs by area, inline or "
@@ -163,6 +168,9 @@ public final class ClientDebugTools {
                 }
                 if (context.has("burst")) {
                     return burst(context);
+                }
+                if (context.has("views")) {
+                    return views(context);
                 }
 
                 final double[] crop = numbers(context.getArguments(), "crop", 4);
@@ -512,6 +520,92 @@ public final class ClientDebugTools {
 
     /** Most frames one burst saves: each is a full-size PNG on disk. */
     static final int MAX_BURST = 32;
+    static final int MAX_VIEWS = 8;
+
+    /**
+     * This call's own view and the extra perspectives in 'views', each a capture of its own, tiled into
+     * one contact sheet. The default stays one perspective: the sheet exists only when asked for.
+     */
+    private static ToolResult views(ToolContext context) throws Exception {
+        JsonElement raw = context.getArguments().get("views");
+        if (raw == null || !raw.isJsonArray() || raw.getAsJsonArray().size() == 0) {
+            return ToolResult.error("'views' is a list of {from, look_at | yaw/pitch, fov?, fullbright?}.");
+        }
+        if (raw.getAsJsonArray().size() > MAX_VIEWS) {
+            return ToolResult.error("At most " + MAX_VIEWS + " extra views. Nothing was captured.");
+        }
+        if (context.has("burst")) {
+            return ToolResult.error("'views' and 'burst' do not combine. Nothing was captured.");
+        }
+        String base = context.getString("name", null);
+        if (base == null || base.isEmpty()) {
+            base = "views-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+        }
+        base = base.endsWith(".png") ? base.substring(0, base.length() - 4) : base;
+        McpTool single = McpRegistry.tool("client_screenshot", context.getSide());
+
+        List<JsonObject> shots = new java.util.ArrayList<>();
+        JsonObject own = new JsonObject();
+        for (java.util.Map.Entry<String, JsonElement> entry : context.getArguments().entrySet()) {
+            if (!"views".equals(entry.getKey()) && !"name".equals(entry.getKey()) && !"inline".equals(entry.getKey())
+                && !"max_dimension".equals(entry.getKey())) {
+                own.add(entry.getKey(), entry.getValue());
+            }
+        }
+        shots.add(own);
+        for (JsonElement view : raw.getAsJsonArray()) {
+            if (!view.isJsonObject()) {
+                return ToolResult.error("Each view is an object {from, look_at | yaw/pitch, ...}. Nothing was captured.");
+            }
+            JsonObject args = new JsonObject();
+            for (java.util.Map.Entry<String, JsonElement> entry : view.getAsJsonObject().entrySet()) {
+                args.add(entry.getKey(), entry.getValue());
+            }
+            shots.add(args);
+        }
+
+        JsonArray paths = new JsonArray();
+        List<BufferedImage> frames = new java.util.ArrayList<>();
+        for (int i = 0; i < shots.size(); i++) {
+            JsonObject args = shots.get(i);
+            args.addProperty("name", base + "_" + (i + 1));
+            ToolResult shot = single.call(context.forPart(args, i, shots.size(), "view " + (i + 1)));
+            JsonObject structured = shot.getStructuredContent();
+            if (shot.isError() || structured == null) {
+                return ToolResult.error("View " + (i + 1) + " failed: " + shot.getText() + " Frames taken so far: "
+                    + paths + ".");
+            }
+            String path = Json.getString(structured, "path", "");
+            paths.add(path);
+            BufferedImage frame = ImageIO.read(new File(path));
+            if (frame == null) {
+                return ToolResult.error("View " + (i + 1) + " at " + path + " could not be read back.");
+            }
+            frames.add(frame);
+        }
+
+        int maxDimension = context.getBoundedInt("max_dimension", ScreenshotImages.DEFAULT_MAX_DIMENSION,
+            ScreenshotImages.MIN_MAX_DIMENSION, ScreenshotImages.PROVIDER_CEILING);
+        BufferedImage sheet = ScreenshotImages.contactSheet(frames, maxDimension);
+        File sheetFile = new File(new File(paths.get(0).getAsString()).getParentFile(), base + "_sheet.png");
+        byte[] png = ScreenshotImages.toPng(sheet);
+        Files.write(sheetFile.toPath(), png);
+
+        JsonObject json = new JsonObject();
+        json.addProperty("sheet", sheetFile.getAbsolutePath());
+        json.addProperty("views", frames.size());
+        json.addProperty("columns", ScreenshotImages.sheetColumns(frames.size()));
+        json.addProperty("width", sheet.getWidth());
+        json.addProperty("height", sheet.getHeight());
+        json.addProperty("approximateTokens", ScreenshotImages.approximateTokens(sheet.getWidth(), sheet.getHeight()));
+        json.add("frames", paths);
+        json.addProperty("layout", "frames numbered from 1 in reading order; 1 is this call's own view");
+        ToolResult result = ToolResult.structured(json);
+        if (context.getBoolean("inline", false)) {
+            result.withContent(McpContent.image(png, "image/png"));
+        }
+        return result;
+    }
 
     /**
      * Several frames of a short animation (#114): a door's swing lasts 8-16 ticks, and a second

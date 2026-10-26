@@ -1,10 +1,13 @@
 package com.micatechnologies.minecraft.mcmcp.tools;
 
+import java.awt.Color;
+import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.List;
 import javax.imageio.ImageIO;
 
 /**
@@ -130,6 +133,59 @@ public final class ScreenshotImages {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         ImageIO.write(image, "png", buffer);
         return buffer.toByteArray();
+    }
+
+    /** Columns a contact sheet of {@code count} frames is laid out in: 1, 2, 2x2, then 3 across. */
+    public static int sheetColumns(int count) {
+        return count <= 2 ? Math.max(1, count) : count <= 4 ? 2 : 3;
+    }
+
+    /**
+     * Several frames tiled into one image no wider or taller than {@code maxDimension}, numbered from 1
+     * in reading order. One image costs its area once, and one call is one turn: the views an agent
+     * wants side by side, without a round trip and a full-size image for each.
+     */
+    public static BufferedImage contactSheet(List<BufferedImage> frames, int maxDimension) {
+        int count = frames.size();
+        int columns = sheetColumns(count);
+        int rows = (count + columns - 1) / columns;
+        BufferedImage first = frames.get(0);
+        double aspect = first.getHeight() / (double) Math.max(1, first.getWidth());
+        int gap = 2;
+        int tileWidth = Math.max(16, (maxDimension - gap * (columns - 1)) / columns);
+        int tileHeight = Math.max(9, (int) Math.round(tileWidth * aspect));
+        int sheetHeight = rows * tileHeight + gap * (rows - 1);
+        if (sheetHeight > maxDimension) {
+            // Taller than wide: fit the height instead.
+            tileHeight = Math.max(9, (maxDimension - gap * (rows - 1)) / rows);
+            tileWidth = Math.max(16, (int) Math.round(tileHeight / aspect));
+        }
+        int width = columns * tileWidth + gap * (columns - 1);
+        int height = rows * tileHeight + gap * (rows - 1);
+        BufferedImage sheet = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = sheet.createGraphics();
+        try {
+            g.setColor(Color.DARK_GRAY);
+            g.fillRect(0, 0, width, height);
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, Math.max(10, tileHeight / 12)));
+            for (int i = 0; i < count; i++) {
+                int left = (i % columns) * (tileWidth + gap);
+                int top = (i / columns) * (tileHeight + gap);
+                g.drawImage(frames.get(i), left, top, tileWidth, tileHeight, null);
+                String label = String.valueOf(i + 1);
+                int labelHeight = g.getFontMetrics().getHeight();
+                int labelWidth = g.getFontMetrics().stringWidth(label) + 8;
+                g.setColor(Color.BLACK);
+                g.fillRect(left, top, labelWidth, labelHeight);
+                g.setColor(Color.WHITE);
+                g.drawString(label, left + 4, top + g.getFontMetrics().getAscent());
+            }
+        }
+        finally {
+            g.dispose();
+        }
+        return sheet;
     }
 
     /**

@@ -131,4 +131,37 @@ class ScreenshotImagesTest {
         assertEquals(ScreenshotImages.approximateTokens(1920, 1080) / 4.0D,
             ScreenshotImages.approximateTokens(960, 540), 2.0D);
     }
+
+    private static BufferedImage frame(int width, int height, int rgb) {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        for (int x = 0; x < width; x++) {
+            for (int y = 0; y < height; y++) {
+                image.setRGB(x, y, rgb);
+            }
+        }
+        return image;
+    }
+
+    @Test
+    void severalViewsCostOneImageNoLargerThanTheCap() {
+        java.util.List<BufferedImage> frames = java.util.Arrays.asList(frame(1920, 1080, 0xFF0000),
+            frame(1920, 1080, 0x00FF00), frame(1920, 1080, 0x0000FF));
+
+        BufferedImage sheet = ScreenshotImages.contactSheet(frames, 1280);
+
+        assertEquals(2, ScreenshotImages.sheetColumns(3), "three views lay out two across");
+        assertTrue(sheet.getWidth() <= 1280 && sheet.getHeight() <= 1280, sheet.getWidth() + "x" + sheet.getHeight());
+        // Frame 2 sits top right, frame 3 bottom left, each drawn whole (sampled away from the number).
+        assertEquals(0x00FF00, sheet.getRGB(sheet.getWidth() * 3 / 4, sheet.getHeight() / 4) & 0xFFFFFF);
+        assertEquals(0x0000FF, sheet.getRGB(sheet.getWidth() / 4, sheet.getHeight() * 3 / 4) & 0xFFFFFF);
+    }
+
+    @Test
+    void aTallFrameFitsTheSheetByItsHeight() {
+        java.util.List<BufferedImage> frames = java.util.Arrays.asList(frame(400, 1600, 0), frame(400, 1600, 0));
+
+        BufferedImage sheet = ScreenshotImages.contactSheet(frames, 800);
+
+        assertTrue(sheet.getHeight() <= 800 && sheet.getWidth() <= 800, sheet.getWidth() + "x" + sheet.getHeight());
+    }
 }
