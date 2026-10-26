@@ -111,7 +111,11 @@ public final class PlayerLeases {
         }
         LinkedHashMap<String, Long> line = waiting.computeIfAbsent(key, k -> new LinkedHashMap<>());
         line.entrySet().removeIf(entry -> nowMillis - entry.getValue() > WAITER_GONE_MILLIS);
-        if (held == null && (line.isEmpty() || line.keySet().iterator().next().equals(holderKey))) {
+        // One that ran out with slots still to put back is not free until the sweep has put them back:
+        // granting over it would lose them.
+        Lease stale = leases.get(key);
+        boolean free = held == null && (stale == null || stale.slots.isEmpty());
+        if (free && (line.isEmpty() || line.keySet().iterator().next().equals(holderKey))) {
             line.remove(holderKey);
             Lease lease = new Lease(player, holderKey, holderLabel, purpose, slots, leaseMillis, nowMillis);
             leases.put(key, lease);
@@ -126,6 +130,12 @@ public final class PlayerLeases {
             place++;
         }
         return new Ask(null, held, place);
+    }
+
+    /** Whether {@code holderKey} holds {@code player}'s lease now. */
+    public synchronized boolean holds(String player, String holderKey, long nowMillis) {
+        Lease held = live(keyOf(player), nowMillis);
+        return held != null && held.holderKey.equals(holderKey);
     }
 
     /** Leaves the queue for {@code player}: an agent that stopped waiting. */

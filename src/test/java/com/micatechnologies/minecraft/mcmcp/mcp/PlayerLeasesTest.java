@@ -40,6 +40,22 @@ class PlayerLeasesTest {
     }
 
     @Test
+    void aWaiterPollingEverySecondKeepsItsPlaceInLine() {
+        // A remote bringPlayer asks with waitSeconds 0 once a second; each refused ask must not cost it
+        // its place, or a later asker overtakes it.
+        PlayerLeases leases = new PlayerLeases();
+        leases.acquire("Builder", "a", "a", "", NONE, MINUTE, 0L);
+        leases.acquire("Builder", "b", "b", "", NONE, MINUTE, 1_000L);
+        leases.acquire("Builder", "c", "c", "", NONE, MINUTE, 1_500L);
+        leases.acquire("Builder", "b", "b", "", NONE, MINUTE, 2_000L);
+        assertEquals(2, leases.status("Builder", "a", 2_100L).get("waiting").getAsInt());
+        leases.release("Builder", "a", false);
+
+        assertNull(leases.acquire("Builder", "c", "c", "", NONE, MINUTE, 2_500L).granted);
+        assertNotNull(leases.acquire("Builder", "b", "b", "", NONE, MINUTE, 3_000L).granted);
+    }
+
+    @Test
     void aWaiterThatStopsAskingLosesItsPlace() {
         PlayerLeases leases = new PlayerLeases();
         leases.acquire("Builder", "a", "a", "", NONE, MINUTE, 0L);
@@ -61,6 +77,16 @@ class PlayerLeasesTest {
 
         assertEquals(1, ended.size());
         assertEquals("{id:\"minecraft:torch\"}", ended.get(0).slots.get(2), "its slots go back to the player");
+    }
+
+    @Test
+    void aLeaseThatRanOutWithSlotsIsNotGrantedOverBeforeItsSlotsAreBack() {
+        PlayerLeases leases = new PlayerLeases();
+        leases.acquire("Builder", "a", "a", "", Collections.singletonMap(0, "{}"), MINUTE, 0L);
+
+        assertNull(leases.acquire("Builder", "b", "b", "", NONE, MINUTE, MINUTE + 1L).granted);
+        leases.expire(MINUTE + 2L);
+        assertNotNull(leases.acquire("Builder", "b", "b", "", NONE, MINUTE, MINUTE + 3L).granted);
     }
 
     @Test

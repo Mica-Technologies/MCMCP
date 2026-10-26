@@ -184,7 +184,8 @@ public final class ServerPlayerLeaseTools {
                 return ToolResult.structured(json);
             }
             if (now >= deadline) {
-                PlayerLeases.get().stopWaiting(player, key);
+                // The caller keeps its place for a few seconds: one asking again, as bringPlayer does
+                // each second with waitSeconds 0, stays in line. One that gave up drops out on its own.
                 ToolResult refused = refusal(context, player);
                 String why = refused != null ? "" : "The lease was free for a moment but another agent was ahead "
                     + "of you in line. ";

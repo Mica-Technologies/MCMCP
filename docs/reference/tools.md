@@ -2704,7 +2704,7 @@ when the player lands.
 #### `client_screenshot`
 
 Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
-`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`, `burst`, `crop`, `views`
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`, `bringWaitSeconds`, `burst`, `crop`, `views`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
 
@@ -2756,6 +2756,12 @@ a remote server, which needs the player's companion `write` access there. It nee
 spectator mode, because the player hovers at the camera, and a survival player put in the air is
 kicked for flying. While the game window has focus it is refused unless the agent holds
 [`client_input_lock`](#client_input_lock), since then a person may be the one playing.
+
+Several agents can share one player, so `bringPlayer` takes the player's
+[`server_player_lease`](#server_player_lease) for the trip and gives it back afterwards. While another
+agent holds it (linking devices, or its own far photo), the call waits its turn in line, up to
+`bringWaitSeconds` (default 30, at most 120), and `view.waitedForPlayerMs` and `view.waitedFor` say
+how long and for whom. An agent that already holds the lease is never made to wait for itself.
 
 **`fullbright: true`** lights everything for this one frame, for night and interiors, without
 touching world time. It raises gamma and gives the player night vision on this client only, with

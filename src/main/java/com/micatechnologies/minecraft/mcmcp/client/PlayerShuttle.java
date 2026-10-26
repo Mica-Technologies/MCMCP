@@ -34,6 +34,9 @@ public final class PlayerShuttle {
         final float pitch;
         final boolean flying;
 
+        /** This trip's turn with the player's lease, to give back after the return. */
+        public volatile Turn turn = Turn.NONE;
+
         Trip(double x, double y, double z, float yaw, float pitch, boolean flying) {
             this.x = x;
             this.y = y;
@@ -51,6 +54,29 @@ public final class PlayerShuttle {
             return json;
         }
     }
+
+    /**
+     * A trip's turn with the shared player's lease (#143): taken before the move, so another agent's
+     * linking or photo is never moved out from under them, and given back after the return.
+     */
+    public static final class Turn {
+        static final Turn NONE = new Turn(false, 0L, null);
+
+        /** Whether this trip took the lease, and so gives it back; false when the agent already held it. */
+        final boolean taken;
+        public final long waitedMillis;
+        /** Who held the player while this trip waited, or null. */
+        public final String waitedFor;
+
+        Turn(boolean taken, long waitedMillis, String waitedFor) {
+            this.taken = taken;
+            this.waitedMillis = waitedMillis;
+            this.waitedFor = waitedFor;
+        }
+    }
+
+    private static final String LEASE_PURPOSE = "bringPlayer: a photo far away";
+    private static final long LEASE_MILLIS = 300_000L;
 
     /** Attempts at the return teleport before the player is reported stranded (#129). */
     private static final int RETURN_ATTEMPTS = 5;
@@ -72,7 +98,23 @@ public final class PlayerShuttle {
      *
      * @throws IllegalStateException with why it could not, for the caller to report
      */
-    public static Trip bring(ToolContext context, double[] to) throws Exception {
+    public static Trip bring(ToolContext context, double[] to, long waitMillis) throws Exception {
+        String player = Minecraft.getMinecraft().getSession().getUsername();
+        // The turn first, then where the player is: another agent's trip may still be bringing them back.
+        Turn turn = takeTurn(context, player, waitMillis);
+        Trip trip;
+        try {
+            trip = start(context, to);
+        }
+        catch (Exception e) {
+            giveTurnBack(context, player, turn);
+            throw e;
+        }
+        trip.turn = turn;
+        return trip;
+    }
+
+    private static Trip start(ToolContext context, double[] to) throws Exception {
         // Decided on the game thread, thrown here: an exception from inside onGameThread comes back as
         // a protocol failure, not as the sentence the agent needs.
         Object checked = context.onGameThread(() -> {
@@ -83,12 +125,6 @@ public final class PlayerShuttle {
             if (!mc.player.capabilities.allowFlying) {
                 return "bringPlayer needs creative or spectator mode, so the player can hover at the camera: a "
                     + "survival player put in the air is kicked for flying.";
-            }
-            String leased = mc.getIntegratedServer() == null ? null : com.micatechnologies.minecraft.mcmcp.mcp
-                .PlayerLeases.get().refusalFor(mc.player.getName(), context.callerKey(), System.currentTimeMillis());
-            if (leased != null) {
-                // On a remote server, the server's teleport refuses this instead (#144).
-                return leased;
             }
             if (Display.isActive() && !ClientInputLock.isLocked()) {
                 return "The game window has focus, so a person may be playing: bringPlayer moves the player only "
@@ -133,6 +169,15 @@ public final class PlayerShuttle {
      * @throws IllegalStateException when every attempt failed; the player is left at {@code from}
      */
     public static void back(ToolContext context, Trip trip, double[] from) throws Exception {
+        try {
+            returnPlayer(context, trip, from);
+        }
+        finally {
+            giveTurnBack(context, Minecraft.getMinecraft().getSession().getUsername(), trip.turn);
+        }
+    }
+
+    private static void returnPlayer(ToolContext context, Trip trip, double[] from) throws Exception {
         Exception last = null;
         long pause = 500L;
         for (int attempt = 0; attempt < RETURN_ATTEMPTS; attempt++) {
@@ -160,6 +205,105 @@ public final class PlayerShuttle {
             + " " + Math.round(from[1]) + " " + Math.round(from[2]) + ": " + last.getMessage() + " They belong at "
             + Math.round(trip.x) + " " + Math.round(trip.y) + " " + Math.round(trip.z) + "; the next bringPlayer "
             + "call returns them there if they have not been moved meanwhile.");
+    }
+
+    /**
+     * Takes the player's lease for a trip, waiting in line up to {@code waitMillis} while another agent
+     * holds it. In singleplayer the ledger is in this JVM; on a remote server it is asked over the
+     * companion, once a second, so no companion call is held open through the wait. A server that
+     * cannot lease (an older MCMCP, or no 'use' access) is not waited on: its teleport still refuses
+     * a player another agent leases.
+     *
+     * @throws IllegalStateException when the wait ran out
+     */
+    private static Turn takeTurn(ToolContext context, String player, long waitMillis) throws Exception {
+        long start = System.currentTimeMillis();
+        String key = context.callerKey();
+        boolean local = Minecraft.getMinecraft().getIntegratedServer() != null;
+        if (local ? com.micatechnologies.minecraft.mcmcp.mcp.PlayerLeases.get().holds(player, key, start)
+            : holdsRemotely(context, player)) {
+            return Turn.NONE;
+        }
+        String waitedFor = null;
+        while (true) {
+            long now = System.currentTimeMillis();
+            String holder;
+            if (local) {
+                com.micatechnologies.minecraft.mcmcp.mcp.PlayerLeases.Ask ask = com.micatechnologies.minecraft.mcmcp.mcp
+                    .PlayerLeases.get().acquire(player, key, context.callerLabel(), LEASE_PURPOSE,
+                        java.util.Collections.emptyMap(), LEASE_MILLIS, now);
+                if (ask.granted != null) {
+                    return new Turn(true, now - start, waitedFor);
+                }
+                holder = ask.heldBy == null ? "an agent ahead in line" : ask.heldBy.holderLabel;
+            }
+            else {
+                JsonObject args = new JsonObject();
+                args.addProperty("player", player);
+                args.addProperty("purpose", LEASE_PURPOSE);
+                args.addProperty("leaseSeconds", (int) (LEASE_MILLIS / 1000L));
+                JsonObject result = ClientCompanion.callServerTool("server_player_lease", args, 15_000L,
+                    context.getCaller().stamp());
+                if (!isError(result)) {
+                    return new Turn(true, now - start, waitedFor);
+                }
+                JsonObject structured = com.micatechnologies.minecraft.mcmcp.json.Json.getObject(result, "structuredContent");
+                JsonObject busy = structured == null ? null : com.micatechnologies.minecraft.mcmcp.json.Json.getObject(structured, "busy");
+                if (busy == null) {
+                    return Turn.NONE;
+                }
+                holder = com.micatechnologies.minecraft.mcmcp.json.Json.getString(busy, "holder", "an agent ahead in line");
+            }
+            waitedFor = holder;
+            if (now - start >= waitMillis) {
+                if (local) {
+                    com.micatechnologies.minecraft.mcmcp.mcp.PlayerLeases.get().stopWaiting(player, key);
+                }
+                throw new IllegalStateException("The player is leased by " + holder + ", and was not free after "
+                    + (waitMillis / 1000L) + " s of waiting (bringWaitSeconds). Try again, or wait longer.");
+            }
+            context.awaitBudget(1000L, "waiting for " + holder + " to finish with " + player);
+        }
+    }
+
+    private static boolean holdsRemotely(ToolContext context, String player) {
+        JsonObject args = new JsonObject();
+        args.addProperty("op", "status");
+        args.addProperty("player", player);
+        try {
+            JsonObject result = ClientCompanion.callServerTool("server_player_lease", args, 15_000L,
+                context.getCaller().stamp());
+            JsonObject structured = com.micatechnologies.minecraft.mcmcp.json.Json.getObject(result, "structuredContent");
+            return !isError(result) && structured != null
+                && com.micatechnologies.minecraft.mcmcp.json.Json.getBoolean(structured, "yours", false);
+        }
+        catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Gives a trip's turn back. Never throws: a turn not given back runs out on its own. */
+    private static void giveTurnBack(ToolContext context, String player, Turn turn) {
+        if (!turn.taken) {
+            return;
+        }
+        try {
+            if (Minecraft.getMinecraft().getIntegratedServer() != null) {
+                com.micatechnologies.minecraft.mcmcp.mcp.PlayerLeases.get().release(player, context.callerKey(), false);
+                return;
+            }
+            JsonObject args = new JsonObject();
+            args.addProperty("op", "release");
+            args.addProperty("player", player);
+            ClientCompanion.callServerTool("server_player_lease", args, 15_000L, context.getCaller().stamp());
+        }
+        catch (RuntimeException e) {
+            // Left to run out.
+        }
+    }
+
+    private static boolean isError(JsonObject result) {
+        return result.has("isError") && result.get("isError").getAsBoolean();
     }
 
     private static void teleport(ToolContext context, double x, double y, double z, float yaw, float pitch,

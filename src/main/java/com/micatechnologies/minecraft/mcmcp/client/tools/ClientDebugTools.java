@@ -152,7 +152,10 @@ public final class ClientDebugTools {
                 .integer("settle_ms", "With 'from': most time to let chunk meshes build at the new "
                     + "viewpoint before capturing. Default 5000.", 0, MAX_SETTLE_MILLIS)
                 .bool("bringPlayer", "With 'from': move the player to the camera first, so its chunks load, "
-                    + "and back to where they were, facing the same way, after the capture.")
+                    + "and back to where they were, facing the same way, after the capture. Takes the player's "
+                    + "lease for the trip, so it waits its turn behind other agents using the same player.")
+                .integer("bringWaitSeconds", "With bringPlayer: how long to wait for another agent to finish with "
+                    + "the player. Default 30.", 0, 120)
                 .property("burst", Json.obj("type", "object"))
                 .property("views", Json.obj("type", "array"))
                 .array("crop", "Keep only [x, y, width, height] of the frame: pixels, or fractions of it "
@@ -184,7 +187,7 @@ public final class ClientDebugTools {
                     return ToolResult.error("'from' and 'look_at' are each three numbers: [x, y, z].");
                 }
                 if (from == null && (lookAt != null || context.has("yaw") || context.has("pitch")
-                    || context.has("settle_ms") || context.has("bringPlayer"))) {
+                    || context.has("settle_ms") || context.has("bringPlayer") || context.has("bringWaitSeconds"))) {
                     return ToolResult.error("'look_at', 'yaw', 'pitch', 'settle_ms' and 'bringPlayer' aim a "
                         + "detached camera, so they need 'from'. Nothing was captured.");
                 }
@@ -236,7 +239,8 @@ public final class ClientDebugTools {
                         com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.Trip trip = null;
                         if (bringPlayer) {
                             try {
-                                trip = com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.bring(context, from);
+                                trip = com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.bring(context, from,
+                                    context.getBoundedInt("bringWaitSeconds", 30, 0, 120) * 1000L);
                             }
                             catch (IllegalStateException e) {
                                 return ToolResult.error(e.getMessage() + " Nothing was captured.");
@@ -305,6 +309,10 @@ public final class ClientDebugTools {
                         }
                         if (broughtFrom != null) {
                             view.add("playerReturnedTo", broughtFrom.toJson());
+                            if (broughtFrom.turn.waitedFor != null) {
+                                view.addProperty("waitedForPlayerMs", broughtFrom.turn.waitedMillis);
+                                view.addProperty("waitedFor", broughtFrom.turn.waitedFor);
+                            }
                         }
                     }
                 }
