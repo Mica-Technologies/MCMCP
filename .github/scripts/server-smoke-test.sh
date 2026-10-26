@@ -852,6 +852,21 @@ case "$ENBT_WRITE" in
   *'"Invulnerable":{"before":0,"after":1}'*'"restore":"{'*'Invulnerable:0b'*) echo "    merged a key, reported before and after, and how to put it back" ;;
   *) mcp_failure "server_set_entity_nbt did not report the write: ${ENBT_WRITE}" ;;
 esac
+# server_census counts from a snapshot of the loaded lists (#137); the two villagers and the chest
+# written above must be in it.
+CENSUS_BODY="$(mcp_call 5623 server_census '{"dimension":0,"top":50}')" \
+  || mcp_failure "server_census failed: ${CENSUS_BODY}"
+printf '%s' "$CENSUS_BODY" | "$PYTHON_BIN" -c '
+import json, sys
+body = json.load(sys.stdin)["result"]
+assert not body.get("isError"), body
+dim = body["structuredContent"]["dimensions"][0]
+villagers = [r for r in dim["entities"]["byType"] if r["entity"] == "minecraft:villager"]
+assert villagers and villagers[0]["count"] >= 2, dim["entities"]
+chests = [r for r in dim["tileEntities"]["byType"] if r["block"] == "minecraft:chest"]
+assert chests, dim["tileEntities"]
+' || mcp_failure "server_census did not count the villagers and the chest: ${CENSUS_BODY}"
+echo "    server_census counts the villagers and the chest"
 DRY_BODY="$(mcp_call 563 server_remove_entities "{\"types\":[\"villager\"],\"x\":$((LX - 2)),\"y\":${LY},\"z\":${LZ},\"toX\":$((LX + 3)),\"toY\":$((LY + 3)),\"toZ\":$((LZ + 4)),\"dryRun\":true}")" \
   || mcp_failure "server_remove_entities dry run failed: ${DRY_BODY}"
 case "$DRY_BODY" in

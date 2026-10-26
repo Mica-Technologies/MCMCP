@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import javax.annotation.Nullable;
+import net.minecraft.block.Block;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityList;
 import net.minecraft.profiler.Profiler;
@@ -1045,7 +1046,18 @@ public final class PerformanceTools {
         final Map<Long, ChunkCount> chunks = new HashMap<Long, ChunkCount>();
         int ticking = 0;
 
-        for (Entity entity : world.loadedEntityList) {
+        // Snapshots, not the live lists (#137): on a busy server the census threw
+        // ConcurrentModificationException. Anything in the loops that adds or removes an entity or
+        // tile entity does it, and so does a mod that spawns from its own thread. The copy is one
+        // array copy, which does not check for modification; a slot a racing writer left empty
+        // reads null and is skipped.
+        List<Entity> loadedEntities = new ArrayList<Entity>(world.loadedEntityList);
+        List<TileEntity> loadedTileEntities = new ArrayList<TileEntity>(world.loadedTileEntityList);
+
+        for (Entity entity : loadedEntities) {
+            if (entity == null) {
+                continue;
+            }
             ResourceLocation key = EntityList.getKey(entity);
             String type = key == null ? entity.getName() : key.toString();
             bump(entityTypes, type, 0, 2);
@@ -1053,9 +1065,15 @@ public final class PerformanceTools {
             chunk.entities++;
             bump(chunk.types, type, 0, 1);
         }
-        for (TileEntity tileEntity : world.loadedTileEntityList) {
-            ResourceLocation block = tileEntity.getBlockType() == null ? null
-                : tileEntity.getBlockType().getRegistryName();
+        for (TileEntity tileEntity : loadedTileEntities) {
+            if (tileEntity == null) {
+                continue;
+            }
+            // getBlockType reads the world when it has not cached the block, and a read at an
+            // unloaded position loads the chunk, whose tile entities then join the list being
+            // walked. A tile entity still listed after its chunk unloaded is named by its class.
+            Block blockType = world.isBlockLoaded(tileEntity.getPos()) ? tileEntity.getBlockType() : null;
+            ResourceLocation block = blockType == null ? null : blockType.getRegistryName();
             String type = block == null ? tileEntity.getClass().getSimpleName() : block.toString();
             bump(tileEntityTypes, type, 0, 2);
             if (tileEntity instanceof ITickable) {
@@ -1068,11 +1086,11 @@ public final class PerformanceTools {
         }
 
         JsonObject entities = new JsonObject();
-        entities.addProperty("total", world.loadedEntityList.size());
+        entities.addProperty("total", loadedEntities.size());
         entities.add("byType", topCounts(entityTypes, top, "entity", false));
 
         JsonObject tileEntities = new JsonObject();
-        tileEntities.addProperty("total", world.loadedTileEntityList.size());
+        tileEntities.addProperty("total", loadedTileEntities.size());
         tileEntities.addProperty("ticking", ticking);
         tileEntities.add("byType", topCounts(tileEntityTypes, top, "block", true));
 
