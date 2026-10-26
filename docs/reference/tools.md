@@ -560,7 +560,9 @@ an action up with something on a fixed cycle, such as a chunk reload timed to a 
 1,800-tick cycle. It waits at most 90 seconds and refuses a tick further away than that.
 
 World time advances even where nothing else does: when the dimension has
-[stopped ticking](#server_world_info) for want of a player, the result carries a `warning`.
+[stopped ticking](#server_world_info) for want of a player, the result carries a `warning`. When
+the tick never comes, the error says whether world time moved at all: a total time that stood still
+while the server kept ticking means a mod is freezing that world, not that the server is behind.
 
 ### Chunk loading
 
@@ -1105,6 +1107,13 @@ chunks loaded and `/blockdata` succeeds. A machine tested on a server nobody has
 and looks broken. A forced chunk keeps the dimension ticking, so
 [`server_keep_loaded`](#server_keep_loaded) over the area under test is the fix. A dimension that has
 stopped adds a line to `warnings`.
+
+`entitiesTicking` is observed, not inferred from that rule. A few times a second MCMCP notes some
+entities vanilla would tick, players first, and vanilla's idle count, then looks again after the
+world's tick. A mod that cancels the entity update (a pauser, lag limiter or tick skipper) moves
+neither, and the rule alone would have said `true` for a world where nothing ticked. When it is
+`false`, `entitiesTickingReason` says which: `idleCutoff` for vanilla's rule, `suppressed` for
+another mod. A forced chunk does not help with the second.
 
 Worth checking before an expensive scan: ticks are 50 ms apart, so a mean above 50 ms means the
 server is already behind. MCMCP's own work runs within a budget each tick, taking turns between

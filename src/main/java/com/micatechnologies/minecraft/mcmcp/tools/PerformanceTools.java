@@ -97,6 +97,7 @@ public final class PerformanceTools {
     public static void register() {
         GcPauseLog.install();
         ServerTickRecorder.register();
+        EntityTickObserver.register();
         registerHealth();
         registerHeapHistogram();
         registerCpuSample();
@@ -631,9 +632,10 @@ public final class PerformanceTools {
                 + "minutes: mean, median, p95, p99 and max. A tick has a 50 ms budget. A high mean is "
                 + "steady load; a low median with a high max is a hitch, and the mean in "
                 + "server_world_info hides that. Measure before and after a change to see its cost. "
-                + "'dimensions' splits the last 100 ticks by dimension, and says entitiesTicking: false for "
-                + "one vanilla has stopped ticking for want of a player or forced chunk: healthy TPS there "
-                + "does not mean its machines are running.")
+                + "'dimensions' splits the last 100 ticks by dimension, and says entitiesTicking: false, with "
+                + "entitiesTickingReason idleCutoff (no player or forced chunk) or suppressed (another mod "
+                + "cancels the update), for one whose entities are not ticking: healthy TPS there does not "
+                + "mean its machines are running.")
             .schema(JsonSchema.noArguments())
             .serverOnly()
             .readOnly()

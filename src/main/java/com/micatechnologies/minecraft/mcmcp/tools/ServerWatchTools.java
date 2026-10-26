@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
+import com.micatechnologies.minecraft.mcmcp.game.ServerTickRecorder;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -601,6 +602,8 @@ public final class ServerWatchTools {
                 synchronized (WAITERS) {
                     WAITERS.add(waiter);
                 }
+                final long startTime = now;
+                final long serverTicksAtStart = ServerTickRecorder.tickCount();
                 long started = System.currentTimeMillis();
                 try {
                     // Polled in short steps so a cancelled call stops waiting.
@@ -613,8 +616,8 @@ public final class ServerWatchTools {
                         }
                         catch (TimeoutException notYet) {
                             if (System.currentTimeMillis() > deadline) {
-                                return ToolResult.error("Tick " + target + " did not arrive in time; the "
-                                    + "server may be paused or running far behind.");
+                                return ToolResult.error(lateTickMessage(context, dimension, target, startTime,
+                                    serverTicksAtStart, System.currentTimeMillis() - started));
                             }
                         }
                     }
@@ -633,6 +636,36 @@ public final class ServerWatchTools {
                 return ToolResult.structured(json);
             })
             .build());
+    }
+
+    /**
+     * Why a waited-for tick never came (#140). A world whose time a mod has frozen while the server
+     * ticks on looks, from "did not arrive", exactly like a server that has stopped; telling them
+     * apart points at a pauser rather than at the server.
+     */
+    private static String lateTickMessage(ToolContext context, int dimension, long target, long startTime,
+                                          long serverTicksAtStart, long waitedMillis) {
+        long serverTicks = ServerTickRecorder.tickCount() - serverTicksAtStart;
+        long worldTime;
+        try {
+            worldTime = context.onGameThread(() -> ServerWorldTools.requireWorld(dimension).getTotalWorldTime());
+        }
+        catch (Exception e) {
+            worldTime = -1L;
+        }
+        long seconds = Math.max(1L, waitedMillis / 1000L);
+        String base = "Tick " + target + " did not arrive in " + seconds + " s. ";
+        if (worldTime == startTime && serverTicks > seconds * 10L) {
+            return base + "Dimension " + dimension + "'s total world time has not advanced at all (still "
+                + worldTime + ") while the server ticked " + serverTicks + " times: another mod is freezing "
+                + "this world (a pauser that stops an empty server is the usual cause), not the server "
+                + "running behind.";
+        }
+        if (worldTime >= 0L) {
+            return base + "World time went from " + startTime + " to " + worldTime + " and the server ticked "
+                + serverTicks + " times; it may be paused or running far behind.";
+        }
+        return base + "The server may be paused or running far behind.";
     }
 
     /** Ends every watch and wakes every waiter, when the server stops. */

@@ -436,8 +436,9 @@ public final class ServerWorldTools {
             .title("Server and world info")
             .description("Report server identity, tick performance, and the state of every loaded "
                 + "dimension: time of day, weather, difficulty, loaded chunk and entity counts, and "
-                + "entitiesTicking: false for a dimension vanilla has stopped ticking because no player or "
-                + "forced chunk has been in it for 15 seconds. Check tick performance here before running "
+                + "entitiesTicking: false for a dimension whose entities and tile entities are not ticking, "
+                + "with entitiesTickingReason: idleCutoff (no player or forced chunk for 15 seconds) or "
+                + "suppressed (another mod cancels the update). Check tick performance here before running "
                 + "expensive scans.")
             .schema(JsonSchema.noArguments())
             .serverOnly()

@@ -372,7 +372,16 @@ for dim in body["result"]["structuredContent"]["dimensions"]:
     assert "entitiesTicking" in dim, dim
     idle = dim.get("idleTicks", 0)
     assert idle != -1, "the idle tick count could not be read"
-    assert dim["entitiesTicking"] == (idle < 300), dim
+    # Observed (#140), so it lags the rule by up to a window of sampled ticks either side of the
+    # cutoff. Nothing on this server cancels the update, so a stop is always vanilla'"'"'s.
+    if idle < 300:
+        assert dim["entitiesTicking"], dim
+    elif idle > 400:
+        assert not dim["entitiesTicking"], dim
+    if not dim["entitiesTicking"]:
+        assert dim["entitiesTickingReason"] == "idleCutoff", dim
+    else:
+        assert "entitiesTickingReason" not in dim, dim
 ' || mcp_failure "server_world_info did not report entitiesTicking consistently: ${WORLD_BODY}"
 echo "    every dimension reports entitiesTicking"
 

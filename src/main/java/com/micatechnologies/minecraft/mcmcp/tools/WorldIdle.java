@@ -1,13 +1,14 @@
 package com.micatechnologies.minecraft.mcmcp.tools;
 
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.perf.EntityTickEvidence;
 import java.lang.reflect.Field;
 import javax.annotation.Nullable;
 import net.minecraft.world.WorldServer;
 import net.minecraftforge.fml.common.ObfuscationReflectionHelper;
 
 /**
- * Whether a dimension still ticks its entities and tile entities (#101).
+ * Whether a dimension still ticks its entities and tile entities (#101, #140).
  *
  * <p>Vanilla 1.12's {@code WorldServer.updateEntities} stops ticking every entity <em>and tile entity</em>
  * once the dimension has had no player and no forced chunk for 300 ticks, about 15 seconds. Nothing
@@ -15,6 +16,11 @@ import net.minecraftforge.fml.common.ObfuscationReflectionHelper;
  * {@code /blockdata} succeeds. A dedicated server nobody has joined is in this state 15 seconds after
  * it starts, so a test of a machine there sees it do nothing and blames the machine. A forced chunk,
  * which {@code server_keep_loaded} adds, keeps the dimension ticking.
+ *
+ * <p>Vanilla's rule is not the only thing that stops it. A mod that cancels the update outright (a
+ * pauser, a lag limiter) stops the idle count too, so inferring from the rule read "ticking" for a
+ * world where nothing ticked. What {@link EntityTickObserver} has seen comes first, and the rule is
+ * the fallback for a world it has nothing on yet.
  *
  * <p>Game thread.
  */
@@ -44,6 +50,11 @@ final class WorldIdle {
         if (!world.playerEntities.isEmpty() || !world.getPersistentChunks().isEmpty()) {
             return 0;
         }
+        return rawIdleTicks(world);
+    }
+
+    /** Vanilla's idle count as it stands, whatever the world holds, or -1 if it cannot be read. */
+    static int rawIdleTicks(WorldServer world) {
         if (UPDATE_ENTITY_TICK == null) {
             return -1;
         }
@@ -55,15 +66,33 @@ final class WorldIdle {
         }
     }
 
-    /** Whether the next tick will tick entities and tile entities; true when it cannot be told. */
-    static boolean entitiesTicking(WorldServer world) {
-        return idleTicks(world) < CUTOFF;
+    /** Why the dimension's entities are or are not ticking: seen if possible, else vanilla's rule. */
+    static EntityTickEvidence.Verdict verdict(WorldServer world) {
+        EntityTickEvidence.Verdict seen = EntityTickObserver.verdict(world);
+        if (seen != EntityTickEvidence.Verdict.UNOBSERVED) {
+            return seen;
+        }
+        // True when it cannot be told, as before: a false "stopped" sends a caller hunting a cause.
+        return idleTicks(world) < CUTOFF ? EntityTickEvidence.Verdict.TICKING
+            : EntityTickEvidence.Verdict.IDLE_CUTOFF;
     }
 
-    /** Adds {@code entitiesTicking} and, while the dimension is empty, {@code idleTicks}. */
+    /** Whether entities and tile entities are ticking, as far as can be told. */
+    static boolean entitiesTicking(WorldServer world) {
+        return verdict(world) == EntityTickEvidence.Verdict.TICKING;
+    }
+
+    /**
+     * Adds {@code entitiesTicking}, with {@code entitiesTickingReason} when it is false, and, while the
+     * dimension is empty, {@code idleTicks}.
+     */
     static void describe(WorldServer world, JsonObject into) {
+        EntityTickEvidence.Verdict verdict = verdict(world);
+        into.addProperty("entitiesTicking", verdict == EntityTickEvidence.Verdict.TICKING);
+        if (verdict != EntityTickEvidence.Verdict.TICKING) {
+            into.addProperty("entitiesTickingReason", verdict.reason);
+        }
         int idle = idleTicks(world);
-        into.addProperty("entitiesTicking", idle < CUTOFF);
         if (idle > 0) {
             into.addProperty("idleTicks", idle);
         }
@@ -72,12 +101,20 @@ final class WorldIdle {
     /** What to tell a caller about a dimension that has stopped ticking, or null while it ticks. */
     @Nullable
     static String warning(WorldServer world) {
-        if (entitiesTicking(world)) {
-            return null;
+        switch (verdict(world)) {
+            case IDLE_CUTOFF:
+                return "Dimension " + world.provider.getDimension() + " has had no player and no forced chunk for "
+                    + "over " + CUTOFF + " ticks, so vanilla has stopped ticking its entities and tile entities: "
+                    + "world time advances, but no machine, controller or mob updates. Hold the area with "
+                    + "server_keep_loaded (a forced chunk keeps the dimension ticking) or have a player join.";
+            case SUPPRESSED:
+                return "Dimension " + world.provider.getDimension() + "'s entity and tile entity update has not "
+                    + "run lately, although vanilla would run it: another mod is cancelling it (a pauser, lag "
+                    + "limiter or tick skipper; one that pauses an empty server is the usual cause). No machine, "
+                    + "controller or mob updates until it stops. That mod's own setting is what lets it run "
+                    + "(pausers usually resume when a player joins); a forced chunk does not.";
+            default:
+                return null;
         }
-        return "Dimension " + world.provider.getDimension() + " has had no player and no forced chunk for over "
-            + CUTOFF + " ticks, so vanilla has stopped ticking its entities and tile entities: world time "
-            + "advances, but no machine, controller or mob updates. Hold the area with server_keep_loaded (a "
-            + "forced chunk keeps the dimension ticking) or have a player join.";
     }
 }
