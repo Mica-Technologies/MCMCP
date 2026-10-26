@@ -758,7 +758,7 @@ short slices with ticks between them.
 
 #### `server_apply_ops`
 
-:material-alert: Destructive · requires `permissions.allowWorldEdits` · `ops` required · optional `dimension`, `dryRun`, `neighbourUpdates`, `since`, `stopOnRefusal`, `pairTwoPart`, `load`, `holdPhysics`
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `ops` required · optional `dimension`, `dryRun`, `neighbourUpdates`, `since`, `stopOnRefusal`, `pairTwoPart`, `load`, `holdPhysics`, `saveTarget`, `replaceTarget`
 
 Replays a build generator's command lines on the server and writes only the cells whose final block
 differs from what is there. One call covers a build phase, with no read of the area first: the ops
@@ -815,6 +815,63 @@ A cell whose block's own code throws while it is written (an old block's `breakB
 names the exception and the class and method that threw, and the server log has the full stack
 trace once per fault. Whatever the hook changed before it threw stays changed, and is in the undo
 point. The same holds for `server_set_blocks` and `server_undo`.
+
+`saveTarget: "tower/structure"` also saves what the ops make as a [build target](#build-targets),
+merging into that layer if it exists (`replaceTarget: true` starts it over). It works with `dryRun`,
+which saves a design without writing it. The reply's `target` describes the saved layer.
+
+#### Build targets
+
+A build target is what an area should be: a block state for each cell a build placed, and nothing for
+cells it did not touch. The server keeps targets in the world's `mcmcp-targets` folder, so checking a
+building is one call that answers with counts. There is no need to replay a generator, read the area
+back and compare in a script. Names are layered with `/`: `tower/structure`, `tower/fitout-l3`,
+`tower/life`. A pattern `tower/*` means every layer under it, merged in the order the layers were
+**created**, later layers winning per cell. Saving the structure again after the fit-out does not
+cover the fit-out.
+
+##### `server_target`
+
+:material-cog: Idempotent · optional `op`, `name`, box, `dimension`, `skipAir`, `replace`, `load`
+
+`op: list` (default) lists the layers with their cells and sizes. `info` describes a name or pattern:
+its layers, cells, states and bounds. `capture` saves a box's live blocks as a layer ("this is
+right"), up to 2,000,000 cells a call. `protect` does the same but marks the cells must-stay-as-is,
+for a person's hand edits: `server_verify` reports a changed one apart, and `server_repair` never
+writes one, whatever a later layer wants there. `delete` removes a name or pattern.
+
+##### `server_verify`
+
+:material-eye: Read-only · `target` required · optional `skipBoxes`, `ignore`, `compare`, `sameAs`, `samples`, `detail`, `load`
+
+Compares the world with a target or pattern and returns `matching`, `differ`, and per kind of
+difference a count and a few samples (`{at, want, is}`):
+
+| Kind | Meaning |
+| --- | --- |
+| `wrongBlock` | a different block |
+| `wrongState` | the right block in another state (facing, half, type...) |
+| `missing` | air where a block is wanted |
+| `extra` | a block where air is wanted |
+| `protectedChanged` | a protected cell no longer as it was kept; not counted in `differ` |
+| `unloaded` | not checked; pass `load: true` |
+
+What changes by itself in a built world is not a difference. That covers properties `open`,
+`powered`, `lit`, `power`, `triggered`, `enabled`, `shape`, fence and pane connections, `slope`,
+leaf decay, `snowy` and fluid `level`. It also covers ids that swap at runtime: `csm:lightupair` and
+`snow_layer` count as air, grass as dirt, and lit or powered blocks as their unlit forms. `ignore` adds
+properties, `compare` takes defaults back out, and `sameAs` adds id equivalences. `skipBoxes` leaves
+volumes out entirely, such as a lift shaft whose cab moves. `detail: "file"` writes every difference
+to a file and returns its path.
+
+##### `server_repair`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `target` required · same options as `server_verify`, plus `dryRun`
+
+Rewrites the cells that differ from the target through `server_apply_ops`, with undo points, the
+write budget and two-part pairing as for any write. Protected cells are never written, and neither
+are cells that match after the ignore rules (an open door stays open). The reply's `repair` has the
+cells it found, `written` and the undo points.
 
 #### `server_run_test`
 

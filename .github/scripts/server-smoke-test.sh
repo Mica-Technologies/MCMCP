@@ -1007,6 +1007,54 @@ case "$PJOB_STATE" in
   *) mcp_failure "the pregen job did not finish: ${PJOB_STATE}" ;;
 esac
 
+echo "==> Build targets: save while writing, verify, break, verify, repair, protect"
+VX=$((SPAWN_X + 60)); VY=$((UNDO_Y + 30)); VZ=$((SPAWN_Z + 60))
+mcp_call 660 server_target '{"op":"delete","name":"smoke/*"}' > /dev/null
+TGT_BODY="$(mcp_call 661 server_apply_ops "{\"ops\":[\"fill ${VX} ${VY} ${VZ} $((VX + 4)) $((VY + 2)) $((VZ + 4)) minecraft:stonebrick 0 hollow\",\"setblock $((VX + 2)) $((VY + 1)) ${VZ} minecraft:air\"],\"saveTarget\":\"smoke/shell\"}")" \
+  || mcp_failure "apply_ops with saveTarget failed: ${TGT_BODY}"
+case "$TGT_BODY" in
+  *'"target":{"name":"smoke/shell"'*'"cells":75'*) echo "    a 5 x 3 x 5 hollow shell saved as smoke/shell (75 cells)" ;;
+  *) mcp_failure "the target was not saved: ${TGT_BODY}" ;;
+esac
+VER_BODY="$(mcp_call 662 server_verify '{"target":"smoke/*"}')" || mcp_failure "server_verify failed: ${VER_BODY}"
+case "$VER_BODY" in
+  *'"matching":75,"differ":0'*) echo "    verify: 75 matching, 0 differ" ;;
+  *) mcp_failure "a fresh build did not verify clean: ${VER_BODY}" ;;
+esac
+mcp_call 663 server_set_block "{\"x\":${VX},\"y\":$((VY + 1)),\"z\":${VZ},\"block\":\"minecraft:air\"}" > /dev/null \
+  || mcp_failure "could not break the shell"
+VER_BODY="$(mcp_call 664 server_verify '{"target":"smoke/shell"}')" || mcp_failure "server_verify failed: ${VER_BODY}"
+case "$VER_BODY" in
+  *'"differ":1'*'"missing":{"count":1'*) echo "    a broken wall block is found as missing" ;;
+  *) mcp_failure "verify did not find the broken block: ${VER_BODY}" ;;
+esac
+REP_BODY="$(mcp_call 665 server_repair '{"target":"smoke/shell"}')" || mcp_failure "server_repair failed: ${REP_BODY}"
+case "$REP_BODY" in
+  *'"repair":{"cells":1,"written":1'*) ;;
+  *) mcp_failure "repair did not write the one cell: ${REP_BODY}" ;;
+esac
+VER_BODY="$(mcp_call 666 server_verify '{"target":"smoke/shell"}')" || mcp_failure "server_verify failed: ${VER_BODY}"
+case "$VER_BODY" in
+  *'"differ":0'*) echo "    repair rewrote it from the target alone, and it verifies clean" ;;
+  *) mcp_failure "the shell did not verify after repair: ${VER_BODY}" ;;
+esac
+# A hand edit: protect a cell as it is now, change it, and verify reports it apart; repair leaves it.
+mcp_call 667 server_set_block "{\"x\":$((VX + 4)),\"y\":$((VY + 1)),\"z\":$((VZ + 2)),\"block\":\"minecraft:glass\"}" > /dev/null
+PROT_BODY="$(mcp_call 668 server_target "{\"op\":\"protect\",\"name\":\"smoke/hand\",\"x\":$((VX + 4)),\"y\":$((VY + 1)),\"z\":$((VZ + 2))}")" \
+  || mcp_failure "protect failed: ${PROT_BODY}"
+mcp_call 669 server_set_block "{\"x\":$((VX + 4)),\"y\":$((VY + 1)),\"z\":$((VZ + 2)),\"block\":\"minecraft:stone\"}" > /dev/null
+VER_BODY="$(mcp_call 670 server_verify '{"target":"smoke/*"}')" || mcp_failure "server_verify failed: ${VER_BODY}"
+REP_BODY="$(mcp_call 671 server_repair '{"target":"smoke/*","dryRun":true}')" || mcp_failure "server_repair failed: ${REP_BODY}"
+case "$VER_BODY$REP_BODY" in
+  *'"differ":0'*'"protectedChanged":{"count":1'*'"repair":{"cells":0'*) echo "    a changed hand edit is reported apart, and repair leaves it alone" ;;
+  *) mcp_failure "the protected cell was not handled: ${VER_BODY} / ${REP_BODY}" ;;
+esac
+LIST_BODY="$(mcp_call 672 server_target '{"op":"delete","name":"smoke/*"}')" || mcp_failure "delete failed: ${LIST_BODY}"
+case "$LIST_BODY" in
+  *'"deleted":["smoke/shell","smoke/hand"]'*) echo "    and both layers deleted by pattern" ;;
+  *) mcp_failure "delete by pattern did not remove both layers: ${LIST_BODY}" ;;
+esac
+
 echo "==> Test scripts: power a lamp, wait for it, check, and put the world back"
 LX=$((SPAWN_X + 30)); LY=$((UNDO_Y + 12)); LZ=$((SPAWN_Z + 30))
 mcp_call 595 server_set_block "{\"x\":${LX},\"y\":${LY},\"z\":${LZ},\"block\":\"minecraft:redstone_lamp\"}" > /dev/null \

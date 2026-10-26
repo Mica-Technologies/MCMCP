@@ -95,6 +95,28 @@ public final class CellOverlay {
         return keys;
     }
 
+    /** A section's 4096 values, for a codec in this package; null if it was never written. */
+    int[] sectionArray(long key) {
+        return sections.get(key);
+    }
+
+    /** Puts a whole section back, as a codec read it. */
+    void putSection(long key, int[] values) {
+        int[] previous = sections.put(key, values);
+        if (previous != null) {
+            for (int value : previous) {
+                if (value != 0) {
+                    cells--;
+                }
+            }
+        }
+        for (int value : values) {
+            if (value != 0) {
+                cells++;
+            }
+        }
+    }
+
     /** Visits one section's touched cells, bottom layer first. */
     public void visit(long sectionKey, Visitor visitor) {
         int[] section = sections.get(sectionKey);

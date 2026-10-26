@@ -83,6 +83,10 @@ public final class ServerApplyOps {
                 .bool("load", "Load the chunks the ops reach for this call, and release them afterwards.")
                 .bool("holdPhysics", "Hold sand, gravel and fluids in and next to the write still until the call "
                     + "ends, then report what would still move (physics) and let it. Default false.")
+                .string("saveTarget", "Save what these ops make as a build target under this name (building/phase, "
+                    + "e.g. 'tower/structure'), for server_verify and server_repair. Merges into the layer if it "
+                    + "exists. Works with dryRun too: save a design without writing it.")
+                .bool("replaceTarget", "With saveTarget: start the layer over instead of merging into it.")
                 .required("ops")
                 .build())
             .serverOnly()
@@ -149,6 +153,13 @@ public final class ServerApplyOps {
         }
         final int dimension = context.getInt("dimension", 0);
         final boolean dryRun = context.getBoolean("dryRun", false);
+        final String saveTarget = context.getString("saveTarget", null);
+        if (saveTarget != null) {
+            String bad = com.micatechnologies.minecraft.mcmcp.regions.TargetStore.checkName(saveTarget);
+            if (bad != null) {
+                return ToolResult.error(bad + " Nothing was written.");
+            }
+        }
         final int flags = context.getBoolean("neighbourUpdates", false) ? 3 : 2 | 16;
         final boolean holdPhysics = context.getBoolean("holdPhysics", false);
         final boolean stopOnRefusal = context.getBoolean("stopOnRefusal", false);
@@ -258,6 +269,9 @@ public final class ServerApplyOps {
             final Map<Long, NBTTagCompound> tags = new LinkedHashMap<>();
             final long[] unloadedReads = {0L};
             replay(context, dimension, ready, overlay, palette, tags, unloadedReads);
+            // The design, saved before anything is written: what the ops make, whatever the world held.
+            final JsonObject savedTarget = saveTarget == null ? null : ServerTargetTools.saveOverlay(saveTarget,
+                context.getBoolean("replaceTarget", false), dimension, overlay, value -> palette.state(value).toString());
 
             // Cells someone else changed since the caller's token are theirs, not this call's.
             final Set<Long> protectedCells = new HashSet<>();
@@ -342,6 +356,9 @@ public final class ServerApplyOps {
             }
             if (physics != null) {
                 json.add("physics", physics);
+            }
+            if (savedTarget != null) {
+                json.add("target", savedTarget);
             }
             // A follow-up: the write has happened, and dropping this would fail the call before its undo
             // point is saved (#133).
