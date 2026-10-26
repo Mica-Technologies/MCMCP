@@ -68,11 +68,10 @@ impl Aggregate {
 
 /// Builds the aggregate.
 ///
-/// `addressable` is the set of instance ids the `instance` argument offers as an enum. It is
-/// deliberately wider than "currently connected": it includes instances seen recently but not
-/// running, so that relaunching a game client — which happens constantly in a mod-development
-/// loop — does not rewrite every tool schema and churn the catalogue.
-pub fn aggregate(contributions: &[Contribution], addressable: &[String], focused: Option<&str>) -> Aggregate {
+/// Nothing in it depends on which games are connected or focused beyond the catalogues they
+/// contribute: the `instance` argument every tool gains is the same string whatever is running
+/// (#139). See [`instance_property`].
+pub fn aggregate(contributions: &[Contribution]) -> Aggregate {
     let mut aggregate = Aggregate::default();
     let mut tools_by_name: BTreeMap<String, Value> = BTreeMap::new();
 
@@ -111,7 +110,7 @@ pub fn aggregate(contributions: &[Contribution], addressable: &[String], focused
         if owners.len() < total && total > 1 {
             annotate_availability(&mut tool, owners);
         }
-        inject_instance_argument(&mut tool, addressable, focused);
+        inject_instance_argument(&mut tool);
         aggregate.tools.push(tool);
     }
 
@@ -124,7 +123,7 @@ pub fn aggregate(contributions: &[Contribution], addressable: &[String], focused
             };
             prompts_by_name.entry(name.to_string()).or_insert_with(|| {
                 let mut prompt = prompt.clone();
-                inject_instance_prompt_argument(&mut prompt, addressable);
+                inject_instance_prompt_argument(&mut prompt);
                 prompt
             });
         }
@@ -149,7 +148,7 @@ fn annotate_availability(tool: &mut Value, owners: &[String]) {
 /// Optional, never required. A model that names an instance gets that instance; one that does not
 /// gets the focused one, which is the whole reason focus exists. Making it required would put a
 /// mandatory argument on all 45 tools to serve the case where more than one game is open.
-pub fn inject_instance_argument(tool: &mut Value, addressable: &[String], focused: Option<&str>) {
+pub fn inject_instance_argument(tool: &mut Value) {
     // Read-only tools may be fanned out; nothing else may. Decided from the tool's own annotations
     // before the schema is touched, so the option simply does not exist where it would be wrong.
     let fannable = crate::policy::Class::of(tool) == crate::policy::Class::ReadOnly;
@@ -173,10 +172,7 @@ pub fn inject_instance_argument(tool: &mut Value, addressable: &[String], focuse
     let Some(properties) = properties.as_object_mut() else {
         return;
     };
-    properties.insert(
-        INSTANCE_ARGUMENT.to_string(),
-        instance_property(addressable, focused, fannable),
-    );
+    properties.insert(INSTANCE_ARGUMENT.to_string(), instance_property(fannable));
 }
 
 /// The `instance` property, written short on purpose.
@@ -188,35 +184,26 @@ pub fn inject_instance_argument(tool: &mut Value, addressable: &[String], focuse
 /// to act on, that omitting it uses focus, and that `mcmcp_instances` is how to see what is
 /// connected. Repeating that per tool taught a model nothing it was not about to read anyway.
 ///
-/// What stays is what is *specific to this tool and this moment* and appears nowhere else: which
-/// instance focus currently points at, the enum of ids, and — on a read-only tool — that `"*"` is
-/// accepted. With one instance addressable even focus is redundant, so the whole thing collapses to
-/// a clause.
-fn instance_property(addressable: &[String], focused: Option<&str>, fannable: bool) -> Value {
-    let mut description = String::from("Which game to act on; omit for the focused one");
-    match focused {
-        Some(focused) if addressable.len() > 1 => description.push_str(&format!(" ({focused}).")),
-        _ => description.push('.'),
-    }
-    if fannable && addressable.len() > 1 {
-        description.push_str(" \"*\" runs it on every connected game.");
-    }
-
-    let mut property = json!({ "type": "string", "description": description });
-    if !addressable.is_empty() {
-        // An enum is worth a great deal here: a model picks from a list far more reliably than it
-        // recalls an id from a description. It covers instances seen recently as well as connected
-        // ones, so a relaunch does not rewrite every schema.
-        let mut values: Vec<Value> = addressable.iter().map(|id| json!(id)).collect();
-        if fannable {
-            values.push(json!(ALL_INSTANCES));
-        }
-        property["enum"] = Value::Array(values);
-    }
-    property
+/// What stays is what is specific to the tool: on a read-only tool, that `"*"` is accepted.
+///
+/// **Nothing in it may depend on which games exist** (#139). It once carried an enum of instance ids
+/// and the focused one's name, which made every schema change whenever a game was approved for the
+/// first time or focus moved. A `tools/list_changed` followed, the host replaced ~49 definitions, the
+/// agent saw its tools vanish and come back (and read it as the server dropping), and the whole
+/// catalogue was re-billed into its prompt. The ids are one `mcmcp_instances` call away and every
+/// result names the game that produced it; a wrong id is answered at call time with the connected
+/// ones and the closest match. The enum also cost its length on every tool.
+fn instance_property(fannable: bool) -> Value {
+    let description = if fannable {
+        "Which game to act on; omit for the focused one. \"*\" runs it on every connected game."
+    } else {
+        "Which game to act on; omit for the focused one."
+    };
+    json!({ "type": "string", "description": description })
 }
 
-fn inject_instance_prompt_argument(prompt: &mut Value, addressable: &[String]) {
+/// Prompts get the same argument, and the same rule: nothing that changes as games come and go.
+fn inject_instance_prompt_argument(prompt: &mut Value) {
     let Some(prompt) = prompt.as_object_mut() else {
         return;
     };
@@ -232,15 +219,10 @@ fn inject_instance_prompt_argument(prompt: &mut Value, addressable: &[String]) {
     if already_present {
         return;
     }
-    let known = if addressable.is_empty() {
-        String::new()
-    } else {
-        format!(" Known instances: {}.", addressable.join(", "))
-    };
     arguments.push(json!({
         "name": INSTANCE_ARGUMENT,
-        "description": format!("Which game instance to gather state from. \
-            Omit it to use the focused instance.{known}"),
+        "description": "Which game instance to gather state from. Omit it to use the focused \
+            instance; mcmcp_instances lists them.",
         "required": false,
     }));
 }
@@ -411,7 +393,7 @@ mod tests {
             contribution("beta", vec!["client_move"]),
         ];
 
-        let aggregate = aggregate(&contributions, &["alpha".into(), "beta".into()], None);
+        let aggregate = aggregate(&contributions);
 
         assert_eq!(names(&aggregate), vec!["client_move".to_string()]);
         assert_eq!(aggregate.instances_with_tool("client_move"), ["alpha", "beta"]);
@@ -424,7 +406,7 @@ mod tests {
             contribution("beta", vec!["client_move"]),
         ];
 
-        let aggregate = aggregate(&contributions, &[], None);
+        let aggregate = aggregate(&contributions);
 
         assert_eq!(
             names(&aggregate),
@@ -451,7 +433,7 @@ mod tests {
             contribution("beta", vec!["client_move"]),
         ];
 
-        let aggregate = aggregate(&contributions, &[], None);
+        let aggregate = aggregate(&contributions);
 
         assert!(
             !aggregate.tools[0]["description"]
@@ -463,15 +445,10 @@ mod tests {
 
     #[test]
     fn every_tool_gains_an_optional_instance_argument() {
-        let aggregate = aggregate(
-            &[contribution("alpha", vec!["client_move"])],
-            &["alpha".into()],
-            None,
-        );
+        let aggregate = aggregate(&[contribution("alpha", vec!["client_move"])]);
 
         let schema = &aggregate.tools[0]["inputSchema"];
         assert_eq!(schema["properties"]["instance"]["type"], "string");
-        assert_eq!(schema["properties"]["instance"]["enum"], json!(["alpha"]));
         // Optional, never required: a mandatory argument on all 45 tools to serve the multi-game
         // case would tax the single-game case that is most of the usage.
         assert!(
@@ -486,32 +463,32 @@ mod tests {
         assert_eq!(schema["properties"]["x"]["type"], "integer");
     }
 
+    fn instance_description(tool: &Value) -> String {
+        tool["inputSchema"]["properties"]["instance"]["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
     #[test]
     fn only_read_only_tools_offer_the_fan_out_option() {
-        // The restriction lives in the enum so a model never sees the option where it would be
-        // wrong. "What does each game report" is useful; "move the player in all three" is not
-        // something anybody means, and an option that could do it would eventually do it.
+        // "What does each game report" is useful; "move the player in all three" is not something
+        // anybody means, and an option that could do it would eventually do it.
         let mut reader = json!({
             "name": "client_player_state",
             "annotations": {"readOnlyHint": true},
             "inputSchema": {"type": "object"},
         });
-        inject_instance_argument(&mut reader, &["alpha".into()], None);
-        let values = reader["inputSchema"]["properties"]["instance"]["enum"]
-            .as_array()
-            .unwrap();
-        assert!(values.iter().any(|value| value == "*"));
+        inject_instance_argument(&mut reader);
+        assert!(instance_description(&reader).contains("\"*\""));
 
         let mut mover = json!({
             "name": "client_move",
             "annotations": {"readOnlyHint": false},
             "inputSchema": {"type": "object"},
         });
-        inject_instance_argument(&mut mover, &["alpha".into()], None);
-        let values = mover["inputSchema"]["properties"]["instance"]["enum"]
-            .as_array()
-            .unwrap();
-        assert!(!values.iter().any(|value| value == "*"));
+        inject_instance_argument(&mut mover);
+        assert!(!instance_description(&mover).contains('*'));
     }
 
     #[test]
@@ -520,12 +497,9 @@ mod tests {
         // third-party tool nobody annotated must not become fannable by omission.
         let mut tool = json!({"name": "mymod_mystery", "inputSchema": {"type": "object"}});
 
-        inject_instance_argument(&mut tool, &["alpha".into()], None);
+        inject_instance_argument(&mut tool);
 
-        let values = tool["inputSchema"]["properties"]["instance"]["enum"]
-            .as_array()
-            .unwrap();
-        assert_eq!(values.len(), 1);
+        assert!(!instance_description(&tool).contains('*'));
     }
 
     #[test]
@@ -534,53 +508,39 @@ mod tests {
         // `properties` at all has to create one rather than quietly doing nothing.
         let mut tool = json!({"name": "mcmcp_endpoint_info", "inputSchema": {"type": "object"}});
 
-        inject_instance_argument(&mut tool, &["alpha".into()], None);
+        inject_instance_argument(&mut tool);
 
         assert_eq!(tool["inputSchema"]["properties"]["instance"]["type"], "string");
     }
 
     #[test]
-    fn the_instance_description_names_the_focused_instance() {
-        // A model reading the schema should not have to make a second call to learn where an
-        // omitted `instance` would land.
-        let mut tool = json!({"name": "t", "inputSchema": {"type": "object"}});
+    fn the_instance_argument_is_short_because_every_tool_carries_it() {
+        // Stamped onto every tool, so each character is paid for ~49 times.
+        let mut tool = json!({"name": "t", "annotations": {"readOnlyHint": true}, "inputSchema": {}});
 
-        inject_instance_argument(&mut tool, &["alpha".into(), "beta".into()], Some("alpha"));
+        inject_instance_argument(&mut tool);
 
-        let description = tool["inputSchema"]["properties"]["instance"]["description"]
-            .as_str()
-            .unwrap();
-        assert!(description.contains("alpha"), "got: {description}");
+        let description = instance_description(&tool);
+        assert!(description.len() < 100, "got {} chars", description.len());
     }
 
     #[test]
-    fn one_addressable_instance_leaves_nothing_to_say_about_focus() {
-        // The description is stamped onto every tool, so anything true-but-useless in it is paid
-        // for ~49 times. With a single instance, naming the focused one names the only one.
-        let mut tool = json!({"name": "t", "inputSchema": {"type": "object"}});
+    fn the_catalogue_does_not_change_when_another_game_connects() {
+        // #139: an enum of instance ids put every connected game into every schema, so approving a
+        // new one rewrote ~49 tool definitions, the host re-listed them all, and the agent read its
+        // tools vanishing and coming back as the server dropping. A second game on the same mod
+        // version must leave the tool list byte-identical.
+        let alone = aggregate(&[contribution("alpha", vec!["client_move"])]);
+        let together = aggregate(&[
+            contribution("alpha", vec!["client_move"]),
+            contribution("beta", vec!["client_move"]),
+        ]);
 
-        inject_instance_argument(&mut tool, &["alpha".into()], Some("alpha"));
-
-        let description = tool["inputSchema"]["properties"]["instance"]["description"]
-            .as_str()
-            .unwrap();
-        assert!(!description.contains("alpha"), "got: {description}");
-        assert!(description.len() < 60, "got {} chars", description.len());
-    }
-
-    #[test]
-    fn the_enum_covers_addressable_instances_not_just_connected_ones() {
-        // Relaunching a client is constant in a mod-development loop. If the enum tracked only live
-        // instances, every relaunch would rewrite all 45 schemas and churn the catalogue.
-        let aggregate = aggregate(
-            &[contribution("alpha", vec!["client_move"])],
-            &["alpha".into(), "beta".into()],
-            None,
-        );
-
-        assert_eq!(
-            aggregate.tools[0]["inputSchema"]["properties"]["instance"]["enum"],
-            json!(["alpha", "beta"])
+        assert_eq!(alone.tools, together.tools);
+        assert!(
+            alone.tools[0]["inputSchema"]["properties"]["instance"]
+                .get("enum")
+                .is_none()
         );
     }
 
@@ -588,7 +548,7 @@ mod tests {
     fn lists_tools_in_a_stable_order() {
         let contributions = vec![contribution("alpha", vec!["zulu_tool", "alpha_tool"])];
 
-        let aggregate = aggregate(&contributions, &[], None);
+        let aggregate = aggregate(&contributions);
 
         assert_eq!(
             names(&aggregate),
@@ -646,7 +606,7 @@ mod tests {
             },
         ];
 
-        let aggregate = aggregate(&contributions, &[], None);
+        let aggregate = aggregate(&contributions);
 
         assert_eq!(aggregate.resources.len(), 2);
         assert_eq!(aggregate.resources[0]["uri"], "minecraft://alpha/game/mods");
@@ -675,7 +635,7 @@ mod tests {
             },
         ];
 
-        let aggregate = aggregate(&contributions, &["alpha".into(), "beta".into()], None);
+        let aggregate = aggregate(&contributions);
 
         assert_eq!(aggregate.prompts.len(), 1);
         let arguments = aggregate.prompts[0]["arguments"].as_array().unwrap();
@@ -687,7 +647,7 @@ mod tests {
     fn an_empty_aggregate_is_valid_rather_than_an_error() {
         // Nothing connected is a normal state, not a failure. The router serves a cached catalogue
         // in that case, and this is what it falls back to when there is no cache either.
-        let aggregate = aggregate(&[], &[], None);
+        let aggregate = aggregate(&[]);
 
         assert!(aggregate.tools.is_empty());
         assert!(aggregate.resources.is_empty());
@@ -706,11 +666,7 @@ mod tests {
     #[test]
     fn a_cache_this_build_wrote_is_used() {
         let path = cache_file("same-version");
-        let built = aggregate(
-            &[contribution("alpha", vec!["client_move"])],
-            &["alpha".into()],
-            None,
-        );
+        let built = aggregate(&[contribution("alpha", vec!["client_move"])]);
         save_cache(&path, &built).expect("the cache should write");
 
         let loaded = load_cache(&path).expect("this build's own cache should load");
@@ -727,11 +683,7 @@ mod tests {
         // build did — and the orchestrator served it, because nothing said which build had written
         // it. An empty tool list for the few seconds until a game connects is the better answer.
         let path = cache_file("other-version");
-        let built = aggregate(
-            &[contribution("alpha", vec!["client_move"])],
-            &["alpha".into()],
-            None,
-        );
+        let built = aggregate(&[contribution("alpha", vec!["client_move"])]);
         save_cache(&path, &built).expect("the cache should write");
 
         assert!(load_cache_built_by(&path, "some-other-version").is_none());
@@ -744,11 +696,7 @@ mod tests {
         // and must rebuild rather than load. Written as the old format on purpose — serialising the
         // current one would not reproduce what is actually sitting in everyone's state directory.
         let path = cache_file("unstamped");
-        let built = aggregate(
-            &[contribution("alpha", vec!["client_move"])],
-            &["alpha".into()],
-            None,
-        );
+        let built = aggregate(&[contribution("alpha", vec!["client_move"])]);
         std::fs::write(&path, serde_json::to_string(&built).expect("serialises"))
             .expect("the fixture should write");
 

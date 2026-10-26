@@ -179,9 +179,13 @@ swap some fifty tool definitions into the prompt it sends for every subsequent t
 away its prompt cache and re-bills the conversation so far — and the loop the orchestrator exists to
 serve is relaunching a dev client over and over, each time with a byte-identical catalogue.
 
-This is also why the `instance` enum covers games seen recently rather than only connected ones: a
-relaunch that rewrote every tool's schema would be a change, and would announce itself. A game that
-brings tools the others lack still announces, because then the surface really is different.
+This is also why the `instance` argument is a plain string that names no game. It once carried an
+enum of instance ids and the focused one's name, so approving a new game or moving focus rewrote
+every tool's schema. The client re-read all of them, and an agent watching saw its tools vanish and
+come back, which looked like the server dropping. The ids are one `mcmcp_instances` call away. A call
+can also name a game by its game id or label when only one connected endpoint has it. A wrong id is
+answered with the connected ones and the closest match. A game that brings tools the others lack
+still announces, because then the surface really is different.
 
 Opening and closing a singleplayer world is the same situation. The server endpoint only exists
 while a world is open, so its twenty-odd `server_*` tools used to be withdrawn and re-announced on

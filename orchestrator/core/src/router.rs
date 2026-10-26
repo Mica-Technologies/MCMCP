@@ -514,37 +514,6 @@ impl Router {
     // Catalogue
     // ------------------------------------------------------------------
 
-    /// Instance ids the `instance` argument offers, live or recently seen.
-    ///
-    /// Wider than "connected" on purpose — see the note on the cached catalogue. A relaunch should
-    /// not rewrite 45 tool schemas.
-    fn addressable(&self) -> Vec<String> {
-        let mut ids = self.registry.ids();
-        // Endpoints seen this run. The store covers approved games across runs, but an endpoint
-        // whose catalogue is still being offered must stay a valid target in the enum too, or a world
-        // closing would rewrite every schema anyway.
-        ids.extend(self.retained.lock().expect("retained lock").keys().cloned());
-        if let Ok(store) = self.store.lock() {
-            for known in store.all() {
-                if known.revoked {
-                    continue;
-                }
-                // Endpoint ids, not the bare game id the store is keyed on: a game id is what an
-                // approval is filed under, not something a call can be routed to. Offering one here
-                // would put a target in every tool schema that always fails.
-                for side in &known.endpoints {
-                    let id = format!("{}{}{side}", known.id, instance::ENDPOINT_SEPARATOR);
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-            }
-        }
-        ids.sort();
-        ids.dedup();
-        ids
-    }
-
     /// Records an event, filling in the instance's label so the log line names it.
     ///
     /// One funnel rather than a `.labelled(...)` on nine call sites: the next event added would have
@@ -567,6 +536,34 @@ impl Router {
             .get(id)
             .map(|instance| instance.info().label)
             .unwrap_or_else(|| id.to_string())
+    }
+
+    /// The connected endpoint a caller meant by `requested`, when it is not an endpoint id itself.
+    ///
+    /// With no enum in the schema (#139) a model passes what it has: the game id a log line or the
+    /// approval prompt showed (`pd-2`), or the label the person calls it by (`PDHEITrial`). Either
+    /// one names an endpoint when exactly one connected endpoint has it, and is left as it is
+    /// otherwise — a singleplayer game's two halves share both, and guessing between a client and a
+    /// server is not something to do silently.
+    fn canonical_instance(&self, requested: &str) -> String {
+        if requested == ALL_INSTANCES || self.registry.get(requested).is_some() {
+            return requested.to_string();
+        }
+        let wanted = requested.to_lowercase();
+        let matches: Vec<String> = self
+            .registry
+            .all()
+            .iter()
+            .filter(|instance| {
+                let info = instance.info();
+                info.approval_id.to_lowercase() == wanted || info.label.to_lowercase() == wanted
+            })
+            .map(|instance| instance.id())
+            .collect();
+        match matches.as_slice() {
+            [only] => only.clone(),
+            _ => requested.to_string(),
+        }
     }
 
     /// The game id an addressable instance is approved under.
@@ -652,18 +649,14 @@ impl Router {
         // retained — which is what lets a world closing and reopening announce nothing.
         contributions.sort_by(|a, b| a.id.cmp(&b.id));
 
-        let aggregate = catalogue::aggregate(
-            &contributions,
-            &self.addressable(),
-            self.registry.focus().as_deref(),
-        );
+        let aggregate = catalogue::aggregate(&contributions);
         *self.cached.lock().expect("cache lock") = Some(aggregate.clone());
         aggregate
     }
 
     async fn handle_tools_list(&self) -> Value {
         let mut tools = self.build_aggregate().await.tools;
-        tools.extend(orchestrator_tools::definitions(&self.addressable()));
+        tools.extend(orchestrator_tools::definitions());
         json!({ "tools": tools })
     }
 
@@ -677,7 +670,7 @@ impl Router {
 
     async fn handle_prompts_list(&self) -> Value {
         let mut prompts = self.build_aggregate().await.prompts;
-        prompts.push(orchestrator_tools::prompt_definition(&self.addressable()));
+        prompts.push(orchestrator_tools::prompt_definition());
         json!({ "prompts": prompts })
     }
 
@@ -703,7 +696,8 @@ impl Router {
 
         let requested_instance = arguments
             .remove(INSTANCE_ARGUMENT)
-            .and_then(|value| value.as_str().map(str::to_string));
+            .and_then(|value| value.as_str().map(str::to_string))
+            .map(|requested| self.canonical_instance(&requested));
 
         if ORCHESTRATOR_TOOLS.contains(&name) {
             // Put `instance` back: it was taken off above for routing, but `mcmcp_read_logs`
@@ -750,8 +744,13 @@ impl Router {
                     .and_then(|game| self.last_exit_crash(&game))
                     .map(|report| format!(" It crashed: {}.", report.summary()))
                     .unwrap_or_default();
+                // The schema no longer lists the ids (#139), so a near miss gets a suggestion.
+                let suggestion = closest_name(&name, &connected)
+                    .map(|close| format!(" Did you mean '{close}'?"))
+                    .unwrap_or_default();
                 return Ok(tool_error(&format!(
-                    "There is no connected instance called '{name}'. Connected right now: {}.{crashed}",
+                    "There is no connected instance called '{name}'.{suggestion} Connected right now: \
+                     {}.{crashed}",
                     if connected.is_empty() {
                         "nothing".to_string()
                     } else {
@@ -1373,7 +1372,7 @@ impl Router {
     /// ignored runs the call with a default nobody asked for, and the result reads as success.
     /// `instance` is always tolerated — the server instructions promise it on every tool.
     fn unknown_orchestrator_argument(&self, name: &str, arguments: &Map<String, Value>) -> Option<Value> {
-        let definitions = orchestrator_tools::definitions(&[]);
+        let definitions = orchestrator_tools::definitions();
         let definition = definitions
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))?;
@@ -1648,6 +1647,7 @@ impl Router {
                         "connected": self.registry.ids(),
                     }));
                 };
+                let requested = &self.canonical_instance(requested);
                 let previous = self.registry.focus();
                 if self.registry.set_focus(requested) {
                     self.record_event(Event::new(
@@ -1669,9 +1669,14 @@ impl Router {
                     ));
                     structured_result(json!({ "focused": requested }))
                 } else {
+                    let connected = self.registry.ids();
+                    let suggestion = closest_name(requested, &connected)
+                        .map(|close| format!(" Did you mean '{close}'?"))
+                        .unwrap_or_default();
                     tool_error(&format!(
-                        "There is no connected instance called '{requested}'. Connected right now: {}.",
-                        self.registry.ids().join(", ")
+                        "There is no connected instance called '{requested}'.{suggestion} Connected \
+                         right now: {}.",
+                        connected.join(", ")
                     ))
                 }
             }
@@ -2191,9 +2196,9 @@ impl Router {
     /// definitions — some 15k tokens — in the prompt it sends for every subsequent turn, which
     /// invalidates its prompt cache and re-bills the conversation so far. Announcing on every
     /// connect and disconnect therefore charged that to a mod-development loop whose whole shape is
-    /// relaunching the game, for a catalogue that came back byte-identical: `addressable` covers
-    /// instances seen recently as well as connected ones precisely so a relaunch does not churn the
-    /// schemas, and the announcement was throwing that away.
+    /// relaunching the game, for a catalogue that came back byte-identical: no schema names a game
+    /// (#139) precisely so that comings and goings do not churn the catalogue, and the announcement
+    /// was throwing that away.
     ///
     /// A first build has nothing to compare against and announces everything, which is right — the
     /// client asked at a point when there was no catalogue and needs to know one exists now.
@@ -3613,6 +3618,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_game_id_or_label_names_the_one_endpoint_that_has_it() {
+        // With no enum to pick from (#139), a model passes the game id it saw in a log line or the
+        // approval prompt. It names an endpoint when only one connected endpoint has it.
+        let alto = endpoint("alto-1.client", "alto-1", Side::Client, &["client_look"], 1, None);
+        let pd = endpoint("pd-2.client", "pd-2", Side::Client, &["client_look"], 2, None);
+        let router = router_of(&[alto, pd]).await;
+
+        let result = call(&router, json!({ "name": "client_look", "instance": "pd-2" })).await;
+        assert!(text_of(&result).contains("ran on pd-2.client"), "{result}");
+
+        let result = call(&router, json!({ "name": "client_look", "instance": "ALTO-1" })).await;
+        assert!(text_of(&result).contains("ran on alto-1.client"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn a_game_id_shared_by_a_client_and_a_server_is_not_guessed_between() {
+        let client = endpoint("sp-3.client", "sp-3", Side::Client, &["client_look"], 3, None);
+        let server = endpoint("sp-3.server", "sp-3", Side::Server, &["client_look"], 3, None);
+        let router = router_of(&[client, server]).await;
+
+        let result = call(&router, json!({ "name": "client_look", "instance": "sp-3" })).await;
+
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(text_of(&result).contains("sp-3.client"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn a_mistyped_instance_is_answered_with_the_closest_connected_one() {
+        let pd = endpoint("pd-2.client", "pd-2", Side::Client, &["client_look"], 2, None);
+        let router = router_of(&[pd]).await;
+
+        let result = call(
+            &router,
+            json!({ "name": "client_look", "instance": "pd-2.clint" }),
+        )
+        .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("Did you mean 'pd-2.client'?"),
+            "{result}"
+        );
+
+        let result = call(&router, json!({ "name": "mcmcp_focus", "target": "pd-2.clint" })).await;
+        assert!(
+            text_of(&result).contains("Did you mean 'pd-2.client'?"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_forwarded_call_names_its_connection_to_the_game_and_a_client_cannot_forge_one() {
         let client = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
         let router = router_of(&[Arc::clone(&client)]).await;
@@ -4242,7 +4297,7 @@ mod tests {
     fn the_orchestrator_offers_no_tool_that_approves_an_instance() {
         // The authorisation boundary, asserted rather than assumed. A model that can approve a
         // pairing can widen its own reach, which is exactly what an approval prompt prevents.
-        let names: Vec<String> = orchestrator_tools::definitions(&[])
+        let names: Vec<String> = orchestrator_tools::definitions()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap().to_string())
             .collect();
@@ -4262,14 +4317,12 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_tools_offer_known_instances_as_an_enum() {
-        let tools = orchestrator_tools::definitions(&["alpha".into(), "beta".into()]);
+    fn orchestrator_tools_name_instances_by_a_plain_string() {
+        let tools = orchestrator_tools::definitions();
         let focus = tools.iter().find(|tool| tool["name"] == "mcmcp_focus").unwrap();
 
-        assert_eq!(
-            focus["inputSchema"]["properties"]["target"]["enum"],
-            json!(["alpha", "beta"])
-        );
+        assert_eq!(focus["inputSchema"]["properties"]["target"]["type"], "string");
+        assert!(focus["inputSchema"]["properties"]["target"].get("enum").is_none());
     }
 
     #[test]

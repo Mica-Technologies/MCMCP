@@ -195,11 +195,15 @@ def check(orchestrator, link_timeout):
     if "mcmcp_endpoint_info" not in names:
         raise Failure("the game's tools did not reach the aggregated catalogue")
 
-    # The instance argument is the whole addressing model, and an enum is what makes a model pick
-    # from it reliably. Every routed tool must offer both.
+    # The instance argument is the whole addressing model, so every routed tool must offer it. It
+    # names no game (#139): an enum of ids rewrote every schema whenever a game was approved, so
+    # the tool list must not mention the instance it was built from.
     for tool in routed:
-        if "enum" not in tool["inputSchema"]["properties"]["instance"]:
-            raise Failure(f"tool {tool['name']} has no instance enum to choose from")
+        instance = tool["inputSchema"]["properties"].get("instance")
+        if instance is None or instance.get("type") != "string":
+            raise Failure(f"tool {tool['name']} has no instance argument")
+        if "enum" in instance or instance_id in json.dumps(tool):
+            raise Failure(f"tool {tool['name']}'s schema names a game: {instance}")
     checked.append(
         f"{len(tools)} tools aggregated: {len(routed)} routed and addressable, "
         f"{len(own)} answered by the orchestrator"

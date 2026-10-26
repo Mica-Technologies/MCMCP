@@ -49,19 +49,17 @@ fn own(mut tool: Value) -> Value {
     tool
 }
 
-/// A `string` property naming an instance, with the known ones as an enum where there are any.
-fn instance_property(addressable: &[String], description: &str) -> Value {
-    let mut property = json!({ "type": "string", "description": description });
-    if !addressable.is_empty() {
-        // A model picks from a list far more reliably than it recalls an id from prose.
-        property["enum"] = Value::Array(addressable.iter().map(|id| json!(id)).collect());
-    }
-    property
+/// A `string` property naming an instance.
+///
+/// No enum of known ids: these definitions are part of the catalogue, and anything in them that
+/// changes as games come and go rewrites the whole tool list for the client (#139). An unknown id
+/// is answered at call time with the connected ones.
+fn instance_property(description: &str) -> Value {
+    json!({ "type": "string", "description": description })
 }
 
-pub fn definitions(addressable: &[String]) -> Vec<Value> {
+pub fn definitions() -> Vec<Value> {
     let target = instance_property(
-        addressable,
         "The instance id, as reported by mcmcp_instances. Ids are '<game>.client' or \
          '<game>.server' — one game open in singleplayer is two of them.",
     );
@@ -155,7 +153,6 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
                             before merging.",
                     },
                     "instance": instance_property(
-                        addressable,
                         "Read only this instance. Omit to read every connected one, which is the \
                          point of this tool.",
                     ),
@@ -216,12 +213,7 @@ pub fn definitions(addressable: &[String]) -> Vec<Value> {
 /// the same thing in two games and attributing the difference correctly. The trap it exists to avoid
 /// is a model comparing two worlds that differ in ways nobody accounted for and confidently blaming
 /// the change under test.
-pub fn prompt_definition(addressable: &[String]) -> Value {
-    let known = if addressable.is_empty() {
-        String::new()
-    } else {
-        format!(" Known instances: {}.", addressable.join(", "))
-    };
+pub fn prompt_definition() -> Value {
     json!({
         "name": COMPARE_PROMPT,
         "title": "Compare two instances",
@@ -236,7 +228,7 @@ pub fn prompt_definition(addressable: &[String]) -> Value {
             },
             {
                 "name": "first",
-                "description": format!("The instance to treat as the one under test.{known}"),
+                "description": "The instance to treat as the one under test.",
                 "required": false,
             },
             {
@@ -336,7 +328,7 @@ mod tests {
     fn every_named_tool_has_a_definition() {
         // The two lists are used for different things — one routes, one is published — and a name in
         // one but not the other is either an unroutable tool or an invisible one.
-        let defined: Vec<String> = definitions(&[])
+        let defined: Vec<String> = definitions()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap().to_string())
             .collect();
@@ -349,7 +341,7 @@ mod tests {
         // Guessing has failed twice: a hardcoded list went stale, and "no instance argument means
         // ours" is wrong because mcmcp_read_logs takes an optional one. This is the authoritative
         // answer, and every tool has to carry it or the guessing comes back.
-        for tool in definitions(&[]) {
+        for tool in definitions() {
             assert_eq!(
                 tool["_meta"][ANSWERED_BY_META], ANSWERED_BY_ORCHESTRATOR,
                 "{} does not say who answers it",
@@ -375,7 +367,7 @@ mod tests {
     fn the_reading_tools_are_annotated_read_only() {
         // Gating classifies by annotation, and a read that claimed to mutate would be blocked by a
         // policy nobody meant to apply to it.
-        for tool in definitions(&[]) {
+        for tool in definitions() {
             let name = tool["name"].as_str().unwrap();
             if name == "mcmcp_instances" || name == "mcmcp_compare_instances" || name == "mcmcp_read_logs" {
                 assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
@@ -384,22 +376,21 @@ mod tests {
     }
 
     #[test]
-    fn known_instances_appear_as_enums() {
-        let tools = definitions(&["alpha".into(), "beta".into()]);
-        let focus = tools.iter().find(|tool| tool["name"] == "mcmcp_focus").unwrap();
-        let logs = tools
-            .iter()
-            .find(|tool| tool["name"] == "mcmcp_read_logs")
-            .unwrap();
-
-        assert_eq!(
-            focus["inputSchema"]["properties"]["target"]["enum"],
-            json!(["alpha", "beta"])
-        );
-        assert_eq!(
-            logs["inputSchema"]["properties"]["instance"]["enum"],
-            json!(["alpha", "beta"])
-        );
+    fn no_instance_property_lists_the_known_games() {
+        // These definitions are part of the catalogue; an enum of ids here rewrote the tool list
+        // every time a game was approved (#139).
+        for tool in definitions() {
+            for (name, property) in tool["inputSchema"]["properties"]
+                .as_object()
+                .into_iter()
+                .flatten()
+            {
+                if name == "target" || name == "instance" {
+                    assert_eq!(property["type"], "string", "{}", tool["name"]);
+                    assert!(property.get("enum").is_none(), "{}", tool["name"]);
+                }
+            }
+        }
     }
 
     #[test]
