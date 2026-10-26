@@ -666,6 +666,34 @@ still hold.
 of your calls keeps its own, so one script cleaning up cannot fail another running on the same account.
 A call whose hold is ended while it waits fails with a message naming what ended it.
 
+#### `server_pregen_chunks`
+
+:material-cog: Idempotent · `x`, `z`, `toX`, `toZ`, or `centerX`, `centerZ`, `radius` · optional `dimension`, `chunksPerTick`, `maxLoadedChunks`
+
+Generates the chunks of an area that do not exist yet, at a set pace, so the first player or build
+there does not pay for world generation. It is the one MCMCP tool that generates chunks: everything
+else refuses to load a chunk that was never generated.
+
+- **Pace.** `chunksPerTick` (1 to 8, default 1) chunks a tick. It waits while the server is not
+  healthy (the same levels that hold jobs), and while the dimension has more than `maxLoadedChunks`
+  loaded (default: what was loaded when it started, plus 512).
+- **Population.** Vanilla populates a chunk (trees, ores, most mods' world generation) only while
+  its +x, +z and +x+z neighbours are loaded with it. So the pass covers one chunk past the area's
+  +x and +z edges, and loads a chunk already on disk when it borders a new one.
+- **Giving back.** Rows go in order. A row the pass loaded is queued to unload once the row after it
+  is finished, so at most about three rows are loaded at once. The server saves each chunk as it
+  unloads it. A chunk a player can see or something forces is never unloaded, and the world is never
+  saved or unloaded as a whole.
+- **Resuming.** Chunks on disk are skipped, so running the same area again picks up where it
+  stopped. An area that exists in full touches nothing.
+- Refused while saving is off (`save-off`): nothing it loaded could be unloaded.
+
+At most 1,024 chunks a call. For more, submit it as a background job:
+`server_job_submit {kind: "pregen", args: {centerX, centerZ, radius}}`. A job is split into squares
+of 16 x 16 chunks. Returns `{chunks, generated, loadedToPopulate, alreadyLoaded, existing,
+released, millis, chunksPerSecond}`, plus `waitsForHealth`, `waitsForLoadedChunks` and `lastWait`
+when it had to wait.
+
 #### `server_get_tile_entities`
 
 :material-eye: Read-only · `x`, `z` or `positions` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `blocks`, `keys`, `maxChars`, `summary`, `limit`, `cursor`, `load`, `groupBy`, `samples`
@@ -875,9 +903,11 @@ them. Steps that each `call` a read and `save` it, then `return` them all, bring
 :material-alert: Destructive · `kind`, `args` required · optional `label`
 
 Starts a long write or read as a background job and returns its id at once. `kind` is `apply_ops`,
-`set_blocks`, `get_blocks`, `relight` or `test`. `args` are the arguments that tool takes, of any
+`set_blocks`, `get_blocks`, `relight`, `test` or `pregen`. `args` are the arguments that tool takes, of any
 size: the server splits them into ordinary calls and works through them at its own pace. A `test`
-job runs one [`server_run_test`](#server_run_test) script, and its status carries the `verdict`. See
+job runs one [`server_run_test`](#server_run_test) script, and its status carries the `verdict`. A
+`pregen` job runs [`server_pregen_chunks`](#server_pregen_chunks) over an area of any size. To
+resume one that was interrupted, submit it again: chunks already generated are skipped. See
 [Background jobs](../guide/jobs.md) for how parts are split, paced and retried.
 
 Refused during an emergency stop, and when the caller already has four jobs queued or running.

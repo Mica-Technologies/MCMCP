@@ -67,7 +67,7 @@ public final class CompanionPolicy implements CallFilter {
         for (String command : new String[] {"server_run_command", "server_run_commands", "server_tell_player"}) {
             CLASSES.put(command, Principal.CLASS_COMMAND);
         }
-        for (String load : new String[] {"server_keep_loaded", "server_release_loaded"}) {
+        for (String load : new String[] {"server_keep_loaded", "server_release_loaded", "server_pregen_chunks"}) {
             CLASSES.put(load, Principal.CLASS_LOAD);
         }
         for (String use : new String[] {"server_use_item_on_block", "server_use_item_on_blocks", "server_activate_block"}) {

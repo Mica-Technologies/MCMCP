@@ -142,4 +142,28 @@ class JobPartsTest {
         assertTrue(status.get("error").getAsString().contains("lastOp + 1"));
         assertEquals(Arrays.asList(12), Arrays.asList(status.getAsJsonObject("totals").get("written").getAsInt()));
     }
+
+    @Test
+    void aPregenAreaIsCutIntoSquaresOfChunksAsBlockBoxes() {
+        // A radius of 300 blocks around 0,0 spans chunks -19..18 on each axis: 38 chunks, so 3 x 3 parts.
+        List<JobParts.Part> parts = JobParts.split("pregen",
+            args("{\"centerX\":0,\"centerZ\":0,\"radius\":300,\"chunksPerTick\":2}"), LIMITS);
+
+        assertEquals(9, parts.size());
+        JsonObject first = parts.get(0).args;
+        assertEquals(-19 * 16, first.get("x").getAsInt());
+        assertEquals((-19 + 15) * 16 + 15, first.get("toX").getAsInt());
+        assertFalse(first.has("radius"), "a part is a box; centre and radius would contradict it");
+        assertEquals(2, first.get("chunksPerTick").getAsInt(), "the pacing goes with every part");
+        assertEquals(18 * 16 + 15, parts.get(8).args.get("toZ").getAsInt(), "the last part ends at the edge");
+    }
+
+    @Test
+    void aPregenAreaNeedsABoxOrACentreAndRadiusButNotBoth() {
+        assertThrows(IllegalArgumentException.class, () -> JobParts.split("pregen", args("{\"centerX\":0}"), LIMITS));
+        assertThrows(IllegalArgumentException.class,
+            () -> JobParts.split("pregen", args("{\"x\":0,\"z\":0,\"radius\":10}"), LIMITS));
+        assertThrows(IllegalArgumentException.class,
+            () -> JobParts.split("pregen", args("{\"centerX\":0,\"centerZ\":0,\"radius\":99999}"), LIMITS));
+    }
 }

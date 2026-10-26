@@ -970,6 +970,43 @@ case "$PAGE_BODY" in
   *) mcp_failure "page 1 had no region and result: ${PAGE_BODY}" ;;
 esac
 
+echo "==> Pregeneration (#138): new chunks are generated, a second pass resumes, and a job runs one"
+# Somewhere no earlier run of this check has been: the world in run/server is kept between runs.
+GX=$(( (RANDOM % 4000 + 2000) * 64 )); GZ=$(( (RANDOM % 4000 + 2000) * 64 ))
+PREGEN_BODY="$(mcp_call 650 server_pregen_chunks "{\"x\":${GX},\"z\":${GZ},\"toX\":$((GX + 47)),\"toZ\":$((GZ + 47)),\"chunksPerTick\":4}")" \
+  || mcp_failure "server_pregen_chunks failed: ${PREGEN_BODY}"
+case "$PREGEN_BODY" in
+  *'"isError":true'*) mcp_failure "server_pregen_chunks refused: ${PREGEN_BODY}" ;;
+  *'"chunks":9,"generated":16,'*'"existing":0,'*) echo "    a 3 x 3 box and its margin generated: 16 chunks" ;;
+  *) mcp_failure "the pass did not generate the box and its margin: ${PREGEN_BODY}" ;;
+esac
+# Ores are placed by population, not generation: a box of bare terrain would have none.
+ORE_BODY="$(mcp_call 6501 server_count_blocks "{\"x\":$((GX + 16)),\"y\":1,\"z\":$((GZ + 16)),\"toX\":$((GX + 31)),\"toY\":128,\"toZ\":$((GZ + 31)),\"include\":[\"minecraft:coal_ore\",\"minecraft:iron_ore\"],\"load\":true}")" \
+  || mcp_failure "counting ores in the new chunks failed: ${ORE_BODY}"
+case "$ORE_BODY" in
+  *'"counted":0'*|*'"isError":true'*) mcp_failure "the generated chunks were not populated: ${ORE_BODY}" ;;
+  *'"counted":'*) echo "    and populated: the middle chunk has ores" ;;
+  *) mcp_failure "server_count_blocks said nothing countable: ${ORE_BODY}" ;;
+esac
+AGAIN_BODY="$(mcp_call 651 server_pregen_chunks "{\"x\":${GX},\"z\":${GZ},\"toX\":$((GX + 47)),\"toZ\":$((GZ + 47))}")" \
+  || mcp_failure "the second pass failed: ${AGAIN_BODY}"
+case "$AGAIN_BODY" in
+  *'"generated":0,"loadedToPopulate":0,'*'"existing":9,'*) echo "    the same box again touched nothing" ;;
+  *) mcp_failure "a second pass over an existing box did work: ${AGAIN_BODY}" ;;
+esac
+PJOB_BODY="$(mcp_call 652 server_job_submit "{\"kind\":\"pregen\",\"args\":{\"centerX\":$((GX + 1000)),\"centerZ\":${GZ},\"radius\":200,\"chunksPerTick\":8}}")" \
+  || mcp_failure "a pregen job failed to start: ${PJOB_BODY}"
+PJOB_ID="$(printf '%s' "$PJOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$PJOB_ID" ] || mcp_failure "no pregen job id: ${PJOB_BODY}"
+for _ in $(seq 1 6); do
+  PJOB_STATE="$(mcp_call 653 server_job_status "{\"id\":\"${PJOB_ID}\",\"wait\":30}")" || mcp_failure "status failed: ${PJOB_STATE}"
+  case "$PJOB_STATE" in *'"state":"done"'*|*'"state":"failed"'*) break ;; esac
+done
+case "$PJOB_STATE" in
+  *'"state":"done"'*'"parts":4'*'"generated":'*) echo "    ${PJOB_ID} generated a 400-block square in four parts" ;;
+  *) mcp_failure "the pregen job did not finish: ${PJOB_STATE}" ;;
+esac
+
 echo "==> Test scripts: power a lamp, wait for it, check, and put the world back"
 LX=$((SPAWN_X + 30)); LY=$((UNDO_Y + 12)); LZ=$((SPAWN_Z + 30))
 mcp_call 595 server_set_block "{\"x\":${LX},\"y\":${LY},\"z\":${LZ},\"block\":\"minecraft:redstone_lamp\"}" > /dev/null \

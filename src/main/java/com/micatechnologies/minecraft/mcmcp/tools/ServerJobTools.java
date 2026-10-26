@@ -42,13 +42,15 @@ public final class ServerJobTools {
             .description("Start a long write or read as a background job and return its id at once: kind "
                 + "'apply_ops' (server_apply_ops' arguments; any length), 'set_blocks' (server_set_blocks' "
                 + "arguments; cells, blocks or a fill of any size), 'get_blocks' (server_get_blocks' arguments "
-                + "over a box of any size; results come back as pages), 'relight', or 'test' (server_run_test's "
-                + "arguments; its verdict is in server_job_status). The server splits it into "
+                + "over a box of any size; results come back as pages), 'relight', 'test' (server_run_test's "
+                + "arguments; its verdict is in server_job_status), or 'pregen' (server_pregen_chunks' "
+                + "arguments over an area of any size; submit it again to resume). The server splits it into "
                 + "ordinary calls and works through them at its own pace, pausing while it struggles. Poll "
                 + "server_job_status; the job survives your script or client restarting, and its chunk holds are "
                 + "its own.")
             .schema(JsonSchema.object()
-                .enumeration("kind", "What to run.", "apply_ops", "set_blocks", "get_blocks", "relight", "test")
+                .enumeration("kind", "What to run.", "apply_ops", "set_blocks", "get_blocks", "relight", "test",
+                    "pregen")
                 .property("args", Json.obj("type", "object"))
                 .string("label", "A name to know it by in lists and the orchestrator.")
                 .required("kind", "args")
@@ -142,7 +144,7 @@ public final class ServerJobTools {
         String kind = context.getString("kind", "");
         String toolName = JobParts.toolFor(kind);
         if (toolName == null) {
-            return ToolResult.error("'kind' is one of apply_ops, set_blocks, get_blocks, relight, test.");
+            return ToolResult.error("'kind' is one of " + JobParts.kindList() + ".");
         }
         McpTool tool = McpRegistry.tool(toolName, McmcpSide.SERVER);
         if (tool == null) {

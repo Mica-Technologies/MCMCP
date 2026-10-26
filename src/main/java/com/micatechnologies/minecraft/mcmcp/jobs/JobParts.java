@@ -34,7 +34,14 @@ public final class JobParts {
         {"get_blocks", "server_get_blocks"},
         {"relight", "server_relight"},
         {"test", "server_run_test"},
+        {"pregen", "server_pregen_chunks"},
     };
+
+    /** A pregeneration part is at most this many chunks on a side: about a region file's quarter. */
+    static final int PREGEN_PART_SIDE = 16;
+
+    /** The furthest a pregeneration radius may reach, in blocks. */
+    public static final int MAX_PREGEN_RADIUS = 16_384;
 
     @Nullable
     public static String toolFor(String kind) {
@@ -105,9 +112,84 @@ public final class JobParts {
             case "test":
                 // A script is one run: its own steps are its pace, and it restores as a whole.
                 return Collections.singletonList(new Part(0, args, 0, -1, null));
+            case "pregen":
+                return splitPregen(args);
             default:
-                throw new IllegalArgumentException("'kind' is one of apply_ops, set_blocks, get_blocks, relight, test.");
+                throw new IllegalArgumentException("'kind' is one of " + kindList() + ".");
         }
+    }
+
+    /** The kinds, for messages. */
+    public static String kindList() {
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < KINDS.length; i++) {
+            text.append(i == 0 ? "" : i == KINDS.length - 1 ? " or " : ", ").append(KINDS[i][0]);
+        }
+        return text.toString();
+    }
+
+    /**
+     * A pregeneration area as a block box {@code {minX, minZ, maxX, maxZ}}: from x, z, toX, toZ, or
+     * from centerX, centerZ and radius (a square, which is what generation works in).
+     *
+     * @throws IllegalArgumentException with a message for the caller
+     */
+    public static int[] pregenBox(JsonObject args) {
+        if (args.has("radius")) {
+            int radius = Json.getInt(args, "radius", 0);
+            if (radius < 0 || radius > MAX_PREGEN_RADIUS) {
+                throw new IllegalArgumentException("'radius' is 0 to " + MAX_PREGEN_RADIUS + " blocks.");
+            }
+            if (args.has("x") || args.has("toX")) {
+                throw new IllegalArgumentException("Give centerX, centerZ and radius, or x, z, toX and toZ; not both.");
+            }
+            int centerX = Json.getInt(args, "centerX", 0);
+            int centerZ = Json.getInt(args, "centerZ", 0);
+            return new int[] {centerX - radius, centerZ - radius, centerX + radius, centerZ + radius};
+        }
+        if (!args.has("x") || !args.has("z")) {
+            throw new IllegalArgumentException("Give x, z, toX and toZ (blocks), or centerX, centerZ and radius.");
+        }
+        int x = Json.getInt(args, "x", 0);
+        int z = Json.getInt(args, "z", 0);
+        int toX = Json.getInt(args, "toX", x);
+        int toZ = Json.getInt(args, "toZ", z);
+        long span = Math.max(Math.abs((long) toX - x), Math.abs((long) toZ - z));
+        if (span > 2L * MAX_PREGEN_RADIUS) {
+            throw new IllegalArgumentException("That box is " + span + " blocks across; at most "
+                + 2 * MAX_PREGEN_RADIUS + ".");
+        }
+        return new int[] {Math.min(x, toX), Math.min(z, toZ), Math.max(x, toX), Math.max(z, toZ)};
+    }
+
+    /**
+     * Squares of {@link #PREGEN_PART_SIDE} chunks, rows in order of z, each as the block box of its
+     * chunks. Each part generates a margin of one chunk on its +x and +z sides so its own edges
+     * populate, and the next part loads that margin back to populate it in turn.
+     */
+    private static List<Part> splitPregen(JsonObject args) {
+        int[] box = pregenBox(args);
+        int minCX = box[0] >> 4;
+        int minCZ = box[1] >> 4;
+        int maxCX = box[2] >> 4;
+        int maxCZ = box[3] >> 4;
+        List<Part> parts = new ArrayList<>();
+        for (int cz = minCZ; cz <= maxCZ; cz += PREGEN_PART_SIDE) {
+            for (int cx = minCX; cx <= maxCX; cx += PREGEN_PART_SIDE) {
+                int toCX = Math.min(maxCX, cx + PREGEN_PART_SIDE - 1);
+                int toCZ = Math.min(maxCZ, cz + PREGEN_PART_SIDE - 1);
+                JsonObject part = copy(args);
+                part.remove("centerX");
+                part.remove("centerZ");
+                part.remove("radius");
+                part.addProperty("x", cx << 4);
+                part.addProperty("z", cz << 4);
+                part.addProperty("toX", (toCX << 4) + 15);
+                part.addProperty("toZ", (toCZ << 4) + 15);
+                parts.add(new Part(parts.size(), part, 0, -1, null));
+            }
+        }
+        return parts;
     }
 
     private static List<Part> splitOps(JsonObject args, long cap) {

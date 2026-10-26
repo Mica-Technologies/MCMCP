@@ -65,6 +65,9 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
  *       needs it, instead of waiting for the autosave; a chunk a player can see is never touched.</li>
  * </ul>
  *
+ * <p>The one exception is {@link ChunkPregen}, which generates on purpose for
+ * {@code server_pregen_chunks} and is paced by its caller in chunks per tick.
+ *
  * <h2>Threads</h2>
  *
  * The ledger, the tickets and the queue are the server thread's alone. A tool asks from its worker

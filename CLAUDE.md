@@ -108,7 +108,9 @@ the server listens. It is **a transport, not a tool set**: the server runs an or
   cannot widen its own access.
 
 Chunk loads go through `ChunkLoadGovernor` and nowhere else; writes check `isBlockLoaded` and never
-load, because `setBlockState` on an unloaded position loads or generates the chunk.
+load, because `setBlockState` on an unloaded position loads or generates the chunk. The one place
+MCMCP generates is `ChunkPregen` (`server_pregen_chunks`, #138). It is paced per tick by its caller,
+and it gives back only the chunks it loaded. Never save or unload the world as a whole from it.
 
 ### The threading rule
 

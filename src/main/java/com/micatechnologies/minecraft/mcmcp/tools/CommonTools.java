@@ -53,6 +53,7 @@ public final class CommonTools {
         ServerInteractTools.register();
         ServerItemUseBatch.register();
         ServerAreaTools.register();
+        ServerPregenTools.register();
         ServerApplyOps.register();
         ServerJobTools.register();
         ServerTestTools.register();
