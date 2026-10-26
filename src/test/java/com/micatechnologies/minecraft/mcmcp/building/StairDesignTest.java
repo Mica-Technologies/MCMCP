@@ -150,4 +150,33 @@ class StairDesignTest {
         StairDesign.DesignException e = assertThrows(StairDesign.DesignException.class, () -> StairDesign.plan(in));
         assertEquals("no door given for floor y80 (rules.DOOR_EVERY_FLOOR)", e.getMessage());
     }
+
+    @Test
+    void aCsmRailOnTheRoofParapetFacesTheStairWellAndNotTheDeckBehindIt() throws Exception {
+        // The UIA builder's review fixture: a drop depth of one cell also counts the deck (its walking cell
+        // is air) and gives the rails every edge; the deck block one further down is what rules it out.
+        JsonObject fixture = fixture("alto1873_N_csmrail");
+        StairDesign.Input input = StairDesign.Input.fromJson(fixture.getAsJsonObject("input"));
+        StairDesign.Plan plan = StairDesign.plan(input);
+        String rail = input.palette.rail;
+        RailEdges.Solid solid = RailEdges.ofPlan(plan.cells, rail);
+
+        List<String> got = new ArrayList<>();
+        for (Map.Entry<Pos, String> cell : plan.cells.entrySet()) {
+            if (cell.getValue().equals(rail)) {
+                Pos p = cell.getKey();
+                got.add(p.x + " " + p.y + " " + p.z + " " + rail + ":"
+                    + RailEdges.edges(solid, p.x, p.y, p.z, RailEdges.PARAPET_DEPTH));
+            }
+        }
+        List<String> expected = new ArrayList<>();
+        for (JsonElement item : fixture.getAsJsonObject("expected").getAsJsonArray("railCells")) {
+            JsonArray c = item.getAsJsonArray();
+            expected.add(c.get(0).getAsInt() + " " + c.get(1).getAsInt() + " " + c.get(2).getAsInt() + " "
+                + c.get(3).getAsString());
+        }
+        java.util.Collections.sort(got);
+        java.util.Collections.sort(expected);
+        assertEquals(expected, got);
+    }
 }

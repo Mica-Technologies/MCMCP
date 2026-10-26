@@ -224,14 +224,10 @@ public final class ServerComponentTools {
             new ArrayList<>(plan.cells.entrySet());
         final String rail = input.palette == null ? null : input.palette.rail;
         // A rail whose edges are stored (a CSM railing, not a pane) faces the drop: the plan is the world
-        // it stands in, and a deck rail drops to the treads one or more blocks below.
+        // it stands in, and a deck rail stands on a parapet over the stair well.
         final java.util.Set<String> railProps = rail == null ? java.util.Collections.<String>emptySet()
             : storedEdges(rail);
-        final RailEdges.Solid planSolid = (x, y, z) -> {
-            String b = plan.cells.get(new com.micatechnologies.minecraft.mcmcp.building.Pos(x, y, z));
-            return b == null || !(b.equals(com.micatechnologies.minecraft.mcmcp.building.StairDesign.AIR)
-                || b.startsWith("minecraft:air") || b.contains("lightupair") || b.equals(rail));
-        };
+        final RailEdges.Solid planSolid = RailEdges.ofPlan(plan.cells, rail);
         Set<Long> chunks = new LinkedHashSet<>();
         for (Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell : cells) {
             chunks.add(ChunkKeys.ofBlock(cell.getKey().x, cell.getKey().z));
@@ -261,7 +257,7 @@ public final class ServerComponentTools {
                             block = torchFor(block);
                         }
                         if (rail != null && block.equals(rail) && !railProps.isEmpty()) {
-                            int mask = RailEdges.edges(planSolid, p.x, p.y, p.z, 2);
+                            int mask = RailEdges.edges(planSolid, p.x, p.y, p.z, RailEdges.PARAPET_DEPTH);
                             if (mask != 0) {
                                 Map<String, String> edges = new LinkedHashMap<>();
                                 edges.put("north", String.valueOf((mask & RailEdges.NORTH) != 0));

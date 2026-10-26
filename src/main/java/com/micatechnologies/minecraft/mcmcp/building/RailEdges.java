@@ -70,6 +70,26 @@ public final class RailEdges {
         return true;
     }
 
+    /**
+     * Drop depth for a rail standing on a parapet: nothing solid in the two cells below the rail beside
+     * it. One cell would also count the deck behind the parapet (its walking cell is air), and give the
+     * rail every edge; the deck's own block is the second cell down (the UIA builder's review, fixture
+     * stairs_alto1873_N_csmrail, 2026-10-26).
+     */
+    public static final int PARAPET_DEPTH = 3;
+
+    /**
+     * What is solid in a planned build, for its rails: anything planned but air, lighting helpers and the
+     * rail itself; outside the plan, solid (a stair core's walls enclose it).
+     */
+    public static Solid ofPlan(final java.util.Map<Pos, String> plan, final String rail) {
+        return (x, y, z) -> {
+            String block = plan.get(new Pos(x, y, z));
+            return block == null || !(block.startsWith("minecraft:air") || block.contains("lightupair")
+                || block.equals(rail) || block.startsWith(rail + ":"));
+        };
+    }
+
     /** "NE", "SW"... as a mask. */
     public static int parse(String edges) {
         int mask = 0;
