@@ -50,9 +50,10 @@ jobs:
       # already; Linux needs the webkit2gtk headers or nothing in the workspace builds at all.
       - name: Install Linux webview dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -84,21 +85,16 @@ jobs:
           workspaces: orchestrator
           key: ${{ matrix.os }}
 
-      # Tauri renders through the system webview, and the app crate is part of the workspace — so
-      # `cargo test --workspace` links against it. Windows has WebView2 and macOS has WKWebView
-      # already; Linux needs the webkit2gtk headers or nothing in the workspace builds at all.
-      - name: Install Linux webview dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
+      # Linux leaves the desktop app out: it is the only crate that links the system webview, and
+      # installing webkit2gtk was the whole of this job's time, 30 minutes on a slow mirror day
+      # (#145). The app still compiles on Linux in the clippy job, and is tested on macOS and
+      # Windows, which ship their webviews.
       - name: Test
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets ${{ runner.os == 'Linux' && '--exclude mcmcp-orchestrator-app' || '' }}
 
       # `cargo test` skips doc tests when --all-targets is given, and they are cheap.
       - name: Doc tests
-        run: cargo test --workspace --doc
+        run: cargo test --workspace --doc ${{ runner.os == 'Linux' && '--exclude mcmcp-orchestrator-app' || '' }}
 
   end_to_end:
     name: Real Game Through the Orchestrator
@@ -142,9 +138,10 @@ jobs:
       # already; Linux needs the webkit2gtk headers or nothing in the workspace builds at all.
       - name: Install Linux webview dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       # The mapping from the mod's version to the app's is where an installer upgrade lives or dies,
       # and it is pure string handling that nothing else exercises — a release is the wrong place to
