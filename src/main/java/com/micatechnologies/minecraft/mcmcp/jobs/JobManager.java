@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,7 +45,13 @@ import javax.annotation.Nullable;
 public final class JobManager {
 
     private static final int RUNNERS = 2;
-    private static final int MAX_ACTIVE_PER_OWNER = 4;
+    /**
+     * Jobs one agent may have queued or running. Counted per agent, not per player: several agents
+     * building through one companion shared four slots, and a serial ride test died half way when the
+     * others held three (#154). The owner as a whole is held to {@link #MAX_ACTIVE_PER_OWNER}.
+     */
+    static final int MAX_ACTIVE_PER_AGENT = 4;
+    static final int MAX_ACTIVE_PER_OWNER = 8;
     private static final int MAX_ACTIVE = 16;
     private static final int BUSY_RETRIES = 8;
     private static final long KEEP_SETTLED_MILLIS = 30L * 60L * 1000L;
@@ -143,36 +150,66 @@ public final class JobManager {
     // Submitting and controlling
     // ------------------------------------------------------------------
 
+    /** No slot is free for a new job: who holds them, and when to try again. */
+    public static final class SlotsFull extends IllegalArgumentException {
+
+        public final List<String> holders;
+
+        SlotsFull(String message, List<String> holders) {
+            super(message);
+            this.holders = holders;
+        }
+    }
+
+    /** How long a caller refused a slot should wait before trying again. */
+    public static final long RETRY_AFTER_MILLIS = 2_000L;
+
     /**
      * Queues a job.
      *
+     * @param agentKey the submitting agent within the owner, for the per-agent cap
+     * @throws SlotsFull when no slot is free for it
      * @throws IllegalArgumentException with a message for the caller
      */
     public static synchronized Job submit(String kind, McpTool tool, JsonObject args, @Nullable String label,
-                                          String owner, String ownerKey, McpSession session, JobParts.Limits limits) {
+                                          String owner, String ownerKey, String agentKey, McpSession session,
+                                          JobParts.Limits limits) {
         if (runners == null || bridge == null) {
             throw new IllegalArgumentException("No server is running jobs.");
         }
         int active = 0;
-        int mine = 0;
+        List<String> owners = new ArrayList<>();
+        List<String> agents = new ArrayList<>();
         for (Job job : JOBS.values()) {
             if (!job.state().settled()) {
                 active++;
+                String held = job.id + (job.label == null ? "" : " '" + job.label + "'") + " (" + job.state().id() + ")";
                 if (job.ownerKey.equals(ownerKey)) {
-                    mine++;
+                    owners.add(held);
+                }
+                if (job.ownerKey.equals(ownerKey) && agentKey.equals(job.agentKey)) {
+                    agents.add(held);
                 }
             }
         }
-        if (mine >= MAX_ACTIVE_PER_OWNER) {
-            throw new IllegalArgumentException("You have " + mine + " jobs queued or running; " + MAX_ACTIVE_PER_OWNER
-                + " is the most. Wait for one to finish, or cancel one.");
+        if (agents.size() >= MAX_ACTIVE_PER_AGENT) {
+            throw new SlotsFull("You have " + agents.size() + " jobs queued or running; " + MAX_ACTIVE_PER_AGENT
+                + " is the most for one agent: " + String.join(", ", agents) + ". Wait for one to finish, cancel one, "
+                + "or submit with waitForSlot.", agents);
+        }
+        if (owners.size() >= MAX_ACTIVE_PER_OWNER) {
+            throw new SlotsFull(owners.size() + " jobs of yours, from all your agents together, are queued or running; "
+                + MAX_ACTIVE_PER_OWNER + " is the most: " + String.join(", ", owners) + ". Submit with waitForSlot "
+                + "to queue behind them.", owners);
         }
         if (active >= MAX_ACTIVE) {
-            throw new IllegalArgumentException("The server has " + active + " jobs queued or running; try again later.");
+            throw new SlotsFull("The server has " + active + " jobs queued or running; " + MAX_ACTIVE + " is the most. "
+                + "Submit with waitForSlot, or try again later.", Collections.<String>emptyList());
         }
         List<JobParts.Part> parts = JobParts.split(kind, args, limits);
         String id = "j" + Long.toString(System.currentTimeMillis() % 100_000_000L, 36) + NEXT.getAndIncrement();
         Job job = new Job(id, kind, tool.getName(), label, owner, ownerKey, parts, System.currentTimeMillis());
+        job.agentKey = agentKey;
         JOBS.put(id, job);
         dirty = true;
         final GameThreadBridge gameThread = bridge;

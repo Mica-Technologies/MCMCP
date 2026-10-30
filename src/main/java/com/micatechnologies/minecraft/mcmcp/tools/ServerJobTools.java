@@ -54,6 +54,8 @@ public final class ServerJobTools {
                     "pregen", "build")
                 .property("args", Json.obj("type", "object"))
                 .string("label", "A name to know it by in lists and the orchestrator.")
+                .integer("waitForSlot", "Seconds to wait for a free job slot (4 per agent, 8 per player, 16 per "
+                    + "server) instead of being refused. Default 0.", 0, MAX_WAIT_SECONDS)
                 .required("kind", "args")
                 .build())
             .serverOnly()
@@ -203,13 +205,34 @@ public final class ServerJobTools {
         JobParts.Limits limits = new JobParts.Limits(Math.min(maxWrite, perMinute),
             Math.min((long) maxWrite * 4L, perMinute), (long) volume * 32L, (long) volume * 32L, volume, 4_194_304L);
         Job job;
-        try {
-            job = JobManager.submit(kind, tool, args, context.getString("label", null),
-                principal.isCompanion() ? principal.getPlayerName() : "endpoint",
-                ChunkLoadGovernor.callerOf(principal), context.getSession(), limits);
-        }
-        catch (IllegalArgumentException e) {
-            return ToolResult.error(e.getMessage());
+        long slotDeadline = System.currentTimeMillis() + context.getBoundedInt("waitForSlot", 0, 0, MAX_WAIT_SECONDS) * 1000L;
+        while (true) {
+            try {
+                job = JobManager.submit(kind, tool, args, context.getString("label", null),
+                    principal.isCompanion() ? principal.getPlayerName() : "endpoint",
+                    ChunkLoadGovernor.callerOf(principal), context.callerKey(), context.getSession(), limits);
+                break;
+            }
+            catch (JobManager.SlotsFull full) {
+                if (System.currentTimeMillis() + JobManager.RETRY_AFTER_MILLIS > slotDeadline) {
+                    JsonObject busy = new JsonObject();
+                    busy.addProperty("retryAfterMs", JobManager.RETRY_AFTER_MILLIS);
+                    busy.add("holders", Json.arrayOfStrings(full.holders));
+                    return ToolResult.error(full.getMessage()).withStructured(Json.obj("busy", busy));
+                }
+                try {
+                    context.getCancellation().throwIfCancelled();
+                    context.reportProgress(0, 1, "Waiting for a job slot");
+                    Thread.sleep(JobManager.RETRY_AFTER_MILLIS);
+                }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return ToolResult.error("Interrupted while waiting for a job slot; nothing was submitted.");
+                }
+            }
+            catch (IllegalArgumentException e) {
+                return ToolResult.error(e.getMessage());
+            }
         }
         JsonObject json = job.toJson(false);
         json.addProperty("note", "Poll server_job_status with this id.");

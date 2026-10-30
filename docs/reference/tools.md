@@ -1166,7 +1166,7 @@ them. Steps that each `call` a read and `save` it, then `return` them all, bring
 
 #### `server_job_submit`
 
-:material-alert: Destructive · `kind`, `args` required · optional `label`
+:material-alert: Destructive · `kind`, `args` required · optional `label`, `waitForSlot`
 
 Starts a long write or read as a background job and returns its id at once. `kind` is `apply_ops`,
 `set_blocks`, `get_blocks`, `relight`, `test`, `pregen` or `build`. `args` are the arguments that tool takes, of any
@@ -1176,7 +1176,11 @@ job runs one [`server_run_test`](#server_run_test) script, and its status carrie
 resume one that was interrupted, submit it again: chunks already generated are skipped. See
 [Background jobs](../guide/jobs.md) for how parts are split, paced and retried.
 
-Refused during an emergency stop, and when the caller already has four jobs queued or running.
+Refused during an emergency stop. Job slots are limited: four queued or running per agent, eight
+per player (all of a companion player's agents together) and sixteen per server. Several agents
+building through one companion used to share four, so a serial test loop died when the others held
+three. A refusal names the jobs holding the slots, and its `busy` block has `retryAfterMs` and the
+`holders`. With `waitForSlot` (seconds, up to 120) the call waits for a slot instead.
 
 #### `server_job_status`
 

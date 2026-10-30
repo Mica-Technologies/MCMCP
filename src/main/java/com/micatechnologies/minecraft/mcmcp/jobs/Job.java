@@ -59,6 +59,11 @@ public final class Job {
     public final String ownerKey;
     public final long createdMillis;
     final List<JobParts.Part> parts;
+    /**
+     * The agent that submitted it, within its owner: what the per-agent cap counts (#154). Not
+     * saved; a job read back after a restart is settled, so it holds no slot.
+     */
+    String agentKey;
 
     private State state = State.QUEUED;
     private final java.util.EnumSet<Hold> holds = java.util.EnumSet.noneOf(Hold.class);
@@ -94,6 +99,7 @@ public final class Job {
         this.label = label;
         this.owner = owner;
         this.ownerKey = ownerKey;
+        this.agentKey = ownerKey;
         this.parts = parts;
         this.createdMillis = createdMillis;
     }
