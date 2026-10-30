@@ -728,19 +728,20 @@ mcp_call 553 server_set_blocks "{\"mode\":\"fill\",\"block\":\"minecraft:air\",\
 DRY_BODY="$(mcp_call 550 server_apply_ops "{\"ops\":${OPS},\"dryRun\":true}")" \
   || mcp_failure "server_apply_ops dry run failed: ${DRY_BODY}"
 case "$DRY_BODY" in
-  *'"attempted":12'*'"wouldWrite":'*'"refusedOps"'*'"sample"'*) ;;
+  # The 'say' line is refused before the write and counts in refused and attempted (#150).
+  *'"attempted":13'*'"wouldWrite":'*'"refused":1,"refusedLines":1'*'"refusedOps"'*'"sample"'*) ;;
   *) mcp_failure "the dry run did not replay the ops: ${DRY_BODY}" ;;
 esac
 APPLY_BODY="$(mcp_call 551 server_apply_ops "{\"ops\":${OPS}}")" \
   || mcp_failure "server_apply_ops failed: ${APPLY_BODY}"
 case "$APPLY_BODY" in
-  *'"attempted":12,"written":'*'"refused":0'*'"byPartner":1'*) ;;
+  *'"attempted":13,"written":'*'"refused":1'*'"byPartner":1'*) ;;
   *) mcp_failure "server_apply_ops did not write the replay, door as a pair: ${APPLY_BODY}" ;;
 esac
 AGAIN_BODY="$(mcp_call 552 server_apply_ops "{\"ops\":${OPS}}")" \
   || mcp_failure "replaying again failed: ${AGAIN_BODY}"
 case "$AGAIN_BODY" in
-  *'"attempted":12,"written":0,"unchanged":12'*) echo "    replayed, door paired, and a second replay wrote nothing" ;;
+  *'"attempted":13,"written":0,"unchanged":12'*) echo "    replayed, door paired, and a second replay wrote nothing" ;;
   *) mcp_failure "a second replay was not all unchanged: ${AGAIN_BODY}" ;;
 esac
 
@@ -1194,6 +1195,13 @@ case "$STAIR_BODY" in
   *'"isError":true'*) mcp_failure "the stair was refused: ${STAIR_BODY}" ;;
   *'"cells":3519'*'"auditFailures":0'*'"refused":0'*) echo "    four floors: 3,519 cells, 6 flights, its own audit clean, every cell written" ;;
   *) mcp_failure "the stair was not built as planned: $(printf '%s' "$STAIR_BODY" | cut -c1-800)" ;;
+esac
+# Built once, the same stair again wants nothing: its door headers are kept, not cut open (#146).
+AGAIN_STAIR="$(mcp_call 713 server_build_stair "{\"box\":[${SX},${SZ},$((SX + 11)),$((SZ + 8))],\"axis\":\"x\",\"width\":3,\"floors\":[${SY},$((SY + 8)),$((SY + 16)),$((SY + 24))],\"doors\":{\"${SY}\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 8))\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 16))\":[[$((SX + 2)),$((SZ + 8))]],\"$((SY + 24))\":[[$((SX + 2)),$((SZ + 8))]]},\"palette\":{\"floor\":\"minecraft:concrete:8\",\"wall\":\"minecraft:concrete:7\",\"tread\":\"minecraft:stone_brick_stairs\",\"rail\":\"minecraft:glass_pane\",\"sconce\":\"minecraft:torch\"},\"dryRun\":true}")" \
+  || mcp_failure "the stair's dry rerun failed: ${AGAIN_STAIR}"
+case "$AGAIN_STAIR" in
+  *'"wouldWrite":0'*) echo "    a dry rerun of the built stair wants nothing" ;;
+  *) mcp_failure "a dry rerun of the built stair wanted writes: $(printf '%s' "$AGAIN_STAIR" | cut -c1-1200)" ;;
 esac
 DEFAULT_STAIR="$(mcp_call 712 server_build_stair "{\"box\":[$((SX + 20)),${SZ},$((SX + 31)),$((SZ + 8))],\"axis\":\"x\",\"floors\":[${SY},$((SY + 8))],\"doors\":{\"${SY}\":[[$((SX + 22)),$((SZ + 8))]],\"$((SY + 8))\":[[$((SX + 22)),$((SZ + 8))]]},\"dryRun\":true}")" \
   || mcp_failure "server_build_stair with defaults failed: ${DEFAULT_STAIR}"
