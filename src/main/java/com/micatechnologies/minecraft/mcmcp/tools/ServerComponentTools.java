@@ -51,8 +51,9 @@ public final class ServerComponentTools {
             .description("Place single doors and double-door pairs in openings, hinges right: each opening is "
                 + "{x, y, z (the lower cell), block, facing (N/E/S/W: the way you walk in), width 1|2, axis (x|z, a "
                 + "pair's direction; default across the facing), closer (default true, where the block has one), "
-                + "hinge (left|right, singles), header ('auto' fills the cell above a 2-high door in a 3-high opening "
-                + "with the wall beside it, or a block id)}. A pair hinges on its outer edges. Each door is written "
+                + "hinge (left|right, singles), header (fills the cell above a 2-high door in a 3-high opening: "
+                + "default when the wall stands on both sides of it there, 'auto' with the wall on either side, a "
+                + "block id, or 'none')}. A pair hinges on its outer edges. Each door is written "
                 + "lower half then upper, through server_apply_ops (undo point, dryRun, saveTarget).")
             .schema(componentSchema(JsonSchema.object())
                 .property("openings", Json.obj("type", "array"))
@@ -158,14 +159,16 @@ public final class ServerComponentTools {
                 + "walls, inclusive), floors (the stand y of each floor's door, bottom up; the last is the roof "
                 + "landing), doors {\"y\": [[x, z]...]} (door cells in the wall per floor), width (3, the minimum, "
                 + "or 4), axis (x|z; default the longer interior), start (lo|hi: where the first flight leaves), "
-                + "inset {\"y\": n}, top, walls (default true: the ring and bulkhead roof), palette {floor, wall, "
+                + "inset {\"y\": n}, top, walls (default true: the ring and bulkhead roof; 'fill': ring cells only "
+                + "where the live cell is open, so a shared facade stays), skipFaces, doorHeight, palette {floor, wall, "
                 + "tread, rail, sconce}. Rules: +1 steps, 3 headroom over every tread and landing, landings at "
                 + "least the width deep, uneven rises split shorter first so each storey lands at its door's end, a "
                 + "divider between the lanes, guards beside every drop, a light near every landing. A box that "
                 + "cannot hold a compliant stair is refused with the fix ('core needs 2 more cells in x...'). "
-                + "Cells holding doors, signs, panels, sconces, pulls or standpipes are kept ('keep' to change). "
+                + "Cells holding doors, signs, panels, sconces, pulls or standpipes are kept ('keep' to change), and "
+                + "a cell the plan wants as air is left when it holds what verify counts as air (csm:lightupair). "
                 + "Returns the flights, the plan's own audit by rule (0 = compliant) and the write "
-                + "(server_apply_ops: undo point, dryRun, saveTarget).")
+                + "(server_apply_ops: undo point, dryRun, saveTarget); a dryRun adds byChange, [want, is, count].")
             .schema(componentSchema(JsonSchema.object())
                 .array("box", "[x0, z0, x1, z1]: the enclosure walls, inclusive.", Json.obj("type", "integer"))
                 .array("floors", "Stand y of each floor's door, bottom up; the last is the roof landing.",
@@ -176,7 +179,13 @@ public final class ServerComponentTools {
                 .enumeration("start", "The end the first flight leaves from. Default lo.", "lo", "hi")
                 .property("inset", Json.obj("type", "object"))
                 .integer("top", "Last interior air row, to cap under an existing roof.", 1, 255)
-                .bool("walls", "Build the enclosure ring and the bulkhead roof. Default true.")
+                .property("walls", described(new String[] {"boolean", "string"}, "Build the enclosure ring and "
+                    + "the bulkhead roof: true (default), false, or 'fill' to write ring cells only where the live cell "
+                    + "is air or has no collision box, keeping a facade or neighbour's wall the core shares."))
+                .array("skipFaces", "Ring faces never written, of N, E, S, W (z min, x max, z max, x min): a "
+                    + "shared exterior wall.", Json.obj("type", "string"))
+                .integer("doorHeight", "Door openings' height. Default 2: the cell over each door is the wall "
+                    + "(kept if it holds a block, else the palette's wall). 3 cuts it open.", 2, 3)
                 .property("palette", Json.obj("type", "object"))
                 .array("keep", "Block patterns never overwritten. Default doors, signs, panels, sconces, pulls, "
                     + "standpipes; [] overwrites everything.", Json.obj("type", "string"))
@@ -193,9 +202,19 @@ public final class ServerComponentTools {
         for (Map.Entry<String, JsonElement> entry : context.getArguments().entrySet()) {
             cfg.add(entry.getKey(), entry.getValue());
         }
-        if (!cfg.has("walls")) {
+        final boolean fillWalls = cfg.has("walls") && cfg.get("walls").isJsonPrimitive()
+            && "fill".equalsIgnoreCase(cfg.get("walls").getAsString());
+        if (!cfg.has("walls") || fillWalls) {
             cfg.addProperty("walls", true);
         }
+        final Set<Character> skipFaces = new java.util.HashSet<>();
+        for (String face : Json.getStringList(context.getArguments(), "skipFaces")) {
+            if (face.trim().length() != 1 || "NESW".indexOf(Character.toUpperCase(face.trim().charAt(0))) < 0) {
+                return ToolResult.error("skipFaces takes N, E, S and W. Nothing was written.");
+            }
+            skipFaces.add(Character.toUpperCase(face.trim().charAt(0)));
+        }
+        final int doorHeight = context.getBoundedInt("doorHeight", 2, 2, 3);
         // Generic defaults that still pass a builder's rules where its blocks exist: a guard rail rather
         // than a bare pane, a sconce rather than nothing. The first of each list this game has is used.
         JsonObject palette = Json.getObject(cfg, "palette");
@@ -228,6 +247,22 @@ public final class ServerComponentTools {
         final java.util.Set<String> railProps = rail == null ? java.util.Collections.<String>emptySet()
             : storedEdges(rail);
         final RailEdges.Solid planSolid = RailEdges.ofPlan(plan.cells, rail);
+        final String wall = input.palette.wall;
+        final int[] ring = {input.box[0], input.box[1], input.box[2], input.box[3]};
+        final int ringFrom = input.floors.get(0) - 1;
+        // The cell over each door, where the plan cuts a 3-high opening.
+        final Set<Long> headers = new java.util.HashSet<>();
+        if (doorHeight == 2) {
+            for (Map.Entry<Integer, List<int[]>> floor : input.doors.entrySet()) {
+                for (int[] door : floor.getValue()) {
+                    headers.add(new BlockPos(door[0], floor.getKey() + 2, door[1]).toLong());
+                }
+            }
+        }
+        final com.micatechnologies.minecraft.mcmcp.regions.TargetDiff.Normaliser same =
+            ServerTargetTools.normaliser(context, ServerTargetTools.store());
+        final boolean dryRun = context.getBoolean("dryRun", false);
+        final Map<String, int[]> byChange = new java.util.TreeMap<>();
         Set<Long> chunks = new LinkedHashSet<>();
         for (Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell : cells) {
             chunks.add(ChunkKeys.ofBlock(cell.getKey().x, cell.getKey().z));
@@ -235,6 +270,9 @@ public final class ServerComponentTools {
         return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
             final List<String> ops = new ArrayList<>();
             final int[] kept = {0};
+            final int[] wallsKept = {0};
+            final int[] headersKept = {0};
+            final int[] airKept = {0};
             final int[] cursor = {0};
             while (cursor[0] < cells.size()) {
                 context.onGameThread(() -> {
@@ -244,15 +282,47 @@ public final class ServerComponentTools {
                     while (cursor[0] < cells.size() && System.nanoTime() - started < 25_000_000L) {
                         Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell = cells.get(cursor[0]++);
                         com.micatechnologies.minecraft.mcmcp.building.Pos p = cell.getKey();
+                        pos.setPos(p.x, p.y, p.z);
+                        IBlockState live = world.isBlockLoaded(pos) ? world.getBlockState(pos) : null;
+                        String block = cell.getValue();
                         if (!keep.isEmpty()) {
-                            pos.setPos(p.x, p.y, p.z);
-                            String id = world.isBlockLoaded(pos) ? idOf(world.getBlockState(pos)) : null;
+                            String id = live == null ? null : idOf(live);
                             if (id != null && !world.isAirBlock(pos) && matchesAny(keep, id)) {
                                 kept[0]++;
                                 continue;
                             }
                         }
-                        String block = cell.getValue();
+                        boolean onRing = p.x == ring[0] || p.x == ring[2] || p.z == ring[1] || p.z == ring[3];
+                        if (block.equals(wall) && onRing && p.y >= ringFrom && p.y <= plan.top + 1) {
+                            char face = p.z == ring[1] ? 'N' : p.x == ring[2] ? 'E' : p.z == ring[3] ? 'S' : 'W';
+                            if (skipFaces.contains(face) || fillWalls && live != null && !world.isAirBlock(pos)
+                                && live.getCollisionBoundingBox(world, pos) != Block.NULL_AABB) {
+                                wallsKept[0]++;
+                                continue;
+                            }
+                        }
+                        boolean wantsAir = block.equals("minecraft:air") || block.startsWith("minecraft:air:");
+                        if (wantsAir && headers.contains(new BlockPos(p.x, p.y, p.z).toLong())) {
+                            // A 2-high door's header: whatever wall is there stays, a hole gets the wall.
+                            if (live != null && !world.isAirBlock(pos)) {
+                                headersKept[0]++;
+                                continue;
+                            }
+                            block = wall;
+                            wantsAir = false;
+                        }
+                        if (wantsAir && live != null && !world.isAirBlock(pos)
+                            && "minecraft:air".equals(same.normalise(ServerTargetTools.canonical(live)))) {
+                            // A light helper is air to verify; clearing it would put the lights out (#146).
+                            airKept[0]++;
+                            continue;
+                        }
+                        if (dryRun && live != null && !(rail != null && block.equals(rail))) {
+                            String want = wantsAir ? "minecraft:air" : block;
+                            if (!sameBlock(want, live)) {
+                                byChange.computeIfAbsent(idOfText(want) + "\t" + idOf(live), k -> new int[1])[0]++;
+                            }
+                        }
                         if (block.startsWith("minecraft:torch:")) {
                             block = torchFor(block);
                         }
@@ -302,6 +372,29 @@ public final class ServerComponentTools {
             }
             if (kept[0] > 0) {
                 json.addProperty("kept", kept[0]);
+            }
+            if (wallsKept[0] > 0) {
+                json.addProperty("wallsKept", wallsKept[0]);
+            }
+            if (headersKept[0] > 0) {
+                json.addProperty("headersKept", headersKept[0]);
+            }
+            if (airKept[0] > 0) {
+                json.addProperty("airKept", airKept[0]);
+            }
+            if (dryRun && !byChange.isEmpty()) {
+                List<Map.Entry<String, int[]>> rows = new ArrayList<>(byChange.entrySet());
+                rows.sort((a, b) -> b.getValue()[0] - a.getValue()[0]);
+                JsonArray changes = new JsonArray();
+                for (int i = 0; i < rows.size() && i < 50; i++) {
+                    String[] ids = rows.get(i).getKey().split("\t", 2);
+                    JsonArray row = new JsonArray();
+                    row.add(ids[0]);
+                    row.add(ids[1]);
+                    row.add(rows.get(i).getValue()[0]);
+                    changes.add(row);
+                }
+                json.add("byChange", changes);
             }
             write(context, dimension, ops, json);
             return ToolResult.structured(json);
@@ -429,6 +522,41 @@ public final class ServerComponentTools {
         }
     }
 
+    /** The id of a plan block written {@code id} or {@code id:meta}. */
+    private static String idOfText(String block) {
+        int first = block.indexOf(':');
+        int second = first < 0 ? -1 : block.indexOf(':', first + 1);
+        return second < 0 ? block : block.substring(0, second);
+    }
+
+    /** Whether the live state is the plan block {@code id} or {@code id:meta}, as stored. Game thread. */
+    private static boolean sameBlock(String block, IBlockState live) {
+        String id = idOfText(block);
+        if (!id.equals(idOf(live))) {
+            return false;
+        }
+        if (id.length() == block.length()) {
+            return true;
+        }
+        try {
+            return live.getBlock().getMetaFromState(live) == Integer.parseInt(block.substring(id.length() + 1));
+        }
+        catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private static JsonObject described(String[] types, String description) {
+        JsonObject property = new JsonObject();
+        JsonArray type = new JsonArray();
+        for (String t : types) {
+            type.add(t);
+        }
+        property.add("type", type);
+        property.addProperty("description", description);
+        return property;
+    }
+
     private static JsonObject rejected(JsonObject opening, String why) {
         JsonObject row = new JsonObject();
         row.add("opening", opening);
@@ -508,8 +636,10 @@ public final class ServerComponentTools {
                         ops.add(setblock(leaf.x, leaf.y + 1, leaf.z, opening.block, upper, has));
                     }
                     counts[opening.width == 2 ? 0 : 1]++;
-                    String header = Json.getString(rows.get(i), "header", null);
-                    if (header != null) {
+                    // By default the hole over a 2-high door in a 3-high opening is closed when it is plainly
+                    // a wall's (#146): left open, it showed up as an enclosure leak at roof bulkheads.
+                    String header = Json.getString(rows.get(i), "header", "walled");
+                    if (!"none".equals(header)) {
                         counts[2] += headers(world, opening, header, ops);
                     }
                 }
@@ -536,7 +666,8 @@ public final class ServerComponentTools {
     private static int headers(WorldServer world, DoorPlan.Opening opening, String header, List<String> ops) {
         int added = 0;
         String fill = null;
-        if (!"auto".equals(header)) {
+        boolean walled = "walled".equals(header);
+        if (!"auto".equals(header) && !walled) {
             fill = header;
         }
         else {
@@ -547,8 +678,13 @@ public final class ServerComponentTools {
             for (int[] cell : beside) {
                 IBlockState state = world.getBlockState(new BlockPos(cell[0], opening.y + 2, cell[1]));
                 if (!world.isAirBlock(new BlockPos(cell[0], opening.y + 2, cell[1]))) {
-                    fill = ServerTargetTools.canonical(state);
-                    break;
+                    if (fill == null) {
+                        fill = ServerTargetTools.canonical(state);
+                    }
+                }
+                else if (walled) {
+                    // Not plainly a wall's hole: an opening that is meant to be taller, or a gap.
+                    return 0;
                 }
             }
         }

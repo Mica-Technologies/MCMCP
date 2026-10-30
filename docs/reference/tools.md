@@ -1038,7 +1038,7 @@ same arguments>}` expands it once and replays it as an op job.
 
 ##### `server_build_stair`
 
-:material-alert: Destructive · requires `permissions.allowWorldEdits` · `box`, `floors` required · optional `doors`, `width`, `axis`, `start`, `inset`, `top`, `walls`, `palette`, `keep` and the write options
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `box`, `floors` required · optional `doors`, `width`, `axis`, `start`, `inset`, `top`, `walls`, `skipFaces`, `doorHeight`, `palette`, `keep` and the write options
 
 Plans and builds a compliant switchback stair core inside an enclosure:
 
@@ -1047,7 +1047,13 @@ Plans and builds a compliant switchback stair core inside an enclosure:
 - `doors` is `{"y": [[x, z]...]}`, the door cells in the wall per floor.
 - `width` is 3 (the minimum) or 4, and `axis` is the long axis (default the longer interior).
 - `start` (`lo`/`hi`) is where the first flight leaves.
-- `walls` (default true) builds the ring and the bulkhead roof.
+- `walls` (default true) builds the ring and the bulkhead roof. `walls: "fill"` writes ring cells
+  only where the live cell is air or has no collision box, so a facade or neighbour's wall the core
+  shares stays as it is. `skipFaces: ["W"]` never writes those faces of the ring (N, E, S, W are z
+  min, x max, z max, x min).
+- `doorHeight` (default 2) closes the cell over each door with the wall: what is there is kept, and
+  an empty cell gets the palette's wall. The plan itself cuts 3-high openings, which left a hole over
+  every 2-high door. `3` cuts them open as before.
 - `palette` is `{floor, wall, tread, rail, sconce}`, by default `minecraft:concrete:8`,
   `minecraft:concrete:7`, `minecraft:stone_brick_stairs`, then for `rail` the first of
   `csm:railing_pipe_galvanized` / `minecraft:iron_bars` this game has, and for `sconce` the first of
@@ -1062,7 +1068,11 @@ that cannot hold a compliant stair is refused with the fix ("core needs 2 more c
 flights + a 1-cell divider = 7, interior is 5"). Cells holding doors, signs, panels, sconces, pulls
 or standpipes are kept (`keep` changes the patterns; `[]` overwrites everything). Returns `flights`
 (`[storey, start y, treads, lane]`), `auditFailures` (the plan's own audit; 0 is compliant, with
-`audit` by rule otherwise), `kept` and the write's counts.
+`audit` by rule otherwise), `kept` and the write's counts. A cell the plan wants as air is left when
+it holds something verify counts as air (`csm:lightupair`, by the world's verify defaults), so a
+rebuild never puts the lights out; `airKept`, `wallsKept` and `headersKept` count what was left. A
+`dryRun` adds `byChange`, `[want, is, count]` per pair, most first, so a rebuild's diff against a
+live core reads without replanning it offline.
 
 ##### `server_place_doors`
 
@@ -1075,12 +1085,16 @@ Each opening is `{x, y, z, block, facing, width, axis?, closer?, hinge?, header?
   on its outer edges: the leaf at the lower coordinate is hinged left when facing north or east.
 - `hinge` (`left`/`right`) sets a single door's hinge.
 - `closer` (default true) applies where the block has one.
-- `header: "auto"` fills the cell over a 2-high door in a 3-high opening with the wall beside it; a
-  block id fills it with that block.
+- `header: "auto"` fills the cell over a 2-high door in a 3-high opening with the wall beside it on
+  either side; a block id fills it with that block.
 
 Each door is written lower half then upper. For CSM's doors this gives exactly the metadata the
 builder verified live: lower = facing (S0 W1 N2 E3), upper = 8 + hinge right + 2 x closer. Returns
 `pairs`, `singles`, `headers`, `rejected` and the write's counts.
+
+Without `header`, the cell over a 2-high door in a 3-high opening is filled with the wall when the
+wall stands on both sides of it at that height, since such a hole is plainly the wall's. `header:
+"none"` leaves it.
 
 ##### `server_place_railing`
 
