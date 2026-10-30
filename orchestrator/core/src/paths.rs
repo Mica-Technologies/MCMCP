@@ -67,6 +67,11 @@ pub fn approval_store_path() -> Result<PathBuf> {
     Ok(state_directory()?.join("instances.json"))
 }
 
+/// Directories whose instances are approved ahead of time. See [`crate::trust`].
+pub fn trusted_roots_path() -> Result<PathBuf> {
+    Ok(crate::trust::trusted_roots_path(&state_directory()?))
+}
+
 /// The last tool catalogue seen, served when no instance is connected.
 ///
 /// Without it, relaunching a game client — which in a mod-development loop happens constantly —

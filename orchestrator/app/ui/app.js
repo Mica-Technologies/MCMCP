@@ -127,6 +127,11 @@ async function renderPrompts() {
         <dt>Side</dt><dd>${escapeHtml(approval.side)}</dd>
         <dt>Versions</dt><dd>Minecraft ${escapeHtml(approval.minecraft_version)} · MCMCP ${escapeHtml(approval.mod_version)}</dd>
       </dl>
+      ${approval.worktrees_root ? `
+      <label class="switch">
+        <input type="checkbox" data-trust-worktrees />
+        <span>Also trust worktrees of this instance (<code>${escapeHtml(approval.worktrees_root)}</code>)</span>
+      </label>` : ""}
       <div class="actions">
         <button class="primary" data-answer="approve">Approve</button>
         <button data-answer="later">Not now</button>
@@ -134,7 +139,8 @@ async function renderPrompts() {
       </div>`;
     for (const button of element.querySelectorAll("[data-answer]")) {
       button.addEventListener("click", async () => {
-        await call("answer_approval", { id: approval.id, answer: button.dataset.answer });
+        const trustWorktrees = element.querySelector("[data-trust-worktrees]")?.checked ?? false;
+        await call("answer_approval", { id: approval.id, answer: button.dataset.answer, trustWorktrees });
       });
     }
     container.appendChild(element);
@@ -1421,6 +1427,17 @@ async function renderSettings() {
   $("link-port").textContent = `127.0.0.1:${settings.link_port}`;
   $("empty-port").textContent = `127.0.0.1:${settings.link_port}`;
 
+  const roots = $("trusted-roots");
+  roots.innerHTML = "";
+  for (const root of await invoke("trusted_roots")) {
+    const item = document.createElement("li");
+    item.innerHTML = `<code>${escapeHtml(root)}</code> <button class="ghost">Remove</button>`;
+    item.querySelector("button").addEventListener("click", () =>
+      call("remove_trusted_root", { directory: root }),
+    );
+    roots.appendChild(item);
+  }
+
   const body = $("gating");
   body.innerHTML = "";
   body.appendChild(gatingRow("Every instance", null, settings.defaults));
@@ -1496,6 +1513,12 @@ $("copy-config").addEventListener("click", async () => {
 $("strict-approval").addEventListener("change", (event) =>
   call("set_strict_approval", { strict: event.target.checked }),
 );
+$("trusted-root-add").addEventListener("click", async () => {
+  const directory = $("trusted-root-new").value.trim();
+  if (!directory) return;
+  await call("add_trusted_root", { directory });
+  $("trusted-root-new").value = "";
+});
 $("require-explicit").addEventListener("change", (event) =>
   call("set_require_explicit_instance", { require: event.target.checked }),
 );

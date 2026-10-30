@@ -233,6 +233,21 @@
         </div>
 
         <div class="setting">
+          <span>Trusted folders</span>
+          <p class="muted">
+            A new instance whose game folder is inside one of these is approved when it first
+            connects, without asking — for agent worktrees, add the repository's
+            <code>.claude\worktrees</code> folder. Each is still logged and listed, and can be revoked.
+            Ignored while every connection needs approval.
+          </p>
+          <ul id="trusted-roots" class="trusted-roots"></ul>
+          <div class="filters">
+            <input id="trusted-root-new" type="text" placeholder="E:\repo\.claude\worktrees" />
+            <button id="trusted-root-add">Add</button>
+          </div>
+        </div>
+
+        <div class="setting">
           <label class="switch">
             <input type="checkbox" id="require-explicit" />
             <span>Destructive calls must name their instance</span>

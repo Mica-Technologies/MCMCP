@@ -38,6 +38,7 @@ use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::{GateRequest, Router};
 use mcmcp_orchestrator_core::store::ApprovalStore;
 use mcmcp_orchestrator_core::tasks::{Status, TaskList, TaskStore, TaskUpdate};
+use mcmcp_orchestrator_core::trust::{self, TrustedRoots};
 use mcmcp_orchestrator_core::{catalogue, jsonrpc, link, mcp_socket, paths, storage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -149,6 +150,8 @@ struct PendingApprovalView {
     game_directory: Option<String>,
     mod_version: String,
     minecraft_version: String,
+    /// The root the "also trust worktrees" box would add (#155), when the folder suggests one.
+    worktrees_root: Option<String>,
 }
 
 /// A parked gate question, without the channel that answers it.
@@ -855,6 +858,7 @@ fn pending_approvals(state: State<'_, AppState>) -> Vec<PendingApprovalView> {
         game_directory: hello.game_directory.clone(),
         mod_version: hello.mod_version.clone(),
         minecraft_version: hello.minecraft_version.clone(),
+        worktrees_root: hello.game_directory.as_deref().and_then(trust::worktrees_root),
     })
 }
 
@@ -876,7 +880,13 @@ enum ApprovalAnswer {
 }
 
 #[tauri::command]
-fn answer_approval(state: State<'_, AppState>, app: AppHandle, id: u64, answer: ApprovalAnswer) -> bool {
+fn answer_approval(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: u64,
+    answer: ApprovalAnswer,
+    trust_worktrees: Option<bool>,
+) -> bool {
     let outcome = match answer {
         ApprovalAnswer::Approve => ApprovalOutcome::Approve,
         ApprovalAnswer::Later => ApprovalOutcome::Pending,
@@ -898,6 +908,14 @@ fn answer_approval(state: State<'_, AppState>, app: AppHandle, id: u64, answer: 
                 hello.label.clone(),
                 "approved",
             );
+            // "Also trust worktrees of this instance": one click that covers every later agent
+            // worktree of the same repository (#155).
+            if trust_worktrees == Some(true)
+                && let Some(root) = hello.game_directory.as_deref().and_then(trust::worktrees_root)
+                && let Err(error) = add_root(&state, &root)
+            {
+                warn!(%error, %root, "could not trust the instance's worktrees");
+            }
         }
         ApprovalOutcome::Pending => {
             state.events.note_about(
@@ -1457,6 +1475,9 @@ fn main() -> anyhow::Result<()> {
             approve_known,
             get_settings,
             set_strict_approval,
+            trusted_roots,
+            add_trusted_root,
+            remove_trusted_root,
             set_policy_rule,
             set_require_explicit_instance,
             export_events,
@@ -1537,6 +1558,92 @@ fn reveal(app: &AppHandle) {
 
 /// Starts everything that is not the window.
 ///
+/// Directories whose new instances are approved ahead of time (#155).
+///
+/// Read from the file every time rather than held: `mcmcp-orchestrator trust-root` writes the same
+/// file from another process, and the listener reads it fresh on every unknown knock too.
+#[tauri::command]
+fn trusted_roots() -> Result<Vec<String>, String> {
+    let path = paths::trusted_roots_path().map_err(|error| error.to_string())?;
+    TrustedRoots::load(&path)
+        .map(|roots| roots.roots)
+        .map_err(|error| error.to_string())
+}
+
+fn add_root(state: &State<'_, AppState>, directory: &str) -> anyhow::Result<bool> {
+    Authority::Human.require_human("trusting a directory")?;
+    let directory = directory.trim();
+    if !std::path::Path::new(directory).is_absolute() {
+        anyhow::bail!("give the whole path, such as E:\\repo\\.claude\\worktrees");
+    }
+    let path = paths::trusted_roots_path()?;
+    let mut roots = TrustedRoots::load(&path)?;
+    if !roots.add(directory) {
+        return Ok(false);
+    }
+    roots.save(&path)?;
+    state.events.note(
+        Actor::Human,
+        None,
+        format!("trusted {directory}: new instances under it are approved on first connection"),
+    );
+    Ok(true)
+}
+
+#[tauri::command]
+fn add_trusted_root(state: State<'_, AppState>, app: AppHandle, directory: String) -> Result<(), String> {
+    add_root(&state, &directory).map_err(|error| error.to_string())?;
+    // A prompt already on screen for an instance the new root covers is answered by it, as its next
+    // knock would be. Not under strict approval, which roots never override.
+    let strict = state
+        .store
+        .lock()
+        .map(|store| store.strict_approval())
+        .unwrap_or(true);
+    if !strict {
+        let covered: Vec<u64> = state
+            .approvals
+            .describe(|id, hello| (id, hello.game_directory.clone()))
+            .into_iter()
+            .filter(|(_, folder)| {
+                folder
+                    .as_deref()
+                    .is_some_and(|folder| trust::is_under(folder, &directory, trust::CASE_INSENSITIVE))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for id in covered {
+            if let Some(hello) = state.approvals.answer(id, ApprovalOutcome::Approve) {
+                state.events.note_about(
+                    Actor::Human,
+                    Some(hello.instance_id),
+                    hello.label,
+                    format!("approved: its folder is under the newly trusted {directory}"),
+                );
+            }
+        }
+    }
+    let _ = app.emit(CHANGED, ());
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_trusted_root(state: State<'_, AppState>, app: AppHandle, directory: String) -> Result<(), String> {
+    Authority::Human
+        .require_human("untrusting a directory")
+        .map_err(|error| error.to_string())?;
+    let path = paths::trusted_roots_path().map_err(|error| error.to_string())?;
+    let mut roots = TrustedRoots::load(&path).map_err(|error| error.to_string())?;
+    if roots.remove(&directory) {
+        roots.save(&path).map_err(|error| error.to_string())?;
+        state
+            .events
+            .note(Actor::Human, None, format!("no longer trusting {directory}"));
+    }
+    let _ = app.emit(CHANGED, ());
+    Ok(())
+}
+
 /// Tauri owns the main thread for the event loop, so the async runtime is spawned beside it rather
 /// than wrapping it. That is the one structural difference from the CLI, and the reason `main` here
 /// is not `#[tokio::main]`.
@@ -1714,6 +1821,8 @@ fn spawn_background(
                             store,
                             events: events_tx,
                             approvals: approvals_tx,
+                            trusted_roots: paths::trusted_roots_path().ok(),
+                            event_log: Some(events.clone()),
                         };
                         if let Err(error) = link::listener::serve(listener, context).await {
                             warn!(%error, "the link listener stopped");

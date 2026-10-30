@@ -275,7 +275,33 @@ While a game waits to be approved, `mcmcp_instances` lists it under `pendingAppr
 label, side, folder, pid and `waitingSeconds` — with a note saying what the person has to do, so a
 model can ask for the approval instead of reporting the game missing. It is not connected, and
 nothing can be called on it until it is approved. The game logs one line when it starts waiting,
-naming its instance id and the orchestrator it reached.
+naming its instance id and the orchestrator it reached. Each entry also carries a `hint` naming the
+`trust-root` command below, so an agent can tell you the one-time fix rather than wait.
+
+### Trusted folders: approving ahead of time
+
+An agent that runs a dev client from its own git worktree (`<repo>\.claude\worktrees\agent-…\run`)
+arrives as a new instance from a new folder, and waits for a click nobody may be there to give. A
+**trusted folder** is that click made in advance: a new instance whose game folder is inside one is
+approved when it first connects.
+
+```bash
+mcmcp-orchestrator trust-root "E:\repo\.claude\worktrees"   # add
+mcmcp-orchestrator trusted-roots                             # list
+mcmcp-orchestrator untrust-root "E:\repo\.claude\worktrees"  # remove
+```
+
+The app has the same list under **Settings → Trusted folders**, and its approval prompt offers
+**Also trust worktrees of this instance**, which adds `<repo>\.claude\worktrees` for the game you are
+approving. A running app picks up a change from the command line at once.
+
+- Each such approval is logged and appears in the roster like a clicked one, so it can be revoked.
+- **Ask before every connection** (strict approval) overrides trusted folders entirely.
+- A folder matches itself and what is inside it, compared without regard to case or separator on
+  Windows: `E:\repo` covers `e:/REPO/run`, and never `E:\repo2`.
+- Like approving itself, this is for people only: no MCP tool can add a trusted folder.
+
+The list lives in `trusted-roots.json` in the state directory.
 
 ## Instance identity
 
@@ -584,7 +610,7 @@ Network settings are read when the link starts, so changing them needs `/mcmcp r
 | macOS | `~/Library/Application Support/mcmcp-orchestrator` |
 | Linux | `$XDG_STATE_HOME/mcmcp-orchestrator`, or `~/.local/state/mcmcp-orchestrator` |
 
-Holding approvals (`instances.json`), the gating policy (`policy.json`), the event log
+Holding approvals (`instances.json`), trusted folders (`trusted-roots.json`), the gating policy (`policy.json`), the event log
 (`events.jsonl`), the diagnostic log (`orchestrator.log`), the cached tool catalogue, agents' task
 lists (`tasks/`), screenshot thumbnails (`thumbnails/`), exported session reports (`reports/`),
 the Data tab's expiry ages (`storage.json`), and the shim's token. Approvals store a **hash** of each instance secret, never the secret — the secrets stay in

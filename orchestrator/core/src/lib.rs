@@ -38,6 +38,7 @@ pub mod storage;
 pub mod store;
 pub mod tasks;
 pub mod thumbnail;
+pub mod trust;
 
 /// The orchestrator's version, from Cargo. Deliberately never a git tag — see the workspace
 /// manifest for why a tag here would rewrite the *mod's* version.

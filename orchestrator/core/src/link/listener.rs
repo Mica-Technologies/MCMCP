@@ -31,12 +31,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+use crate::events::{Actor, EventLog};
 use crate::instance::{Instance, InstanceInfo, UpstreamEvent};
 use crate::jsonrpc;
 use crate::link::framing;
 use crate::link::protocol::{self, Hello};
 use crate::registry::{PendingApproval, Registry};
 use crate::store::{ApprovalStore, Verdict};
+use crate::trust::TrustedRoots;
 
 /// How many frames may queue for one instance's writer before sends block.
 ///
@@ -96,6 +98,11 @@ pub struct LinkContext {
     pub store: Arc<Mutex<ApprovalStore>>,
     pub events: mpsc::UnboundedSender<UpstreamEvent>,
     pub approvals: mpsc::Sender<ApprovalRequest>,
+    /// The trusted-roots file (#155), read whenever an unknown instance knocks. `None` trusts no
+    /// directory, and every unknown instance is asked about.
+    pub trusted_roots: Option<std::path::PathBuf>,
+    /// Where a trusted-root approval is recorded, beside the clicked ones.
+    pub event_log: Option<EventLog>,
 }
 
 /// Listens for instances until the returned future is dropped or the socket fails.
@@ -187,7 +194,27 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
         // good enough.
         Verdict::Approved if strict => ask(&context, &hello).await,
         Verdict::Approved => ApprovalOutcome::Approve,
-        Verdict::Unknown => ask(&context, &hello).await,
+        Verdict::Unknown => match trusted_root_for(&context, &hello, strict) {
+            Some(root) => {
+                info!(
+                    instance = %hello.instance_id,
+                    label = %hello.fallback_label(),
+                    directory = hello.game_directory.as_deref().unwrap_or("(unknown)"),
+                    %root,
+                    "approving a new instance under a trusted root"
+                );
+                if let Some(log) = &context.event_log {
+                    log.note_about(
+                        Actor::System,
+                        Some(hello.instance_id.clone()),
+                        hello.fallback_label(),
+                        format!("approved: its folder is under the trusted root {root}"),
+                    );
+                }
+                ApprovalOutcome::Approve
+            }
+            None => ask(&context, &hello).await,
+        },
     };
 
     match &outcome {
@@ -412,6 +439,24 @@ async fn bootstrap(
     }
 }
 
+/// The trusted root an unknown instance's game directory is under, when approving ahead of time is
+/// allowed at all: strict approval means every connection takes a click, roots included.
+fn trusted_root_for(context: &LinkContext, hello: &Hello, strict: bool) -> Option<String> {
+    if strict {
+        return None;
+    }
+    let directory = hello.game_directory.as_deref()?;
+    let path = context.trusted_roots.as_deref()?;
+    match TrustedRoots::load(path) {
+        Ok(roots) => roots.covering(directory).map(str::to_string),
+        Err(error) => {
+            // Asking is the safe answer to a file that cannot be read.
+            warn!(%error, "could not read the trusted roots; asking instead");
+            None
+        }
+    }
+}
+
 async fn ask(context: &LinkContext, hello: &Hello) -> ApprovalOutcome {
     // Listed by mcmcp_instances for as long as this question is open, so a model can say what to
     // approve instead of reporting the game missing (#108). Dropped on every way out of here.
@@ -555,6 +600,54 @@ mod tests {
         assert_eq!(summary.instance_id, "modb-dev");
         assert_eq!(summary.label, "modB dev");
         assert_eq!(summary.game_directory.as_deref(), Some("E:\\instances\\modB"));
+    }
+
+    fn hello_from(directory: &str) -> Hello {
+        serde_json::from_value(json!({
+            "type": "hello", "linkProtocol": 1, "instanceId": "run-a19052",
+            "instanceSecret": "a".repeat(64), "instanceName": "worktree dev", "side": "client",
+            "gameDirectory": directory, "modVersion": "test", "minecraftVersion": "1.12.2",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_instance_under_a_trusted_root_is_approved_ahead_of_time_unless_strict() {
+        let directory = std::env::temp_dir().join(format!("mcmcp-link-trust-{}", std::process::id()));
+        let path = crate::trust::trusted_roots_path(&directory);
+        let mut roots = TrustedRoots::default();
+        roots.add("/home/a/repo/.claude/worktrees");
+        roots.save(&path).unwrap();
+
+        let (approvals, _requests) = mpsc::channel(1);
+        let (events, _received) = mpsc::unbounded_channel();
+        let context = LinkContext {
+            registry: Arc::new(Registry::new()),
+            store: Arc::new(Mutex::new(
+                ApprovalStore::load(directory.join("none.json")).unwrap(),
+            )),
+            events,
+            approvals,
+            trusted_roots: Some(path),
+            event_log: None,
+        };
+
+        let inside = hello_from("/home/a/repo/.claude/worktrees/agent-1/run");
+        assert_eq!(
+            trusted_root_for(&context, &inside, false).as_deref(),
+            Some("/home/a/repo/.claude/worktrees")
+        );
+        // Strict approval is "every connection takes a click", and a root is not a click.
+        assert_eq!(trusted_root_for(&context, &inside, true), None);
+        assert_eq!(
+            trusted_root_for(&context, &hello_from("/home/a/repo/run"), false),
+            None
+        );
+        assert_eq!(
+            trusted_root_for(&context, &hello_from("/home/a/repo/.claude/worktrees2/x"), false),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[tokio::test]

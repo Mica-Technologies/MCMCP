@@ -18,6 +18,7 @@ use mcmcp_orchestrator_core::registry::Registry;
 use mcmcp_orchestrator_core::router::Router;
 use mcmcp_orchestrator_core::store::ApprovalStore;
 use mcmcp_orchestrator_core::tasks::TaskStore;
+use mcmcp_orchestrator_core::trust::TrustedRoots;
 use mcmcp_orchestrator_core::{catalogue, control, link, paths, stdio};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -93,6 +94,22 @@ enum Command {
 
     /// Rename an instance, so it can be told apart from the others.
     Label { instance: String, label: String },
+
+    /// Approve, ahead of time, every new instance whose game directory is under this one.
+    ///
+    /// For agent worktrees: `trust-root <repo>/.claude/worktrees` covers every dev client an agent
+    /// starts from one, so none of them waits on a click nobody is there to give. Each is still
+    /// logged and listed, and can be revoked. Ignored while strict approval is on.
+    TrustRoot {
+        /// The directory. Relative paths are taken from the current directory.
+        directory: String,
+    },
+
+    /// Stop trusting a directory added with `trust-root`. Instances already approved stay approved.
+    UntrustRoot { directory: String },
+
+    /// List the trusted directories.
+    TrustedRoots,
 
     /// Read or change the gating policy.
     Policy {
@@ -210,6 +227,9 @@ async fn main() -> Result<()> {
         Command::Approve { instance } => approve(&instance),
         Command::Revoke { instance } => revoke(&instance),
         Command::Label { instance, label } => set_label(&instance, &label),
+        Command::TrustRoot { directory } => trust_root(&directory),
+        Command::UntrustRoot { directory } => untrust_root(&directory),
+        Command::TrustedRoots => list_trusted_roots(),
         Command::Policy {
             class,
             rule,
@@ -451,6 +471,65 @@ fn set_label(instance: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn trust_root(directory: &str) -> Result<()> {
+    paths::ensure_state_directory()?;
+    let path = paths::trusted_roots_path()?;
+    let mut roots = TrustedRoots::load(&path)?;
+    // Absolute, so the root means the same thing to the app as it did in this shell. Not
+    // canonicalised: that would resolve links, and on Windows add a `\\?\` prefix nobody typed.
+    let absolute = std::path::absolute(directory)
+        .with_context(|| format!("making {directory} absolute"))?
+        .display()
+        .to_string();
+    if !roots.add(&absolute) {
+        println!("{absolute} is already trusted.");
+        return Ok(());
+    }
+    roots.save(&path)?;
+    println!(
+        "Trusted {absolute}. A new instance whose game directory is under it is approved when it \
+         first connects{}.",
+        if open_store()?.lock().expect("store lock").strict_approval() {
+            " — but strict approval is on, which overrides this until it is turned off"
+        } else {
+            ""
+        }
+    );
+    if !std::path::Path::new(&absolute).is_dir() {
+        println!("(It does not exist yet; that is fine if it will.)");
+    }
+    Ok(())
+}
+
+fn untrust_root(directory: &str) -> Result<()> {
+    let path = paths::trusted_roots_path()?;
+    let mut roots = TrustedRoots::load(&path)?;
+    // Either spelling: as listed, or as typed relative to here.
+    let absolute = std::path::absolute(directory)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| directory.to_string());
+    if !(roots.remove(directory) | roots.remove(&absolute)) {
+        anyhow::bail!("{directory} is not a trusted root; `trusted-roots` lists them");
+    }
+    roots.save(&path)?;
+    println!(
+        "No longer trusting {directory}. Instances already approved from under it stay approved; \
+         revoke them to undo that."
+    );
+    Ok(())
+}
+
+fn list_trusted_roots() -> Result<()> {
+    let roots = TrustedRoots::load(&paths::trusted_roots_path()?)?;
+    if roots.roots.is_empty() {
+        println!("No trusted roots. Add one with `trust-root <directory>`.");
+    }
+    for root in &roots.roots {
+        println!("{root}");
+    }
+    Ok(())
+}
+
 fn policy_command(
     class: Option<Class>,
     rule: Option<Rule>,
@@ -661,7 +740,7 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
         Arc::clone(&policy),
         Arc::clone(&registry),
         policy_path,
-        events,
+        events.clone(),
     );
 
     let address = format!("127.0.0.1:{link_port}");
@@ -696,6 +775,8 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
         store,
         events: events_tx,
         approvals: approvals_tx,
+        trusted_roots: paths::trusted_roots_path().ok(),
+        event_log: Some(events),
     };
 
     let links = tokio::spawn(link::listener::serve(listener, context));

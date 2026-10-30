@@ -1616,19 +1616,30 @@ impl Router {
                     "focused": focus,
                 });
                 // Only when there is one: a link waiting on a human is the exception (#108).
+                let strict = self
+                    .store
+                    .lock()
+                    .map(|store| store.strict_approval())
+                    .unwrap_or(true);
                 let pending: Vec<Value> = self
                     .registry
                     .pending()
                     .into_iter()
                     .map(|approval| {
-                        json!({
+                        let mut entry = json!({
                             "game": approval.instance_id,
                             "label": approval.label,
                             "side": approval.side,
                             "gameDirectory": approval.game_directory,
                             "pid": approval.pid,
                             "waitingSeconds": approval.since.elapsed().as_secs(),
-                        })
+                        });
+                        // The one-time fix a person can make so the next worktree never waits
+                        // (#155). Not under strict approval, which a trusted root does not override.
+                        if !strict {
+                            entry["hint"] = json!(pending_hint(approval.game_directory.as_deref()));
+                        }
+                        entry
                     })
                     .collect();
                 if !pending.is_empty() {
@@ -2818,6 +2829,28 @@ fn oversized_call_message(tool: &str, bytes: usize) -> String {
         "This call is {bytes} bytes, over the {limit} one message to a game may be, so nothing was \
          sent. Split it into smaller calls.{hint}"
     )
+}
+
+/// What a `pendingApproval` entry says the person can run to pre-approve its kind (#155). Short: it
+/// is read into a model's context every time the roster is.
+///
+/// A game in an agent worktree is pointed at the worktrees folder, which covers its siblings too;
+/// any other at its own folder.
+fn pending_hint(game_directory: Option<&str>) -> String {
+    let root = game_directory.map(|directory| {
+        let in_worktree = directory
+            .replace('\\', "/")
+            .to_lowercase()
+            .contains("/.claude/worktrees/");
+        match crate::trust::worktrees_root(directory) {
+            Some(root) if in_worktree => root,
+            _ => directory.to_string(),
+        }
+    });
+    match root {
+        Some(root) => format!("to pre-approve: mcmcp-orchestrator trust-root \"{root}\""),
+        None => "to pre-approve: mcmcp-orchestrator trust-root <dir>".to_string(),
+    }
 }
 
 /// A successful response carrying a failure the model must read.
@@ -4371,5 +4404,19 @@ mod tests {
         assert_eq!(id_key(&json!(7)), "7");
         assert_eq!(id_key(&json!("7")), "7");
         assert_ne!(id_key(&json!(7)), id_key(&json!("seven")));
+    }
+
+    #[test]
+    fn a_pending_worktree_game_is_pointed_at_the_root_that_covers_its_siblings_too() {
+        assert_eq!(
+            pending_hint(Some(r"E:\repo\.claude\worktrees\agent-a1\run")),
+            r#"to pre-approve: mcmcp-orchestrator trust-root "E:\repo\.claude\worktrees""#
+        );
+        // Not a worktree: its own folder, since the worktrees root would not cover it.
+        assert_eq!(
+            pending_hint(Some(r"E:\modpacks\alto")),
+            r#"to pre-approve: mcmcp-orchestrator trust-root "E:\modpacks\alto""#
+        );
+        assert!(pending_hint(None).ends_with("<dir>"));
     }
 }
