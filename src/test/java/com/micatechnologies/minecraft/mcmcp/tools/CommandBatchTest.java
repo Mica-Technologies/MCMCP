@@ -140,6 +140,36 @@ class CommandBatchTest {
     }
 
     @Test
+    void aSetblockTagInTheModeSlotGetsReplacePutBeforeItSoVanillaKeepsIt() {
+        assertEquals("/setblock -700 125 -5990 csm:dynamic_street_sign 0 replace {signData:\"A - B\"}",
+            CommandBatch.withModeBeforeTag("/setblock -700 125 -5990 csm:dynamic_street_sign 0 {signData:\"A - B\"}"));
+        assertEquals("setblock 1 2 3 csm:sign 0 replace {a:1}",
+            CommandBatch.withModeBeforeTag("setblock 1 2 3 csm:sign 0 {a:1}"));
+    }
+
+    @Test
+    void aFillTagInTheModeSlotGetsReplaceToo() {
+        assertEquals("/fill 0 0 0 1 1 1 minecraft:chest 0 replace {Lock:\"x\"}",
+            CommandBatch.withModeBeforeTag("/fill 0 0 0 1 1 1 minecraft:chest 0 {Lock:\"x\"}"));
+    }
+
+    @Test
+    void aCommandThatAlreadyNamesItsModeOrHasNoTagIsLeftAlone() {
+        assertNull(CommandBatch.withModeBeforeTag("/setblock 1 2 3 csm:sign 0 replace {a:1}"));
+        assertNull(CommandBatch.withModeBeforeTag("/setblock 1 2 3 minecraft:stone 0"));
+        assertNull(CommandBatch.withModeBeforeTag("/setblock 1 2 3 minecraft:stone"));
+        assertNull(CommandBatch.withModeBeforeTag("/fill 0 0 0 1 1 1 minecraft:stone 0 keep"));
+        assertNull(CommandBatch.withModeBeforeTag("/say setblock 1 2 3 a 0 {b}"));
+    }
+
+    @Test
+    void theModeWarningNamesTheChangedCommandsByIndex() {
+        String warning = CommandBatch.modeInsertedWarning(java.util.Arrays.asList(0, 4));
+        assertTrue(warning.startsWith("2 /setblock or /fill"), warning);
+        assertTrue(warning.contains("#0, #4"), warning);
+    }
+
+    @Test
     void theBlockAnAtStandsInIsFlooredAsTildeResolvesAgainstIt() {
         assertArrayEquals(new int[] {52, 49, -2605}, CommandBatch.blockOf(new double[] {52.5, 49.0, -2604.5, 0, 0}));
     }

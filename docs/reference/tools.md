@@ -2062,6 +2062,11 @@ result:
 - **Blocked commands.** A command on `permissions.blockedCommands` refuses the whole call before
   anything runs.
 - **Undo.** `/fill` and `/clone` leave one undo point for the call.
+- **A data tag in the mode slot.** `/setblock x y z block meta {nbt}` leaves out
+  `replace|keep|destroy`, and vanilla then takes the tag as the mode: it drops the tag and reports
+  "Block placed", or fails on the next word when the tag has spaces. `replace` is put before the tag
+  (vanilla's reading of the slot anyway, with the tag kept), the same for `/fill`, and a `warning`
+  names the commands. `server_run_command` and `client_run_commands` do the same.
 - **Tick time.** Commands run in game-thread slices of at most 25 ms, so a long list never holds
   up a tick.
 - **Time limit.** A call that runs past two minutes stops and returns `nextIndex`.
@@ -2357,7 +2362,7 @@ command's reply, and nothing can prevent that.
 | `ok` | Replied, and not in red |
 | `error` | A reply was red, which is how vanilla, WorldEdit, FAWE and ForgeEssentials all report failure. Colour is the one signal that is the same across mods and client languages |
 | `no_reply` | Nothing within `reply_timeout_ms`. Normal when the `sendCommandFeedback` gamerule is off; lower the timeout there |
-| `client` | A client-side command handled it; no server reply is coming |
+| `client` | A client-side command handled it; `replies` are the lines it printed in chat (`error` instead when one was red) |
 | `refused` | MCMCP's config refused it, or it does not start with `/` |
 | `unloaded` | `check_loaded` found a chunk it touches not loaded on this client, so it was not sent |
 
@@ -2861,7 +2866,9 @@ The rolling 300-line buffer of received chat: command output, other players, dea
 anything mods print to chat. This is how you see the result of `client_send_chat`.
 
 Each line reads `[HH:MM:SS] message`. Anything that is not ordinary player chat is tagged after the
-time — `(SYSTEM)` for command output and server messages, `(GAME_INFO)` for the action bar.
+time — `(SYSTEM)` for command output and server messages, `(GAME_INFO)` for the action bar, and
+`(LOCAL)` for lines this client printed itself, such as a client-side command's output, which no
+chat packet carries.
 
 Returns text only, opening with `# N of M buffered line(s)`. There is no structured form, for the
 reason given under [`game_read_log`](#game_read_log).

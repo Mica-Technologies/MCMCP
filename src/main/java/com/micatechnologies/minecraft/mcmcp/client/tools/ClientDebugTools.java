@@ -1076,7 +1076,8 @@ public final class ClientDebugTools {
                 + "between sending and reading.\n\n"
                 + "Each line reads '[HH:MM:SS] message'. Anything that is not ordinary player chat "
                 + "is tagged after the time: '(SYSTEM)' for command output and server messages, "
-                + "'(GAME_INFO)' for the action bar above the hotbar.")
+                + "'(GAME_INFO)' for the action bar above the hotbar, '(LOCAL)' for lines this client "
+                + "printed itself, such as a client-side command's output.")
             .schema(JsonSchema.object()
                 .integer("lines", "How many recent lines to return.", 1, 300)
                 .string("filter", "Case-insensitive substring; only matching lines are returned.")

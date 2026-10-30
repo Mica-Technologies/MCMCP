@@ -5,6 +5,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -14,8 +15,13 @@ import net.minecraft.util.text.ITextComponent;
 import net.minecraft.util.text.TextComponentTranslation;
 import net.minecraft.util.text.TextFormatting;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.ChatLine;
+import net.minecraft.client.gui.GuiNewChat;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.fml.common.eventhandler.EventPriority;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
+import net.minecraftforge.fml.common.gameevent.TickEvent;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
@@ -40,6 +46,15 @@ import net.minecraftforge.fml.relauncher.SideOnly;
  *
  * <p>Code that needs every line from a moment onwards — however many arrive — opens a
  * {@link Capture} instead of reading the buffer, which cannot say what fell off its front.
+ *
+ * <h2>Lines printed on this client (#157)</h2>
+ *
+ * {@link ClientChatReceivedEvent} fires only for chat that came from the server. A client-side
+ * command ({@code ClientCommandHandler}: {@code /csmclient ...}) prints straight into the chat
+ * window with {@code sendMessage}, and no event sees it, so its output was on screen and nowhere
+ * else. {@link #scanLocal} reads the chat window's own line list for lines added since the last look
+ * that no chat event delivered, and records them as type {@code LOCAL}. It runs every client tick,
+ * and straight after a client command so its lines can be returned as that command's replies.
  */
 @SideOnly(Side.CLIENT)
 public final class ClientChatRecorder {
@@ -54,6 +69,23 @@ public final class ClientChatRecorder {
     private static final List<Capture> CAPTURES = new CopyOnWriteArrayList<>();
 
     private static boolean registered;
+
+    /** The newest chat-window line already looked at; null before the first look. Client thread. */
+    @Nullable
+    private static ChatLine lastSeen;
+
+    /**
+     * The components chat events delivered lately, by identity: the chat window holds the same
+     * object, which is how a line from the server is told from one printed here.
+     */
+    private static final Deque<ITextComponent> DELIVERED = new ArrayDeque<>();
+
+    private static final java.util.Map<ITextComponent, Boolean> DELIVERED_SET = new IdentityHashMap<>();
+
+    @Nullable
+    private static java.lang.reflect.Field chatLinesField;
+
+    private static boolean chatLinesMissing;
 
     private ClientChatRecorder() {
     }
@@ -99,6 +131,121 @@ public final class ClientChatRecorder {
         }
     }
 
+    /**
+     * Records lines the chat window gained since the last look that no chat event delivered: what
+     * this client printed itself. Client thread only.
+     *
+     * @return the lines recorded, oldest first
+     */
+    public static List<Entry> scanLocal(Minecraft mc) {
+        List<ChatLine> lines = chatLines(mc);
+        if (lines == null) {
+            return java.util.Collections.emptyList();
+        }
+        List<ChatLine> added = new ArrayList<>();
+        if (lastSeen != null) {
+            // Newest first. A line no longer there means the window was cleared or scrolled past
+            // its 100 lines, and then everything in it is new.
+            for (ChatLine line : lines) {
+                if (line == lastSeen) {
+                    break;
+                }
+                added.add(line);
+            }
+        }
+        lastSeen = lines.isEmpty() ? null : lines.get(0);
+        if (lastSeen == null && added.isEmpty()) {
+            // An empty window: the next line printed is new, whatever it is.
+            lastSeen = SENTINEL;
+        }
+        List<Entry> recorded = new ArrayList<>();
+        for (int i = added.size() - 1; i >= 0; i--) {
+            ITextComponent message = added.get(i).getChatComponent();
+            if (message == null || DELIVERED_SET.containsKey(message)) {
+                continue;
+            }
+            // Remembered too: a line deleted by id can make the window look new from the top again.
+            remember(message);
+            Entry entry = entryOf(message, "LOCAL");
+            record(entry);
+            recorded.add(entry);
+        }
+        return recorded;
+    }
+
+    /** Stands for "nothing seen yet, but looked": never in the window, so every line is new. */
+    private static final ChatLine SENTINEL = new ChatLine(0, null, 0);
+
+    @Nullable
+    @SuppressWarnings("unchecked")
+    private static List<ChatLine> chatLines(Minecraft mc) {
+        if (mc.ingameGUI == null || chatLinesMissing) {
+            return null;
+        }
+        try {
+            if (chatLinesField == null) {
+                // Private, so by both names: a released jar has the SRG name at runtime.
+                java.lang.reflect.Field field;
+                try {
+                    field = GuiNewChat.class.getDeclaredField("chatLines");
+                }
+                catch (NoSuchFieldException devName) {
+                    field = GuiNewChat.class.getDeclaredField("field_146252_h");
+                }
+                field.setAccessible(true);
+                chatLinesField = field;
+            }
+            return (List<ChatLine>) chatLinesField.get(mc.ingameGUI.getChatGUI());
+        }
+        catch (ReflectiveOperationException | RuntimeException e) {
+            chatLinesMissing = true;
+            com.micatechnologies.minecraft.mcmcp.Mcmcp.LOGGER.warn("MCMCP: cannot read the chat window's "
+                + "lines; chat printed by client-side commands will not be recorded.", e);
+            return null;
+        }
+    }
+
+    private static void remember(ITextComponent message) {
+        if (DELIVERED_SET.containsKey(message)) {
+            return;
+        }
+        if (DELIVERED.size() >= CAPACITY) {
+            DELIVERED_SET.remove(DELIVERED.removeFirst());
+        }
+        DELIVERED.addLast(message);
+        DELIVERED_SET.put(message, Boolean.TRUE);
+    }
+
+    private static Entry entryOf(ITextComponent message, String type) {
+        // Unformatted: colour codes and click events are chat-window furniture, and stripping
+        // them here means every consumer does not have to.
+        return new Entry(System.currentTimeMillis(),
+            message.getUnformattedText(),
+            type,
+            isErrorStyled(message),
+            message instanceof TextComponentTranslation
+                ? ((TextComponentTranslation) message).getKey() : null,
+            message instanceof TextComponentTranslation
+                ? argumentTexts((TextComponentTranslation) message) : new String[0]);
+    }
+
+    private static void record(Entry entry) {
+        for (Capture capture : CAPTURES) {
+            capture.lines.add(entry);
+        }
+
+        synchronized (ENTRIES) {
+            if (ENTRIES.size() >= CAPACITY) {
+                ENTRIES.removeFirst();
+            }
+            ENTRIES.addLast(entry);
+        }
+
+        // Wakes up any MCP client subscribed to the chat resource. Fires on the client thread
+        // inside the chat handler, so it does nothing but append to per-session queues.
+        McpRegistry.notifyResourceUpdated(RESOURCE_URI);
+    }
+
     public static class Events {
 
         @SubscribeEvent
@@ -106,31 +253,29 @@ public final class ClientChatRecorder {
             if (event.getMessage() == null) {
                 return;
             }
-            // Unformatted: colour codes and click events are chat-window furniture, and stripping
-            // them here means every consumer does not have to.
+            record(entryOf(event.getMessage(), String.valueOf(event.getType())));
+        }
+
+        /**
+         * Last, after any mod has replaced the message: the object that reaches the chat window,
+         * so {@link #scanLocal} does not record it a second time.
+         */
+        @SubscribeEvent(priority = EventPriority.LOWEST)
+        public void onChatDelivered(ClientChatReceivedEvent event) {
             ITextComponent message = event.getMessage();
-            Entry entry = new Entry(System.currentTimeMillis(),
-                message.getUnformattedText(),
-                String.valueOf(event.getType()),
-                isErrorStyled(message),
-                message instanceof TextComponentTranslation
-                    ? ((TextComponentTranslation) message).getKey() : null,
-                message instanceof TextComponentTranslation
-                    ? argumentTexts((TextComponentTranslation) message) : new String[0]);
-            for (Capture capture : CAPTURES) {
-                capture.lines.add(entry);
+            if (message == null || event.isCanceled()) {
+                return;
             }
+            // Lines before this one are behind it in the window, so they are seen first.
+            scanLocal(Minecraft.getMinecraft());
+            remember(message);
+        }
 
-            synchronized (ENTRIES) {
-                if (ENTRIES.size() >= CAPACITY) {
-                    ENTRIES.removeFirst();
-                }
-                ENTRIES.addLast(entry);
+        @SubscribeEvent
+        public void onClientTick(TickEvent.ClientTickEvent event) {
+            if (event.phase == TickEvent.Phase.END) {
+                scanLocal(Minecraft.getMinecraft());
             }
-
-            // Wakes up any MCP client subscribed to the chat resource. Fires on the client thread
-            // inside the chat handler, so it does nothing but append to per-session queues.
-            McpRegistry.notifyResourceUpdated(RESOURCE_URI);
         }
     }
 

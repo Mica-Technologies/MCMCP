@@ -87,7 +87,9 @@ public final class ServerCommandTools {
                 }
 
                 final String rawCommand = context.requireString("command");
-                final String command = rawCommand.startsWith("/") ? rawCommand.substring(1) : rawCommand;
+                final String given = rawCommand.startsWith("/") ? rawCommand.substring(1) : rawCommand;
+                final String fixed = CommandBatch.withModeBeforeTag(given);
+                final String command = fixed != null ? fixed : given;
                 if (command.trim().isEmpty()) {
                     return ToolResult.error("The command is empty.");
                 }
@@ -105,7 +107,7 @@ public final class ServerCommandTools {
                     return ToolResult.error(malformed.getMessage());
                 }
                 if (at == null) {
-                    return runOne(context, command, asPlayer, null);
+                    return runOne(context, command, asPlayer, null, fixed != null);
                 }
                 if (asPlayer == null || asPlayer.trim().isEmpty()) {
                     return ToolResult.error("'at' moves the player the command runs as, so it needs asPlayer. "
@@ -127,13 +129,14 @@ public final class ServerCommandTools {
                     block[0] - CommandTargets.MARGIN, block[2] - CommandTargets.MARGIN,
                     block[0] + CommandTargets.MARGIN, block[2] + CommandTargets.MARGIN);
                 return ServerChunkTools.withChunks(context, dimension, chunks, true,
-                    outcome -> runOne(context, command, asPlayer, at));
+                    outcome -> runOne(context, command, asPlayer, at, fixed != null));
             })
             .build());
     }
 
     private static ToolResult runOne(final ToolContext context, final String command, final String asPlayer,
-                                     @javax.annotation.Nullable final double[] at) throws Exception {
+                                     @javax.annotation.Nullable final double[] at, final boolean modeInserted)
+        throws Exception {
         // /fill and /clone leave undo points like server_set_blocks does: {dimension, area,
         // before map}, filled in on the game thread when the command is one of those.
         final UndoPoints.Recorder recorder = ServerUndoTools.start(context, false);
@@ -228,6 +231,10 @@ public final class ServerCommandTools {
 
                     JsonObject json = new JsonObject();
                     json.addProperty("command", command);
+                    if (modeInserted) {
+                        json.addProperty("warning", "'replace' was put before the data tag: vanilla reads that "
+                            + "slot as replace|keep|destroy and drops a tag there while reporting success.");
+                    }
                     json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
                     // Minecraft's convention: 0 means the command did not succeed. It is not an
                     // error code — the reason, when there is one, is in the captured output.

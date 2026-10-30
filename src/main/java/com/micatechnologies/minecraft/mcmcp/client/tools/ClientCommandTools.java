@@ -9,6 +9,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.tools.CommandBatch;
 import com.micatechnologies.minecraft.mcmcp.tools.CommandTargets;
 import com.micatechnologies.minecraft.mcmcp.tools.GameJson;
 import com.micatechnologies.minecraft.mcmcp.tools.NbtJson;
@@ -81,7 +82,8 @@ public final class ClientCommandTools {
                 + "'error' when the server answered in red (how vanilla, WorldEdit, FAWE and "
                 + "ForgeEssentials report failure), 'ok' when it answered otherwise, 'no_reply' when "
                 + "nothing came within reply_timeout_ms (normal when the sendCommandFeedback gamerule "
-                + "is off), 'client' for a client-side command, and 'refused', 'unloaded' or "
+                + "is off), 'client' for a client-side command (its replies are what it printed), and "
+                + "'refused', 'unloaded' or "
                 + "'not_run' when it was not sent. A server broadcast arriving mid-command may be "
                 + "counted as that command's reply.\n\n"
                 + "Results list only commands that were not 'ok' unless all_results is true. One "
@@ -136,6 +138,7 @@ public final class ClientCommandTools {
         Integer nextIndex = null;
         String stopReason = null;
         Outcome lastSent = null;
+        List<Integer> modeInserted = new ArrayList<>();
 
         try (ClientChatRecorder.Capture chat = ClientChatRecorder.capture()) {
             for (int i = 0; i < commands.size(); i++) {
@@ -158,8 +161,13 @@ public final class ClientCommandTools {
                 // Anything still arriving belongs to the last command the server was sent.
                 drain(chat, lastSent);
 
-                final String command = commands.get(i).trim();
+                final String given = commands.get(i).trim();
+                final String withMode = CommandBatch.withModeBeforeTag(given);
+                final String command = withMode != null ? withMode : given;
                 Outcome outcome = new Outcome(i, command);
+                if (withMode != null) {
+                    modeInserted.add(i);
+                }
                 outcomes.add(outcome);
 
                 if (!command.startsWith("/")) {
@@ -176,6 +184,7 @@ public final class ClientCommandTools {
                 }
 
                 long commandStart = System.currentTimeMillis();
+                final List<ClientChatRecorder.Entry> printed = new ArrayList<>();
                 String sent = context.onGameThread(new Callable<String>() {
                     @Override
                     public String call() {
@@ -186,11 +195,24 @@ public final class ClientCommandTools {
                                 return unloaded;
                             }
                         }
-                        return ClientInputTools.sendAsPlayer(command) ? "client" : "server";
+                        // Lines already in the window are not this command's.
+                        ClientChatRecorder.scanLocal(mc);
+                        boolean local = ClientInputTools.sendAsPlayer(command);
+                        if (local) {
+                            // A client command runs here, now: what it printed is in the window (#157).
+                            printed.addAll(ClientChatRecorder.scanLocal(mc));
+                        }
+                        return local ? "client" : "server";
                     }
                 });
                 if ("client".equals(sent)) {
                     outcome.status = "client";
+                    for (ClientChatRecorder.Entry line : printed) {
+                        outcome.replies.add(line.getText());
+                        if (line.isError()) {
+                            outcome.status = "error";
+                        }
+                    }
                 } else if (!"server".equals(sent)) {
                     outcome.status = "unloaded";
                     outcome.replies.add(sent);
@@ -258,6 +280,9 @@ public final class ClientCommandTools {
             json.addProperty("stopped", stopReason);
         }
         json.add("results", results);
+        if (!modeInserted.isEmpty()) {
+            json.addProperty("warning", CommandBatch.modeInsertedWarning(modeInserted));
+        }
         return json;
     }
 

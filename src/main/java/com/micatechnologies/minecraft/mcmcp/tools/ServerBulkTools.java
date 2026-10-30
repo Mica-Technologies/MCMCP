@@ -764,7 +764,8 @@ public final class ServerBulkTools {
         }
         final List<String> commands = new ArrayList<>();
         for (CommandBatch.Entry entry : entries) {
-            commands.add(entry.command);
+            String fixed = CommandBatch.withModeBeforeTag(entry.command);
+            commands.add(fixed != null ? fixed : entry.command);
         }
         if (commands.isEmpty()) {
             return ToolResult.error("'commands' is empty.");
@@ -1104,6 +1105,15 @@ public final class ServerBulkTools {
         // Said at the top, not only per command: a script that checks the call returned saw a batch
         // with failures in it as applied (#117).
         List<String> warnings = new ArrayList<>();
+        List<Integer> modeInserted = new ArrayList<>();
+        for (int i = 0; i < entries.size(); i++) {
+            if (!entries.get(i).command.equals(commands.get(i))) {
+                modeInserted.add(i);
+            }
+        }
+        if (!modeInserted.isEmpty()) {
+            warnings.add(CommandBatch.modeInsertedWarning(modeInserted));
+        }
         if (counts[1] > 0) {
             warnings.add(counts[1] + " of " + next[0] + " command(s) failed; see results."
                 + (outsideWorld[0] > 0 ? " " + outsideWorld[0] + " of them answered 'outside of the world', "

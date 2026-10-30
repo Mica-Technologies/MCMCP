@@ -35,6 +35,60 @@ public final class CommandBatch {
     private CommandBatch() {
     }
 
+    /**
+     * The command with {@code replace} put before a data tag written where vanilla reads the
+     * old-block mode, or null when it needs nothing (#153).
+     *
+     * <p>{@code /setblock x y z block meta {nbt}} reads like it carries the tag, but vanilla's
+     * {@code CommandSetBlock} takes the sixth argument as {@code replace|keep|destroy} and parses a
+     * tag only from the seventh on. A tag with no spaces became an unknown mode, which means replace,
+     * and was dropped while the command said "Block placed": blank signs on a live server. One with
+     * spaces was split there, and the next word failed to parse as a tag. {@code /fill} has the same
+     * slot, ninth. Inserting {@code replace} is what vanilla did with the slot anyway, with the tag
+     * kept: {@code server_apply_ops} already read these lines that way.
+     */
+    @Nullable
+    public static String withModeBeforeTag(String command) {
+        String text = command.startsWith("/") ? command.substring(1) : command;
+        String[] words = text.split(" ", -1);
+        String name = words[0].toLowerCase(java.util.Locale.ROOT);
+        if (name.startsWith("minecraft:")) {
+            name = name.substring("minecraft:".length());
+        }
+        int slot = name.equals("setblock") ? 6 : name.equals("fill") ? 9 : -1;
+        if (slot < 0 || words.length <= slot || !words[slot].startsWith("{")) {
+            return null;
+        }
+        StringBuilder fixed = new StringBuilder(command.length() + 8);
+        if (command.startsWith("/")) {
+            fixed.append('/');
+        }
+        for (int i = 0; i < words.length; i++) {
+            if (i > 0) {
+                fixed.append(' ');
+            }
+            if (i == slot) {
+                fixed.append("replace ");
+            }
+            fixed.append(words[i]);
+        }
+        return fixed.toString();
+    }
+
+    /** The warning for the commands {@link #withModeBeforeTag} changed, by index. */
+    public static String modeInsertedWarning(List<Integer> indices) {
+        StringBuilder listed = new StringBuilder();
+        for (int i = 0; i < indices.size() && i < QUOTED_LINES; i++) {
+            listed.append(i == 0 ? "#" : ", #").append(indices.get(i));
+        }
+        if (indices.size() > QUOTED_LINES) {
+            listed.append(", ...");
+        }
+        return indices.size() + " /setblock or /fill command(s) had a data tag where vanilla reads "
+            + "replace|keep|destroy, and vanilla drops a tag there while reporting success; 'replace' was "
+            + "put before the tag so it is kept (" + listed + "). Write the mode to make this explicit.";
+    }
+
     /** One command, and where its player runs it from. */
     public static final class Entry {
 
