@@ -603,6 +603,14 @@ public final class ServerApplyOps {
             }
             return;
         }
+        // Air over a second half this write just placed is an earlier clear-out, not a removal: ops that
+        // fill a room with air and then place a door by its lower half kept the air above it, and the
+        // write took the door's top back off, leaving half a door.
+        if (!dryRun && target.getMaterial() == net.minecraft.block.material.Material.AIR
+            && pairs.wrotePartnerAt(pos)) {
+            tally.byPartner++;
+            return;
+        }
         if (!dryRun && TwoPartBlocks.isTwoPart(target)) {
             switch (pairs.write(world, pos, target, null, undo)) {
                 case WRITTEN:

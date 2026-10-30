@@ -213,6 +213,11 @@ final class TwoPartBlocks {
         private final java.util.Set<Long> changedPartners = new java.util.HashSet<>();
         int partnersWritten;
         int oldPartnersCleared;
+
+        /** Whether this writer put a second half at {@code pos} while writing its first half. */
+        boolean wrotePartnerAt(BlockPos pos) {
+            return changedPartners.contains(pos.toLong());
+        }
         /** False when the caller asked for every cell to be written as given (pairTwoPart: false). */
         boolean pairing = true;
         /** Second halves made up rather than given, the first few by position: a caller can check them. */

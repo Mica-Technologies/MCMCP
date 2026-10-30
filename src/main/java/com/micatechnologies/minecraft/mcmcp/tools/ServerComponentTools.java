@@ -318,7 +318,8 @@ public final class ServerComponentTools {
                             continue;
                         }
                         if (dryRun && live != null && !(rail != null && block.equals(rail))) {
-                            String want = wantsAir ? "minecraft:air" : block;
+                            String want = wantsAir ? "minecraft:air"
+                                : block.startsWith("minecraft:torch:") ? torchFor(block) : block;
                             if (!sameBlock(want, live)) {
                                 byChange.computeIfAbsent(idOfText(want) + "\t" + idOf(live), k -> new int[1])[0]++;
                             }
