@@ -823,7 +823,9 @@ Options:
 
 The counts add up to `attempted` (the cells the ops reach): `written` (or `wouldWrite`),
 `unchanged`, `conflicts`, `unloaded`, `refused` and `byPartner`. Lines that could not be replayed
-are listed in `refusedOps` with their line number and reason; the rest still run. `nbt` counts the
+are listed in `refusedOps` with their line number and reason, counted in `refusedLines`, and the
+cells they name are in `refused` and `attempted` (one per line that did not parse). A script that
+checks `refused == 0` therefore sees an unknown block id. The rest still run. `nbt` counts the
 merges, and `bbox` is the box the ops cover. One call reaches at most 4 × `limits.maxWriteCells`
 cells, charged to the writes-per-minute budget (past it, a `busy` error with `retryAfterMs`), and
 leaves one undo point. Submit a larger list as a [job](#server_job_submit), which waits for the
@@ -837,7 +839,9 @@ point. The same holds for `server_set_blocks` and `server_undo`.
 
 `saveTarget: "tower/structure"` also saves what the ops make as a [build target](#build-targets),
 merging into that layer if it exists (`replaceTarget: true` starts it over). It works with `dryRun`,
-which saves a design without writing it. The reply's `target` describes the saved layer.
+which saves a design without writing it. The reply's `target` describes the saved layer. A two-part
+block placed by its first half (a door, a bed, two-tall furniture) gets its second half saved too,
+unless the ops put something other than air in that cell.
 
 #### Build targets
 
@@ -862,7 +866,7 @@ writes one, whatever a later layer wants there. `delete` removes a name or patte
 
 ##### `server_verify`
 
-:material-eye: Read-only · `target` required · optional `skipBoxes`, `ignore`, `compare`, `sameAs`, `samples`, `detail`, `load`
+:material-eye: Read-only · `target` required · optional `skipBoxes`, `ignore`, `compare`, `sameAs`, `samples`, `detail`, `detailOffset`, `groupBy`, `load`
 
 Compares the world with a target or pattern and returns `matching`, `differ`, and per kind of
 difference a count and a few samples (`{at, want, is}`):
@@ -886,14 +890,25 @@ also covers ids that swap at runtime: `csm:lightupair` and `snow_layer` count as
 powered blocks count as their unlit forms, keeping their facing. Grass counts as dirt only under a
 block that stops light, where vanilla turns it, so a design's missing sod is still found.
 
-- `ignore` adds properties everywhere, and `compare` takes defaults back out.
+- `ignore` adds properties everywhere, and `compare` takes defaults back out. An entry with a `:`
+  is a block id or pattern instead (`"csm:firealarm*"`): a cell that wants that block or holds it is
+  not compared at all, and is counted in `ignoredBlocks`.
+- The second half of a two-part block (a door's top, two-tall furniture's upper cell) where the
+  target wants air is not `extra` when the target wants its first half there. The block placed it
+  itself, and `server_repair` would otherwise break the furniture in half.
 - `ignoreFor: {"csm:*": ["state"]}` ignores properties for matching blocks only, `*` matching any
   run. CSM bright lights flip a stored `state` with redstone.
 - `sameAs` adds id equivalences.
 - `server_target op: "defaults"` with `rules: {ignore, compare, sameAs, ignoreFor}` saves a world's
   own defaults, applied before each call's, so a modpack's runtime state is set once.
 - `skipBoxes` leaves volumes out entirely, such as a lift shaft whose cab moves.
-- `detail: "file"` writes every difference to a file and returns its path.
+- `samples` lists up to 2,000 per kind (default 5).
+- `groupBy: "ids"` adds `byIds`, one `[want id, is id, count]` row per pair, most cells first (up to
+  200 rows). It is usually enough to tell a system added since the target was saved from damage.
+- `detail: "inline"` returns every difference in the reply as `x y z kind want is` lines, 2,000 a
+  call. When there are more, call again with `detailOffset` set to the reply's `nextDetailOffset`.
+- `detail: "file"` writes every difference to a file and returns its path. The file is on the
+  server, so a client reaching it through the companion cannot open it; use `inline` there.
 
 ##### `server_repair`
 

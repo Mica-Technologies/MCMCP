@@ -228,6 +228,15 @@ public final class TargetDiff {
     private final Map<Kind, long[]> counts = new EnumMap<>(Kind.class);
     private final Map<Kind, JsonArray> samples = new EnumMap<>(Kind.class);
     private long skipped;
+    /** Block id patterns: a cell wanting or holding one is not compared (#151). */
+    private final List<String> ignoredBlocks = new ArrayList<>();
+    private long ignored;
+    /** Differences counted by "want id\tis id", when asked for (#151); null when not. */
+    @Nullable
+    private Map<String, long[]> byIds;
+
+    /** Most (want, is) pairs listed in {@code byIds}, most cells first. */
+    public static final int BY_IDS_LISTED = 200;
 
     /**
      * @param skipBoxes {minX, minY, minZ, maxX, maxY, maxZ} each: volumes not checked at all (a lift
@@ -241,6 +250,34 @@ public final class TargetDiff {
             counts.put(kind, new long[1]);
             samples.put(kind, new JsonArray());
         }
+    }
+
+    /**
+     * Leaves out cells whose wanted or live block id matches one of these patterns ({@code *} any
+     * run): a system added after the target was saved (fire alarms, vents) checked against a shell.
+     */
+    public TargetDiff ignoringBlocks(List<String> patterns) {
+        ignoredBlocks.addAll(patterns);
+        return this;
+    }
+
+    /** Counts every difference by its (wanted id, live id) pair as well. */
+    public TargetDiff groupingByIds() {
+        byIds = new HashMap<>();
+        return this;
+    }
+
+    private boolean ignoresBlock(String state) {
+        if (ignoredBlocks.isEmpty() || state == null) {
+            return false;
+        }
+        String id = Normaliser.idOf(state);
+        for (String pattern : ignoredBlocks) {
+            if (Normaliser.matches(pattern, id)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public boolean skips(int x, int y, int z) {
@@ -264,8 +301,23 @@ public final class TargetDiff {
             skipped++;
             return null;
         }
+        if (ignoresBlock(want) || ignoresBlock(live)) {
+            ignored++;
+            return null;
+        }
         Kind kind = classify(want, protect, live);
         counts.get(kind)[0]++;
+        if (byIds != null && kind.isDifference()) {
+            String key = Normaliser.idOf(normaliser.normalise(want)) + "\t"
+                + Normaliser.idOf(normaliser.normalise(live));
+            long[] count = byIds.get(key);
+            if (count == null) {
+                byIds.put(key, new long[] {1L});
+            }
+            else {
+                count[0]++;
+            }
+        }
         JsonArray list = samples.get(kind);
         if (kind.isDifference() && list.size() < samplesPerKind) {
             JsonObject sample = new JsonObject();
@@ -338,6 +390,28 @@ public final class TargetDiff {
         }
         if (skipped > 0) {
             json.addProperty("skipped", skipped);
+        }
+        if (ignored > 0) {
+            json.addProperty("ignoredBlocks", ignored);
+        }
+        if (byIds != null) {
+            List<Map.Entry<String, long[]>> pairs = new ArrayList<>(byIds.entrySet());
+            pairs.sort((a, b) -> a.getValue()[0] != b.getValue()[0]
+                ? Long.compare(b.getValue()[0], a.getValue()[0]) : a.getKey().compareTo(b.getKey()));
+            JsonArray rows = new JsonArray();
+            for (int i = 0; i < pairs.size() && i < BY_IDS_LISTED; i++) {
+                String[] ids = pairs.get(i).getKey().split("\t", 2);
+                JsonArray row = new JsonArray();
+                row.add(ids[0]);
+                row.add(ids[1]);
+                row.add(pairs.get(i).getValue()[0]);
+                rows.add(row);
+            }
+            // [want, is, count] rows: one line per pair, not an object per pair.
+            json.add("byIds", rows);
+            if (pairs.size() > BY_IDS_LISTED) {
+                json.addProperty("byIdsPairs", pairs.size());
+            }
         }
         return json;
     }

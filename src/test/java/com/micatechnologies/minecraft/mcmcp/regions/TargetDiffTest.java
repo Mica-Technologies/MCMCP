@@ -131,4 +131,31 @@ class TargetDiffTest {
         assertEquals("minecraft:oak_door[open=true]", strict.normalise("minecraft:oak_door[powered=false,open=true]"));
         assertEquals("minecraft:oak_door", TargetDiff.Normaliser.defaults().normalise("minecraft:oak_door[open=true]"));
     }
+
+    @Test
+    void aCellWantingOrHoldingAnIgnoredBlockIsNotComparedAndIsCountedApart() {
+        TargetDiff diff = diff().ignoringBlocks(java.util.Arrays.asList("csm:firealarm*", "csm:lcv"));
+
+        assertNull(diff.add(0, 0, 0, "minecraft:air", false, "csm:firealarm_horn"));
+        assertNull(diff.add(1, 0, 0, "csm:lcv", false, "minecraft:air"));
+        assertEquals(TargetDiff.Kind.EXTRA, diff.add(2, 0, 0, "minecraft:air", false, "csm:standpipe"));
+
+        JsonObject json = diff.toJson();
+        assertEquals(1, json.get("differ").getAsLong());
+        assertEquals(2, json.get("ignoredBlocks").getAsLong());
+    }
+
+    @Test
+    void groupingByIdsCountsEachWantedAndLivePairMostFirst() {
+        TargetDiff diff = diff().groupingByIds();
+        diff.add(0, 0, 0, "minecraft:air", false, "csm:firealarm_horn");
+        diff.add(1, 0, 0, "minecraft:air", false, "csm:firealarm_horn");
+        diff.add(2, 0, 0, "minecraft:concrete[color=gray]", false, "minecraft:stone");
+        diff.add(3, 0, 0, "minecraft:stone", false, "minecraft:stone");
+
+        com.google.gson.JsonArray rows = diff.toJson().getAsJsonArray("byIds");
+        assertEquals(2, rows.size());
+        assertEquals("[\"minecraft:air\",\"csm:firealarm_horn\",2]", rows.get(0).toString());
+        assertEquals("[\"minecraft:concrete\",\"minecraft:stone\",1]", rows.get(1).toString());
+    }
 }

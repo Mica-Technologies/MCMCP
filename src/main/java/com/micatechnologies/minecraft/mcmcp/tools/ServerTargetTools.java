@@ -54,6 +54,9 @@ public final class ServerTargetTools {
     /** Most differences a detail file lists. */
     private static final int MAX_DETAIL_LINES = 1_000_000;
 
+    /** Most differing cells one verify returns inline; the rest are paged with detailOffset. */
+    static final int MAX_INLINE_LINES = 2_000;
+
     private ServerTargetTools() {
     }
 
@@ -74,9 +77,38 @@ public final class ServerTargetTools {
      */
     static JsonObject saveOverlay(String name, boolean replace, int dimension, CellOverlay overlay,
                                   IntFunction<String> stateOf) throws IOException {
+        return saveOverlay(name, replace, dimension, overlay, stateOf, null);
+    }
+
+    /**
+     * As above, adding the second half of each two-part block whose first half the ops place and whose
+     * other cell they leave out: the block makes that half itself, and a target without it reported
+     * every one as extra (#150).
+     *
+     * @param stateAt the ops' state per cell value, or null to add no halves
+     */
+    static JsonObject saveOverlay(String name, boolean replace, int dimension, CellOverlay overlay,
+                                  IntFunction<String> stateOf, @Nullable IntFunction<IBlockState> stateAt)
+        throws IOException {
         final BuildTarget target = new BuildTarget(dimension);
+        final List<Object[]> firstHalves = new ArrayList<>();
         for (long key : overlay.sectionsBottomUp()) {
-            overlay.visit(key, (x, y, z, value) -> target.put(x, y, z, stateOf.apply(value)));
+            overlay.visit(key, (x, y, z, value) -> {
+                target.put(x, y, z, stateOf.apply(value));
+                IBlockState state = stateAt == null ? null : stateAt.apply(value);
+                if (state != null && TwoPartBlocks.isTwoPart(state) && !TwoPartBlocks.isSecondHalf(state)) {
+                    firstHalves.add(new Object[] {new BlockPos(x, y, z), state});
+                }
+            });
+        }
+        for (Object[] half : firstHalves) {
+            BlockPos pos = (BlockPos) half[0];
+            IBlockState state = (IBlockState) half[1];
+            BlockPos other = TwoPartBlocks.partnerPos(state, pos);
+            String there = target.get(other.getX(), other.getY(), other.getZ());
+            if (other.getY() >= 0 && other.getY() <= 255 && (there == null || there.startsWith("minecraft:air"))) {
+                target.put(other.getX(), other.getY(), other.getZ(), TwoPartBlocks.derivedSecondHalf(state).toString());
+            }
         }
         return store().save(name, target, replace, System.currentTimeMillis()).toJson();
     }
@@ -266,7 +298,9 @@ public final class ServerTargetTools {
                 + "[x1, y1, z1, x2, y2, z2]: a lift shaft whose cab moves, a room left for later."))
             .array("ignore", "More block-state properties to ignore everywhere, on top of the defaults (open, "
                 + "powered, lit, power, triggered, enabled, leaf decay, snowy, fluid level). Properties a block "
-                + "does not store (fence connections, stair shape) are never compared.", Json.obj("type", "string"))
+                + "does not store (fence connections, stair shape) are never compared. An entry with ':' is a "
+                + "block id or pattern instead ('csm:firealarm*'): a cell wanting or holding it is not compared.",
+                Json.obj("type", "string"))
             .array("compare", "Default-ignored properties to compare after all, e.g. ['open'].",
                 Json.obj("type", "string"))
             .property("ignoreFor", described("object", "Properties to ignore for some blocks only, {pattern: "
@@ -285,11 +319,18 @@ public final class ServerTargetTools {
                 + "matching, differ, and per kind (wrongBlock, wrongState, missing = air where a block is wanted, "
                 + "extra = a block where air is wanted, protectedChanged, unloaded) a few samples each. Runtime "
                 + "changes are not differences: doors opened, lamps lit, fences joined, leaves decaying (see "
-                + "'ignore'). detail: 'file' writes every difference to a file and returns its path instead of "
-                + "listing more. Fix what differs with server_repair, without re-sending ops.")
+                + "'ignore'). The upper half of a two-part block whose lower half the target wants is not "
+                + "extra. detail: 'inline' lists every difference (paged), 'file' writes them to a file on the "
+                + "server. Fix what differs with server_repair, without re-sending ops.")
             .schema(checkArguments(JsonSchema.object())
-                .integer("samples", "Samples per kind. Default 5.", 0, 50)
-                .enumeration("detail", "'file' writes every difference to a file.", "summary", "file")
+                .integer("samples", "Samples per kind. Default 5.", 0, 2000)
+                .enumeration("detail", "'file' writes every difference to a file on the server; 'inline' "
+                    + "returns them in the reply as 'x y z kind want is' lines, " + MAX_INLINE_LINES
+                    + " a call, paged with detailOffset.", "summary", "file", "inline")
+                .integer("detailOffset", "detail 'inline': differing cells to pass over first, from the "
+                    + "previous reply's nextDetailOffset.", 0, Integer.MAX_VALUE)
+                .enumeration("groupBy", "'ids': add byIds, [want id, is id, count] per pair, most first: "
+                    + "usually enough to tell additions from damage.", "ids")
                 .required("target")
                 .build())
             .serverOnly()
@@ -381,6 +422,39 @@ public final class ServerTargetTools {
         return result;
     }
 
+    /** The block patterns in the defaults' and the call's 'ignore': the entries with ':' in them. */
+    static List<String> ignoredBlocks(JsonObject defaults, JsonObject arguments) {
+        List<String> patterns = new ArrayList<>();
+        for (JsonObject rules : new JsonObject[] {defaults, arguments}) {
+            for (String entry : Json.getStringList(rules, "ignore")) {
+                if (entry.indexOf(':') > 0) {
+                    patterns.add(entry);
+                }
+            }
+        }
+        return patterns;
+    }
+
+    /**
+     * Whether a cell the target wants as air holds the second half of a two-part block whose first half
+     * the target does want: furniture whose top the block placed itself, so it was never in the ops a
+     * target was saved from (#150). Repair would otherwise break it in half. Game thread.
+     */
+    private static boolean upperHalfOfWanted(WorldServer world, BlockPos pos, IBlockState live, String want,
+                                             BuildTarget target) {
+        if (!want.startsWith("minecraft:air") || !TwoPartBlocks.isTwoPart(live) || !TwoPartBlocks.isSecondHalf(live)) {
+            return false;
+        }
+        BlockPos base = TwoPartBlocks.partnerPos(live, pos);
+        String baseWant = target.get(base.getX(), base.getY(), base.getZ());
+        if (baseWant == null || world.getBlockState(base).getBlock() != live.getBlock()) {
+            return false;
+        }
+        int open = baseWant.indexOf('[');
+        String baseId = open < 0 ? baseWant : baseWant.substring(0, open);
+        return String.valueOf(live.getBlock().getRegistryName()).equals(baseId);
+    }
+
     /**
      * Whether a dirt cell where grass is wanted is grass that vanilla turned to dirt: under a block that
      * stops light. Anywhere else it is a missing sod, and a real difference. Game thread.
@@ -428,9 +502,17 @@ public final class ServerTargetTools {
         if (skip == null) {
             return ToolResult.error("'skipBoxes' is a list of [x1, y1, z1, x2, y2, z2] boxes.");
         }
-        final int samples = repair ? 3 : context.getBoundedInt("samples", 5, 0, 50);
-        final boolean toFile = !repair && "file".equals(context.getString("detail", "summary"));
-        final TargetDiff diff = new TargetDiff(normaliser(context, store), samples, skip);
+        final int samples = repair ? 3 : context.getBoundedInt("samples", 5, 0, 2000);
+        final String detailMode = repair ? "summary" : context.getString("detail", "summary");
+        final boolean toFile = "file".equals(detailMode);
+        final boolean inline = "inline".equals(detailMode);
+        final int detailOffset = Math.max(0, context.getInt("detailOffset", 0));
+        final long[] differing = {0L};
+        final TargetDiff diff = new TargetDiff(normaliser(context, store), samples, skip)
+            .ignoringBlocks(ignoredBlocks(store.readDefaults(), context.getArguments()));
+        if (!repair && "ids".equals(context.getString("groupBy", null))) {
+            diff.groupingByIds();
+        }
         final Map<String, String> wanted = new HashMap<>();
         final int dimension = target.dimension();
         final List<String> fixes = new ArrayList<>();
@@ -453,8 +535,12 @@ public final class ServerTargetTools {
                         target.forEachCellIn(keys.get(cursor[0]++), (x, y, z, rawWant, protect) -> {
                             pos.setPos(x, y, z);
                             String want = canonical(rawWant, wanted);
-                            String live = world.isBlockLoaded(pos) ? canonical(world.getBlockState(pos)) : null;
+                            IBlockState liveState = world.isBlockLoaded(pos) ? world.getBlockState(pos) : null;
+                            String live = liveState == null ? null : canonical(liveState);
                             if (live != null && grassTurnedToDirt(world, pos, want, live)) {
+                                live = want;
+                            }
+                            if (live != null && upperHalfOfWanted(world, pos, liveState, want, target)) {
                                 live = want;
                             }
                             TargetDiff.Kind kind = diff.add(x, y, z, want, protect, live);
@@ -464,8 +550,12 @@ public final class ServerTargetTools {
                             if (repair && kind != TargetDiff.Kind.PROTECTED_CHANGED) {
                                 fixes.add(setblock(x, y, z, rawWant));
                             }
+                            long index = differing[0]++;
                             if (toFile && detail.size() < MAX_DETAIL_LINES) {
                                 detail.add(x + " " + y + " " + z + " " + kind.key + " want " + want + " is " + live);
+                            }
+                            if (inline && index >= detailOffset && detail.size() < MAX_INLINE_LINES) {
+                                detail.add(x + " " + y + " " + z + " " + kind.key + " " + want + " " + live);
                             }
                         });
                     }
@@ -485,6 +575,13 @@ public final class ServerTargetTools {
             }
             if (toFile && !detail.isEmpty()) {
                 json.addProperty("detailFile", writeDetail(name, detail));
+            }
+            if (inline) {
+                json.add("detail", Json.arrayOfStrings(detail));
+                long next = (long) detailOffset + detail.size();
+                if (next < differing[0]) {
+                    json.addProperty("nextDetailOffset", next);
+                }
             }
             if (repair) {
                 json.add("repair", repairCells(context, dimension, fixes));

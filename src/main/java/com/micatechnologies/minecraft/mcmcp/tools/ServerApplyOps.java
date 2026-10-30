@@ -175,6 +175,10 @@ public final class ServerApplyOps {
         // Parse and resolve. Each refusal names its line, so a generator bug is findable.
         CommandOps.Parsed parsed = CommandOps.parseAll(lines);
         final JsonArray refusedOps = new JsonArray();
+        // Lines refused before the write count in 'refused' too, as the cells they name (one for a line
+        // that did not parse): a script gating on refused == 0 went on to write past unknown ids (#150).
+        int refusedLines = parsed.errors.size();
+        long refusedLineCells = parsed.errors.size();
         for (int i = 0; i < parsed.errors.size(); i++) {
             refusedOp(refusedOps, parsed.errorLines.get(i), lines.get(parsed.errorLines.get(i)), parsed.errors.get(i));
         }
@@ -227,6 +231,8 @@ public final class ServerApplyOps {
             }
             if (why != null) {
                 refusedOp(refusedOps, line, lines.get(line), why);
+                refusedLines++;
+                refusedLineCells += op.cells();
                 continue;
             }
             ready.add(new Ready(line, op, state, filter, nbt));
@@ -239,10 +245,13 @@ public final class ServerApplyOps {
             maxZ = Math.max(maxZ, op.z2);
             chunks.addAll(ChunkKeys.box(op.x1, op.z1, op.x2, op.z2));
         }
+        final int refusedLineCount = refusedLines;
+        final long refusedBeforeWrite = refusedLineCells;
         if (stopOnRefusal && refusedOps.size() > 0) {
             JsonObject json = new JsonObject();
             json.addProperty("aborted", true);
-            json.addProperty("note", "stopOnRefusal: nothing was written because " + refusedOps.size()
+            json.addProperty("refusedLines", refusedLineCount);
+            json.addProperty("note", "stopOnRefusal: nothing was written because " + refusedLineCount
                 + " line(s) were refused.");
             json.add("refusedOps", refusedOps);
             return ToolResult.structured(json);
@@ -272,7 +281,8 @@ public final class ServerApplyOps {
             replay(context, dimension, ready, overlay, palette, tags, unloadedReads);
             // The design, saved before anything is written: what the ops make, whatever the world held.
             final JsonObject savedTarget = saveTarget == null ? null : ServerTargetTools.saveOverlay(saveTarget,
-                context.getBoolean("replaceTarget", false), dimension, overlay, value -> palette.state(value).toString());
+                context.getBoolean("replaceTarget", false), dimension, overlay, value -> palette.state(value).toString(),
+                palette::state);
 
             // Cells someone else changed since the caller's token are theirs, not this call's.
             final Set<Long> protectedCells = new HashSet<>();
@@ -316,12 +326,15 @@ public final class ServerApplyOps {
             json.addProperty("dimension", dimension);
             json.addProperty("ops", ready.size());
             json.addProperty("dryRun", dryRun);
-            json.addProperty("attempted", overlay.cells());
+            json.addProperty("attempted", overlay.cells() + refusedBeforeWrite);
             json.addProperty(dryRun ? "wouldWrite" : "written", tally.written);
             json.addProperty("unchanged", tally.unchanged);
             json.addProperty("conflicts", tally.conflicts);
             json.addProperty("unloaded", tally.unloaded);
-            json.addProperty("refused", tally.refused);
+            json.addProperty("refused", tally.refused + refusedBeforeWrite);
+            if (refusedLineCount > 0) {
+                json.addProperty("refusedLines", refusedLineCount);
+            }
             if (tally.byPartner > 0) {
                 json.addProperty("byPartner", tally.byPartner);
             }
