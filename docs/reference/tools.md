@@ -2774,6 +2774,10 @@ this call's own view as frame 1. They are tiled, numbered in reading order, into
 (`<name>_sheet.png`) no larger than `max_dimension`. Several angles of a build are then one image and
 one call, rather than a turn and a full-size image each. Returns `sheet`, `frames` (paths), the
 sheet's size and `approximateTokens`; `inline: true` includes the sheet. Not with `burst`.
+With `bringPlayer`, the player is taken to the call's own camera once and held there until every
+view has rendered, then brought back. A view farther than the render distance reaches from there is
+given its own trip. A view that fails is listed in `failed` with its error, and the sheet is made of
+the frames that rendered, rather than the whole call failing.
 
 **A burst.** `burst: {count, interval_ticks}` saves `count` frames (2-32), one every `interval_ticks`
 (1-40, at 50 ms a tick) from the first, as `<name>_1.png` onwards, and returns `shots`: each one's

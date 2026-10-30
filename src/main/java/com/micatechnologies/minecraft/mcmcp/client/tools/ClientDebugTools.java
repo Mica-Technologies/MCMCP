@@ -534,6 +534,16 @@ public final class ClientDebugTools {
      * This call's own view and the extra perspectives in 'views', each a capture of its own, tiled into
      * one contact sheet. The default stays one perspective: the sheet exists only when asked for.
      */
+    /** [x, y, z] as numbers, or null. */
+    @javax.annotation.Nullable
+    private static double[] xyz(@javax.annotation.Nullable JsonElement raw) {
+        if (raw == null || !raw.isJsonArray() || raw.getAsJsonArray().size() != 3) {
+            return null;
+        }
+        JsonArray a = raw.getAsJsonArray();
+        return new double[] {a.get(0).getAsDouble(), a.get(1).getAsDouble(), a.get(2).getAsDouble()};
+    }
+
     private static ToolResult views(ToolContext context) throws Exception {
         JsonElement raw = context.getArguments().get("views");
         if (raw == null || !raw.isJsonArray() || raw.getAsJsonArray().size() == 0) {
@@ -572,24 +582,64 @@ public final class ClientDebugTools {
             shots.add(args);
         }
 
+        // bringPlayer on the call's own view takes the player there once for the whole sheet (#152).
+        // Each view used to be its own shot, so the player went back home after frame 1 and every
+        // extra view found its camera in chunks this client no longer held. A view farther than the
+        // render distance reaches from there gets a trip of its own, from the first camera.
+        double[] ownFrom = xyz(own.get("from"));
+        com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.Trip trip = null;
+        if (Json.getBoolean(own, "bringPlayer", false) && ownFrom != null) {
+            try {
+                trip = com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.bring(context, ownFrom,
+                    Math.max(0, Math.min(120, Json.getInt(own, "bringWaitSeconds", 30))) * 1000L);
+            }
+            catch (IllegalStateException e) {
+                return ToolResult.error(e.getMessage() + " Nothing was captured.");
+            }
+            own.remove("bringPlayer");
+            own.remove("bringWaitSeconds");
+            final double reach = context.onGameThread(() ->
+                Math.max(2, Minecraft.getMinecraft().gameSettings.renderDistanceChunks - 2) * 16.0D);
+            for (int i = 1; i < shots.size(); i++) {
+                double[] at = xyz(shots.get(i).get("from"));
+                if (at != null && !shots.get(i).has("bringPlayer")
+                    && Math.max(Math.abs(at[0] - ownFrom[0]), Math.abs(at[2] - ownFrom[2])) > reach) {
+                    shots.get(i).addProperty("bringPlayer", true);
+                }
+            }
+        }
+
         JsonArray paths = new JsonArray();
+        JsonArray failed = new JsonArray();
         List<BufferedImage> frames = new java.util.ArrayList<>();
-        for (int i = 0; i < shots.size(); i++) {
-            JsonObject args = shots.get(i);
-            args.addProperty("name", base + "_" + (i + 1));
-            ToolResult shot = single.call(context.forPart(args, i, shots.size(), "view " + (i + 1)));
-            JsonObject structured = shot.getStructuredContent();
-            if (shot.isError() || structured == null) {
-                return ToolResult.error("View " + (i + 1) + " failed: " + shot.getText() + " Frames taken so far: "
-                    + paths + ".");
+        try {
+            for (int i = 0; i < shots.size(); i++) {
+                JsonObject args = shots.get(i);
+                args.addProperty("name", base + "_" + (i + 1));
+                ToolResult shot = single.call(context.forPart(args, i, shots.size(), "view " + (i + 1)));
+                JsonObject structured = shot.getStructuredContent();
+                String path = shot.isError() || structured == null ? null : Json.getString(structured, "path", "");
+                BufferedImage frame = path == null ? null : ImageIO.read(new File(path));
+                if (frame == null) {
+                    // The frames that did render still make a sheet; the ones that did not are named.
+                    JsonObject miss = new JsonObject();
+                    miss.addProperty("view", i + 1);
+                    miss.addProperty("error", path == null ? String.valueOf(shot.getText())
+                        : "the frame at " + path + " could not be read back");
+                    failed.add(miss);
+                    continue;
+                }
+                paths.add(path);
+                frames.add(frame);
             }
-            String path = Json.getString(structured, "path", "");
-            paths.add(path);
-            BufferedImage frame = ImageIO.read(new File(path));
-            if (frame == null) {
-                return ToolResult.error("View " + (i + 1) + " at " + path + " could not be read back.");
+        }
+        finally {
+            if (trip != null) {
+                com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.back(context, trip, ownFrom);
             }
-            frames.add(frame);
+        }
+        if (frames.isEmpty()) {
+            return ToolResult.error("No view was captured: " + failed + ".");
         }
 
         int maxDimension = context.getBoundedInt("max_dimension", ScreenshotImages.DEFAULT_MAX_DIMENSION,
@@ -608,6 +658,14 @@ public final class ClientDebugTools {
         json.addProperty("approximateTokens", ScreenshotImages.approximateTokens(sheet.getWidth(), sheet.getHeight()));
         json.add("frames", paths);
         json.addProperty("layout", "frames numbered from 1 in reading order; 1 is this call's own view");
+        if (failed.size() > 0) {
+            json.add("failed", failed);
+            json.addProperty("warning", failed.size() + " of " + shots.size() + " views failed and are not on the "
+                + "sheet; see failed. The sheet's frames are the others, in order.");
+        }
+        if (trip != null) {
+            json.add("playerReturnedTo", trip.toJson());
+        }
         ToolResult result = ToolResult.structured(json);
         if (context.getBoolean("inline", false)) {
             result.withContent(McpContent.image(png, "image/png"));
