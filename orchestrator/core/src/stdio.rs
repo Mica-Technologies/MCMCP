@@ -22,11 +22,12 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::client_calls::ClientCalls;
 use crate::jsonrpc;
 use crate::router::Router;
 
@@ -36,9 +37,16 @@ pub async fn serve(router: Arc<Router>) -> Result<()> {
     // One task owns stdout. Responses come from many request tasks and notifications come from the
     // instances, and two writers interleaving mid-frame would corrupt both.
     let (outgoing, mut outgoing_rx) = mpsc::unbounded_channel::<Value>();
+    // What the client has asked and not been answered, so it is sent progress only for a call it is
+    // still waiting on (#159). Checked by the writer, in the order bytes reach stdout.
+    let calls = Arc::new(Mutex::new(ClientCalls::new()));
+    let writer_calls = Arc::clone(&calls);
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(message) = outgoing_rx.recv().await {
+            let Some(message) = writer_calls.lock().expect("calls lock").outgoing(message) else {
+                continue;
+            };
             let mut line = match serde_json::to_vec(&message) {
                 Ok(line) => line,
                 Err(error) => {
@@ -97,6 +105,7 @@ pub async fn serve(router: Arc<Router>) -> Result<()> {
             }
         };
 
+        calls.lock().expect("calls lock").incoming(&message);
         let router = Arc::clone(&router);
         let outgoing = outgoing.clone();
         let caller = Arc::clone(&caller);

@@ -60,6 +60,23 @@ Start the app once, open **Settings**, and copy the snippet. It looks like this:
 No port, no token, no URL. The shim finds the app — and starts it if it is not running — so this
 entry never has to change, and games can come and go underneath a connection that never drops.
 
+The app can come and go underneath it too. If the app's connection drops — it was restarted,
+upgraded or crashed — the shim keeps your MCP client's session and dials again:
+
+- a call that was running is answered with a tool error saying its result was lost and to check the
+  game before retrying, rather than left waiting forever;
+- while the app is away, `ping` is answered by the shim, and other requests wait up to 20 seconds
+  for it to return (the first one starts the app if it is not running) before failing;
+- once back, the shim replays the client's `initialize` and sends `notifications/tools/list_changed`,
+  since what is connected may have changed meanwhile.
+
+The app logs why it closed a client's connection — a failed read or write, a line too large, a
+panic — at WARN in `orchestrator.log`, with the client's session id. A line that is not JSON is
+answered with a parse error and no longer ends the connection, and an answer too large to send is
+replaced by a tool error saying so. `tools/list` is served from the catalogue last built, so a
+re-list during a burst of games linking and unlinking is instant. Progress notifications reach only
+the connection whose call they belong to, and only while that call is open.
+
 Prefer no app at all? The headless orchestrator speaks MCP over stdio directly:
 
 ```json
@@ -665,8 +682,9 @@ Something usually has to close first, and the installer asks before closing anyt
 - **the app**, if its window is open;
 - **the shim**, `mcmcp-orchestrator.exe`, which is the one that actually catches people out. An MCP
   client spawns it on your behalf, so it is frequently running without anybody having started it
-  knowingly, and it holds the file the installer is about to replace. Every shim exits when the app
-  does, so closing the app first releases them all.
+  knowingly, and it holds the file the installer is about to replace. A shim no longer exits when
+  the app does — it waits to reattach — so the installer closes shims itself, and moves both
+  binaries aside before copying so one restarted mid-install cannot block the new files.
 
 Answering *cancel* to either prompt cancels the install rather than closing your session anyway. A
 closed shim is restarted by its MCP client on the next call, so the cost of letting it go is one

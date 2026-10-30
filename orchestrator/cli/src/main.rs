@@ -246,103 +246,49 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Pumps an MCP client's stdio to and from the app.
+/// Relays an MCP client's stdio to and from the app; see [`mcmcp_orchestrator_core::shim`].
 ///
-/// Deliberately a pump and not a translator: what arrives on stdin is JSON-RPC, one object per line,
-/// and what the app's socket wants is JSON-RPC, one object per line. Parsing in the middle would add
-/// a place for the two to disagree and buy nothing.
+/// A pump rather than a translator: lines pass through byte for byte, and the relay parses them only
+/// enough to answer, hold and replay across a lost connection.
 ///
 /// Reads the token from the state directory rather than taking one as an argument. An MCP client
 /// configuration containing a secret is a secret in a file people paste into issues.
 async fn shim(mcp_port: u16, may_launch: bool) -> Result<()> {
-    use mcmcp_orchestrator_core::mcp_socket;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use mcmcp_orchestrator_core::{mcp_socket, shim};
 
     let state = paths::state_directory()?;
 
-    let stream = match connect(mcp_port).await {
-        Ok(stream) => stream,
-        Err(_) if may_launch => {
-            // Nothing listening. Starting the app is the entire point of the shim being a separate
-            // process: an MCP client connecting is what brings the orchestrator up, so there is no
-            // "did I remember to start it?" step.
-            launch_app()?;
-            wait_for_app(mcp_port).await?
+    // The shim lives as long as its client: closing stdin is how MCP says it is done, and the app
+    // going away is no longer a reason to end (#159) — the relay answers what was in flight and
+    // reattaches, so the client's session, and every tool in it, survives an app restart.
+    shim::run(tokio::io::stdin(), tokio::io::stdout(), move |launch| {
+        let state = state.clone();
+        async move {
+            let stream = match connect(mcp_port).await {
+                Ok(stream) => stream,
+                Err(_) if launch && may_launch => {
+                    // Nothing listening. Starting the app is the entire point of the shim being a
+                    // separate process: an MCP client connecting is what brings the orchestrator
+                    // up, so there is no "did I remember to start it?" step.
+                    launch_app()?;
+                    wait_for_app(mcp_port).await?
+                }
+                Err(error) => {
+                    anyhow::bail!(
+                        "nothing is listening on 127.0.0.1:{mcp_port} ({error}). Start the MCMCP \
+                         Orchestrator app, or drop --no-launch and this will start it."
+                    );
+                }
+            };
+            // Read on every attempt: the app writes it on its first run, which may be this one.
+            let token = mcp_socket::read_token(&state).context(
+                "reading the orchestrator's token. It is written when the app first runs; if it has \
+                 never run on this machine, start it once.",
+            )?;
+            shim::attach(stream, &token).await
         }
-        Err(error) => {
-            anyhow::bail!(
-                "nothing is listening on 127.0.0.1:{mcp_port} ({error}). Start the MCMCP \
-                 Orchestrator app, or drop --no-launch and this will start it."
-            );
-        }
-    };
-
-    let token = mcp_socket::read_token(&state).context(
-        "reading the orchestrator's token. It is written when the app first runs; if it has never \
-         run on this machine, start it once.",
-    )?;
-
-    // into_split rather than split: the stdin pump runs in its own task, which needs an owned half.
-    // A borrowing split would tie both halves to this stack frame.
-    let (read_half, mut write_half) = stream.into_split();
-    let mut from_app = BufReader::new(read_half);
-
-    // Attach before anything else. Until the app answers, this connection may not carry MCP.
-    mcmcp_orchestrator_core::link::framing::write_frame(
-        &mut write_half,
-        &serde_json::json!({ "type": "attach", "token": token }),
-    )
-    .await?;
-
-    match mcmcp_orchestrator_core::link::framing::read_frame(&mut from_app).await? {
-        Some(frame) if frame.get("type").and_then(|t| t.as_str()) == Some("attached") => {}
-        Some(frame) => anyhow::bail!(
-            "the orchestrator refused this connection: {}",
-            frame
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("no reason given")
-        ),
-        None => anyhow::bail!("the orchestrator closed the connection without answering"),
-    }
-
-    // Two pumps, in opposite directions. The shim lives exactly as long as the shorter of them:
-    // the app going away leaves nothing to relay to, and the client closing stdin is how MCP says
-    // it is done. Waiting for the app to close after that meant waiting for every call still in
-    // flight, for a client no longer reading the answers.
-    let mut to_app = tokio::spawn(async move {
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if write_half.write_all(line.as_bytes()).await.is_err()
-                || write_half.write_all(b"\n").await.is_err()
-                || write_half.flush().await.is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    let from_app = async move {
-        let mut stdout = tokio::io::stdout();
-        let mut lines = from_app.lines();
-        while let Some(line) = lines.next_line().await? {
-            stdout.write_all(line.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
-        }
-        info!("the orchestrator app closed the connection");
-        anyhow::Ok(())
-    };
-
-    tokio::select! {
-        result = from_app => result?,
-        _ = &mut to_app => info!("the MCP client closed its input"),
-    }
-    to_app.abort();
-    Ok(())
+    })
+    .await
 }
 
 async fn connect(port: u16) -> Result<tokio::net::TcpStream> {

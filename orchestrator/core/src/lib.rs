@@ -19,6 +19,7 @@
 pub mod activity;
 pub mod caller;
 pub mod catalogue;
+pub mod client_calls;
 pub mod control;
 pub mod crash;
 pub mod events;
@@ -33,6 +34,7 @@ pub mod paths;
 pub mod policy;
 pub mod registry;
 pub mod router;
+pub mod shim;
 pub mod stdio;
 pub mod storage;
 pub mod store;

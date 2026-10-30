@@ -654,22 +654,37 @@ impl Router {
         aggregate
     }
 
+    /// The aggregate a client's list request is answered from: the one last built.
+    ///
+    /// Every change to what is connected or what a game offers rebuilds it before announcing
+    /// (`rebuild_and_announce`, a game's own `list_changed`), so it is current whenever a client has
+    /// been told to re-list. Serving it rather than rebuilding keeps a re-list cheap and unable to
+    /// fail during link churn (#159), and stops a list request from replacing the cache between a
+    /// change and its announcement — which made the announcement compare against the new state and
+    /// say nothing. Built only when nothing has been yet.
+    async fn current_aggregate(&self) -> Aggregate {
+        match self.cached_aggregate() {
+            Some(aggregate) => aggregate,
+            None => self.build_aggregate().await,
+        }
+    }
+
     async fn handle_tools_list(&self) -> Value {
-        let mut tools = self.build_aggregate().await.tools;
+        let mut tools = self.current_aggregate().await.tools;
         tools.extend(orchestrator_tools::definitions());
         json!({ "tools": tools })
     }
 
     async fn handle_resources_list(&self) -> Value {
-        json!({ "resources": self.build_aggregate().await.resources })
+        json!({ "resources": self.current_aggregate().await.resources })
     }
 
     async fn handle_templates_list(&self) -> Value {
-        json!({ "resourceTemplates": self.build_aggregate().await.resource_templates })
+        json!({ "resourceTemplates": self.current_aggregate().await.resource_templates })
     }
 
     async fn handle_prompts_list(&self) -> Value {
-        let mut prompts = self.build_aggregate().await.prompts;
+        let mut prompts = self.current_aggregate().await.prompts;
         prompts.push(orchestrator_tools::prompt_definition());
         json!({ "prompts": prompts })
     }
@@ -3749,6 +3764,36 @@ mod tests {
             }
         }
         announced
+    }
+
+    #[tokio::test]
+    async fn a_re_list_during_link_churn_cannot_swallow_the_announcement_of_the_change() {
+        // A tools/list used to rebuild and cache the aggregate. One landing between a game linking
+        // and the router handling that link replaced the cache first, so the change compared equal
+        // and was never announced (#159).
+        let first = endpoint("g.client", "g", Side::Client, &["client_look"], 1, None);
+        let router = router_of(&[first]).await;
+        let mut downstream = router.subscribe_downstream();
+
+        let second = endpoint("h.server", "h", Side::Server, &["server_new_tool"], 1, None);
+        router.registry.insert(Arc::clone(&second));
+        let listed = router
+            .handle(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+            .await
+            .unwrap();
+        assert!(!tool_names(&listed).contains(&"server_new_tool".to_string()));
+
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "h.server".into(),
+            })
+            .await;
+        assert!(announced(&mut downstream).contains(&"notifications/tools/list_changed".to_string()));
+        let listed = router
+            .handle(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}))
+            .await
+            .unwrap();
+        assert!(tool_names(&listed).contains(&"server_new_tool".to_string()));
     }
 
     #[tokio::test]
