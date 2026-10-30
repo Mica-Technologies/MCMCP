@@ -223,6 +223,13 @@ allocation rate is how garbage-heavy code shows up before it becomes a GC pause 
 and after a change. The per-thread figures come from HotSpot's extension of `ThreadMXBean` and are
 simply absent on a JVM that lacks it.
 
+`window.threads` ranks every thread by the CPU it used in the window, as a percent of one core,
+up to 12 rows: `name`, `cpuPercent`, `state`, `daemon` and `at`, the first frame that is not the
+JDK's own. `otherThreadsPercent` totals every thread but the game thread. A server idling at 7% CPU
+with its tick doing nothing is usually a background thread: a monitoring mod polling the OS, say.
+A tick profiler cannot see that, and this finds it in one call. Pass the name to
+[`game_cpu_sample`](#game_cpu_sample) to see what that thread is doing.
+
 On a client, `clientThread` says whether the game is still finishing frames: `responding`, and
 `lastProgressMsAgo`. Once it has gone `limits.clientStallSeconds` without one, `responding` is false
 and `stalled` carries the thread's state, what it is waiting on and its top frames, with `deadlocked`

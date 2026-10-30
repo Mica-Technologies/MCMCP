@@ -22,6 +22,7 @@ import com.micatechnologies.minecraft.mcmcp.perf.HeapHistogram;
 import com.micatechnologies.minecraft.mcmcp.perf.ProfilerGuard;
 import com.micatechnologies.minecraft.mcmcp.perf.SlowTickFilter;
 import com.micatechnologies.minecraft.mcmcp.perf.StallDetector;
+import com.micatechnologies.minecraft.mcmcp.perf.ThreadCpu;
 import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import java.io.File;
 import java.io.IOException;
@@ -137,7 +138,10 @@ public final class PerformanceTools {
                 + "a hang all look alike until you read it.\n\n"
                 + "With sample_seconds, also measures that window: GC pauses, and the game thread's "
                 + "CPU share and allocation rate. A high allocation rate is how garbage-heavy code "
-                + "shows up before it becomes a GC pause; compare it before and after a change.\n\n"
+                + "shows up before it becomes a GC pause; compare it before and after a change. "
+                + "window.threads ranks every thread by CPU (percent of one core) with its state and "
+                + "the first non-JDK frame, and otherThreadsPercent totals all but the game thread: "
+                + "how a background mod thread burning CPU off the tick is found.\n\n"
                 + "'previousRun' is what the request journal recorded about the run before this one: "
                 + "whether it ended cleanly, and any tool calls that started and never finished. Read it "
                 + "after a crash to rule MCMCP in or out; its 'journal' field says whether recording was on.")
@@ -316,11 +320,13 @@ public final class PerformanceTools {
         }
         long cpuBefore = threadCpuNanos(threadBean, threadId);
         long allocatedBefore = threadAllocatedBytes(threadBean, threadId);
+        Map<Long, Long> everyBefore = everyThreadCpu(threadBean);
         long startedNanos = System.nanoTime();
 
         sleepCancellable(context, seconds * 1000L);
 
         double wallNanos = System.nanoTime() - startedNanos;
+        Map<Long, Long> everyAfter = everyThreadCpu(threadBean);
         long gcCount = -gcCountBefore;
         long gcMillis = -gcMillisBefore;
         for (GarbageCollectorMXBean gc : ManagementFactory.getGarbageCollectorMXBeans()) {
@@ -347,7 +353,69 @@ public final class PerformanceTools {
             }
             window.add("gameThread", thread);
         }
+        addThreadRanking(window, everyBefore, everyAfter, (long) wallNanos, threadId);
         return window;
+    }
+
+    /** Rows listed in window.threads, busiest first. */
+    private static final int THREADS_LISTED = 12;
+
+    /** Every live thread's CPU time by id, or empty when the JVM cannot say. */
+    private static Map<Long, Long> everyThreadCpu(ThreadMXBean bean) {
+        Map<Long, Long> times = new HashMap<>();
+        try {
+            if (!bean.isThreadCpuTimeSupported()) {
+                return times;
+            }
+            for (long id : bean.getAllThreadIds()) {
+                times.put(id, bean.getThreadCpuTime(id));
+            }
+        } catch (RuntimeException e) {
+            // Switched off at runtime: no ranking, the rest of the window stands.
+        }
+        return times;
+    }
+
+    /** window.threads and otherThreadsPercent (#156). */
+    private static void addThreadRanking(JsonObject window, Map<Long, Long> before, Map<Long, Long> after,
+                                         long wallNanos, long gameThreadId) {
+        if (after.isEmpty()) {
+            return;
+        }
+        Map<Long, Thread> live = new HashMap<>();
+        Map<Long, StackTraceElement[]> stacks = new HashMap<>();
+        Map<Long, String> names = new HashMap<>();
+        for (Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
+            live.put(entry.getKey().getId(), entry.getKey());
+            stacks.put(entry.getKey().getId(), entry.getValue());
+            names.put(entry.getKey().getId(), entry.getKey().getName());
+        }
+        List<ThreadCpu.Row> rows = ThreadCpu.rank(before, after, names, wallNanos);
+        double others = 0.0D;
+        JsonArray listed = new JsonArray();
+        for (ThreadCpu.Row row : rows) {
+            if (row.id != gameThreadId) {
+                others += row.percent;
+            }
+            if (listed.size() >= THREADS_LISTED || row.percent < 0.05D) {
+                continue;
+            }
+            JsonObject item = new JsonObject();
+            item.addProperty("name", row.name);
+            item.addProperty("cpuPercent", round1(row.percent));
+            Thread thread = live.get(row.id);
+            if (thread != null) {
+                item.addProperty("state", thread.getState().name());
+                item.addProperty("daemon", thread.isDaemon());
+            }
+            String at = ThreadCpu.ownFrame(stacks.get(row.id));
+            if (at != null) {
+                item.addProperty("at", at);
+            }
+            listed.add(item);
+        }
+        window.addProperty("otherThreadsPercent", round1(others));
+        window.add("threads", listed);
     }
 
     private static long threadCpuNanos(ThreadMXBean bean, long threadId) {
