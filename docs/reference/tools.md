@@ -754,6 +754,21 @@ near any player never unloads. `blocks` (patterns) limits it to some, and `dryRu
 `reloaded`, `byBlock`, and any `failed`; a tile entity that cannot be re-created from its NBT is put
 back as it was. At most 4,096 a call.
 
+#### `server_wire_connections`
+
+:material-eye: Read-only · listed only when Immersive Engineering is loaded · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `groupBy`, `limit`
+
+Immersive Engineering keeps its wire graph in `ImmersiveNetHandler`, not in tile-entity NBT, so
+[`server_get_tile_entities`](#server_get_tile_entities) shows each connector's `wireCount` and never
+where its wires go. This returns every wire with an end in the box, each once, as rows of
+`[start, end, wireType, length, farEndLoaded]`: the ends as `[x, y, z]`, IE's wire type name
+(`STEEL`, `ELECTRUM_INS`, ...), the length in blocks, and whether the far end's chunk is loaded.
+
+`groupBy: "component"` returns the connected pieces with a node in the box instead, largest first:
+`nodes`, `wires`, `types`, the bounding box `min` and `max`, and `nodesInBox`. A piece's nodes outside
+the box count too, so one feeder from substation to its last load is one piece, however far it runs.
+`limit` (default 500, up to 2,000) caps the rows.
+
 #### `server_count_blocks`
 
 :material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `include`, `exclude`, `includeAir`, `byState`, `samples`, `limit`, `extents`, `byY`, `load`
