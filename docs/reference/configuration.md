@@ -481,6 +481,7 @@ An integrated server's is not used, since it stops ticking whenever its player p
 | `throttled` | mean tick over `holdJobsMspt`, or real TPS below `holdJobsBelowTps` | background jobs wait | yellow |
 | `paused` | mean tick over `refuseWritesMspt`, real TPS below `refuseWritesBelowTps`, or heap over `chunks.pauseHeapPercent` | calls that change the world are refused, and jobs wait | red |
 | `stalled` | a dedicated server's thread has finished no tick for `stallDumpSeconds` | as `paused`, and every thread's stack is written out | red |
+| `idle` | the same silence, but the thread is asleep in the main loop outside any tick, or a mod declared a pause | calls that change the world are refused with that reason; no stack dump, no warning | not told |
 
 Getting worse takes effect at once; getting better waits out 10 seconds of better readings. These
 are looser than chunk loading's own thresholds ([`chunks`](#chunks) `throttleMspt` and `pauseMspt`,
@@ -526,6 +527,14 @@ with the MCMCP calls running at the time, and one warning in the log names the f
 resume, the log says so and how long it lasted.
 
 Integrated servers are not watched this way: one stops ticking whenever its player pauses the game.
+
+A server paused on purpose is not stalled. Pause mods (LDFX's pauser, SUM's) freeze an empty server
+by putting the server thread to sleep in the main loop instead of running ticks, and a working server
+only sleeps there for the few milliseconds between ticks. When the silent thread is asleep there,
+outside any tick, the state is `idle`: one INFO line in the log, no stack dump, and writes are
+refused with "the server is idle" rather than a stall. A pause mod can also say so directly by calling
+`com.micatechnologies.minecraft.mcmcp.perf.IdlePause.declare("who")` reflectively, and
+`declare(null)` when it resumes. If a pause turns into a stall, the dump is written then.
 
 While the server is stalled, calls that change the world are refused before they run, as when
 it is paused.

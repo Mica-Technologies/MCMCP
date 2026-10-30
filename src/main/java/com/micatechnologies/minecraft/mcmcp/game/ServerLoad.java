@@ -40,7 +40,12 @@ import javax.annotation.Nullable;
 public final class ServerLoad {
 
     public enum Level {
-        OK, THROTTLED, PAUSED, STALLED;
+        OK, THROTTLED, PAUSED, STALLED,
+        /**
+         * Not ticking on purpose: a pause mod froze an empty server (#158). Healthy, but nothing that
+         * needs the server thread runs until it ticks again, so writes are refused with that reason.
+         */
+        IDLE;
 
         public String id() {
             return name().toLowerCase(Locale.ROOT);
@@ -60,6 +65,9 @@ public final class ServerLoad {
     private static volatile long recoveryMillis;
     private static volatile boolean stalled;
     private static volatile long stalledForMillis;
+    /** Why the server is idle on purpose, or null when it is not. */
+    @Nullable
+    private static volatile String idleReason;
     @Nullable
     private static volatile String lastStallDump;
     private static final List<Listener> LISTENERS = new CopyOnWriteArrayList<>();
@@ -89,13 +97,13 @@ public final class ServerLoad {
 
     /** The level now: a stall if there is one, else the last measurement. */
     public static Level level() {
-        return stalled ? Level.STALLED : measured;
+        return stalled ? Level.STALLED : idleReason != null ? Level.IDLE : measured;
     }
 
     /** Whether calls that change the world are refused, and jobs wait: paused or stalled. */
     public static boolean refusesWrites() {
         Level level = level();
-        return level == Level.PAUSED || level == Level.STALLED;
+        return level == Level.PAUSED || level == Level.STALLED || level == Level.IDLE;
     }
 
     /** Whether background jobs hold back: anything but OK. */
@@ -137,6 +145,19 @@ public final class ServerLoad {
         fire(before);
     }
 
+    /** From the watchdog: why the server is not ticking on purpose, or null when it ticks or is stuck. */
+    public static synchronized void idle(@Nullable String reason, long forMillis) {
+        Level before = level();
+        idleReason = reason;
+        stalledForMillis = reason != null || stalled ? forMillis : 0L;
+        fire(before);
+    }
+
+    @Nullable
+    public static String idleReason() {
+        return idleReason;
+    }
+
     /** From the watchdog: where the current stall's stacks were written. */
     public static void stallDumped(@Nullable String path) {
         lastStallDump = path;
@@ -146,6 +167,7 @@ public final class ServerLoad {
     public static synchronized void reset() {
         measured = Level.OK;
         stalled = false;
+        idleReason = null;
         stalledForMillis = 0L;
         meanMspt = 0.0D;
         realTps = -1.0D;
@@ -215,6 +237,8 @@ public final class ServerLoad {
         switch (level()) {
             case STALLED:
                 return 15_000L;
+            case IDLE:
+                return 30_000L;
             case PAUSED:
                 return Math.max(5_000L, Math.min(30_000L, recoveryMillis));
             default:
@@ -227,6 +251,11 @@ public final class ServerLoad {
         Level level = level();
         if (level == Level.STALLED) {
             return "stalled: the server thread has not finished a tick in " + stalledForMillis / 1000L + " s";
+        }
+        if (level == Level.IDLE) {
+            return "idle: not ticking on purpose for " + stalledForMillis / 1000L + " s (" + idleReason
+                + "; a pause mod freezes an empty server), and nothing that needs the server thread runs until a "
+                + "player joins or it is unpaused";
         }
         return level.id() + " (mean tick " + round1(meanMspt) + " ms, " + round1(reportedTps()) + " TPS, heap "
             + Math.round(heapPercent) + "%)";
@@ -296,6 +325,11 @@ public final class ServerLoad {
         json.addProperty("refusesWrites", refusesWrites());
         if (stalled) {
             json.addProperty("stalledSeconds", stalledForMillis / 1000L);
+        }
+        String reason = idleReason;
+        if (reason != null && !stalled) {
+            json.addProperty("idle", reason);
+            json.addProperty("idleSeconds", stalledForMillis / 1000L);
         }
         String dump = lastStallDump;
         if (dump != null) {

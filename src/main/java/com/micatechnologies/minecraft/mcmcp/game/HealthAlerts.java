@@ -26,7 +26,8 @@ public final class HealthAlerts {
      */
     @Nullable
     public synchronized ServerLoad.Level poll(ServerLoad.Level current, long nowMillis, long intervalMillis) {
-        if (current == announced) {
+        // A server paused on purpose is not news, and it pauses every time the last player leaves (#158).
+        if (current == announced || current == ServerLoad.Level.IDLE) {
             return null;
         }
         Long last = lastSent.get(current);
@@ -70,6 +71,9 @@ public final class HealthAlerts {
             case PAUSED:
                 text.append("Server is overloaded: ").append(numbers)
                     .append(". MCMCP refuses calls that change the world and holds back jobs until it recovers.");
+                break;
+            case IDLE:
+                text.append("Server is paused on purpose; MCMCP refuses calls that change the world until it ticks.");
                 break;
             default:
                 text.append("Server thread stalled: no tick in ").append(stalledSeconds).append(" s.");

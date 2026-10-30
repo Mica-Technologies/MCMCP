@@ -5,6 +5,7 @@ import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolActivity;
 import com.micatechnologies.minecraft.mcmcp.perf.GameThreads;
+import com.micatechnologies.minecraft.mcmcp.perf.IdlePause;
 import com.micatechnologies.minecraft.mcmcp.perf.StallDetector;
 import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import java.io.File;
@@ -64,6 +65,12 @@ public final class ServerWatchdog {
     /** Watchdog thread only: when the current stall's ticks stopped, or 0 when there is none. */
     private static long stalledSinceNanos;
 
+    /** Watchdog thread only: the current silence is a deliberate pause, not yet a stall (#158). */
+    private static boolean idle;
+
+    /** Watchdog thread only: the silence has been reported as a stall, with its dump. */
+    private static boolean reported;
+
     private ServerWatchdog() {
     }
 
@@ -114,7 +121,10 @@ public final class ServerWatchdog {
         if (current == null || server == null || !server.isServerRunning()) {
             if (stalledSinceNanos != 0L) {
                 stalledSinceNanos = 0L;
+                idle = false;
+                reported = false;
                 ServerLoad.stalled(false, 0L);
+                ServerLoad.idle(null, 0L);
             }
             return;
         }
@@ -125,23 +135,59 @@ public final class ServerWatchdog {
         long silent = current.silentMillis(now);
         if (transition == StallDetector.Transition.STALLED) {
             stalledSinceNanos = now - silent * 1_000_000L;
+            idle = false;
+            reported = false;
+        }
+        if (transition == StallDetector.Transition.RECOVERED) {
+            long lasted = stalledSinceNanos == 0L ? 0L : (now - stalledSinceNanos) / 1_000_000L;
+            stalledSinceNanos = 0L;
+            ServerLoad.stalled(false, 0L);
+            ServerLoad.idle(null, 0L);
+            if (reported) {
+                Mcmcp.LOGGER.info("MCMCP: the server thread is finishing ticks again, after about " + lasted / 1000L
+                    + " s without one.");
+            }
+            else if (idle) {
+                Mcmcp.LOGGER.info("MCMCP: the server is ticking again after a pause of about " + lasted / 1000L + " s.");
+            }
+            idle = false;
+            reported = false;
+            return;
+        }
+        if (!current.isStalled()) {
+            return;
+        }
+        // Looked at on every poll of a silence: a pause can turn into a stall (a player joins and the
+        // first tick hangs), and a stall is never taken back for a pause once it is reported.
+        String pause = reported ? null : IdlePause.reason(serverStack());
+        if (pause != null) {
+            if (!idle) {
+                idle = true;
+                Mcmcp.LOGGER.info("MCMCP: the server is not ticking on purpose (" + pause + "). Calls that change the "
+                    + "world are refused until it ticks again; this is not a stall.");
+            }
+            ServerLoad.idle(pause, silent);
+            return;
+        }
+        if (!reported) {
+            reported = true;
+            idle = false;
+            ServerLoad.idle(null, 0L);
             String file = writeDump(silent);
             ServerLoad.stallDumped(file);
             ServerLoad.stalled(true, silent);
             Mcmcp.LOGGER.warn("MCMCP: the server thread has finished no tick in " + silent / 1000L + " s. Calls that "
                 + "change the world are refused until it does. "
                 + (file == null ? "Its stack could not be written; see the error above." : "Every thread's stack is in " + file + "."));
+            return;
         }
-        else if (transition == StallDetector.Transition.RECOVERED) {
-            long lasted = stalledSinceNanos == 0L ? 0L : (now - stalledSinceNanos) / 1_000_000L;
-            stalledSinceNanos = 0L;
-            ServerLoad.stalled(false, 0L);
-            Mcmcp.LOGGER.info("MCMCP: the server thread is finishing ticks again, after about " + lasted / 1000L
-                + " s without one.");
-        }
-        else if (current.isStalled()) {
-            ServerLoad.stalled(true, silent);
-        }
+        ServerLoad.stalled(true, silent);
+    }
+
+    @Nullable
+    private static StackTraceElement[] serverStack() {
+        ThreadInfo info = GameThreads.snapshot(GameThreads.find(GameThreads.SERVER));
+        return info == null || !info.getThreadName().equals(GameThreads.SERVER) ? null : info.getStackTrace();
     }
 
     /**

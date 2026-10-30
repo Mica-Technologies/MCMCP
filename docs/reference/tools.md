@@ -230,8 +230,8 @@ naming any threads the JVM finds deadlocked. A world load, a deadlock and a hang
 alike; the stack is what tells them apart. This is answered off the game thread, so it works on a
 client that has stopped answering everything else.
 
-On a server, `serverHealth` is MCMCP's view of the server: `level` (`ok`, `throttled`, `paused` or
-`stalled`), `meanTickMs`, `tps` (what the mean tick allows), `realTps` on a dedicated server (ticks
+On a server, `serverHealth` is MCMCP's view of the server: `level` (`ok`, `throttled`, `paused`,
+`stalled` or `idle`, paused on purpose by a pause mod, with `idle` saying why and `idleSeconds`), `meanTickMs`, `tps` (what the mean tick allows), `realTps` on a dedicated server (ticks
 finished a second by the wall clock over the last 5 s, which also sees the time between ticks),
 `heapPercentAfterGc`, and `refusesWrites`, true while calls that change the world are refused. On a dedicated server, `stalled` means the server thread has
 finished no tick for [`health.stallDumpSeconds`](configuration.md#health); then `stalledSeconds`
