@@ -153,7 +153,8 @@ public final class ServerApplyOps {
         }
         final int dimension = context.getInt("dimension", 0);
         final boolean dryRun = context.getBoolean("dryRun", false);
-        final String saveTarget = context.getString("saveTarget", null);
+        final String saveTarget = com.micatechnologies.minecraft.mcmcp.regions.TargetStore.normalise(
+            context.getString("saveTarget", null));
         if (saveTarget != null) {
             String bad = com.micatechnologies.minecraft.mcmcp.regions.TargetStore.checkName(saveTarget);
             if (bad != null) {

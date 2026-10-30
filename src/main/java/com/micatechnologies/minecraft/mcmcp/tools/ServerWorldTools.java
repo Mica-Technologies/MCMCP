@@ -214,6 +214,7 @@ public final class ServerWorldTools {
                     .required("blocks", "radius"))
                 .required("x", "z")
                 .build())
+            .alias("include", "blocks")
             .serverOnly()
             .readOnly()
             .handler(context -> {

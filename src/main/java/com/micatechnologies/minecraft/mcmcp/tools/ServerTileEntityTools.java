@@ -90,6 +90,8 @@ public final class ServerTileEntityTools {
                     + "and says 'truncated' when it stopped there.", Json.obj("type", "string"))
                 .integer("samples", "With groupBy: sample positions per group. Default 3.", 0, 20)
                 .build())
+            .alias("include", "blocks")
+            .alias("offset", "cursor")
             .serverOnly()
             .readOnly()
             .handler(context -> {

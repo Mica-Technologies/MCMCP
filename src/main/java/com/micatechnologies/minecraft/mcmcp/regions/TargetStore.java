@@ -77,6 +77,14 @@ public final class TargetStore {
         }
     }
 
+    /**
+     * A name as given, trimmed and lower-cased. Names are stored lower case, and a caller writing
+     * {@code Alto1873/StairN} means the same layer, so it is folded rather than refused (#148).
+     */
+    public static String normalise(String name) {
+        return name == null ? null : name.trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
     /** A message for the caller when a name cannot be used, or null when it can. */
     @Nullable
     public static String checkName(String name) {

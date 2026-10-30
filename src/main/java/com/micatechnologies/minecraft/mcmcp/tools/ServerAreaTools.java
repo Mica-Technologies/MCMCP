@@ -124,6 +124,7 @@ public final class ServerAreaTools {
                     + "have any: counts per floor. Default false.")
                 .required("x", "z")
                 .build())
+            .alias("blocks", "include")
             .serverOnly()
             .readOnly()
             .handler(ServerAreaTools::count)

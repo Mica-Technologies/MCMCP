@@ -91,7 +91,7 @@ public final class ServerPlanTools {
         int yMaxDefault = 255;
         int dimension = context.getInt("dimension", 0);
         if (context.has("target")) {
-            String name = context.getString("target", "");
+            String name = TargetStore.normalise(context.getString("target", ""));
             BuildTarget target = store.union(name);
             int[] bounds = target == null ? null : target.bounds();
             if (bounds == null) {

@@ -61,6 +61,7 @@ public final class ServerTileEntityReloadTools {
                 .bool("dryRun", "Count what would be reloaded; change nothing."))
                 .required("x", "y", "z")
                 .build())
+            .alias("include", "blocks")
             .serverOnly()
             .destructive()
             .idempotent()

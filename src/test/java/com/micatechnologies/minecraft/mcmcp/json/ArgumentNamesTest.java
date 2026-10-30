@@ -73,4 +73,26 @@ class ArgumentNamesTest {
 
         assertTrue(message.contains("client_runtime_info takes no arguments."), message);
     }
+
+    @Test
+    void anAliasIsRenamedToTheArgumentItStandsForAndThenAccepted() {
+        JsonObject schema = JsonSchema.object().string("include", "Blocks").build();
+        JsonObject call = arguments("blocks", "minecraft:stone");
+
+        ArgumentNames.applyAliases(java.util.Collections.singletonMap("blocks", "include"), call);
+
+        assertEquals("minecraft:stone", call.get("include").getAsString());
+        assertNull(ArgumentNames.describeUnknown("server_count_blocks", schema, call));
+    }
+
+    @Test
+    void anAliasPassedAlongsideItsDeclaredNameIsStillRefused() {
+        JsonObject schema = JsonSchema.object().string("include", "Blocks").build();
+        JsonObject call = arguments("blocks", "a", "include", "b");
+
+        ArgumentNames.applyAliases(java.util.Collections.singletonMap("blocks", "include"), call);
+
+        assertEquals("b", call.get("include").getAsString());
+        assertTrue(ArgumentNames.describeUnknown("server_count_blocks", schema, call).contains("'blocks'"));
+    }
 }

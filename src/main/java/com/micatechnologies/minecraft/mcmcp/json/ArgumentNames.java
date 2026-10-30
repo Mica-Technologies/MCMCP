@@ -48,6 +48,20 @@ public final class ArgumentNames {
         return unknown;
     }
 
+    /**
+     * Renames each alias in {@code arguments} to the declared name it stands for, so a tool can take
+     * the other spelling of a filter or paging argument without publishing it (#148: one tool's
+     * {@code include} is another's {@code blocks}). An alias passed alongside its declared name is
+     * left alone, and the unknown-argument check then names it.
+     */
+    public static void applyAliases(Map<String, String> aliases, JsonObject arguments) {
+        for (Map.Entry<String, String> alias : aliases.entrySet()) {
+            if (arguments.has(alias.getKey()) && !arguments.has(alias.getValue())) {
+                arguments.add(alias.getValue(), arguments.remove(alias.getKey()));
+            }
+        }
+    }
+
     /** The names {@code schema} declares, in declaration order. */
     public static List<String> declared(JsonObject schema) {
         List<String> names = new ArrayList<>();

@@ -12,6 +12,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.regions.BuildTarget;
 import com.micatechnologies.minecraft.mcmcp.regions.SpaceChecks;
+import com.micatechnologies.minecraft.mcmcp.regions.TargetStore;
 import com.micatechnologies.minecraft.mcmcp.regions.VoxelGrid;
 import java.util.ArrayList;
 import java.util.BitSet;
@@ -148,7 +149,7 @@ public final class ServerSpaceTools {
         final int[] box;
         final int dimension;
         if (context.has("target")) {
-            String name = context.getString("target", "");
+            String name = TargetStore.normalise(context.getString("target", ""));
             BuildTarget target = ServerTargetTools.store().union(name);
             int[] bounds = target == null ? null : target.bounds();
             if (bounds == null) {

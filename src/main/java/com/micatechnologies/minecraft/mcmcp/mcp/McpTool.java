@@ -5,7 +5,9 @@ import com.micatechnologies.minecraft.mcmcp.game.McmcpSide;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
 
@@ -54,6 +56,7 @@ public final class McpTool {
     private final boolean idempotent;
     private final boolean openWorld;
     private final boolean requiresGameThread;
+    private final Map<String, String> aliases;
     private final Handler handler;
 
     private McpTool(Builder builder) {
@@ -70,6 +73,7 @@ public final class McpTool {
         this.idempotent = builder.idempotent;
         this.openWorld = builder.openWorld;
         this.requiresGameThread = builder.requiresGameThread;
+        this.aliases = Collections.unmodifiableMap(new LinkedHashMap<>(builder.aliases));
         this.handler = builder.handler;
     }
 
@@ -104,6 +108,11 @@ public final class McpTool {
 
     public boolean requiresGameThread() {
         return requiresGameThread;
+    }
+
+    /** Unpublished alternative argument names, each to the declared name it stands for. */
+    public Map<String, String> getAliases() {
+        return aliases;
     }
 
     public ToolResult call(ToolContext context) throws Exception {
@@ -171,6 +180,8 @@ public final class McpTool {
          * opt out explicitly via {@link #offGameThread()}.
          */
         private boolean requiresGameThread = true;
+
+        private final Map<String, String> aliases = new LinkedHashMap<>();
 
         private Handler handler;
 
@@ -244,6 +255,16 @@ public final class McpTool {
             return this;
         }
 
+        /**
+         * Accepts {@code alias} as another name for the declared argument {@code declared}. It is
+         * not published, so it costs nothing in the catalogue; it is for spellings a sibling tool
+         * uses for the same thing.
+         */
+        public Builder alias(String alias, String declared) {
+            this.aliases.put(alias, declared);
+            return this;
+        }
+
         public Builder handler(Handler value) {
             this.handler = value;
             return this;
@@ -258,6 +279,14 @@ public final class McpTool {
                 // model decides whether to call the tool; an undescribed tool is dead weight in
                 // every request's context window.
                 throw new IllegalStateException("Tool '" + name + "' has no description");
+            }
+            com.google.gson.JsonObject properties =
+                com.micatechnologies.minecraft.mcmcp.json.Json.getObjectOrEmpty(inputSchema, "properties");
+            for (Map.Entry<String, String> alias : aliases.entrySet()) {
+                if (properties.has(alias.getKey()) || !properties.has(alias.getValue())) {
+                    throw new IllegalStateException("Tool '" + name + "' aliases '" + alias.getKey()
+                        + "' to '" + alias.getValue() + "', which it does not declare (or the alias is declared)");
+                }
             }
             return new McpTool(this);
         }

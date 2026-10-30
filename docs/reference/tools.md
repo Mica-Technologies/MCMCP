@@ -9,7 +9,9 @@ destructive ones — so they are set honestly rather than defensively.
 
 **An argument a tool does not declare is refused**, with the closest valid name — `world_type`
 gets "did you mean 'worldType'?" — and nothing is done. Ignoring it used to run the tool on a
-default the caller never chose, and the result read as success.
+default the caller never chose, and the result read as success. A few tools also take the
+spelling a sibling tool uses for the same argument, unpublished: `blocks` and `include` are one
+block filter wherever either is declared, and `server_get_tile_entities` takes `offset` for `cursor`.
 
 **Big lists are tables.** A list of three or more objects in a result (tile entities, nearby
 entities, inventory slots, `server_find_blocks` hits around a point, profiler rows) comes back as
@@ -843,7 +845,8 @@ A build target is what an area should be: a block state for each cell a build pl
 cells it did not touch. The server keeps targets in the world's `mcmcp-targets` folder, so checking a
 building is one call that answers with counts. There is no need to replay a generator, read the area
 back and compare in a script. Names are layered with `/`: `tower/structure`, `tower/fitout-l3`,
-`tower/life`. A pattern `tower/*` means every layer under it, merged in the order the layers were
+`tower/life`. Names are lower case; one given in upper case is folded, not refused. A pattern
+`tower/*` means every layer under it, merged in the order the layers were
 **created**, later layers winning per cell. Saving the structure again after the fit-out does not
 cover the fit-out.
 

@@ -13,6 +13,13 @@ import org.junit.jupiter.api.Test;
 
 class TargetStoreTest {
 
+    @Test
+    void anUpperCaseTargetNameIsFoldedToTheLayerItMeans() {
+        assertEquals("alto1873/stairn", TargetStore.normalise(" Alto1873/StairN "));
+        assertNull(TargetStore.checkName(TargetStore.normalise("Alto1873/StairN")));
+        assertNull(TargetStore.normalise(null));
+    }
+
     private static TargetStore store() throws IOException {
         File folder = Files.createTempDirectory("mcmcp-targets").toFile();
         folder.deleteOnExit();

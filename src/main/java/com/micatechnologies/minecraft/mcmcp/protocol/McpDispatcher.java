@@ -342,6 +342,7 @@ public class McpDispatcher {
         if (instanceRefusal != null) {
             return ToolResult.error(instanceRefusal).toJson(session.getProtocolVersion());
         }
+        ArgumentNames.applyAliases(tool.getAliases(), arguments);
         String unknownArguments = ArgumentNames.describeUnknown(name, tool.getInputSchema(), arguments);
         if (unknownArguments != null) {
             return ToolResult.error(unknownArguments).toJson(session.getProtocolVersion());

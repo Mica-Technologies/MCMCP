@@ -127,7 +127,7 @@ public final class ServerTargetTools {
 
     private static ToolResult target(ToolContext context) throws Exception {
         String op = context.getString("op", "list");
-        String name = context.getString("name", null);
+        String name = TargetStore.normalise(context.getString("name", null));
         TargetStore store = store();
         switch (op) {
             case "list": {
@@ -418,7 +418,7 @@ public final class ServerTargetTools {
     }
 
     private static ToolResult check(final ToolContext context, final boolean repair) throws Exception {
-        final String name = context.getString("target", "");
+        final String name = TargetStore.normalise(context.getString("target", ""));
         final TargetStore store = store();
         final BuildTarget target = store.union(name);
         if (target == null) {
