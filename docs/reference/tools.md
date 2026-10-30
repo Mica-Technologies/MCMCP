@@ -1072,7 +1072,9 @@ Plans and builds a compliant switchback stair core inside an enclosure:
 - `palette` is `{floor, wall, tread, rail, sconce}`, by default `minecraft:concrete:8`,
   `minecraft:concrete:7`, `minecraft:stone_brick_stairs`, then for `rail` the first of
   `csm:railing_pipe_galvanized` / `minecraft:iron_bars` this game has, and for `sconce` the first of
-  `csm:sconcehalfshellnickel` / `minecraft:torch` (a torch gets the sconce's facing). A rail that stores
+  `csm:sconcehalfshellnickel` / `minecraft:torch` (a torch gets the sconce's facing; one the plan puts in
+a ring cell goes one cell inside, hung on the wall, and torches are written after everything else so
+none is placed before the block it hangs on). A rail that stores
   its edges (a CSM railing) gets them facing the drop, as [`server_place_railing`](#server_place_railing) would.
 
 The rules are those of the UIA builder's stair planner, ported exactly and tested against its

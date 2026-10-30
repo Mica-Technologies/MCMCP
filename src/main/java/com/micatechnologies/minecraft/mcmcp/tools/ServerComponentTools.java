@@ -148,6 +148,22 @@ public final class ServerComponentTools {
         return "minecraft:torch:" + torch[(meta >> 2) & 3];
     }
 
+    /** The way a wall torch of this meta points, {dx, dz}: its own cell is one step from what it hangs on. */
+    static int[] torchStep(String torch) {
+        switch (torch.substring(torch.lastIndexOf(':') + 1)) {
+            case "1":
+                return new int[] {1, 0};
+            case "2":
+                return new int[] {-1, 0};
+            case "3":
+                return new int[] {0, 1};
+            case "4":
+                return new int[] {0, -1};
+            default:
+                return new int[] {0, 0};
+        }
+    }
+
     /** Patterns a stair never overwrites by default: what is fitted into a core after it is built. */
     static final List<String> STAIR_KEEP = java.util.Arrays.asList("*door*", "*sign*", "*panel*", "*sconce*",
         "*pull*", "*standpipe*");
@@ -263,12 +279,34 @@ public final class ServerComponentTools {
             ServerTargetTools.normaliser(context, ServerTargetTools.store());
         final boolean dryRun = context.getBoolean("dryRun", false);
         final Map<String, int[]> byChange = new java.util.TreeMap<>();
+        // A torch standing in for a sconce in a ring cell hangs on the cell behind it, outside the core,
+        // and fell off where that was air (#161). It goes one cell in, hung on the ring, which gets the
+        // wall. Only where the plan leaves that inner cell open.
+        final Map<com.micatechnologies.minecraft.mcmcp.building.Pos, com.micatechnologies.minecraft.mcmcp.building.Pos>
+            torchesIn = new java.util.HashMap<>();
+        for (Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell : cells) {
+            com.micatechnologies.minecraft.mcmcp.building.Pos p = cell.getKey();
+            if (!cell.getValue().startsWith("minecraft:torch:")
+                || !(p.x == input.box[0] || p.x == input.box[2] || p.z == input.box[1] || p.z == input.box[3])) {
+                continue;
+            }
+            int[] step = torchStep(torchFor(cell.getValue()));
+            com.micatechnologies.minecraft.mcmcp.building.Pos in =
+                new com.micatechnologies.minecraft.mcmcp.building.Pos(p.x + step[0], p.y, p.z + step[1]);
+            String there = plan.cells.get(in);
+            if (there == null || there.equals("minecraft:air")) {
+                torchesIn.put(p, in);
+            }
+        }
+        final Set<com.micatechnologies.minecraft.mcmcp.building.Pos> torchCells = new java.util.HashSet<>(torchesIn.values());
         Set<Long> chunks = new LinkedHashSet<>();
         for (Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell : cells) {
             chunks.add(ChunkKeys.ofBlock(cell.getKey().x, cell.getKey().z));
         }
         return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
             final List<String> ops = new ArrayList<>();
+            // Torches go in after everything else: one written before the wall it hangs on drops off (#161).
+            final List<String> torches = new ArrayList<>();
             final int[] kept = {0};
             final int[] wallsKept = {0};
             final int[] headersKept = {0};
@@ -282,6 +320,9 @@ public final class ServerComponentTools {
                     while (cursor[0] < cells.size() && System.nanoTime() - started < 25_000_000L) {
                         Map.Entry<com.micatechnologies.minecraft.mcmcp.building.Pos, String> cell = cells.get(cursor[0]++);
                         com.micatechnologies.minecraft.mcmcp.building.Pos p = cell.getKey();
+                        if (torchCells.contains(p)) {
+                            continue;  // a moved torch's cell, written with its ring cell
+                        }
                         pos.setPos(p.x, p.y, p.z);
                         IBlockState live = world.isBlockLoaded(pos) ? world.getBlockState(pos) : null;
                         String block = cell.getValue();
@@ -291,6 +332,12 @@ public final class ServerComponentTools {
                                 kept[0]++;
                                 continue;
                             }
+                        }
+                        com.micatechnologies.minecraft.mcmcp.building.Pos torchIn = torchesIn.get(p);
+                        if (torchIn != null) {
+                            ops.add(BuildProgram.setblockLine(p.x, p.y, p.z, wall));
+                            torches.add(BuildProgram.setblockLine(torchIn.x, torchIn.y, torchIn.z, torchFor(block)));
+                            continue;
                         }
                         boolean onRing = p.x == ring[0] || p.x == ring[2] || p.z == ring[1] || p.z == ring[3];
                         if (block.equals(wall) && onRing && p.y >= ringFrom && p.y <= plan.top + 1) {
@@ -339,7 +386,7 @@ public final class ServerComponentTools {
                                 continue;
                             }
                         }
-                        ops.add(BuildProgram.setblockLine(p.x, p.y, p.z, block));
+                        (block.startsWith("minecraft:torch:") ? torches : ops).add(BuildProgram.setblockLine(p.x, p.y, p.z, block));
                     }
                     return null;
                 });
@@ -398,6 +445,19 @@ public final class ServerComponentTools {
                 json.add("byChange", changes);
             }
             write(context, dimension, ops, json);
+            if (!torches.isEmpty() && !json.has("error")) {
+                // Into the same target layer: the second write must not start it over.
+                JsonObject second = new JsonObject();
+                write(context, dimension, torches, second, false);
+                for (String key : new String[] {"written", "wouldWrite", "unchanged", "refused"}) {
+                    if (second.has(key)) {
+                        json.addProperty(key, Json.getLong(json, key, 0L) + second.get(key).getAsLong());
+                    }
+                }
+                if (second.has("error")) {
+                    json.add("error", second.get("error"));
+                }
+            }
             return ToolResult.structured(json);
         });
     }
@@ -496,6 +556,12 @@ public final class ServerComponentTools {
 
     /** Writes the ops through server_apply_ops with this call's write options, and adds its reply. */
     private static void write(ToolContext context, int dimension, List<String> ops, JsonObject into) throws Exception {
+        write(context, dimension, ops, into, true);
+    }
+
+    /** As above; {@code mayReplaceTarget} false for a second write into the layer the first one saved. */
+    private static void write(ToolContext context, int dimension, List<String> ops, JsonObject into,
+                              boolean mayReplaceTarget) throws Exception {
         if (ops.isEmpty()) {
             into.addProperty("written", 0);
             return;
@@ -505,7 +571,7 @@ public final class ServerComponentTools {
         args.add("ops", Json.arrayOfStrings(ops));
         args.addProperty("dimension", dimension);
         for (String key : new String[] {"dryRun", "saveTarget", "replaceTarget", "load"}) {
-            if (context.getArguments().has(key)) {
+            if (context.getArguments().has(key) && (mayReplaceTarget || !"replaceTarget".equals(key))) {
                 args.add(key, context.getArguments().get(key));
             }
         }
