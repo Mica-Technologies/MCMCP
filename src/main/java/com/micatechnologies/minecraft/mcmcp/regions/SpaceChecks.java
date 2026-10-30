@@ -8,6 +8,8 @@ import java.util.BitSet;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  * The two space checks a builder ran on every building as its own scripts: is the inside sealed, and can
@@ -208,6 +210,72 @@ public final class SpaceChecks {
         return seen;
     }
 
+    /** A test for one cell of a grid. */
+    public interface CellTest {
+        boolean test(int x, int y, int z);
+    }
+
+    /**
+     * The cell nearest {@code at} within {@code radius} (by steps along the axes) that passes, or null.
+     * Ties go to the same layer first, then lower x, y, z, so the answer does not depend on hash order.
+     * A seed or probe given on a wardrobe top or a counter flooded nothing (#147); moved to the floor
+     * beside it, it means what the caller meant.
+     */
+    @Nullable
+    public static int[] nearest(VoxelGrid grid, int[] at, int radius, CellTest passes) {
+        if (grid.contains(at[0], at[1], at[2]) && passes.test(at[0], at[1], at[2])) {
+            return at;
+        }
+        int[] best = null;
+        int bestDistance = Integer.MAX_VALUE;
+        int bestLayer = Integer.MAX_VALUE;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    int distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+                    if (distance == 0 || distance > radius) {
+                        continue;
+                    }
+                    int x = at[0] + dx;
+                    int y = at[1] + dy;
+                    int z = at[2] + dz;
+                    if (!grid.contains(x, y, z) || !passes.test(x, y, z)) {
+                        continue;
+                    }
+                    int layer = Math.abs(dy);
+                    if (distance < bestDistance || distance == bestDistance && layer < bestLayer) {
+                        best = new int[] {x, y, z};
+                        bestDistance = distance;
+                        bestLayer = layer;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /** Only the cells of a set whose y is one of {@code layers}; the set itself when there are none. */
+    public static BitSet onLayers(VoxelGrid grid, BitSet cells, Set<Integer> layers) {
+        if (layers.isEmpty()) {
+            return cells;
+        }
+        BitSet kept = new BitSet(grid.volume());
+        for (int x = grid.minX; x <= grid.maxX; x++) {
+            for (int y : layers) {
+                if (y < grid.minY || y > grid.maxY) {
+                    continue;
+                }
+                for (int z = grid.minZ; z <= grid.maxZ; z++) {
+                    int at = grid.index(x, y, z);
+                    if (cells.get(at)) {
+                        kept.set(at);
+                    }
+                }
+            }
+        }
+        return kept;
+    }
+
     /** Every standable cell in the box (strictly inside its y range), reached or not. */
     public static BitSet standableCells(VoxelGrid grid, int headroom, boolean doorsOpen) {
         BitSet all = new BitSet(grid.volume());
@@ -301,6 +369,17 @@ public final class SpaceChecks {
         }
         Collections.sort(out, Comparator.comparingInt((Cluster c) -> -c.count));
         return out;
+    }
+
+    /** The clusters of at least {@code min} cells: smaller ones are furniture tops, not rooms. */
+    public static List<Cluster> atLeast(List<Cluster> clusters, int min) {
+        List<Cluster> kept = new ArrayList<>();
+        for (Cluster cluster : clusters) {
+            if (cluster.count >= min) {
+                kept.add(cluster);
+            }
+        }
+        return kept;
     }
 
     /** The first {@code limit} clusters as JSON. */

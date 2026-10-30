@@ -25,6 +25,54 @@ import org.junit.jupiter.api.Test;
  */
 class SpaceChecksTest {
 
+    /** A 5 x 5 room: solid floor at y 0, open above to y 4, a one-block wardrobe at (2, 1, 2). */
+    private static VoxelGrid furnishedRoom() {
+        VoxelGrid grid = new VoxelGrid(0, 0, 0, 4, 4, 4);
+        for (int x = 0; x <= 4; x++) {
+            for (int y = 1; y <= 4; y++) {
+                for (int z = 0; z <= 4; z++) {
+                    grid.set(x, y, z, VoxelGrid.OPEN);
+                }
+            }
+        }
+        grid.set(2, 1, 2, VoxelGrid.SOLID);
+        return grid;
+    }
+
+    @Test
+    void aSeedInsideFurnitureSnapsToTheFloorBesideItNotOnTop() {
+        VoxelGrid grid = furnishedRoom();
+        int[] to = SpaceChecks.nearest(grid, new int[] {2, 1, 2}, 3,
+            (x, y, z) -> SpaceChecks.standable(grid, x, y, z, 2, true));
+
+        assertEquals(1, to[1], "same layer first: the floor, not the wardrobe top");
+        assertEquals(1, Math.abs(to[0] - 2) + Math.abs(to[2] - 2));
+    }
+
+    @Test
+    void aStandableSeedStaysWhereItIs() {
+        VoxelGrid grid = furnishedRoom();
+        int[] at = {0, 1, 0};
+
+        assertTrue(SpaceChecks.nearest(grid, at, 3, (x, y, z) -> SpaceChecks.standable(grid, x, y, z, 2, true)) == at);
+    }
+
+    @Test
+    void aFurnitureTopIsASmallAreaAndLeftOutByFloorLevelAndSize() {
+        VoxelGrid grid = furnishedRoom();
+        BitSet standable = SpaceChecks.standableCells(grid, 2, true);
+        List<SpaceChecks.Cluster> clusters = SpaceChecks.clusters(grid, standable);
+
+        // The floor (24 cells) and the wardrobe top (1 cell) touch diagonally, so they are one cluster;
+        // by layer they come apart.
+        BitSet floor = SpaceChecks.onLayers(grid, standable, Collections.singleton(1));
+        assertEquals(24, floor.cardinality());
+        BitSet top = SpaceChecks.onLayers(grid, standable, Collections.singleton(2));
+        assertEquals(1, SpaceChecks.atLeast(SpaceChecks.clusters(grid, top), 1).size());
+        assertEquals(0, SpaceChecks.atLeast(SpaceChecks.clusters(grid, top), 6).size());
+        assertEquals(clusters.size(), SpaceChecks.atLeast(clusters, 1).size());
+    }
+
     private static JsonObject fixture(String name) throws IOException {
         try (InputStream in = SpaceChecksTest.class.getResourceAsStream("/fixtures/uia/" + name);
              Reader reader = new InputStreamReader(new GZIPInputStream(in), StandardCharsets.UTF_8)) {

@@ -73,12 +73,20 @@ public final class ServerSpaceTools {
                 + "when it and the headroom above are clear and the cell below is solid, and a step moves to a "
                 + "neighbour up to 'step' blocks higher or lower. Reports how many cells each door mode reaches "
                 + "(doors 'open', 'closed' or 'both'), and the standable places nobody can reach, as clusters "
-                + "(a room with no way in). separate: true floods each seed alone with doors closed and says "
-                + "which other seeds it reaches: homes or suites that open into each other.")
+                + "(a room with no way in), at least minCluster cells each so furniture tops are left out. "
+                + "probes name one cell per room and come back as unreachedProbes per flood: the exact check "
+                + "that every room is reached. separate: true floods each seed alone with doors closed and says "
+                + "which other seeds and probes it reaches: homes or suites that open into each other.")
             .schema(spaceSchema(JsonSchema.object())
                 .integer("headroom", "Clear cells needed to stand. Default 2.", 1, 4)
                 .integer("step", "Most blocks up or down in one move. Default 1.", 0, 2)
                 .enumeration("doors", "Doors open, closed, or both (two floods). Default both.", "open", "closed", "both")
+                .property("probes", described("array", "Cells that must be reached, one per room: {name, at: [x, y, z]} "
+                    + "or [x, y, z]. Snapped like seeds."))
+                .integer("minCluster", "Unreached areas smaller than this are not listed or counted as areas (the "
+                    + "tops of wardrobes and counters); smallAreas counts them. Default 6.", 1, 1000)
+                .array("floorY", "Only report unreached places at these standing y levels (the floors), e.g. [174].",
+                    Json.obj("type", "integer"))
                 .build())
             .serverOnly()
             .readOnly()
@@ -95,6 +103,8 @@ public final class ServerSpaceTools {
             .property("seeds", described("array", "Where to start: [x, y, z] each, or {name, at: [x, y, z]} to have "
                 + "results named."))
             .bool("separate", "Flood each seed on its own and report which other seeds it reaches.")
+            .bool("snap", "Move a seed that is not standable (walk) or not in air (enclosure) to the nearest one "
+                + "within 3 blocks, and say where in 'snapped'. Default true.")
             .array("passable", "More block ids that count as open (a lighting helper with a collision box).",
                 Json.obj("type", "string"))
             .integer("clusters", "Clusters listed. Default 10.", 0, 100));
@@ -112,8 +122,13 @@ public final class ServerSpaceTools {
 
     @Nullable
     private static List<Seed> seeds(ToolContext context) {
+        return cells(context, "seeds");
+    }
+
+    @Nullable
+    private static List<Seed> cells(ToolContext context, String argument) {
         List<Seed> seeds = new ArrayList<>();
-        JsonElement raw = context.getArguments().get("seeds");
+        JsonElement raw = context.getArguments().get(argument);
         if (raw == null || !raw.isJsonArray()) {
             return null;
         }
@@ -183,6 +198,10 @@ public final class ServerSpaceTools {
         final Set<String> passable = new HashSet<>(Json.getStringList(context.getArguments(), "passable"));
         passable.add("csm:lightupair");
         final int clusterLimit = context.getBoundedInt("clusters", 10, 0, 100);
+        final List<Seed> probes = context.has("probes") ? cells(context, "probes") : null;
+        if (context.has("probes") && probes == null) {
+            return ToolResult.error("'probes' is a list of {name, at: [x, y, z]} or [x, y, z] cells.");
+        }
         final boolean separate = context.getBoolean("separate", false);
 
         return ServerChunkTools.withChunks(context, dimension, ChunkKeys.box(box[0], box[2], box[3], box[5]), outcome -> {
@@ -194,6 +213,19 @@ public final class ServerSpaceTools {
             if (unloaded > 0) {
                 json.addProperty("unloaded", unloaded);
                 json.addProperty("note", unloaded + " cells were in unloaded chunks and count as solid. Pass load: true.");
+            }
+            final int headroom = context.getBoundedInt("headroom", 2, 1, 4);
+            SpaceChecks.CellTest usable = enclosure ? (x, y, z) -> grid.get(x, y, z) == VoxelGrid.OPEN
+                : (x, y, z) -> SpaceChecks.standable(grid, x, y, z, headroom, true);
+            JsonArray snapped = new JsonArray();
+            if (context.getBoolean("snap", true)) {
+                snap(grid, seeds, usable, snapped);
+                if (probes != null) {
+                    snap(grid, probes, usable, snapped);
+                }
+            }
+            if (snapped.size() > 0) {
+                json.add("snapped", snapped);
             }
             List<int[]> cells = new ArrayList<>();
             for (Seed seed : seeds) {
@@ -217,13 +249,20 @@ public final class ServerSpaceTools {
                     json.add("seedsNotInAir", bad);
                 }
                 if (separate) {
-                    json.add("separation", separation(grid, seeds, (g, s) ->
+                    json.add("separation", separation(grid, seeds, null, (g, s) ->
                         SpaceChecks.enclosure(g, s, zones).interior));
                 }
             }
             else {
-                int headroom = context.getBoundedInt("headroom", 2, 1, 4);
                 int step = context.getBoundedInt("step", 1, 0, 2);
+                int minCluster = context.getBoundedInt("minCluster", 6, 1, 1000);
+                Set<Integer> floors = new HashSet<>();
+                JsonElement floorY = context.getArguments().get("floorY");
+                if (floorY != null && floorY.isJsonArray()) {
+                    for (JsonElement y : floorY.getAsJsonArray()) {
+                        floors.add(y.getAsInt());
+                    }
+                }
                 String doors = context.getString("doors", "both");
                 for (String mode : "both".equals(doors) ? new String[] {"open", "closed"} : new String[] {doors}) {
                     boolean open = "open".equals(mode);
@@ -232,11 +271,31 @@ public final class ServerSpaceTools {
                     result.addProperty("reached", reached.cardinality());
                     BitSet unreached = SpaceChecks.standableCells(grid, headroom, open);
                     unreached.andNot(reached);
-                    List<SpaceChecks.Cluster> clusters = SpaceChecks.clusters(grid, unreached);
-                    result.addProperty("unreachedCells", unreached.cardinality());
+                    unreached = SpaceChecks.onLayers(grid, unreached, floors);
+                    List<SpaceChecks.Cluster> all = SpaceChecks.clusters(grid, unreached);
+                    List<SpaceChecks.Cluster> clusters = SpaceChecks.atLeast(all, minCluster);
+                    long kept = 0L;
+                    for (SpaceChecks.Cluster cluster : clusters) {
+                        kept += cluster.count;
+                    }
+                    result.addProperty("unreachedCells", kept);
                     result.addProperty("unreachedAreas", clusters.size());
+                    if (all.size() > clusters.size()) {
+                        result.addProperty("smallAreas", all.size() - clusters.size());
+                    }
                     if (!clusters.isEmpty()) {
                         result.add("unreached", SpaceChecks.clustersJson(clusters, clusterLimit));
+                    }
+                    if (probes != null) {
+                        JsonArray missed = new JsonArray();
+                        for (Seed probe : probes) {
+                            if (!grid.contains(probe.at[0], probe.at[1], probe.at[2])
+                                || !SpaceArrays.reached(grid, reached, probe.at)) {
+                                missed.add(probe.name);
+                            }
+                        }
+                        result.addProperty("probesReached", probes.size() - missed.size());
+                        result.add("unreachedProbes", missed);
                     }
                     json.add("doors" + Character.toUpperCase(mode.charAt(0)) + mode.substring(1), result);
                 }
@@ -250,7 +309,7 @@ public final class ServerSpaceTools {
                     json.add("seedsNotStandable", notStanding);
                 }
                 if (separate) {
-                    json.add("separation", separation(grid, seeds, (g, s) ->
+                    json.add("separation", separation(grid, seeds, probes, (g, s) ->
                         SpaceChecks.walk(g, s, headroom, step, false)));
                 }
             }
@@ -262,8 +321,26 @@ public final class ServerSpaceTools {
         BitSet run(VoxelGrid grid, List<int[]> seeds);
     }
 
-    /** Each seed alone: how far it gets, and which other seeds it reaches. */
-    private static JsonArray separation(VoxelGrid grid, List<Seed> seeds, Flood flood) {
+    /**
+     * Moves each cell that fails {@code usable} to the nearest one within 3 that passes, noting each
+     * move in {@code snapped}. One with none in reach is left, and reported as before.
+     */
+    private static void snap(VoxelGrid grid, List<Seed> cells, SpaceChecks.CellTest usable, JsonArray snapped) {
+        for (Seed cell : cells) {
+            int[] to = SpaceChecks.nearest(grid, cell.at, 3, usable);
+            if (to != null && to != cell.at) {
+                JsonObject move = new JsonObject();
+                move.addProperty("name", cell.name);
+                move.add("from", SpaceArrays.of(cell.at));
+                move.add("to", SpaceArrays.of(to));
+                snapped.add(move);
+                System.arraycopy(to, 0, cell.at, 0, 3);
+            }
+        }
+    }
+
+    /** Each seed alone: how far it gets, and which other seeds (and probes) it reaches. */
+    private static JsonArray separation(VoxelGrid grid, List<Seed> seeds, @Nullable List<Seed> probes, Flood flood) {
         JsonArray rows = new JsonArray();
         for (Seed seed : seeds) {
             List<int[]> one = new ArrayList<>();
@@ -280,6 +357,16 @@ public final class ServerSpaceTools {
             row.addProperty("seed", seed.name);
             row.addProperty("cells", reached.cardinality());
             row.add("reaches", reaches);
+            if (probes != null) {
+                JsonArray probesReached = new JsonArray();
+                for (Seed probe : probes) {
+                    if (grid.contains(probe.at[0], probe.at[1], probe.at[2])
+                        && SpaceArrays.reached(grid, reached, probe.at)) {
+                        probesReached.add(probe.name);
+                    }
+                }
+                row.add("probes", probesReached);
+            }
             rows.add(row);
         }
         return rows;

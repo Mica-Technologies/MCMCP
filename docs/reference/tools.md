@@ -956,7 +956,7 @@ largest `clusters` (26-connected; `count`, `min`, `max`, one `sample`).
 
 ##### `server_check_walk`
 
-:material-eye: Read-only · `seeds` and `box` or `target` required · optional `headroom`, `step`, `doors`, `separate`, `passable`, `clusters`, `margin`, `dimension`, `load`
+:material-eye: Read-only · `seeds` and `box` or `target` required · optional `headroom`, `step`, `doors`, `probes`, `minCluster`, `floorY`, `separate`, `snap`, `passable`, `clusters`, `margin`, `dimension`, `load`
 
 A cell is standable when it and the cells above it up to `headroom` (default 2) are open, or doors
 with the doors open, and the cell below is solid. From each cell a person moves to one of the four
@@ -964,6 +964,18 @@ neighbours: at the same height first, then up to `step` (default 1) up, then dow
 strictly inside the box's y range. `doors: "both"` (default) gives `doorsOpen` and `doorsClosed`,
 each with `reached`, and `unreachedCells` / `unreachedAreas` / `unreached` (clusters of standable
 places nobody gets to: a room with no way in). `separate` floods each seed with doors closed.
+
+- **Furniture tops are not rooms.** Areas smaller than `minCluster` (default 6) are not listed or
+  counted in `unreachedAreas`, and `smallAreas` says how many were left out. `floorY: [174]` reports
+  only places at those standing heights, the floors themselves.
+- **Probes** name one cell per room, `{name, at: [x, y, z]}`. Each flood gives `probesReached` and
+  `unreachedProbes`, the names it missed, so "every room is reached from the front door" is an exact
+  check rather than a size threshold that can hide a 3 x 3 restroom. With `separate`, each row lists
+  the `probes` that seed reaches.
+- **Seeds snap.** A seed (or probe) on a wardrobe or counter is moved to the nearest standable cell
+  within 3, the same layer first, and `snapped` says from where to where. Before, it flooded 0
+  cells. `snap: false` keeps it where given. `server_check_enclosure` snaps a seed that is not in
+  air the same way.
 
 Both checks were ported from the UIA builder's own scripts and are tested against their fixtures: the
 basilica's 14,771 leaking cells in 17 clusters, and ALTO 1873 L13's 1,486 / 303 walkable cells.
