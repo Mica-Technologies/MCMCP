@@ -97,6 +97,22 @@ public final class ClientInputScheduler {
             new CompletableFuture<Void>()));
     }
 
+    /**
+     * Presses one binding itself rather than the key it is bound to (#165): its own pressed flag and
+     * press counter, so {@code isKeyDown()} and {@code isPressed()} both see it.
+     *
+     * <p>For a mod's binding addressed by id. Going through the key code instead would miss a binding
+     * that is unbound, needs a modifier, or shares its key with another binding in a different
+     * conflict context, which is common for mod keys; and it would press whatever else shares the
+     * key. Nothing else is pressed here.
+     */
+    public static CompletableFuture<Void> holdDirect(KeyBinding binding, int delayTicks, int ticks) {
+        PendingRelease pending = new PendingRelease(binding, -1, Math.max(0, delayTicks),
+            Math.max(1, ticks), new CompletableFuture<Void>());
+        pending.direct = true;
+        return schedule(pending);
+    }
+
     private static CompletableFuture<Void> schedule(PendingRelease pending) {
         if (pending.delayTicks == 0) {
             pending.press();
@@ -154,13 +170,16 @@ public final class ClientInputScheduler {
         public void onClientTickStart(TickEvent.ClientTickEvent event) {
             if (event.phase == TickEvent.Phase.START) {
                 RawKeyboard.reassert();
+                SyntheticMouse.reassert();
             }
         }
 
+        /** Also where a synthetic click moves on by one frame ({@link SyntheticMouse}). */
         @SubscribeEvent(priority = EventPriority.HIGHEST)
         public void onRenderTickStart(TickEvent.RenderTickEvent event) {
             if (event.phase == TickEvent.Phase.START) {
                 RawKeyboard.reassert();
+                SyntheticMouse.onFrame();
             }
         }
 
@@ -225,6 +244,8 @@ public final class ClientInputScheduler {
         int delayTicks;
         int remainingTicks;
         boolean pressed;
+        /** Press the binding's own state ({@link KeyBindingPress}) rather than its key code. */
+        boolean direct;
 
         PendingRelease(KeyBinding binding, int rawKeyCode, int delayTicks, int remainingTicks,
                        CompletableFuture<Void> future) {
@@ -241,6 +262,10 @@ public final class ClientInputScheduler {
                 RawKeyboard.down(rawKeyCode);
                 return;
             }
+            if (direct) {
+                KeyBindingPress.press(binding);
+                return;
+            }
             int keyCode = binding.getKeyCode();
             KeyBinding.setKeyBindState(keyCode, true);
             // onTick increments the binding's press counter, which is what isPressed() consumes.
@@ -252,6 +277,9 @@ public final class ClientInputScheduler {
         void release() {
             if (binding == null) {
                 RawKeyboard.up(rawKeyCode);
+            }
+            else if (direct) {
+                KeyBindingPress.release(binding);
             }
             else {
                 KeyBinding.setKeyBindState(binding.getKeyCode(), false);

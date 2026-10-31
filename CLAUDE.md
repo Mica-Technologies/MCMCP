@@ -284,9 +284,14 @@ frequently model-generated and arrive with the wrong primitive type.
   the last step. MalisisCore's screens hit-test `Mouse.getX()/getY()` themselves, so calling
   `mouseClicked` on them clicked nothing while reporting success — every Malisis screen was silently
   unclickable, and it produced a false bug report against a working widget. `SyntheticMouse` sets
-  LWJGL's mouse state and calls the screen's own `handleMouseInput()`, press then release. This is
-  the mouse twin of the `handleKeyboardInput` problem `client_gui_key` already worked around; assume
-  any new input tool has the same trap.
+  LWJGL's mouse state and plays the click out over three real frames (hover, press held, release),
+  each event through Forge's `MouseInputEvent.Pre` → `handleMouseInput()` → `Post`. Skipping the
+  events missed mods that take clicks there (#169); doing it inside one task missed lists that poll
+  `Mouse.isButtonDown` while drawing (`GuiSlot`, `GuiScrollingList`, #166). This is the mouse twin
+  of the `handleKeyboardInput` problem `client_gui_key` already worked around; assume any new input
+  tool has the same trap.
+- **Convert mouse points with the open screen's own `width`/`height`, not `ScaledResolution`.** That
+  is what vanilla reads the mouse with, and a screen laid out at its own size (LDIC) differs (#163).
 - **LWJGL's mouse origin is bottom-left**, GUI space and screenshots are top-left. `SyntheticMouse`
   flips Y once, in `toLwjglY`. If clicks land a consistent distance from the wrong edge, start there.
 - **Set both `x`/`y` and `event_x`/`event_y`.** Vanilla's `handleMouseInput` reads the event pair;

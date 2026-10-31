@@ -1,7 +1,9 @@
 package com.micatechnologies.minecraft.mcmcp.client.tools;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.client.SyntheticMouse;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -17,6 +19,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiButton;
@@ -29,6 +35,11 @@ import net.minecraft.client.gui.GuiScreenOptionsSounds;
 import net.minecraft.client.gui.GuiVideoSettings;
 import net.minecraft.client.gui.GuiTextField;
 import net.minecraft.client.gui.ScaledResolution;
+import net.minecraftforge.fml.client.FMLClientHandler;
+import net.minecraftforge.fml.client.GuiModList;
+import net.minecraftforge.fml.client.IModGuiFactory;
+import net.minecraftforge.fml.common.Loader;
+import net.minecraftforge.fml.common.ModContainer;
 import net.minecraftforge.client.event.GuiScreenEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.relauncher.Side;
@@ -126,24 +137,6 @@ public final class ClientGuiTools {
         registerView();
     }
 
-    /**
-     * Converts a point in display pixels — what you measure off a screenshot — into the scaled
-     * coordinate space that {@code mouseClicked} and widget positions use.
-     *
-     * <p>No Y flip. LWJGL's mouse origin is bottom-left and vanilla flips it when reading
-     * {@code Mouse.getY()}, but a screenshot's origin is top-left, which already matches the GUI's.
-     * Flipping here would put every click the same distance from the wrong edge.
-     */
-    private static int toGuiX(Minecraft mc, int pixelX) {
-        ScaledResolution resolution = new ScaledResolution(mc);
-        return pixelX * resolution.getScaledWidth() / Math.max(1, mc.displayWidth);
-    }
-
-    private static int toGuiY(Minecraft mc, int pixelY) {
-        ScaledResolution resolution = new ScaledResolution(mc);
-        return pixelY * resolution.getScaledHeight() / Math.max(1, mc.displayHeight);
-    }
-
     // ------------------------------------------------------------------
     // Reflection helpers
     // ------------------------------------------------------------------
@@ -235,34 +228,125 @@ public final class ClientGuiTools {
     }
 
     /**
-     * Delivers a click at a point in GUI space, and reports which path carried it.
+     * A click started on the client thread and still playing out. Holds no Minecraft object, so it
+     * can cross back to the worker that waits on it.
+     */
+    private static final class PendingClick {
+        /** Fields for the result, merged over the description of the screen open afterwards. */
+        final JsonObject json = new JsonObject();
+        @Nullable
+        CompletableFuture<SyntheticMouse.Outcome> future;
+        String screenBefore;
+    }
+
+    /**
+     * How long a click waits for the client to draw its three frames before it is finished in one
+     * task instead. A healthy client needs about 50 ms; a throttled one at 10 fps about 300.
+     */
+    private static final long CLICK_FRAMES_TIMEOUT_MILLIS = 2000L;
+
+    /**
+     * Starts a click at an LWJGL point. Client thread only.
      *
-     * <p>Prefers {@link SyntheticMouse}, which sets LWJGL's mouse state and calls the screen's
-     * {@code handleMouseInput()} - the same route a real click takes. That matters because
-     * {@code mouseClicked} is only one branch *inside* the real route, and a screen that overrides
-     * {@code handleMouseInput} may never reach it: MalisisCore's screens do their own hit testing and
-     * ignore {@code mouseClicked} entirely, so calling it clicked nothing and reported success.
+     * <p>Prefers {@link SyntheticMouse}, which plays the click out over real frames through Forge's
+     * input route: {@code MouseInputEvent.Pre}, the screen's {@code handleMouseInput()}, then
+     * {@code Post}, with LWJGL's button held for one frame between. That matters because
+     * {@code mouseClicked} is only one branch *inside* the real route: MalisisCore's screens never
+     * reach it, mods that skin vanilla screens take clicks in the events, and scrolling lists poll the
+     * button while drawing.
      *
      * <p>Falls back to {@code mouseClicked} when LWJGL cannot be driven - a shaded build, or
-     * LWJGL3ify's shim - because that is still correct for most screens and a working majority beats
-     * a uniform failure.
-     *
-     * @return the delivery path, for the caller to put in its result: models retry a click that did
-     *         nothing, and knowing which path ran is the difference between "the button is broken"
-     *         and "this screen needs the other path".
+     * LWJGL3ify's shim - because that is still correct for most screens. The path taken goes in the
+     * result: models retry a click that did nothing, and knowing which path ran is the difference
+     * between "the button is broken" and "this screen needs the other path".
      */
-    private static String deliverClick(GuiScreen screen, int guiX, int guiY, int button,
-                                       int scaledWidth, int scaledHeight) throws Exception {
-        if (SyntheticMouse.click(screen, guiX, guiY, button, scaledWidth, scaledHeight)) {
-            return "lwjgl";
+    private static void startClick(PendingClick pending, GuiScreen screen, int lwjglX, int lwjglY,
+                                   int button) throws Exception {
+        pending.screenBefore = screen.getClass().getSimpleName();
+        pending.future = SyntheticMouse.begin(lwjglX, lwjglY, button);
+        if (pending.future != null) {
+            return;
         }
         Method mouseClicked = mouseClickedMethod();
         if (mouseClicked == null) {
             throw new IllegalStateException("Could not drive LWJGL's mouse state, and could not locate "
                 + "GuiScreen.mouseClicked on this Minecraft build; GUI clicking is unavailable.");
         }
-        mouseClicked.invoke(screen, guiX, guiY, button);
-        return "mouseClicked";
+        int[] gui = SyntheticMouse.toGui(screen, lwjglX, lwjglY);
+        mouseClicked.invoke(screen, gui[0], gui[1], button);
+        pending.json.addProperty("via", "mouseClicked");
+    }
+
+    /**
+     * Waits for a started click to finish, then describes the screen open afterwards. Worker thread:
+     * the click needs the client thread to draw frames meanwhile.
+     */
+    private static JsonObject finishClick(ToolContext context, final PendingClick pending)
+        throws Exception {
+        if (pending.future != null) {
+            SyntheticMouse.Outcome outcome;
+            try {
+                outcome = pending.future.get(CLICK_FRAMES_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            }
+            catch (TimeoutException noFrames) {
+                // No frame drawn in time: finish what is left in one task, which is still right for
+                // most screens, rather than fail a click that may already be half delivered.
+                context.onGameThread(new Callable<Void>() {
+                    @Override
+                    public Void call() {
+                        SyntheticMouse.finishNow();
+                        return null;
+                    }
+                });
+                outcome = pending.future.get(CLICK_FRAMES_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            }
+            catch (ExecutionException failed) {
+                Throwable cause = failed.getCause();
+                throw cause instanceof Exception ? (Exception) cause : failed;
+            }
+            pending.json.addProperty("via", outcome.via);
+            pending.json.addProperty("frames", outcome.frames);
+            if (outcome.cancelledBy != null) {
+                pending.json.addProperty("cancelledBy", outcome.cancelledBy);
+            }
+        }
+        JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+            @Override
+            public JsonObject call() {
+                GuiScreen after = Minecraft.getMinecraft().currentScreen;
+                JsonObject json = describeScreen(after);
+                json.addProperty("screenBefore", pending.screenBefore);
+                json.addProperty("screenChanged", after == null
+                    || !pending.screenBefore.equals(after.getClass().getSimpleName()));
+                return json;
+            }
+        });
+        for (Map.Entry<String, JsonElement> entry : pending.json.entrySet()) {
+            result.add(entry.getKey(), entry.getValue());
+        }
+        return result;
+    }
+
+    /** A sentence for the reply when a mod took the press before the screen saw it, else "". */
+    private static String cancelledNote(JsonObject result) {
+        return result.has("cancelledBy")
+            ? " A mod cancelled the press in " + result.get("cancelledBy").getAsString()
+                + " and handled it itself, so the screen's own handler never saw it."
+            : "";
+    }
+
+    /** Adds the open screen's own size, and the game's, so a caller can see when they differ. */
+    private static void addScreenSize(JsonObject json, Minecraft mc, GuiScreen screen) {
+        ScaledResolution resolution = new ScaledResolution(mc);
+        json.addProperty("screenWidth", screen.width);
+        json.addProperty("screenHeight", screen.height);
+        json.addProperty("scaledWidth", resolution.getScaledWidth());
+        json.addProperty("scaledHeight", resolution.getScaledHeight());
+        if (screen.width != resolution.getScaledWidth() || screen.height != resolution.getScaledHeight()) {
+            // A screen laid out at its own size (LDIC's scaled inventories, #163). Its own size is
+            // what it reads the mouse with, so it is what positions here are in.
+            json.addProperty("screenScaled", true);
+        }
     }
 
     /**
@@ -628,6 +712,14 @@ public final class ClientGuiTools {
                             return json;
                         }
                         json.addProperty("overridesMouseClicked", overridesMouseClicked(screen));
+                        // Widget positions are in the screen's own coordinates, which differ from
+                        // scaledWidth on a screen laid out at its own size (#163).
+                        json.addProperty("screenWidth", screen.width);
+                        json.addProperty("screenHeight", screen.height);
+                        if (screen.width != json.get("scaledWidth").getAsInt()
+                            || screen.height != json.get("scaledHeight").getAsInt()) {
+                            json.addProperty("screenScaled", true);
+                        }
 
                         JsonArray buttons = new JsonArray();
                         List<GuiButton> present = buttonsOf(screen);
@@ -717,9 +809,9 @@ public final class ClientGuiTools {
                         + "click. Call client_gui_widgets to see what is available.");
                 }
 
-                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                final PendingClick pending = context.onGameThread(new Callable<PendingClick>() {
                     @Override
-                    public JsonObject call() throws Exception {
+                    public PendingClick call() throws Exception {
                         Minecraft mc = Minecraft.getMinecraft();
                         GuiScreen screen = mc.currentScreen;
                         if (screen == null) {
@@ -747,38 +839,33 @@ public final class ClientGuiTools {
                         int mouseY = target.y + target.height / 2;
 
                         String clickedLabel = target.displayString;
-                        String screenBefore = screen.getClass().getSimpleName();
-                        String via;
+                        PendingClick started = new PendingClick();
                         if (press) {
+                            started.screenBefore = screen.getClass().getSimpleName();
                             if (!pressButton(screen, target)) {
                                 throw new IllegalStateException("Button '" + clickedLabel + "' "
                                     + "refused the press: its own mousePressed said no, or a mod "
                                     + "cancelled it.");
                             }
-                            via = "press";
+                            started.json.addProperty("via", "press");
                         }
                         else {
-                            ScaledResolution buttonResolution = new ScaledResolution(mc);
-                            via = deliverClick(screen, mouseX, mouseY, 0,
-                                buttonResolution.getScaledWidth(),
-                                buttonResolution.getScaledHeight());
+                            // Button positions are in the screen's own coordinates, so they convert
+                            // with its own size (#163), not the ScaledResolution.
+                            int[] point = SyntheticMouse.fromGui(screen, mouseX, mouseY);
+                            startClick(started, screen, point[0], point[1], 0);
                         }
-
-                        JsonObject json = describeScreen(mc.currentScreen);
-                        json.addProperty("via", via);
-                        json.addProperty("clickedLabel", clickedLabel);
-                        json.addProperty("clickedAtX", mouseX);
-                        json.addProperty("clickedAtY", mouseY);
-                        json.addProperty("screenBefore", screenBefore);
-                        json.addProperty("screenChanged",
-                            mc.currentScreen == null || !screenBefore.equals(
-                                mc.currentScreen.getClass().getSimpleName()));
-                        return json;
+                        started.json.addProperty("clickedLabel", clickedLabel);
+                        started.json.addProperty("clickedAtX", mouseX);
+                        started.json.addProperty("clickedAtY", mouseY);
+                        return started;
                     }
                 });
+                JsonObject result = finishClick(context, pending);
 
                 return ToolResult.text("Clicked '" + result.get("clickedLabel").getAsString()
-                    + "'. Screen is now " + result.get("screenName").getAsString() + ".")
+                    + "'. Screen is now " + result.get("screenName").getAsString() + "."
+                    + cancelledNote(result))
                     .withStructured(result);
             })
             .build());
@@ -859,7 +946,13 @@ public final class ClientGuiTools {
                 + "normally, because every screen gets them through the same handler.\n\n"
                 + "The workflow is: take a screenshot with inline=true, read the pixel coordinate of "
                 + "the thing you want off the image, and click it. Pixel space is the default for "
-                + "exactly that reason.")
+                + "exactly that reason; the screen converts it with its own size, as it does a real "
+                + "click, so screens laid out at their own scale ('screenScaled') work too.\n\n"
+                + "A click plays out over three frames like a person's: the cursor hovers, the "
+                + "button is held for a frame, then released, through Forge's mouse events. So "
+                + "scrolling lists (the mod list, world list, Video Settings rows) and screens that "
+                + "poll the mouse can be clicked. 'cancelledBy' in the reply means a mod took the "
+                + "press in an event and handled it itself.")
             .schema(JsonSchema.object()
                 .integer("x", "Horizontal coordinate.")
                 .integer("y", "Vertical coordinate, measured from the top.")
@@ -882,9 +975,9 @@ public final class ClientGuiTools {
                 final String space = context.getString("space", "pixel");
                 final int mouseButton = context.getBoundedInt("button", 0, 0, 2);
 
-                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+                final PendingClick pending = context.onGameThread(new Callable<PendingClick>() {
                     @Override
-                    public JsonObject call() throws Exception {
+                    public PendingClick call() throws Exception {
                         Minecraft mc = Minecraft.getMinecraft();
                         GuiScreen screen = mc.currentScreen;
                         if (screen == null) {
@@ -892,35 +985,30 @@ public final class ClientGuiTools {
                                 + "click.");
                         }
 
-                        int guiX = "gui".equals(space) ? x : toGuiX(mc, x);
-                        int guiY = "gui".equals(space) ? y : toGuiY(mc, y);
+                        // A screenshot pixel is a display pixel, and goes to LWJGL as it is; the
+                        // screen converts it with its own size, as it does a real click (#163).
+                        int[] point = "gui".equals(space)
+                            ? SyntheticMouse.fromGui(screen, x, y)
+                            : SyntheticMouse.fromPixel(x, y);
+                        int[] gui = SyntheticMouse.toGui(screen, point[0], point[1]);
 
-                        String screenBefore = screen.getClass().getSimpleName();
-                        ScaledResolution resolution = new ScaledResolution(mc);
-                        String via = deliverClick(screen, guiX, guiY, mouseButton,
-                            resolution.getScaledWidth(), resolution.getScaledHeight());
-
-                        JsonObject json = describeScreen(mc.currentScreen);
-                        json.addProperty("via", via);
-                        json.addProperty("handlesOwnMouseInput",
+                        PendingClick started = new PendingClick();
+                        started.json.addProperty("handlesOwnMouseInput",
                             SyntheticMouse.overridesHandleMouseInput(screen));
-                        json.addProperty("clickedGuiX", guiX);
-                        json.addProperty("clickedGuiY", guiY);
-                        json.addProperty("space", space);
-                        json.addProperty("button", mouseButton);
-                        json.addProperty("scaledWidth", resolution.getScaledWidth());
-                        json.addProperty("scaledHeight", resolution.getScaledHeight());
-                        json.addProperty("screenBefore", screenBefore);
-                        json.addProperty("screenChanged",
-                            mc.currentScreen == null || !screenBefore.equals(
-                                mc.currentScreen.getClass().getSimpleName()));
-                        return json;
+                        started.json.addProperty("clickedGuiX", gui[0]);
+                        started.json.addProperty("clickedGuiY", gui[1]);
+                        started.json.addProperty("space", space);
+                        started.json.addProperty("button", mouseButton);
+                        addScreenSize(started.json, mc, screen);
+                        startClick(started, screen, point[0], point[1], mouseButton);
+                        return started;
                     }
                 });
+                JsonObject result = finishClick(context, pending);
 
                 return ToolResult.text("Clicked at gui(" + result.get("clickedGuiX").getAsInt() + ", "
                     + result.get("clickedGuiY").getAsInt() + "). Screen is now "
-                    + result.get("screenName").getAsString() + ".")
+                    + result.get("screenName").getAsString() + "." + cancelledNote(result))
                     .withStructured(result);
             })
             .build());
@@ -1369,18 +1457,44 @@ public final class ClientGuiTools {
      * Options screens behind it were unreachable and muting a test client took a restart and an edit
      * to options.txt (issue #47).
      */
+    /**
+     * A mod's own Config screen, made the way the mod list's Config button makes it (#166): its
+     * {@code IModGuiFactory.createConfigGui}. The mod list itself needs a polled click to select an
+     * entry, so this is the direct way in.
+     */
+    private static GuiScreen modConfigScreen(String modId, @Nullable GuiScreen parent) {
+        ModContainer mod = Loader.instance().getIndexedModList().get(modId);
+        if (mod == null) {
+            throw new IllegalArgumentException("No mod '" + modId + "' is loaded; game_list_mods lists "
+                + "the ids.");
+        }
+        IModGuiFactory factory = FMLClientHandler.instance().getGuiFactoryFor(mod);
+        if (factory == null || !factory.hasConfigGui()) {
+            throw new IllegalArgumentException("'" + modId + "' has no Config screen; its Config "
+                + "button in the mod list is disabled too.");
+        }
+        GuiScreen config = factory.createConfigGui(parent == null ? new GuiModList(null) : parent);
+        if (config == null) {
+            throw new IllegalStateException("'" + modId + "' declares a Config screen but made none.");
+        }
+        return config;
+    }
+
     private static void registerGuiOpen() {
         McpRegistry.registerTool(McpTool.named("client_gui_open")
             .title("Open a screen")
             .description("Open a vanilla screen, which the other client_gui_* tools can then drive: "
                 + "'pause' (the Escape menu; pauses singleplayer), 'options', 'sound', 'controls', "
-                + "'video', or 'chat' (optionally prefilled with 'text'). The options screens return "
-                + "to the screen that was open, or to the game, on Done.\n\n"
+                + "'video', or 'chat' (optionally prefilled with 'text'); 'mods' (the mod list), or "
+                + "'mod_config' with 'modId' for that mod's own Config screen, as its Config button "
+                + "opens it. The options screens return to the screen that was open, or to the game, "
+                + "on Done.\n\n"
                 + "To change a setting without clicking through a screen, use client_options.")
             .schema(JsonSchema.object()
                 .enumeration("screen", "Which screen to open.",
-                    "pause", "options", "sound", "controls", "video", "chat")
+                    "pause", "options", "sound", "controls", "video", "chat", "mods", "mod_config")
                 .string("text", "chat: text to prefill the chat box with, e.g. '/'.")
+                .string("modId", "mod_config: the mod id, as game_list_mods reports it.")
                 .required("screen")
                 .build())
             .clientOnly()
@@ -1391,10 +1505,14 @@ public final class ClientGuiTools {
                 }
                 final String screen = context.requireString("screen");
                 final String text = context.getString("text", "");
-                if (!Arrays.asList("pause", "options", "sound", "controls", "video", "chat")
-                    .contains(screen)) {
+                if (!Arrays.asList("pause", "options", "sound", "controls", "video", "chat", "mods",
+                    "mod_config").contains(screen)) {
                     return ToolResult.error("Unknown screen '" + screen + "'; use pause, options, "
-                        + "sound, controls, video or chat.");
+                        + "sound, controls, video, chat, mods or mod_config.");
+                }
+                final String modId = context.getString("modId", null);
+                if ("mod_config".equals(screen) && modId == null) {
+                    return ToolResult.error("mod_config needs 'modId'; game_list_mods lists them.");
                 }
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
@@ -1415,6 +1533,12 @@ public final class ClientGuiTools {
                         }
                         else if ("controls".equals(screen)) {
                             opened = new GuiControls(parent, mc.gameSettings);
+                        }
+                        else if ("mods".equals(screen)) {
+                            opened = new GuiModList(parent);
+                        }
+                        else if ("mod_config".equals(screen)) {
+                            opened = modConfigScreen(modId, parent);
                         }
                         else {
                             opened = new GuiVideoSettings(parent, mc.gameSettings);

@@ -2,63 +2,86 @@ package com.micatechnologies.minecraft.mcmcp.client;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.util.concurrent.CompletableFuture;
 
 import javax.annotation.Nullable;
 
 import org.lwjgl.input.Mouse;
 
+import com.micatechnologies.minecraft.mcmcp.Mcmcp;
+
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraftforge.client.event.GuiScreenEvent;
+import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
 /**
  * Delivers a click to a {@link GuiScreen} the way the game itself does: by setting LWJGL's mouse
- * state and calling the screen's {@code handleMouseInput()}.
+ * state, across real frames, and handing each event to the screen through Forge's input route.
  *
  * <h2>Why this exists</h2>
  *
  * <p>{@code GuiScreen.mouseClicked} is not how the game delivers clicks. It is one step *inside* how
  * the game delivers clicks. The real path is {@code GuiScreen.handleInput()}, which pumps LWJGL's
- * event queue and calls {@code handleMouseInput()} once per event; vanilla's {@code handleMouseInput}
- * then reads {@code Mouse.getEventX/getEventY/getEventButton/getEventButtonState} and dispatches to
- * {@code mouseClicked} or {@code mouseReleased}.
+ * event queue and, for each event, posts Forge's {@code MouseInputEvent.Pre}, calls
+ * {@code handleMouseInput()} unless that was cancelled, then posts {@code MouseInputEvent.Post}.
+ * Vanilla's {@code handleMouseInput} reads {@code Mouse.getEventX/getEventY/getEventButton/
+ * getEventButtonState} and dispatches to {@code mouseClicked} or {@code mouseReleased}.
  *
- * <p>A screen is free to override {@code handleMouseInput()} and never call {@code mouseClicked} at
- * all. MalisisCore's {@code MalisisGui} does exactly that — it does its own hit testing against
- * {@code Mouse.getX()/getY()} and dispatches to its own component tree — so invoking
- * {@code mouseClicked} on it reaches nothing whatsoever. Every MalisisDoors, MalisisSwitches and
- * MalisisCore screen was silently unclickable, and the symptom was indistinguishable from a broken
- * mod: the click returned success, the screen did not change, and nothing was logged. That cost a
- * false bug report against a perfectly good tab widget before the cause was found.
+ * <p>Each step is somewhere a screen or a mod can take the click instead:
+ * <ul>
+ *   <li>MalisisCore's screens override {@code handleMouseInput()} and hit-test
+ *       {@code Mouse.getX()/getY()} themselves, so {@code mouseClicked} reached nothing.</li>
+ *   <li>Mods that skin vanilla screens (LDIC's advancement tabs, #169) handle the click in
+ *       {@code MouseInputEvent.Pre} and cancel it, or place a cursor in {@code Post}. Calling
+ *       {@code handleMouseInput()} directly skipped both.</li>
+ *   <li>Scrolling lists (vanilla {@code GuiSlot}, Forge's {@code GuiScrollingList}, the mod list) and
+ *       NanoVG frameworks such as OneConfig's poll {@code Mouse.isButtonDown} and the cursor while
+ *       drawing (#166). {@code GuiSlot} even hit-tests the press event against the cursor position
+ *       its last {@code drawScreen} saw. A press and release inside one task, with no frame drawn
+ *       between, is invisible to them.</li>
+ * </ul>
  *
- * <p>This is not a Malisis quirk. Any screen that overrides {@code handleMouseInput} is in the same
- * position, and overriding it is the documented way to handle scroll wheels.
+ * <h2>A click is three frames</h2>
+ *
+ * <p>So a click is played out over real frames, the way a person's is:
+ * <ol>
+ *   <li><b>hover</b>: the cursor is put at the point with the button up, and one frame is drawn, so
+ *       every screen's idea of where the mouse is matches the point;</li>
+ *   <li><b>press</b>: the button goes down and the press event is delivered; the frame is drawn with
+ *       it held, which is what polling widgets see;</li>
+ *   <li><b>release</b>: the button comes up at the same point and the release event is delivered;
+ *       one more frame lets a polling widget see the release.</li>
+ * </ol>
+ *
+ * <p>{@code Display.update()} refills LWJGL's state from the real mouse at the end of every frame,
+ * so the point and the button are written back at the start of each client tick and render tick
+ * ({@link #reassert}, called by {@link ClientInputScheduler}), before anything reads them. After the
+ * last frame nothing is written and the next refill hands the mouse back to the person.
+ *
+ * <p>If no frame is drawn (a stalled or minimised client), the caller finishes the click at once
+ * with {@link #finishNow}: every remaining event in one task, which is still right for most screens.
  *
  * <h2>What it sets, and why both coordinate pairs</h2>
  *
  * <p>Vanilla's {@code handleMouseInput} reads {@code Mouse.getEventX()/getEventY()}. MalisisGui reads
- * {@code Mouse.getX()/getY()}. Neither is wrong, so both pairs are set to the same point — setting
- * only one works on exactly half of the screens in the wild, and which half depends on the mod.
+ * {@code Mouse.getX()/getY()}. Neither is wrong, so both pairs are set to the same point.
  *
- * <p>LWJGL's mouse origin is bottom-left, while GUI space and screenshots are top-left. The flip is
- * applied here, in {@link #toLwjglY}, and is the single most likely thing to be wrong if clicks land
- * a consistent distance from the wrong edge.
- *
- * <h2>Press and release are both required</h2>
- *
- * <p>A real click is two events. Many screens act on the release, or require a press and release on
- * the same component (MalisisGui fires {@code onClick} only when the released component is the one
- * that took focus on press). Sending only the press leaves buttons visually stuck down and actions
- * unfired. Both events are delivered inside one game-thread task, so no frame renders between them
- * and the two cannot disagree about what is under the cursor.
+ * <p>Points are LWJGL display pixels. A screenshot pixel is a display pixel with the Y axis flipped
+ * ({@link #fromPixel}); a point in a screen's own coordinates converts with that screen's
+ * {@code width}/{@code height} ({@link #fromGui}), exactly as vanilla converts back. Not the
+ * {@code ScaledResolution}: a screen initialised at another size (LDIC's scaled-up inventories, #163)
+ * reads the mouse with its own size, and converting with the game's put every click at twice the
+ * intended point.
  *
  * <h2>Failure is not fatal</h2>
  *
  * <p>Every field is looked up once and cached. If LWJGL is not the expected implementation — a
  * shaded build, or LWJGL3ify's compatibility shim — {@link #isAvailable()} returns false and the
- * caller falls back to {@code mouseClicked}, which is still correct for the majority of screens.
- * Nothing here throws its way out to the game thread.
+ * caller falls back to {@code mouseClicked}. Nothing here throws its way out to the game thread.
  */
 @SideOnly(Side.CLIENT)
 public final class SyntheticMouse {
@@ -90,6 +113,20 @@ public final class SyntheticMouse {
     private static final Field FIELD_EVENT_DWHEEL = field("event_dwheel");
     @Nullable
     private static final Field FIELD_EVENT_NANOS = field("event_nanos");
+    /** What {@code Mouse.isButtonDown} reads. Optional: without it, polling widgets just miss out. */
+    @Nullable
+    private static final Field FIELD_BUTTONS = field("buttons");
+
+    /**
+     * Forge's {@code GuiScreen.mouseHandled}: set by a screen that took an event, which suppresses
+     * {@code MouseInputEvent.Post}. Forge's own field, so its name is the same in a released jar.
+     */
+    @Nullable
+    private static final Field FIELD_MOUSE_HANDLED = screenField("mouseHandled");
+
+    /** The click being played out, or null. Client thread only. */
+    @Nullable
+    private static Click active;
 
     private SyntheticMouse() {
     }
@@ -103,6 +140,18 @@ public final class SyntheticMouse {
         }
         catch (NoSuchFieldException | RuntimeException unavailable) {
             // A different LWJGL. isAvailable() reports it and callers fall back.
+            return null;
+        }
+    }
+
+    @Nullable
+    private static Field screenField(String name) {
+        try {
+            Field f = GuiScreen.class.getDeclaredField(name);
+            f.setAccessible(true);
+            return f;
+        }
+        catch (NoSuchFieldException | RuntimeException unavailable) {
             return null;
         }
     }
@@ -124,8 +173,7 @@ public final class SyntheticMouse {
     /**
      * Whether {@code screen} handles mouse input itself rather than leaving it to {@link GuiScreen}.
      *
-     * <p>Used only to explain in the tool result which path a click took. The synthetic path is
-     * correct for both kinds of screen, so this does not gate anything.
+     * <p>Used only to explain in the tool result which path a click took.
      */
     public static boolean overridesHandleMouseInput(GuiScreen screen) {
         Method method = handleMouseInputMethod(screen);
@@ -157,85 +205,211 @@ public final class SyntheticMouse {
         return null;
     }
 
-    /** GUI-space X to LWJGL display-pixel X. */
-    private static int toLwjglX(Minecraft mc, int guiX, int scaledWidth) {
-        return guiX * mc.displayWidth / Math.max(1, scaledWidth);
-    }
+    // ------------------------------------------------------------------
+    // Coordinates
+    // ------------------------------------------------------------------
 
-    /**
-     * GUI-space Y to LWJGL display-pixel Y, flipped to a bottom-left origin.
-     *
-     * <p>Inverts vanilla's {@code height - Mouse.getEventY() * height / displayHeight - 1}, so a point
-     * converted here and read back by a screen lands on the row it was asked for.
-     */
-    private static int toLwjglY(Minecraft mc, int guiY, int scaledHeight) {
-        int flipped = Math.max(0, scaledHeight - 1 - guiY);
-        return flipped * mc.displayHeight / Math.max(1, scaledHeight);
-    }
-
-    /**
-     * Delivers a full press-and-release at a GUI-space point.
-     *
-     * <p>Must be called on the client thread: it drives a screen's input handler, which touches the
-     * whole GUI tree.
-     *
-     * @return false if this LWJGL build cannot be driven, or the screen has no reachable
-     *         {@code handleMouseInput}; the caller should fall back to {@code mouseClicked}.
-     */
-    public static boolean click(GuiScreen screen, int guiX, int guiY, int button,
-                                int scaledWidth, int scaledHeight) throws Exception {
-        if (!isAvailable()) {
-            return false;
-        }
-        Method handleMouseInput = handleMouseInputMethod(screen);
-        if (handleMouseInput == null) {
-            return false;
-        }
-
+    /** A screenshot pixel (top-left origin) as an LWJGL point (bottom-left origin): {x, y}. */
+    public static int[] fromPixel(int pixelX, int pixelY) {
         Minecraft mc = Minecraft.getMinecraft();
-        int lwjglX = toLwjglX(mc, guiX, scaledWidth);
-        int lwjglY = toLwjglY(mc, guiY, scaledHeight);
+        return new int[]{pixelX, MousePoints.pixelToLwjglY(pixelY, mc.displayHeight)};
+    }
 
-        // The real cursor is wherever the player left it. Put it back afterwards so the next real
-        // frame does not treat the synthetic position as the mouse's last known location.
-        int savedX = Mouse.getX();
-        int savedY = Mouse.getY();
-        int savedEventX = Mouse.getEventX();
-        int savedEventY = Mouse.getEventY();
-        int savedEventButton = Mouse.getEventButton();
-        boolean savedEventState = Mouse.getEventButtonState();
-        int savedEventDWheel = Mouse.getEventDWheel();
+    /**
+     * A point in the screen's own coordinates as an LWJGL point. Inverts vanilla's
+     * {@code x = eventX * width / displayWidth} and {@code y = height - eventY * height / displayHeight - 1},
+     * with the screen's own size, so the screen reads back the point it was asked for.
+     */
+    public static int[] fromGui(GuiScreen screen, int guiX, int guiY) {
+        Minecraft mc = Minecraft.getMinecraft();
+        return new int[]{MousePoints.toLwjglX(guiX, screen.width, mc.displayWidth),
+            MousePoints.toLwjglY(guiY, screen.height, mc.displayHeight)};
+    }
 
+    /** An LWJGL point as the screen itself reads it: {x, y} in its own coordinates. */
+    public static int[] toGui(GuiScreen screen, int lwjglX, int lwjglY) {
+        Minecraft mc = Minecraft.getMinecraft();
+        return new int[]{MousePoints.toGuiX(lwjglX, screen.width, mc.displayWidth),
+            MousePoints.toGuiY(lwjglY, screen.height, mc.displayHeight)};
+    }
+
+    // ------------------------------------------------------------------
+    // Playing a click out
+    // ------------------------------------------------------------------
+
+    /** What happened to a click, for the tool to report. */
+    public static final class Outcome {
+        /** "lwjgl" across frames, or "lwjgl-immediate" when no frame was drawn in time. */
+        public String via = "lwjgl";
+        /** "MouseInputEvent.Pre" when a mod cancelled the press, so the screen never saw it. */
+        @Nullable
+        public String cancelledBy;
+        /** Frames drawn while the click played out. */
+        public int frames;
+        /** Whether LWJGL's button state could be held for polling widgets. */
+        public boolean polled = FIELD_BUTTONS != null;
+    }
+
+    private static final class Click {
+        final int x;
+        final int y;
+        final int button;
+        final CompletableFuture<Outcome> future = new CompletableFuture<>();
+        final Outcome outcome = new Outcome();
+        /** 0 hover, 1 pressed, 2 released, 3 done. */
+        int stage;
+
+        final int savedEventX = Mouse.getEventX();
+        final int savedEventY = Mouse.getEventY();
+        final int savedEventButton = Mouse.getEventButton();
+        final boolean savedEventState = Mouse.getEventButtonState();
+        final int savedEventDWheel = Mouse.getEventDWheel();
+
+        Click(int x, int y, int button) {
+            this.x = x;
+            this.y = y;
+            this.button = button;
+        }
+    }
+
+    /**
+     * Starts a click at an LWJGL point and returns at once; the click plays out over the next three
+     * frames. Client thread only. The future completes on the client thread when it is done.
+     *
+     * <p>A click still in flight is finished first, so two never interleave.
+     *
+     * @return null when this LWJGL build cannot be driven; the caller should fall back to
+     *         {@code mouseClicked}
+     */
+    @Nullable
+    public static CompletableFuture<Outcome> begin(int lwjglX, int lwjglY, int button) {
+        if (!isAvailable()) {
+            return null;
+        }
+        finishNow();
+        Click click = new Click(lwjglX, lwjglY, button);
+        active = click;
+        assertState(click);
+        return click.future;
+    }
+
+    /** Writes the click's point and button back over LWJGL's latest poll. Client thread only. */
+    public static void reassert() {
+        Click click = active;
+        if (click != null) {
+            assertState(click);
+        }
+    }
+
+    /** Advances the click by one frame. Called at the start of every render tick. */
+    public static void onFrame() {
+        Click click = active;
+        if (click == null) {
+            return;
+        }
+        // The first render tick after begin() draws the hover frame; each one after it moves on.
+        if (++click.outcome.frames > 1) {
+            advance(click);
+        }
+        else {
+            assertState(click);
+        }
+    }
+
+    /**
+     * Plays out whatever is left of the click in flight at once. Client thread only. Used when no
+     * frame arrives in time, and before a new click starts.
+     */
+    public static void finishNow() {
+        Click click = active;
+        if (click == null) {
+            return;
+        }
+        if (click.stage < 3) {
+            click.outcome.via = "lwjgl-immediate";
+        }
+        while (active == click) {
+            advance(click);
+        }
+    }
+
+    private static void advance(Click click) {
         try {
-            position(lwjglX, lwjglY);
-            dispatch(screen, handleMouseInput, button, true);
-            // Position is set again before the release: a screen's handler is free to move the
-            // cursor, and a release somewhere else is a drag, not a click.
-            position(lwjglX, lwjglY);
-            dispatch(screen, handleMouseInput, button, false);
+            click.stage++;
+            assertState(click);
+            if (click.stage == 1 || click.stage == 2) {
+                GuiScreen screen = Minecraft.getMinecraft().currentScreen;
+                if (screen != null) {
+                    boolean pressed = click.stage == 1;
+                    String cancelledBy = dispatch(screen, click, pressed);
+                    if (pressed && cancelledBy != null) {
+                        click.outcome.cancelledBy = cancelledBy;
+                    }
+                }
+            }
+            if (click.stage >= 3) {
+                end(click);
+                click.future.complete(click.outcome);
+            }
         }
-        finally {
-            position(savedX, savedY);
-            setInt(FIELD_EVENT_X, savedEventX);
-            setInt(FIELD_EVENT_Y, savedEventY);
-            setInt(FIELD_EVENT_BUTTON, savedEventButton);
-            setBoolean(FIELD_EVENT_STATE, savedEventState);
-            setInt(FIELD_EVENT_DWHEEL, savedEventDWheel);
+        catch (Throwable failure) {
+            // Never out onto the game thread: the click fails, the game carries on.
+            end(click);
+            click.future.completeExceptionally(failure);
         }
-        return true;
     }
 
-    /** Sets both coordinate pairs, because screens disagree about which one they read. */
-    private static void position(int lwjglX, int lwjglY) throws IllegalAccessException {
-        setInt(FIELD_X, lwjglX);
-        setInt(FIELD_Y, lwjglY);
-        setInt(FIELD_EVENT_X, lwjglX);
-        setInt(FIELD_EVENT_Y, lwjglY);
+    private static void end(Click click) {
+        if (active == click) {
+            active = null;
+        }
+        try {
+            setInt(FIELD_EVENT_X, click.savedEventX);
+            setInt(FIELD_EVENT_Y, click.savedEventY);
+            setInt(FIELD_EVENT_BUTTON, click.savedEventButton);
+            setBoolean(FIELD_EVENT_STATE, click.savedEventState);
+            setInt(FIELD_EVENT_DWHEEL, click.savedEventDWheel);
+            // The point and button stay until the next poll hands the real mouse back.
+        }
+        catch (IllegalAccessException | RuntimeException e) {
+            Mcmcp.LOGGER.warn("MCMCP could not restore LWJGL's mouse event state", e);
+        }
     }
 
-    private static void dispatch(GuiScreen screen, Method handleMouseInput, int button,
-                                 boolean pressed) throws Exception {
-        setInt(FIELD_EVENT_BUTTON, button);
+    private static void assertState(Click click) {
+        try {
+            setInt(FIELD_X, click.x);
+            setInt(FIELD_Y, click.y);
+            setInt(FIELD_EVENT_X, click.x);
+            setInt(FIELD_EVENT_Y, click.y);
+            setButton(click.button, click.stage == 1);
+        }
+        catch (IllegalAccessException | RuntimeException e) {
+            Mcmcp.LOGGER.warn("MCMCP could not set LWJGL's mouse state", e);
+        }
+    }
+
+    private static void setButton(int button, boolean down) throws IllegalAccessException {
+        if (FIELD_BUTTONS == null) {
+            return;
+        }
+        Object value = FIELD_BUTTONS.get(null);
+        if (value instanceof ByteBuffer) {
+            ByteBuffer buttons = (ByteBuffer) value;
+            if (button >= 0 && button < buttons.capacity()) {
+                buttons.put(button, (byte) (down ? 1 : 0));
+            }
+        }
+    }
+
+    /**
+     * One event, the way Forge's {@code GuiScreen.handleInput} delivers it.
+     *
+     * @return "MouseInputEvent.Pre" if a handler cancelled it before the screen saw it, else null
+     */
+    @Nullable
+    private static String dispatch(GuiScreen screen, Click click, boolean pressed) throws Exception {
+        setInt(FIELD_EVENT_BUTTON, click.button);
         setBoolean(FIELD_EVENT_STATE, pressed);
         // A click carries no movement and no scroll. Leaving stale deltas here makes a screen that
         // reads them treat the click as a drag.
@@ -243,7 +417,22 @@ public final class SyntheticMouse {
         setInt(FIELD_EVENT_DY, 0);
         setInt(FIELD_EVENT_DWHEEL, 0);
         setLong(FIELD_EVENT_NANOS, System.nanoTime());
-        handleMouseInput.invoke(screen);
+
+        if (FIELD_MOUSE_HANDLED != null) {
+            FIELD_MOUSE_HANDLED.setBoolean(screen, false);
+        }
+        if (MinecraftForge.EVENT_BUS.post(new GuiScreenEvent.MouseInputEvent.Pre(screen))) {
+            return "MouseInputEvent.Pre";
+        }
+        Method handleMouseInput = handleMouseInputMethod(screen);
+        if (handleMouseInput != null) {
+            handleMouseInput.invoke(screen);
+        }
+        boolean handled = FIELD_MOUSE_HANDLED != null && FIELD_MOUSE_HANDLED.getBoolean(screen);
+        if (screen == Minecraft.getMinecraft().currentScreen && !handled) {
+            MinecraftForge.EVENT_BUS.post(new GuiScreenEvent.MouseInputEvent.Post(screen));
+        }
+        return null;
     }
 
     private static void setInt(@Nullable Field field, int value) throws IllegalAccessException {

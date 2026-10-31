@@ -1,13 +1,16 @@
 package com.micatechnologies.minecraft.mcmcp.client.tools;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputLock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientInputScheduler;
 import com.micatechnologies.minecraft.mcmcp.client.ClientKeepAwake;
+import com.micatechnologies.minecraft.mcmcp.client.KeyBindingPress;
 import com.micatechnologies.minecraft.mcmcp.client.RawKeyboard;
 import com.micatechnologies.minecraft.mcmcp.client.WindowFocus;
+import com.micatechnologies.minecraft.mcmcp.json.ArgumentNames;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.CallerId;
@@ -274,6 +277,140 @@ public final class ClientInputTools {
         }
         return ToolResult.text(held + "Keyboard.isKeyDown never reported " + String.join(", ", unseen)
             + " down; a one-tick hold can end before the first check, so hold it longer.");
+    }
+
+    /** client_key with listBindings: every registered binding id, its category and current key. */
+    private static ToolResult listBindings(ToolContext context, @Nullable String filter) throws Exception {
+        final String needle = filter == null ? null : filter.trim().toLowerCase(java.util.Locale.ROOT);
+        JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+            @Override
+            public JsonObject call() {
+                JsonArray rows = new JsonArray();
+                for (KeyBinding binding : Minecraft.getMinecraft().gameSettings.keyBindings) {
+                    String id = binding.getKeyDescription();
+                    String category = binding.getKeyCategory();
+                    if (needle != null && !id.toLowerCase(java.util.Locale.ROOT).contains(needle)
+                        && !category.toLowerCase(java.util.Locale.ROOT).contains(needle)) {
+                        continue;
+                    }
+                    // [id, category, key]: rows, not objects, because a modded client has hundreds.
+                    JsonArray row = new JsonArray();
+                    row.add(id);
+                    row.add(category);
+                    row.add(binding.getDisplayName());
+                    rows.add(row);
+                }
+                JsonObject json = new JsonObject();
+                json.addProperty("columns", "id, category, key");
+                json.addProperty("count", rows.size());
+                json.add("bindings", rows);
+                return json;
+            }
+        });
+        return ToolResult.structured(result);
+    }
+
+    /**
+     * client_key with 'bindings': presses registered bindings by id (#165), together with any named
+     * 'keys'. The bindings count as actions, so state keys among 'keys' lead them by a tick.
+     */
+    private static ToolResult holdBindings(ToolContext context, final List<String> keys,
+                                           final List<String> ids) throws Exception {
+        if (keys.size() + ids.size() > MAX_RAW_KEYS) {
+            return ToolResult.error("At most " + MAX_RAW_KEYS + " keys and bindings can be held at once.");
+        }
+        for (String name : keys) {
+            if (!Arrays.asList(KEY_NAMES).contains(name)) {
+                return ToolResult.error("Unknown key '" + name + "'. Use one of: "
+                    + String.join(", ", KEY_NAMES) + ".");
+            }
+        }
+        final int ticks = context.getBoundedInt("ticks", 1, 1, McmcpConfig.getMaxInputTicks());
+        final int lead = keys.isEmpty() ? 0 : comboLeadTicks(withAction(keys));
+        final Map<String, KeyBinding> resolved = new LinkedHashMap<>();
+        String refusal = context.onGameThread(new Callable<String>() {
+            @Override
+            public String call() {
+                if (!KeyBindingPress.available()) {
+                    return "This game's KeyBinding cannot be pressed directly; the game log says why.";
+                }
+                if (!keys.isEmpty()) {
+                    ClientStateTools.requireInWorld();
+                }
+                List<String> known = new ArrayList<>();
+                for (KeyBinding binding : Minecraft.getMinecraft().gameSettings.keyBindings) {
+                    known.add(binding.getKeyDescription());
+                }
+                for (String id : ids) {
+                    KeyBinding binding = KeyBindingPress.find(id);
+                    if (binding == null) {
+                        String closest = ArgumentNames.closest(id, known);
+                        return "No keybinding '" + id + "' is registered"
+                            + (closest == null ? "" : "; did you mean '" + closest + "'?")
+                            + ". client_key with listBindings lists them.";
+                    }
+                    resolved.put(id, binding);
+                }
+                return null;
+            }
+        });
+        if (refusal != null) {
+            return ToolResult.error(refusal);
+        }
+        CompletableFuture<Void> hold = context.onGameThread(new Callable<CompletableFuture<Void>>() {
+            @Override
+            public CompletableFuture<Void> call() {
+                List<CompletableFuture<Void>> holds = new ArrayList<>();
+                if (!keys.isEmpty()) {
+                    // Held one tick longer than asked when bindings lead in, so they spend their
+                    // whole hold with the state keys down.
+                    holds.add(holdTogether(keys, ticks + (lead > 0 && comboLeadTicks(keys) == 0 ? lead : 0)));
+                }
+                for (KeyBinding binding : resolved.values()) {
+                    holds.add(ClientInputScheduler.holdDirect(binding, lead, ticks));
+                }
+                return CompletableFuture.allOf(holds.toArray(new CompletableFuture[0]));
+            }
+        });
+        awaitHold(hold, ticks + lead + 1);
+        JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+            @Override
+            public JsonObject call() {
+                JsonObject json = new JsonObject();
+                JsonArray consumed = new JsonArray();
+                JsonArray unread = new JsonArray();
+                for (Map.Entry<String, KeyBinding> entry : resolved.entrySet()) {
+                    int left = KeyBindingPress.unconsumed(entry.getValue());
+                    (left == 0 ? consumed : unread).add(entry.getKey());
+                    if (left > 0) {
+                        // A press nobody read would fire whenever something next asks isPressed(),
+                        // long after this call. Cleared, as a released real key's would be by then.
+                        while (entry.getValue().isPressed()) {
+                            // Drains the counter.
+                        }
+                    }
+                }
+                json.add("pressedRead", consumed);
+                json.add("pressedUnread", unread);
+                json.addProperty("ticks", ticks);
+                return json;
+            }
+        });
+        String text = "Held " + String.join(" + ", ids) + (keys.isEmpty() ? "" : " with '"
+            + String.join("' + '", keys) + "'") + " for " + ticks + " tick(s).";
+        if (result.getAsJsonArray("pressedUnread").size() > 0) {
+            text += " Nothing called isPressed() on " + result.getAsJsonArray("pressedUnread")
+                + " during the hold; a binding read only with isKeyDown(), or only in another "
+                + "context (a GUI binding with no screen open, say), does not show here.";
+        }
+        return ToolResult.text(text).withStructured(result);
+    }
+
+    /** {@code keys} plus a placeholder action, to ask whether its state keys must lead. */
+    private static List<String> withAction(List<String> keys) {
+        List<String> combined = new ArrayList<>(keys);
+        combined.add("use");
+        return combined;
     }
 
     /**
@@ -687,11 +824,21 @@ public final class ClientInputTools {
                 + "'raw' holds keyboard keys where LWJGL reports them (Keyboard.isKeyDown) and presses no "
                 + "keybinding: for mods that read the keyboard themselves, such as Immersive Vehicles' "
                 + "driving controls, which never see a keybinding hold. Named keys map to the key they are "
-                + "bound to; 'rawKeys' names any other key.")
+                + "bound to; 'rawKeys' names any other key.\n\n"
+                + "'bindings' presses any registered keybinding by its id, a mod's included (such as "
+                + "key.jei.showRecipe): the binding itself goes down, whatever key it is bound to or "
+                + "whether it is bound at all, so both isKeyDown and isPressed see it, and nothing "
+                + "sharing its key is pressed. 'listBindings' lists the ids with their category and "
+                + "current key.")
             .schema(JsonSchema.object()
                 .enumeration("key", "Which keybinding to press.", KEY_NAMES)
                 .array("keys", "Several keybindings to hold together, instead of 'key'.",
                     JsonSchema.enumItems(KEY_NAMES))
+                .array("bindings", "Registered keybinding ids to press, such as "
+                    + "key.ldic.hotbar_toggle; held with any 'keys'. At most " + MAX_RAW_KEYS + ".",
+                    Json.obj("type", "string"))
+                .bool("listBindings", "List every registered keybinding id instead of pressing.")
+                .string("filter", "With listBindings: only ids or categories containing this text.")
                 .integer("ticks", "How long to hold them, in ticks (20 per second).", 1, 1200)
                 .bool("raw", "Hold the keys at the LWJGL level instead of pressing keybindings.")
                 .array("rawKeys", "LWJGL key names to hold raw, such as W, SPACE, LSHIFT, NUMPAD8 or F; "
@@ -712,12 +859,21 @@ public final class ClientInputTools {
                     requested.add(single);
                 }
                 requested.addAll(Json.getStringList(context.getArguments(), "keys"));
+                if (context.getBoolean("listBindings", false)) {
+                    return listBindings(context, context.getString("filter", null));
+                }
                 List<String> rawNames = Json.getStringList(context.getArguments(), "rawKeys");
                 if (context.getBoolean("raw", false) || !rawNames.isEmpty()) {
                     return holdRaw(context, requested, rawNames);
                 }
+                final List<String> bindingIds = new ArrayList<>(
+                    new LinkedHashSet<>(Json.getStringList(context.getArguments(), "bindings")));
+                if (!bindingIds.isEmpty()) {
+                    return holdBindings(context, new ArrayList<>(requested), bindingIds);
+                }
                 if (requested.isEmpty()) {
-                    return ToolResult.error("Name a keybinding with 'key', or several with 'keys'.");
+                    return ToolResult.error("Name a keybinding with 'key', or several with 'keys', or "
+                        + "a registered binding id with 'bindings' (listBindings lists them).");
                 }
                 // Checked before anything is pressed, so a bad name in a combination cannot leave
                 // the valid half of it held with nobody waiting on the release.

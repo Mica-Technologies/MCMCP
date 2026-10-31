@@ -2580,7 +2580,7 @@ Returns the **distance actually travelled**, which is zero if something was in t
 
 #### `client_key`
 
-Requires `permissions.allowPlayerControl` · `key` or `keys`, optional `ticks`, `raw`, `rawKeys`
+Requires `permissions.allowPlayerControl` · `key`, `keys` or `bindings`, optional `ticks`, `raw`, `rawKeys`, `listBindings`, `filter`
 
 The general-purpose input tool. Named bindings only: `forward`, `back`, `left`, `right`, `jump`,
 `sneak`, `sprint`, `attack`, `use`, `drop`, `inventory`, `pickBlock`, `swapHands`.
@@ -2602,6 +2602,15 @@ keyboard key it is bound to now. `rawKeys` names any keyboard key by its LWJGL n
 keyboard every frame, so the hold writes it back at the start of every client tick and render tick,
 ahead of other mods' handlers. Raw holds release like any other: when `ticks` run out, on leaving
 the world, and on an emergency stop. They also work as `client_key` steps in `client_sequence`.
+
+**Any binding by id.** `bindings` presses registered keybindings by their id, a mod's included:
+`["key.ldic.hotbar_toggle"]`. The binding itself goes down — its pressed flag and its press counter
+— so a mod reading `isKeyDown()` or `isPressed()` sees it, whatever key it is bound to, whether it
+needs a modifier, or whether it is bound at all. Nothing else sharing its key is pressed. It combines
+with `keys`, and state keys lead it by a tick as they do an action. The reply lists in
+`pressedRead` the bindings something called `isPressed()` on during the hold; a press nobody read is
+cleared at release so it cannot fire later. `listBindings: true` lists every id as
+`[id, category, key]`, narrowed by `filter`.
 
 #### `client_interact`
 
@@ -3184,6 +3193,10 @@ Call this first: the other two address widgets by label or index, and this is wh
 Text fields are found by *type*, so they are listed even on a mod's own screen where no field name
 could have been known in advance.
 
+Positions are in the screen's own coordinates. The reply gives `screenWidth`/`screenHeight` beside
+the game's `scaledWidth`/`scaledHeight`, and `screenScaled: true` when they differ: a screen laid
+out at its own size, as LDIC's full-screen inventories are, reads the mouse with that size.
+
 #### `client_gui_click`
 
 Requires `permissions.allowPlayerControl` · optional `label`, `index`, `mode`
@@ -3258,13 +3271,31 @@ Core Lib among them — so a screen full of controls can report zero buttons. Cl
 none of that.
 
 The workflow is screenshot → read the pixel → click it, which is why `pixel` is the default space.
-`gui` is Minecraft's scaled space, matching the positions `client_gui_widgets` reports.
+`gui` is the screen's own coordinate space, matching the positions `client_gui_widgets` reports. A
+pixel goes to LWJGL as it is and the screen converts it with its own `width`/`height`, exactly as it
+converts a real click, so a screen laid out at a size other than the game's `ScaledResolution`
+(`screenScaled` in the reply) is clicked where the screenshot shows.
 
-The click is delivered the way the game delivers one: LWJGL's mouse state is set to the target point
-and the screen's own `handleMouseInput()` is called, press then release. The reply reports `via` —
-`lwjgl` for that path, or `mouseClicked` if LWJGL's state could not be driven and the older direct
-call was used instead — and `handlesOwnMouseInput`, which says whether this screen takes over mouse
-handling rather than leaving it to `GuiScreen`.
+The click is delivered the way the game delivers one, over three real frames:
+
+1. **hover** — LWJGL's cursor is set to the point with the button up, and a frame is drawn;
+2. **press** — the button goes down, the press event goes through Forge's route
+   (`MouseInputEvent.Pre`, the screen's own `handleMouseInput()`, then `MouseInputEvent.Post`), and
+   a frame is drawn with the button held;
+3. **release** — the button comes up at the same point and the release event goes the same way.
+
+LWJGL refills the mouse from the real one every frame, so the point and button are written back at
+the start of every client tick and render tick until the click is done. That is what lets scrolling
+lists be clicked: vanilla's `GuiSlot` (the world list, Video Settings' rows), Forge's
+`GuiScrollingList` (the mod list) and NanoVG frameworks such as OneConfig's read
+`Mouse.isButtonDown` and the cursor while drawing, and never saw a click delivered inside one task.
+
+The reply reports `via` — `lwjgl` for that path; `lwjgl-immediate` when the client drew no frame
+within two seconds and the rest of the click was delivered at once; `mouseClicked` if LWJGL's state
+could not be driven and the older direct call was used instead — plus `frames`, and
+`handlesOwnMouseInput`, which says whether this screen takes over mouse handling rather than leaving
+it to `GuiScreen`. `cancelledBy: "MouseInputEvent.Pre"` means a mod took the press in Forge's event
+and handled it itself (LDIC's themed advancement tabs do), so the screen never saw it.
 
 !!! warning "Why not just call `mouseClicked`?"
 
@@ -3278,6 +3309,10 @@ handling rather than leaving it to `GuiScreen`.
     screen did not change, and nothing was logged. It produced a false bug report against a widget
     that was working perfectly. This is the mouse counterpart of the `handleKeyboardInput` problem
     described under `client_gui_key`.
+
+    Forge adds two more steps around it: `handleInput()` posts `MouseInputEvent.Pre`, skipping the
+    screen when it is cancelled, and `MouseInputEvent.Post` after it. Mods that skin vanilla screens
+    handle clicks there, so a click that called `handleMouseInput()` directly missed them too.
 
 #### `client_gui_key`
 
@@ -3310,12 +3345,16 @@ reply says so.
 
 #### `client_gui_open`
 
-Requires `permissions.allowPlayerControl` · `screen`, optional `text`
+Requires `permissions.allowPlayerControl` · `screen`, optional `text`, `modId`
 
 Opens a vanilla screen for the other `client_gui_*` tools to drive: `pause` (the Escape menu, which
 pauses singleplayer), `options`, `sound`, `controls`, `video`, or `chat`, prefilled with `text`.
 `pause` and `chat` need a world. The options screens return to whatever was open, or to the game, on
 Done.
+
+`mods` opens Forge's mod list, and `mod_config` with `modId` opens that mod's own Config screen,
+made by its `IModGuiFactory` exactly as the mod list's Config button makes it. The reply is an
+error when the mod has no Config screen.
 
 Escape is not a gameplay binding, so `client_key` cannot press it, and the pause menu otherwise opens
 only when the window loses focus. Without this the Options screens were unreachable from in-world.
@@ -3336,8 +3375,18 @@ a boolean as its value, a number as `[value, min, max]`.
 
 Volumes are `sound_<category>`, 0 to 1: `master`, `music`, `record`, `weather`, `block`, `hostile`,
 `neutral`, `player`, `ambient`, `voice`. Everything else uses the game's option names in lower case
-(`fov`, `gamma`, `render_distance`, `framerate_limit`, `auto_jump`, ...). Options the game only
-cycles through, such as graphics and GUI scale, are not here; open their screen instead.
+(`fov`, `gamma`, `render_distance`, `framerate_limit`, `auto_jump`, ...).
+
+Options the game only cycles through take an index or a label, and are listed as
+`[index, label, [labels]]`: `gui_scale` (`auto`, `small`, `normal`, `large`), `attack_indicator`
+(`off`, `crosshair`, `hotbar`), `graphics`, `render_clouds`, `ambient_occlusion`, `particles`,
+`chat_visibility`, `main_hand` and `narrator`. Each is stepped through the game's own cycle until it
+reads back as asked, so every step has the button's side effects; a `gui_scale` change also lays the
+open screen out again at the new scale, as Video Settings does.
+
+```json
+{ "set": { "gui_scale": "normal", "attack_indicator": 0 } }
+```
 
 Values go through the game's own setters, so a volume reaches the sound engine and a render distance
 reaches the renderer, just as a slider would. The reply gives each option's `old` and `new` value.
