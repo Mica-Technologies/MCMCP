@@ -213,6 +213,11 @@ public final class HoldLedger {
         return places;
     }
 
+    /** Distinct chunks held by a caller's group: what its per-caller cap counts (#167). */
+    public int heldChunksOfGroup(String caller) {
+        return placesOfGroup(groupOf(caller)).size();
+    }
+
     /** Distinct chunks held by one caller. */
     public int heldChunks(String caller) {
         return placesOf(caller).size();

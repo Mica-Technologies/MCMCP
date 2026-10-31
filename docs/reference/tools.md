@@ -594,6 +594,14 @@ Both go through one governor:
   stand in the way of waits up to 10 seconds for them before it is refused. One that only the
   caller's own running calls stand in the way of is refused at once, since it may be running inside
   one of them (a [`server_run_test`](#server_run_test) step).
+- **Large reads go a piece at a time.** A read-only `load: true` over more chunks than the caller
+  may hold now (`server_count_blocks`, `server_find_blocks` box mode, `server_get_blocks` packed or
+  `surface`, `server_plan_view`) is not refused: it is cut into bands of whole chunk rows that each
+  fit, and each piece is loaded, read and given back before the next. The result is the same one
+  stitched result, and its `chunks` block adds `tiles`, `tilesRead` and `tileChunks`. The caps pace
+  such a read rather than block it; loads still go at the per-minute budget, so a very large one
+  takes minutes. Too little room for even a small piece (under 16 chunks) is still refused, naming
+  the cap. Writes are never cut up: they hold all they touch until their undo point is taken.
 - **A call's own hold.** `load: true` holds its chunks only while its call runs. If the call stops
   waiting before the server thread admits it, nothing is held; if it stops waiting while the
   admission runs, the hold is given back as soon as the admission ends. A hold whose call is over
@@ -1019,7 +1027,7 @@ basilica's 14,771 leaking cells in 17 clusters, and ALTO 1873 L13's 1,486 / 303 
 
 ##### `server_plan_view`
 
-:material-eye: Read-only · `x`, `z`, `toX`, `toZ` or `target` · optional `diffTarget`, `y_max`, `y_min`, `scale`, `grid`, `highlight`, `max_dimension`, `inline`, `dimension`, `load`
+:material-eye: Read-only · `x`, `z`, `toX`, `toZ` or `target` · optional `diffTarget`, `y_max`, `y_min`, `scale`, `grid`, `highlight`, `max_dimension`, `heights`, `inline`, `dimension`, `load`
 
 A top-down plan drawn by the server and returned as an image: each column in its top block's map
 colour, shaded by height, with a labelled grid. Unlike [`client_render_map`](#client_render_map) it
@@ -1032,6 +1040,11 @@ needs no player and no render distance.
   then shows in one picture. The reply has `differCells` and `differColumns`.
 - `highlight` paints matching blocks magenta.
 - `max_dimension` (default 768) caps the long edge; an image costs about width × height / 750 tokens.
+- `heightRange` in the reply is the lowest and highest top block drawn. `heights: true` adds every
+  sampled column's top y as a packed array (`-1` nothing in range, `-2` not loaded), so a long
+  survey can be analysed from the one call.
+- `load: true` over more chunks than you may hold draws it a piece at a time (see
+  [chunk loading](#chunk-loading)).
 
 The PNG is also written under `mcmcp-plans/` in the game directory, and its path returned.
 

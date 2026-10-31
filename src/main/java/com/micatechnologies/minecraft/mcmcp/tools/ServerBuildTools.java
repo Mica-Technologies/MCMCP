@@ -115,7 +115,8 @@ public final class ServerBuildTools {
                     + "'palette' (the index array needs it) and false for 'summary' and 'list'.")
                 .bool("load", "Load the chunks this read needs that are not loaded, and release them "
                     + "afterwards. Default false: cells in unloaded chunks read as mcmcp:unloaded, and the "
-                    + "'chunks' block says how many chunks that was. See server_keep_loaded.")
+                    + "'chunks' block says how many chunks that was. With 'packed' or mode 'surface', a box over your "
+                    + "hold cap is loaded and read a piece at a time. See server_keep_loaded.")
                 .enumeration("encoding", "'json' (default) as above. 'packed': palette plus the index array "
                         + "as one short string (run-length, zlib, base64; see 'encoding' in the reply), with no "
                         + "listing cap up to limits.maxPackedReadCells. Use it for anything large.",

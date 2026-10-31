@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ReadTiles;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -111,7 +112,8 @@ public final class ServerAreaTools {
                 + "call. 'include' and 'exclude' take ids, namespaces ending in ':' or patterns with '*' anywhere. "
                 + "Returns counts per block id, most first, with a few sample positions of each; 'extents' adds "
                 + "where each lives (min and max corner), 'byY' its count per layer. Air is left out unless "
-                + "includeAir. Unloaded chunks are listed and not counted; pass load: true to count them.")
+                + "includeAir. Unloaded chunks are listed and not counted; pass load: true to count them (a box over your hold cap is "
+                + "loaded and counted a piece at a time).")
             .schema(boxSchema(JsonSchema.object())
                 .array("include", "Only count these blocks.", Json.obj("type", "string"))
                 .array("exclude", "Never count these blocks, e.g. the natural ones.", Json.obj("type", "string"))
@@ -148,21 +150,22 @@ public final class ServerAreaTools {
         final boolean extents = context.getBoolean("extents", false);
         final boolean byY = context.getBoolean("byY", false);
 
-        return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
-            // State id -> whether it is counted, worked out once per state rather than once per cell.
-            final Map<Integer, String> keys = new HashMap<>();
-            final Map<String, Counted> counts = new HashMap<>();
-            final Map<String, JsonArray> sampled = new HashMap<>();
-            final long[] counted = {0L};
-            final List<Long> pending = new ArrayList<>(chunks);
-            int done = 0;
-            while (done < pending.size()) {
+        // State id -> whether it is counted, worked out once per state rather than once per cell.
+        final Map<Integer, String> keys = new HashMap<>();
+        final Map<String, Counted> counts = new HashMap<>();
+        final Map<String, JsonArray> sampled = new HashMap<>();
+        final long[] counted = {0L};
+        final List<Long> pending = new ArrayList<>(chunks);
+        return ServerChunkTools.walk(context, dimension, box.minX, box.minZ, box.maxX, box.maxZ, 0, tile -> {
+            int done = tile.firstChunk;
+            int end = tile.lastChunk + 1;
+            while (done < end) {
                 final int from = done;
                 done = context.onGameThread(() -> {
                     WorldServer world = ServerWorldTools.requireWorld(dimension);
                     long started = System.nanoTime();
                     int at = from;
-                    while (at < pending.size() && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
+                    while (at < end && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
                         long key = pending.get(at++);
                         Chunk chunk = world.getChunkProvider().getLoadedChunk(ChunkKeys.x(key), ChunkKeys.z(key));
                         if (chunk != null) {
@@ -176,6 +179,8 @@ public final class ServerAreaTools {
                     context.reportProgress(done, pending.size(), "Counted " + done + " of " + pending.size() + " chunks");
                 }
             }
+            return true;
+        }, chunksBlock -> {
             List<Map.Entry<String, Counted>> sorted = new ArrayList<>(counts.entrySet());
             sorted.sort((a, b) -> Long.compare(b.getValue().count, a.getValue().count));
             JsonArray blocks = new JsonArray();
@@ -215,11 +220,7 @@ public final class ServerAreaTools {
                 json.addProperty("typesNotListed", sorted.size() - limit);
             }
             json.add("blocks", blocks);
-            json.add("chunks", context.onGameThread(() -> {
-                ChunkLoadGovernor.touch(dimension, chunks);
-                return outcome != null ? outcome.toJson()
-                    : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
-            }));
+            json.add("chunks", chunksBlock);
             return ToolResult.structured(json);
         });
     }
@@ -383,19 +384,26 @@ public final class ServerAreaTools {
         if (start < 0 || start > end) {
             return ToolResult.error("That cursor is not from a page of this box. Start again without one.");
         }
-        final Set<Long> chunks = near == null ? new java.util.LinkedHashSet<>(pending)
-            : new java.util.LinkedHashSet<>(ChunkKeys.box(box.minX - near.radius(), box.minZ - near.radius(),
-                box.maxX + near.radius(), box.maxZ + near.radius()));
-        return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
-            final Finder finder = new Finder(box, patterns, nearby, near);
-            final long[] at = {start};
-            while (at[0] < end && finder.matches.size() < limit) {
+        final Finder finder = new Finder(box, patterns, nearby, near);
+        final long[] at = {start};
+        return ServerChunkTools.walk(context, dimension, box.minX, box.minZ, box.maxX, box.maxZ,
+            near == null ? 0 : near.radius(), new ServerChunkTools.TileReader() {
+            @Override
+            public boolean needs(ReadTiles.Tile tile) {
+                return at[0] < end && finder.matches.size() < limit && (at[0] >> 8) <= tile.lastChunk;
+            }
+
+            @Override
+            public boolean read(ReadTiles.Tile tile) {
+            at[0] = Math.max(at[0], (long) tile.firstChunk << 8);
+            final long tileEnd = Math.min(end, (long) (tile.lastChunk + 1) << 8);
+            while (at[0] < tileEnd && finder.matches.size() < limit) {
                 context.onGameThread(() -> {
                     WorldServer world = ServerWorldTools.requireWorld(dimension);
                     // Chunks may unload between slices, so what this one looked up is forgotten after it.
                     finder.beginSlice(world);
                     long started = System.nanoTime();
-                    while (at[0] < end && finder.matches.size() < limit
+                    while (at[0] < tileEnd && finder.matches.size() < limit
                         && System.nanoTime() - started < SLICE_NANOS) {
                         int index = (int) (at[0] >> 8);
                         int y = (int) (at[0] & 255);
@@ -429,6 +437,9 @@ public final class ServerAreaTools {
                         + pending.size() + " chunks");
                 }
             }
+            return finder.matches.size() < limit;
+            }
+        }, chunksBlock -> {
             JsonArray palette = finder.palette;
             for (int i = 0; i < palette.size(); i++) {
                 palette.get(i).getAsJsonObject().addProperty("count", finder.paletteCounts.get(i)[0]);
@@ -449,11 +460,7 @@ public final class ServerAreaTools {
                 json.addProperty("cursor", String.valueOf(at[0]));
                 json.addProperty("note", "More matches may follow: call again with the same box and this cursor.");
             }
-            json.add("chunks", context.onGameThread(() -> {
-                ChunkLoadGovernor.touch(dimension, chunks);
-                return outcome != null ? outcome.toJson()
-                    : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
-            }));
+            json.add("chunks", chunksBlock);
             return ToolResult.structured(json);
         });
     }

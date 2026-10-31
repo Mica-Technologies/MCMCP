@@ -2,7 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ReadTiles;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -12,6 +12,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.regions.BuildTarget;
+import com.micatechnologies.minecraft.mcmcp.regions.PackedIndices;
 import com.micatechnologies.minecraft.mcmcp.regions.TargetDiff;
 import com.micatechnologies.minecraft.mcmcp.regions.TargetStore;
 import java.awt.image.BufferedImage;
@@ -57,7 +58,8 @@ public final class ServerPlanTools {
                 + "'diffTarget' paints red every column where the world differs from that build target (as "
                 + "server_verify judges it, within y_max), over the plan: where a storey is unfinished or "
                 + "wrong, in one picture. 'highlight' paints matching blocks magenta. Needs no player and no "
-                + "render distance; 'load' reads unloaded chunks. Costs about width x height / 750 tokens: "
+                + "render distance; 'load' reads unloaded chunks, a piece at a time when the box is more than you "
+                + "may hold. 'heightRange' gives the lowest and highest top; 'heights' every column's. Costs about width x height / 750 tokens: "
                 + "'max_dimension' (default " + DEFAULT_MAX_DIMENSION + ") caps the long edge.")
             .schema(ServerChunkTools.loadArgument(JsonSchema.object()
                 .integer("x", "X of one corner.")
@@ -74,7 +76,8 @@ public final class ServerPlanTools {
                 .integer("max_dimension", "Longest edge in pixels. Default " + DEFAULT_MAX_DIMENSION + ".",
                     ScreenshotImages.MIN_MAX_DIMENSION, ScreenshotImages.PROVIDER_CEILING)
                 .integer("dimension", "Dimension id. Default 0, or the target's.")
-                .bool("inline", "Include the image in the response. Default true; false returns only the file path."))
+                .bool("heights", "Add the top y of every sampled column, packed. Default false.")
+                .bool("inline","Include the image in the response. Default true; false returns only the file path."))
                 .build())
             .serverOnly()
             .readOnly()
@@ -150,12 +153,26 @@ public final class ServerPlanTools {
         final int yMin = context.getBoundedInt("y_min", 0, 0, 255);
         final TargetDiff.Normaliser normaliser = ServerTargetTools.normaliser(context, store);
 
-        return ServerChunkTools.withChunks(context, dim, ChunkKeys.box(minX, minZ, minX + spanX - 1, minZ + spanZ - 1),
-            outcome -> {
+        final boolean wantHeights = context.getBoolean("heights", false);
+        final MapImage.Columns columns = new MapImage.Columns(pixelsX, pixelsZ);
+        final MapSampler sampler = new MapSampler(minX, minZ, scale, yMax, highlight);
+        final Map<String, String> wanted = new HashMap<>();
+        final TargetDiff judge = diffTarget == null ? null
+            : new TargetDiff(normaliser, 0, java.util.Collections.<int[]>emptyList());
+        final int[] rowsDrawn = {0};
+        // Out to the last pixel's sample point, which can be past the box's edge (scale > 1).
+        final int walkMaxX = Math.max(minX + spanX - 1, ReadTiles.lastSamplePoint(minX, scale, pixelsX));
+        final int walkMaxZ = Math.max(minZ + spanZ - 1, ReadTiles.lastSamplePoint(minZ, scale, pixelsZ));
+        return ServerChunkTools.walk(context, dim, minX, minZ, walkMaxX, walkMaxZ, 0, tile -> {
                 if (diffTarget != null) {
-                    final Map<String, String> wanted = new HashMap<>();
-                    final TargetDiff judge = new TargetDiff(normaliser, 0, java.util.Collections.<int[]>emptyList());
-                    final List<Long> keys = diffTarget.sectionKeys();
+                    // Only the sections over this piece: the rest are judged with their own piece.
+                    final List<Long> keys = new java.util.ArrayList<>();
+                    for (long key : diffTarget.sectionKeys()) {
+                        int[] chunk = BuildTarget.chunkOf(key);
+                        if (tile.containsChunk(chunk[0], chunk[1])) {
+                            keys.add(key);
+                        }
+                    }
                     final int[] cursor = {0};
                     while (cursor[0] < keys.size()) {
                         context.onGameThread(() -> {
@@ -164,7 +181,7 @@ public final class ServerPlanTools {
                             long started = System.nanoTime();
                             while (cursor[0] < keys.size() && System.nanoTime() - started < 25_000_000L) {
                                 diffTarget.forEachCellIn(keys.get(cursor[0]++), (x, y, z, want, protect) -> {
-                                    if (y > yMax || y < yMin || x < minX || z < minZ || x >= minX + spanX
+                                    if (y > yMax || y < yMin || !tile.containsBlock(x, z) || x >= minX + spanX
                                         || z >= minZ + spanZ) {
                                         return;
                                     }
@@ -185,17 +202,24 @@ public final class ServerPlanTools {
                     }
                 }
 
-                final MapImage.Columns columns = new MapImage.Columns(pixelsX, pixelsZ);
-                final MapSampler sampler = new MapSampler(minX, minZ, scale, yMax, highlight);
-                for (int row = 0; row < pixelsZ; row += ROWS_PER_HOP) {
+                // The pixels whose sample point is in this piece; every pixel's is in exactly one.
+                final int[] across = ReadTiles.pixelRange(minX, scale, pixelsX, tile.minX, tile.maxX);
+                final int[] down = ReadTiles.pixelRange(minZ, scale, pixelsZ, tile.minZ, tile.maxZ);
+                int hop = Math.max(1, ROWS_PER_HOP * pixelsX / Math.max(1, across[1] - across[0]));
+                for (int row = down[0]; row < down[1]; row += hop) {
                     final int from = row;
-                    final int to = Math.min(pixelsZ, row + ROWS_PER_HOP);
+                    final int to = Math.min(down[1], row + hop);
                     context.onGameThread(() -> {
-                        sampler.sampleRows(ServerWorldTools.requireWorld(dim), columns, from, to);
+                        sampler.sampleRect(ServerWorldTools.requireWorld(dim), columns, across[0], across[1], from, to);
                         return null;
                     });
-                    context.reportProgress(to, pixelsZ, "rows drawn");
+                    if (across[1] - across[0] == pixelsX) {
+                        rowsDrawn[0] += to - from;
+                        context.reportProgress(rowsDrawn[0], pixelsZ, "rows drawn");
+                    }
                 }
+                return true;
+            }, chunksBlock -> {
                 BufferedImage image = MapImage.render(columns, minX, minZ, scale, pixelsPerBlock, grid, null, null);
                 for (long column : differing) {
                     int x = (int) (column >> 32);
@@ -242,12 +266,41 @@ public final class ServerPlanTools {
                 if (!highlight.isEmpty()) {
                     json.addProperty("highlightedColumns", sampler.highlighted);
                 }
+                addHeights(json, columns.heights(), wantHeights);
+                json.add("chunks", chunksBlock);
                 ToolResult result = ToolResult.structured(json);
                 if (context.getBoolean("inline", true)) {
                     result.withContent(McpContent.image(png, "image/png"));
                 }
                 return result;
             });
+    }
+
+    /**
+     * The height legend: the lowest and highest top block drawn, always; with {@code heights} the top y of
+     * every sampled column too, packed, so a long survey can be analysed from the one call (#167).
+     */
+    private static void addHeights(JsonObject json, int[] heights, boolean full) {
+        int low = Integer.MAX_VALUE;
+        int high = Integer.MIN_VALUE;
+        for (int height : heights) {
+            if (height >= 0) {
+                low = Math.min(low, height);
+                high = Math.max(high, height);
+            }
+        }
+        if (low <= high) {
+            JsonArray range = new JsonArray();
+            range.add(low);
+            range.add(high);
+            json.add("heightRange", range);
+        }
+        if (full) {
+            json.addProperty("heights", PackedIndices.encode(heights));
+            json.addProperty("heightsEncoding", PackedIndices.ENCODING);
+            json.addProperty("heightsNote", "one top y per sampled column, index = px + width_in_columns * pz "
+                + "before pixelsPerBlock (columns: ceil(span / scale)); -1 nothing in range, -2 not loaded");
+        }
     }
 
     static int autoGrid(int span) {

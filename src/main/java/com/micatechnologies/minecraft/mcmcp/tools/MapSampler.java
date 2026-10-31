@@ -53,11 +53,16 @@ public final class MapSampler {
     }
 
     public void sampleRows(World world, MapImage.Columns columns, int fromRow, int toRow) {
+        sampleRect(world, columns, 0, columns.width(), fromRow, toRow);
+    }
+
+    /** Samples the columns {@code [fromColumn, toColumn) x [fromRow, toRow)}: one piece of a tiled plan (#167). */
+    public void sampleRect(World world, MapImage.Columns columns, int fromColumn, int toColumn, int fromRow, int toRow) {
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         for (int pz = fromRow; pz < toRow; pz++) {
             // The middle of the pixel's block square, so a scaled map is not biased north-west.
             int z = minZ + pz * scale + scale / 2;
-            for (int px = 0; px < columns.width(); px++) {
+            for (int px = fromColumn; px < toColumn; px++) {
                 int x = minX + px * scale + scale / 2;
                 Chunk chunk = world.getChunkProvider().getLoadedChunk(x >> 4, z >> 4);
                 if (chunk == null || chunk.isEmpty()) {

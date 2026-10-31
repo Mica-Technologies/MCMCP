@@ -91,6 +91,11 @@ public final class MapImage {
         public void setEmpty(int px, int pz) {
             heights[pz * width + px] = EMPTY;
         }
+
+        /** Each column's top y, row by row; {@link #EMPTY} with nothing in range, {@link #UNLOADED} unread. */
+        public int[] heights() {
+            return heights.clone();
+        }
     }
 
     /**

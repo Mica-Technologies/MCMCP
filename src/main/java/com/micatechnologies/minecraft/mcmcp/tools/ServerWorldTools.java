@@ -196,7 +196,8 @@ public final class ServerWorldTools {
                 .integer("limit", "Positions to return: cube mode up to 500 (default 64); box mode a page, up to "
                     + ServerAreaTools.MAX_FIND_LIMIT + " (default 1000).", 1, ServerAreaTools.MAX_FIND_LIMIT)
                 .string("cursor", "Box mode: the 'cursor' a previous page returned, to continue from it.")
-                .bool("load", "Box mode: load the box's unloaded chunks for this call, and release them afterwards.")
+                .bool("load", "Box mode: load the box's unloaded chunks for this call, and release them afterwards; "
+                    + "a box over your hold cap is loaded a piece at a time.")
                 .object("near", "Box mode: keep only the matches that have (mode 'with', the default) or lack "
                     + "(mode 'without') one of these blocks within 'radius', by box distance (radius 1 is the 26 "
                     + "touching cells). 'with' adds up to 3 of the nearby blocks' positions to each match. "

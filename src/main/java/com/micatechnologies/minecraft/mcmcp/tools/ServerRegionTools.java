@@ -3,8 +3,6 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
-import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
-import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
@@ -70,7 +68,6 @@ public final class ServerRegionTools {
         final int sizeZ = maxZ - minZ + 1;
         final int sizeY = maxY - minY + 1;
         final boolean surface = "surface".equals(context.getString("mode", "blocks"));
-        final Set<Long> chunks = ChunkKeys.box(minX, minZ, maxX, maxZ);
 
         long cells = surface ? (long) sizeX * sizeZ : (long) sizeX * sizeZ * sizeY;
         long cap = surface ? McmcpConfig.getMaxSurfaceColumns() : McmcpConfig.getMaxPackedReadCells();
@@ -96,37 +93,50 @@ public final class ServerRegionTools {
             ignore.add(net.minecraft.init.Blocks.AIR);
         }
 
-        return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
-            final int[] states = new int[(int) cells];
-            final int[] heights = surface ? new int[(int) cells] : null;
+        final int[] states = new int[(int) cells];
+        final int[] heights = surface ? new int[(int) cells] : null;
+        final long[] read = {0L};
+        return ServerChunkTools.walk(context, dimension, minX, minZ, maxX, maxZ, 0, tile -> {
+            int tileWidth = tile.maxX - tile.minX + 1;
             if (surface) {
-                for (int from = 0; from < cells; from += SURFACE_COLUMNS_PER_TASK) {
-                    final int start = from;
-                    final int end = (int) Math.min(cells, from + SURFACE_COLUMNS_PER_TASK);
-                    context.onGameThread(() -> {
-                        readSurface(ServerWorldTools.requireWorld(dimension), minX, minZ, sizeX, minY, maxY, ignore,
-                            start, end, states, heights);
-                        return null;
-                    });
-                    context.reportProgress(end, cells, "Read " + end + " of " + cells + " columns");
+                // At most SURFACE_COLUMNS_PER_TASK columns a task: whole rows, or pieces of one long row.
+                int rowsPerTask = Math.max(1, SURFACE_COLUMNS_PER_TASK / tileWidth);
+                int columnsPerTask = Math.min(tileWidth, SURFACE_COLUMNS_PER_TASK);
+                for (int z = tile.minZ; z <= tile.maxZ; z += rowsPerTask) {
+                    final int fromZ = z;
+                    final int toZ = Math.min(tile.maxZ, z + rowsPerTask - 1);
+                    for (int x = tile.minX; x <= tile.maxX; x += columnsPerTask) {
+                        final int fromX = x;
+                        final int toX = Math.min(tile.maxX, x + columnsPerTask - 1);
+                        context.onGameThread(() -> {
+                            readSurface(ServerWorldTools.requireWorld(dimension), minX, minZ, sizeX, minY, maxY, ignore,
+                                fromX, toX, fromZ, toZ, states, heights);
+                            return null;
+                        });
+                        read[0] += (long) (toX - fromX + 1) * (toZ - fromZ + 1);
+                    }
+                    context.reportProgress(read[0], cells, "Read " + read[0] + " of " + cells + " columns");
                 }
             }
             else {
-                int layer = sizeX * sizeZ;
+                int layer = tileWidth * (tile.maxZ - tile.minZ + 1);
                 int layersPerTask = Math.max(1, McmcpConfig.getMaxBlockVolume() / Math.max(1, layer));
                 for (int y = minY; y <= maxY; y += layersPerTask) {
                     final int fromY = y;
                     final int toY = Math.min(maxY, y + layersPerTask - 1);
                     context.onGameThread(() -> {
-                        readCells(ServerWorldTools.requireWorld(dimension), minX, minZ, sizeX, sizeZ, minY, fromY, toY,
-                            states);
+                        readCells(ServerWorldTools.requireWorld(dimension), minX, minZ, sizeX, sizeZ, minY, tile.minX,
+                            tile.maxX, tile.minZ, tile.maxZ, fromY, toY, states);
                         return null;
                     });
-                    if (sizeY > layersPerTask) {
-                        context.reportProgress(toY - minY + 1, sizeY, "Read " + (toY - minY + 1) + " of " + sizeY + " layers");
+                    read[0] += (long) layer * (toY - fromY + 1);
+                    if (cells > McmcpConfig.getMaxBlockVolume()) {
+                        context.reportProgress(read[0], cells, "Read " + read[0] + " of " + cells + " cells");
                     }
                 }
             }
+            return true;
+        }, chunksBlock -> {
 
             // Off the game thread: the palette. State ids resolve through the block registry, which is
             // fixed once the server is running.
@@ -179,25 +189,24 @@ public final class ServerRegionTools {
                 json.addProperty("indexOrder", "index = dx + sizeX * (dz + sizeZ * dy), relative to origin");
                 json.addProperty("indices", PackedIndices.encode(indices));
             }
-            json.add("chunks", context.onGameThread(() -> {
-                ChunkLoadGovernor.touch(dimension, chunks);
-                return outcome != null ? outcome.toJson()
-                    : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
-            }));
+            json.add("chunks", chunksBlock);
             return ToolResult.structured(json);
         });
     }
 
-    /** Game thread. Unloaded chunks read as -1, never as air, and are never loaded. */
-    private static void readCells(WorldServer world, int minX, int minZ, int sizeX, int sizeZ, int minY, int fromY,
-                                  int toY, int[] states) {
+    /**
+     * Game thread. The cells of {@code [x0, x1] x [z0, z1]}, layers {@code fromY..toY}, into the box's
+     * array. Unloaded chunks read as -1, never as air, and are never loaded.
+     */
+    private static void readCells(WorldServer world, int minX, int minZ, int sizeX, int sizeZ, int minY, int x0,
+                                  int x1, int z0, int z1, int fromY, int toY, int[] states) {
         ChunkProviderServer provider = world.getChunkProvider();
         Chunk cached = null;
         for (int y = fromY; y <= toY; y++) {
-            for (int dz = 0; dz < sizeZ; dz++) {
-                for (int dx = 0; dx < sizeX; dx++) {
-                    int x = minX + dx;
-                    int z = minZ + dz;
+            for (int z = z0; z <= z1; z++) {
+                for (int x = x0; x <= x1; x++) {
+                    int dx = x - minX;
+                    int dz = z - minZ;
                     if (cached == null || cached.x != x >> 4 || cached.z != z >> 4) {
                         cached = provider.getLoadedChunk(x >> 4, z >> 4);
                     }
@@ -208,28 +217,29 @@ public final class ServerRegionTools {
         }
     }
 
-    /** Game thread. Each column's top block below maxY that is not ignored. */
+    /** Game thread. Each column's top block below maxY that is not ignored, over {@code [x0, x1] x [z0, z1]}. */
     private static void readSurface(WorldServer world, int minX, int minZ, int sizeX, int minY, int maxY,
-                                    Set<Block> ignore, int start, int end, int[] states, int[] heights) {
+                                    Set<Block> ignore, int x0, int x1, int z0, int z1, int[] states, int[] heights) {
         ChunkProviderServer provider = world.getChunkProvider();
-        for (int i = start; i < end; i++) {
-            int x = minX + i % sizeX;
-            int z = minZ + i / sizeX;
-            Chunk chunk = provider.getLoadedChunk(x >> 4, z >> 4);
-            if (chunk == null) {
-                states[i] = -1;
-                heights[i] = -2;
-                continue;
-            }
-            int top = Math.min(maxY, chunk.getTopFilledSegment() + 15);
-            states[i] = Block.getStateId(net.minecraft.init.Blocks.AIR.getDefaultState());
-            heights[i] = -1;
-            for (int y = top; y >= minY; y--) {
-                IBlockState state = chunk.getBlockState(x & 15, y, z & 15);
-                if (!ignore.contains(state.getBlock())) {
-                    states[i] = Block.getStateId(state);
-                    heights[i] = y;
-                    break;
+        for (int z = z0; z <= z1; z++) {
+            for (int x = x0; x <= x1; x++) {
+                int i = (x - minX) + sizeX * (z - minZ);
+                Chunk chunk = provider.getLoadedChunk(x >> 4, z >> 4);
+                if (chunk == null) {
+                    states[i] = -1;
+                    heights[i] = -2;
+                    continue;
+                }
+                int top = Math.min(maxY, chunk.getTopFilledSegment() + 15);
+                states[i] = Block.getStateId(net.minecraft.init.Blocks.AIR.getDefaultState());
+                heights[i] = -1;
+                for (int y = top; y >= minY; y--) {
+                    IBlockState state = chunk.getBlockState(x & 15, y, z & 15);
+                    if (!ignore.contains(state.getBlock())) {
+                        states[i] = Block.getStateId(state);
+                        heights[i] = y;
+                        break;
+                    }
                 }
             }
         }

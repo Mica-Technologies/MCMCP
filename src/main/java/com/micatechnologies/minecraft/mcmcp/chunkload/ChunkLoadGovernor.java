@@ -211,6 +211,68 @@ public final class ChunkLoadGovernor {
         }
     }
 
+    /**
+     * What a tiled read's pieces cost together (#167): their outcomes summed, as one {@code chunks}
+     * block with the tiling beside it. A chunk on two pieces' edges is counted on each.
+     */
+    public static final class Tally {
+
+        private final int inBox;
+        private final int tiles;
+        private final int tileChunks;
+        private int done;
+        private int loaded;
+        private int alreadyLoaded;
+        private int held;
+        private int ungenerated;
+        private long waitedMillis;
+        private final List<Long> ungeneratedChunks = new ArrayList<>();
+
+        public Tally(int inBox, int tiles, int tileChunks) {
+            this.inBox = inBox;
+            this.tiles = tiles;
+            this.tileChunks = tileChunks;
+        }
+
+        public void add(Outcome outcome) {
+            done++;
+            loaded += outcome.loaded;
+            alreadyLoaded += outcome.alreadyLoaded;
+            held += outcome.held;
+            ungenerated += outcome.ungenerated;
+            waitedMillis += outcome.waitedMillis;
+            for (long chunk : outcome.ungeneratedChunks) {
+                if (ungeneratedChunks.size() < 256) {
+                    ungeneratedChunks.add(chunk);
+                }
+            }
+        }
+
+        public int done() {
+            return done;
+        }
+
+        public JsonObject toJson() {
+            JsonObject json = new JsonObject();
+            json.addProperty("inBox", inBox);
+            json.addProperty("loaded", loaded);
+            json.addProperty("alreadyLoaded", alreadyLoaded);
+            json.addProperty("held", held);
+            json.addProperty("unloaded", 0);
+            json.addProperty("ungenerated", ungenerated);
+            json.addProperty("waitedMs", waitedMillis);
+            if (!ungeneratedChunks.isEmpty()) {
+                json.add("ungeneratedChunks", chunkList(ungeneratedChunks));
+            }
+            json.addProperty("tiles", tiles);
+            json.addProperty("tilesRead", done);
+            json.addProperty("tileChunks", tileChunks);
+            json.addProperty("tiledBecause", "the box needs more chunks than you may hold at once "
+                + "(chunks.maxHeldChunksPerCaller / chunks.maxHeldChunks), so it was read a piece at a time");
+            return json;
+        }
+    }
+
     private static final class Request {
 
         final HoldLedger.Hold hold;
@@ -526,6 +588,37 @@ public final class ChunkLoadGovernor {
     public static String ownerOf(String holdId) {
         HoldLedger.Hold hold = LEDGER.get(holdId);
         return hold == null ? null : hold.caller;
+    }
+
+    /**
+     * How many more chunks {@code caller} may hold now under both caps, overlaps not counted: the size
+     * a tiled read cuts its pieces to (#167). Server thread.
+     */
+    public static int roomFor(String caller) {
+        int room = McmcpConfig.getChunkMaxHeld() - LEDGER.heldChunks();
+        int perCaller = McmcpConfig.getChunkMaxHeldPerCaller();
+        if (perCaller > 0) {
+            room = Math.min(room, perCaller - LEDGER.heldChunksOfGroup(caller));
+        }
+        return Math.max(0, room);
+    }
+
+    /**
+     * Ends a call's hold and waits until the server thread has done it, so the next piece of a tiled
+     * read finds the room this one gave back (#167). A follow-up: it finishes what the call began.
+     */
+    public static void releaseAndWait(ToolContext context, Outcome outcome, String why) {
+        endCall(outcome.callEnded);
+        try {
+            context.onGameThreadFollowUp(() -> {
+                releaseNow(outcome.holdId, why);
+                return null;
+            });
+        }
+        catch (RuntimeException failed) {
+            // The hold already reads as its call's gone; this queues the release behind whatever held it up.
+            release(outcome.holdId, why);
+        }
     }
 
     /** Distinct chunks one caller holds. Server thread. */

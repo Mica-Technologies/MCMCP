@@ -4,8 +4,10 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ReadTiles;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
+import com.micatechnologies.minecraft.mcmcp.mcp.McpContent;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
@@ -66,6 +68,105 @@ public final class ServerChunkTools {
         finally {
             ChunkLoadGovernor.release(outcome, "its call ended");
         }
+    }
+
+    /** One piece of a tiled read. */
+    public interface TileReader {
+
+        /** Reads the box's cells in {@code tile}, its chunks held. Returns false to stop early (a full page). */
+        boolean read(ReadTiles.Tile tile) throws Exception;
+
+        /** Whether the read still needs {@code tile}: false skips it without loading it (a page's cursor). */
+        default boolean needs(ReadTiles.Tile tile) {
+            return true;
+        }
+    }
+
+    /** Builds the result once every piece is read, given the call's {@code chunks} block. */
+    public interface TileFinish {
+
+        ToolResult finish(JsonObject chunks) throws Exception;
+    }
+
+    /**
+     * A read-only walk over a block box, with {@code load: true} cut into pieces that fit what the
+     * caller may hold (#167): each piece is loaded, read and given back before the next, so the hold
+     * caps pace a large read instead of refusing it. Each piece's reading still goes through the game
+     * thread in slices, so the server ticks between them. Without {@code load}, or when the whole box
+     * fits, it is one piece, as before.
+     *
+     * <p>For reads only. A write must hold all it touches until its undo point is taken.
+     *
+     * @param margin blocks round the box that must be loaded too ({@code near}'s radius); 0 for none
+     */
+    public static ToolResult walk(ToolContext context, final int dimension, int minX, int minZ, int maxX, int maxZ,
+                                  int margin, TileReader reader, TileFinish finish) throws Exception {
+        final ReadTiles.Tile whole = ReadTiles.whole(minX, minZ, maxX, maxZ, margin);
+        final Set<Long> allChunks = whole.holdChunks();
+        if (!context.getBoolean("load", false)) {
+            if (reader.needs(whole)) {
+                reader.read(whole);
+            }
+            return finish.finish(context.onGameThread(() -> {
+                ChunkLoadGovernor.touch(dimension, allChunks);
+                return ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), allChunks);
+            }));
+        }
+        final String caller = ChunkLoadGovernor.holdCallerOf(context);
+        int room = context.onGameThread(() -> ChunkLoadGovernor.roomFor(caller));
+        List<ReadTiles.Tile> tiles = room < ReadTiles.MIN_ROOM ? null
+            : ReadTiles.plan(minX, minZ, maxX, maxZ, margin, room);
+        if (tiles == null || tiles.size() == 1) {
+            // It fits, or there is too little room to cut it into: one hold, and a refusal names the cap.
+            return withChunks(context, dimension, allChunks, true, outcome -> {
+                if (reader.needs(whole)) {
+                    reader.read(whole);
+                }
+                touch(context, dimension, allChunks);
+                return finish.finish(outcome.toJson());
+            });
+        }
+        ChunkLoadGovernor.Tally tally = new ChunkLoadGovernor.Tally(allChunks.size(), tiles.size(), room);
+        for (ReadTiles.Tile tile : tiles) {
+            if (!reader.needs(tile)) {
+                continue;
+            }
+            ChunkLoadGovernor.Outcome outcome;
+            try {
+                outcome = ChunkLoadGovernor.acquire(context, dimension, tile.holdChunks(), true,
+                    McmcpConfig.getChunkHoldIdleSeconds() * 1000L, McmcpConfig.getChunkHoldMaxSeconds() * 1000L);
+            }
+            catch (ChunkLoadGovernor.Busy busy) {
+                ToolResult refused = busy.toResult();
+                refused.withContent(McpContent.text("This read was "
+                    + "cut into " + tiles.size() + " pieces of up to " + room + " chunks to fit your hold cap, and "
+                    + "piece " + (tile.index + 1) + " could not be loaded; nothing of the read is returned."));
+                return refused;
+            }
+            boolean more;
+            try {
+                more = reader.read(tile);
+                tally.add(outcome);
+            }
+            finally {
+                ChunkLoadGovernor.releaseAndWait(context, outcome, "its piece of a tiled read was read");
+            }
+            context.reportProgress(tile.index + 1, tiles.size(), "Read piece " + (tile.index + 1) + " of "
+                + tiles.size());
+            if (!more) {
+                break;
+            }
+        }
+        touch(context, dimension, allChunks);
+        return finish.finish(tally.toJson());
+    }
+
+    /** Renews the idle timer of any lasting hold the read used: reading in a hold keeps it. */
+    private static void touch(ToolContext context, int dimension, Set<Long> chunks) {
+        context.onGameThread(() -> {
+            ChunkLoadGovernor.touch(dimension, chunks);
+            return null;
+        });
     }
 
     /** The argument every read and write that can load takes. */

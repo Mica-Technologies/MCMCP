@@ -1024,6 +1024,37 @@ case "$PJOB_STATE" in
   *) mcp_failure "the pregen job did not finish: ${PJOB_STATE}" ;;
 esac
 
+echo "==> Tiled reads (#167): a load over more chunks than the hold cap is read a piece at a time"
+# The cap lowered to 24 chunks, so an 8 x 8-chunk box round the pregenerated corner cannot be held at once.
+# Before #167 this was refused ("Hold cap reached for you").
+HELD_WAS="$(grep -o 'I:maxHeldChunksPerCaller=[0-9]*' "$CONFIG_FILE" | head -1)"
+sed -i 's/I:maxHeldChunksPerCaller=[0-9]*/I:maxHeldChunksPerCaller=24/' "$CONFIG_FILE"
+mcp_call 6540 server_run_command '{"command":"mcmcp reload"}' > /dev/null
+TILED_BODY="$(mcp_call 6541 server_count_blocks "{\"x\":${GX},\"y\":1,\"z\":${GZ},\"toX\":$((GX + 127)),\"toY\":128,\"toZ\":$((GZ + 127)),\"include\":[\"minecraft:coal_ore\",\"minecraft:iron_ore\"],\"load\":true}")" \
+  || mcp_failure "the tiled count failed: ${TILED_BODY}"
+TILED_PLAN="$(mcp_call 6542 server_plan_view "{\"x\":${GX},\"z\":${GZ},\"toX\":$((GX + 127)),\"toZ\":$((GZ + 127)),\"load\":true,\"inline\":false,\"heights\":true}")" \
+  || mcp_failure "the tiled plan failed: ${TILED_PLAN}"
+TILED_SURFACE="$(mcp_call 6543 server_get_blocks "{\"x\":${GX},\"y\":0,\"z\":${GZ},\"toX\":$((GX + 127)),\"toY\":255,\"toZ\":$((GZ + 127)),\"mode\":\"surface\",\"load\":true}")" \
+  || mcp_failure "the tiled surface read failed: ${TILED_SURFACE}"
+sed -i "s/I:maxHeldChunksPerCaller=[0-9]*/${HELD_WAS:-I:maxHeldChunksPerCaller=512}/" "$CONFIG_FILE"
+mcp_call 6544 server_run_command '{"command":"mcmcp reload"}' > /dev/null
+case "$TILED_BODY" in
+  *'"isError":true'*) mcp_failure "a count over the hold cap was refused: ${TILED_BODY}" ;;
+  *'"counted":0'*) mcp_failure "the tiled count found no ores in the populated corner: ${TILED_BODY}" ;;
+  *'"tiles":'*'"tilesRead":'*) echo "    server_count_blocks over 64 chunks with a 24-chunk cap: counted in pieces" ;;
+  *) mcp_failure "the count did not say it was tiled: ${TILED_BODY}" ;;
+esac
+case "$TILED_PLAN" in
+  *'"isError":true'*) mcp_failure "a plan over the hold cap was refused: ${TILED_PLAN}" ;;
+  *'"heightRange":'*'"heights":'*'"tiles":'*) echo "    server_plan_view drew it in pieces, with its heights" ;;
+  *) mcp_failure "the plan was not tiled or had no heights: ${TILED_PLAN}" ;;
+esac
+case "$TILED_SURFACE" in
+  *'"isError":true'*) mcp_failure "a surface read over the hold cap was refused: ${TILED_SURFACE}" ;;
+  *'"mode":"surface"'*'"tiles":'*) echo "    server_get_blocks surface read it in pieces" ;;
+  *) mcp_failure "the surface read was not tiled: ${TILED_SURFACE}" ;;
+esac
+
 echo "==> Build targets: save while writing, verify, break, verify, repair, protect"
 VX=$((SPAWN_X + 60)); VY=$((UNDO_Y + 30)); VZ=$((SPAWN_Z + 60))
 mcp_call 660 server_target '{"op":"delete","name":"smoke/*"}' > /dev/null
