@@ -60,6 +60,10 @@ public final class WireGraph {
         return new ArrayList<>(wires.values());
     }
 
+    /** A box holding every cell, for a whole-dimension read (#162). */
+    public static final int[] EVERYWHERE = {Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MAX_VALUE,
+        Integer.MAX_VALUE, Integer.MAX_VALUE};
+
     /** Whether a cell is inside the box {minX, minY, minZ, maxX, maxY, maxZ}. */
     public static boolean inside(int[] box, int[] at) {
         return at[0] >= box[0] && at[1] >= box[1] && at[2] >= box[2] && at[0] <= box[3] && at[1] <= box[4]

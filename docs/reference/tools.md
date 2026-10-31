@@ -756,7 +756,7 @@ back as it was. At most 4,096 a call.
 
 #### `server_wire_connections`
 
-:material-eye: Read-only · listed only when Immersive Engineering is loaded · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `groupBy`, `limit`
+:material-eye: Read-only · listed only when Immersive Engineering is loaded · `x`, `z` required unless `whole` · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `whole`, `groupBy`, `ends`, `load`, `limit`
 
 Immersive Engineering keeps its wire graph in `ImmersiveNetHandler`, not in tile-entity NBT, so
 [`server_get_tile_entities`](#server_get_tile_entities) shows each connector's `wireCount` and never
@@ -768,6 +768,28 @@ where its wires go. This returns every wire with an end in the box, each once, a
 `nodes`, `wires`, `types`, the bounding box `min` and `max`, and `nodesInBox`. A piece's nodes outside
 the box count too, so one feeder from substation to its last load is one piece, however far it runs.
 `limit` (default 500, up to 2,000) caps the rows.
+
+`whole: true` reads the whole dimension instead of a box, with no `x`/`z` and no cell cap: IE already
+holds the dimension's every connection, so nothing is scanned. With `groupBy: "component"` that lists
+every piece in the dimension in one call (`nodesInBox` is left out).
+
+`ends: true` reads what sits at each end, where its chunk is loaded:
+
+- With wire rows, an `ends` object keyed `"x,y,z"` gives each end once: `block`, the tile entity id
+  `te`, and for a connector the block it is `mounted` on (`[x, y, z]`, from the connector's facing)
+  with its `mountedBlock`, `mountedTe` and Forge `energy` / `maxEnergy`, read on the face the
+  connector touches. An end in an unloaded chunk is `{"loaded": false}`.
+- With `groupBy: "component"`, each piece adds `sources` (ends mounted on something that only gives
+  energy, such as a generator or a generation meter), `loads` (only takes it), `stores` (both, as a
+  capacitor), `loadsEnergised` (loads holding any energy) and `unloadedEnds`. `roles` lists up to 64
+  of them per piece as `[role, node, mountedTe, energy, maxEnergy]`. A top-level `summary` counts
+  `piecesWithSource`, `piecesWithoutSource`, `loadsOnFedPieces` and `loadsOnUnfedPieces`: which
+  networks are live, and what the dead ones were meant to feed.
+
+A role comes from the mounted block's energy capability (`canExtract` / `canReceive`), so a block
+that pushes energy without offering extraction reads as no role; its `mountedTe` is still there to
+tell. At most 30,000 ends are read a call. `load: true` (only with `ends`) loads the ends' chunks
+through the chunk governor and releases them after; without it, nothing is loaded.
 
 #### `server_count_blocks`
 
