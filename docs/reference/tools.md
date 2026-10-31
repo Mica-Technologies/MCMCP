@@ -2801,8 +2801,14 @@ this call's own view as frame 1. They are tiled, numbered in reading order, into
 one call, rather than a turn and a full-size image each. Returns `sheet`, `frames` (paths), the
 sheet's size and `approximateTokens`; `inline: true` includes the sheet. Not with `burst`.
 With `bringPlayer`, the player is taken to the call's own camera once and held there until every
-view has rendered, then brought back. A view farther than the render distance reaches from there is
-given its own trip. A view that fails is listed in `failed` with its error, and the sheet is made of
+view has rendered, then brought back once. Before each extra view, the player is moved on to that
+view's camera, under the same trip and lease, when this client does not yet hold the chunk under the
+camera or it lies farther than the render distance reaches from where the player stands. A client
+that is slow to be sent chunks therefore no longer fails a view 150 blocks off as "a chunk this client
+does not hold". A view's own `bringPlayer: false` keeps the player where they are for it, and `true`
+always moves them. `playerStoodAt` lists, per view, where the player was when it was drawn (`hopped`
+when they were moved for it), and `hops` counts the moves. A move that fails is listed in `failed` for
+that view, and the next view moves the player again. A view that fails is listed in `failed` with its error, and the sheet is made of
 the frames that rendered, rather than the whole call failing.
 
 **A burst.** `burst: {count, interval_ticks}` saves `count` frames (2-32), one every `interval_ticks`

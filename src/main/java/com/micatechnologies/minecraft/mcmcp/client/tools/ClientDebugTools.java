@@ -126,7 +126,8 @@ public final class ClientDebugTools {
                 + "One perspective is the default. 'views' adds more: [{from, look_at | yaw/pitch, fov?, "
                 + "fullbright?}...] (up to " + MAX_VIEWS + "), each rendered as above, and with this call's own "
                 + "view as frame 1, tiled and numbered into one contact sheet under max_dimension: one image "
-                + "and one call where several would each cost a turn and a full-size image.")
+                + "and one call where several would each cost a turn and a full-size image. With bringPlayer, the "
+                + "player is moved on to each view whose chunks this client lacks, and home once at the end.")
             .schema(JsonSchema.object()
                 .string("name", "File name for the screenshot, without a path. '.png' is appended if "
                     + "missing. Defaults to a timestamped name.")
@@ -530,10 +531,18 @@ public final class ClientDebugTools {
     static final int MAX_BURST = 32;
     static final int MAX_VIEWS = 8;
 
-    /**
-     * This call's own view and the extra perspectives in 'views', each a capture of its own, tiled into
-     * one contact sheet. The default stays one perspective: the sheet exists only when asked for.
-     */
+    /** [x, y, z] to a hundredth of a block, or null when unknown. */
+    private static JsonElement rounded(double[] at) {
+        if (at == null || Double.isNaN(at[0])) {
+            return com.google.gson.JsonNull.INSTANCE;
+        }
+        JsonArray a = new JsonArray();
+        for (double v : at) {
+            a.add(Math.round(v * 100.0D) / 100.0D);
+        }
+        return a;
+    }
+
     /** [x, y, z] as numbers, or null. */
     @javax.annotation.Nullable
     private static double[] xyz(@javax.annotation.Nullable JsonElement raw) {
@@ -544,6 +553,10 @@ public final class ClientDebugTools {
         return new double[] {a.get(0).getAsDouble(), a.get(1).getAsDouble(), a.get(2).getAsDouble()};
     }
 
+    /**
+     * This call's own view and the extra perspectives in 'views', each a capture of its own, tiled into
+     * one contact sheet. The default stays one perspective: the sheet exists only when asked for.
+     */
     private static ToolResult views(ToolContext context) throws Exception {
         JsonElement raw = context.getArguments().get("views");
         if (raw == null || !raw.isJsonArray() || raw.getAsJsonArray().size() == 0) {
@@ -582,12 +595,14 @@ public final class ClientDebugTools {
             shots.add(args);
         }
 
-        // bringPlayer on the call's own view takes the player there once for the whole sheet (#152).
-        // Each view used to be its own shot, so the player went back home after frame 1 and every
-        // extra view found its camera in chunks this client no longer held. A view farther than the
-        // render distance reaches from there gets a trip of its own, from the first camera.
+        // bringPlayer on the call's own view takes the player there once for the whole sheet (#152),
+        // and keeps them until the last view has rendered. Before each extra view, the player is moved
+        // on to its camera, under the same trip, when the client does not yet hold the chunk under it
+        // or it lies past the render distance from where they stand (#168): a throttled client had not
+        // been sent chunks 150 blocks off, though they were well inside the render distance.
         double[] ownFrom = xyz(own.get("from"));
         com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.Trip trip = null;
+        double reach = 0.0D;
         if (Json.getBoolean(own, "bringPlayer", false) && ownFrom != null) {
             try {
                 trip = com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.bring(context, ownFrom,
@@ -598,24 +613,62 @@ public final class ClientDebugTools {
             }
             own.remove("bringPlayer");
             own.remove("bringWaitSeconds");
-            final double reach = context.onGameThread(() ->
+            reach = context.onGameThread(() ->
                 Math.max(2, Minecraft.getMinecraft().gameSettings.renderDistanceChunks - 2) * 16.0D);
-            for (int i = 1; i < shots.size(); i++) {
-                double[] at = xyz(shots.get(i).get("from"));
-                if (at != null && !shots.get(i).has("bringPlayer")
-                    && Math.max(Math.abs(at[0] - ownFrom[0]), Math.abs(at[2] - ownFrom[2])) > reach) {
-                    shots.get(i).addProperty("bringPlayer", true);
-                }
-            }
         }
 
         JsonArray paths = new JsonArray();
         JsonArray failed = new JsonArray();
+        JsonArray stoodAt = new JsonArray();
         List<BufferedImage> frames = new java.util.ArrayList<>();
+        double[] standing = ownFrom;
+        int hops = 0;
         try {
             for (int i = 0; i < shots.size(); i++) {
                 JsonObject args = shots.get(i);
                 args.addProperty("name", base + "_" + (i + 1));
+                if (trip != null) {
+                    boolean hopped = false;
+                    if (i > 0) {
+                        JsonElement said = args.remove("bringPlayer");
+                        args.remove("bringWaitSeconds");
+                        Boolean explicit = said == null || !said.isJsonPrimitive() ? null : said.getAsBoolean();
+                        final double[] camera = xyz(args.get("from"));
+                        boolean held = camera != null && context.<Boolean>onGameThread(() -> {
+                            Minecraft mc = Minecraft.getMinecraft();
+                            net.minecraft.world.chunk.Chunk chunk = mc.world == null ? null
+                                : mc.world.getChunkProvider().getLoadedChunk(
+                                    MathHelper.floor(camera[0]) >> 4, MathHelper.floor(camera[2]) >> 4);
+                            return chunk != null && !chunk.isEmpty();
+                        });
+                        if (ViewHops.needsHop(explicit, camera, standing, reach, held)) {
+                            try {
+                                com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.hop(context, trip, camera);
+                                standing = camera;
+                                hopped = true;
+                                hops++;
+                            }
+                            catch (IllegalStateException e) {
+                                // Where they are now is unknown: the next view moves them again, and
+                                // the return at the end goes home from wherever this left them.
+                                standing = new double[] {Double.NaN, Double.NaN, Double.NaN};
+                                JsonObject miss = new JsonObject();
+                                miss.addProperty("view", i + 1);
+                                miss.addProperty("error", "moving the player to this camera failed: "
+                                    + e.getMessage());
+                                failed.add(miss);
+                                continue;
+                            }
+                        }
+                    }
+                    JsonObject at = new JsonObject();
+                    at.addProperty("view", i + 1);
+                    at.add("at", rounded(standing));
+                    if (hopped) {
+                        at.addProperty("hopped", true);
+                    }
+                    stoodAt.add(at);
+                }
                 ToolResult shot = single.call(context.forPart(args, i, shots.size(), "view " + (i + 1)));
                 JsonObject structured = shot.getStructuredContent();
                 String path = shot.isError() || structured == null ? null : Json.getString(structured, "path", "");
@@ -635,7 +688,8 @@ public final class ClientDebugTools {
         }
         finally {
             if (trip != null) {
-                com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.back(context, trip, ownFrom);
+                com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.back(context, trip,
+                    Double.isNaN(standing[0]) ? ownFrom : standing);
             }
         }
         if (frames.isEmpty()) {
@@ -664,6 +718,8 @@ public final class ClientDebugTools {
                 + "sheet; see failed. The sheet's frames are the others, in order.");
         }
         if (trip != null) {
+            json.add("playerStoodAt", stoodAt);
+            json.addProperty("hops", hops);
             json.add("playerReturnedTo", trip.toJson());
         }
         ToolResult result = ToolResult.structured(json);

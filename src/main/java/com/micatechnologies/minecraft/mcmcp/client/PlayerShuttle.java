@@ -159,6 +159,19 @@ public final class PlayerShuttle {
     }
 
     /**
+     * Moves an already-brought player on to another camera, within the same trip and lease (#168), and
+     * waits until this client has them there and holds the chunk under them. The trip's home is not
+     * touched, so one {@link #back} at the end still returns them to where {@link #bring} found them.
+     *
+     * @throws IllegalStateException when they did not arrive; they may be anywhere between, and the
+     *         trip's {@link #back} still applies
+     */
+    public static void hop(ToolContext context, Trip trip, double[] to) throws Exception {
+        teleport(context, to[0], to[1], to[2], trip.yaw, trip.pitch, true);
+        waitUntilAt(context, to[0], to[1], to[2]);
+    }
+
+    /**
      * Puts the player back where {@link #bring} found them, facing and flying as they were.
      *
      * <p>Retried with backoff: the return is the move that matters most, and on a remote server it can
