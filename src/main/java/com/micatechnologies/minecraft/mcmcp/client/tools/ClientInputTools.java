@@ -1152,6 +1152,7 @@ public final class ClientInputTools {
                     + "runs out extends it. Ignored when releasing.", 1, 7200)
                 .string("reason", "A short phrase shown on screen, so the person watching can tell a "
                     + "task in progress from a stuck agent. For example 'mining the iron vein'.")
+                .string("agent", CallerId.AGENT_ARGUMENT)
                 .build())
             .clientOnly()
             .handler(context -> {

@@ -200,6 +200,15 @@ public final class ClientCamera {
         return saved != null;
     }
 
+    /**
+     * The override standing now, as an identity to compare: the same object from {@link #apply} until
+     * it is restored or replaced, null when none stands. Client thread only.
+     */
+    @Nullable
+    public static Object current() {
+        return saved;
+    }
+
     private static void setRenderView(@Nullable Entity entity) {
         if (RENDER_VIEW_ENTITY == null || entity == null) {
             return;

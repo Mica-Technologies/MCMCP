@@ -15,6 +15,10 @@ import javax.annotation.Nullable;
  */
 public final class CallerId {
 
+    /** The schema text of the {@code agent} argument, on the tools whose holds it separates. */
+    public static final String AGENT_ARGUMENT = "Your own short name, when several agents share one connection "
+        + "(sub-agents of one client): holds, locks and leases are then yours alone, not every agent's on it.";
+
     /** The {@code _meta} key the orchestrator puts the caller under; {@code caller.rs} writes it. */
     public static final String META_KEY = "mcmcp/caller";
 
@@ -34,8 +38,24 @@ public final class CallerId {
         this.stamp = stamp;
     }
 
-    /** Who sent a {@code tools/call} with these params on this session. */
+    /**
+     * Who sent a {@code tools/call} with these params on this session, told apart further by the
+     * call's own {@code agent} argument where the tool takes one (#178). Sub-agents of one client
+     * share its connection, so nothing else can separate them: two took bringPlayer screenshots at
+     * once, and the input lock answered "yours" to both.
+     */
     public static CallerId of(McpSession session, @Nullable JsonObject params) {
+        CallerId base = connectionOf(session, params);
+        JsonObject arguments = params == null ? null : Json.getObject(params, "arguments");
+        String agent = arguments == null ? null : Json.getString(arguments, "agent", null);
+        if (agent == null || agent.trim().isEmpty()) {
+            return base;
+        }
+        String name = agent.trim().length() > 40 ? agent.trim().substring(0, 40) : agent.trim();
+        return new CallerId(base.id + "/agent:" + name, name + " via " + base.label, base.stamp);
+    }
+
+    private static CallerId connectionOf(McpSession session, @Nullable JsonObject params) {
         JsonObject meta = params == null ? null : Json.getObject(params, "_meta");
         JsonObject stamped = meta == null ? null : Json.getObject(meta, META_KEY);
         if (session.isOrchestratorLink() && stamped != null && Json.getString(stamped, "id", null) != null) {

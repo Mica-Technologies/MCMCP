@@ -58,4 +58,21 @@ class CallerIdTest {
         McpSession session = new McpSession("direct", 0L);
         assertEquals("session:direct", CallerId.of(session, stamped("c1", "spoof")).id());
     }
+
+    @Test
+    void subAgentsOnOneConnectionAreTwoCallersWhenTheyNameThemselves() {
+        // #178: two sub-agents shared one orchestrator connection, and the input lock said "yours" to both.
+        McpSession link = new McpSession("link", 0L, true);
+        JsonObject first = stamped("c6", "claude-code");
+        first.add("arguments", Json.parse("{\"agent\":\"MtM-B\"}"));
+        JsonObject second = stamped("c6", "claude-code");
+        second.add("arguments", Json.parse("{\"agent\":\"MtM-D\"}"));
+
+        CallerId b = CallerId.of(link, first);
+        CallerId d = CallerId.of(link, second);
+
+        assertEquals("orchestrator:c6/agent:MtM-B", b.id());
+        assertNotEquals(b.id(), d.id());
+        assertEquals("orchestrator:c6", CallerId.of(link, stamped("c6", "claude-code")).id());
+    }
 }

@@ -33,6 +33,8 @@ import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.annotation.Nullable;
 import javax.imageio.ImageIO;
 import net.minecraft.client.Minecraft;
@@ -160,6 +162,7 @@ public final class ClientDebugTools {
                     + "lease for the trip, so it waits its turn behind other agents using the same player.")
                 .integer("bringWaitSeconds", "With bringPlayer: how long to wait for another agent to finish with "
                     + "the player. Default 30.", 0, 120)
+                .string("agent", com.micatechnologies.minecraft.mcmcp.mcp.CallerId.AGENT_ARGUMENT)
                 .property("burst", Json.obj("type", "object"))
                 .property("views", Json.obj("type", "array"))
                 .array("crop", "Keep only [x, y, width, height] of the frame: pixels, or fractions of it "
@@ -168,7 +171,7 @@ public final class ClientDebugTools {
                     + "read from the file.", NUMBER)
                 .build())
             .clientOnly()
-            .handler(context -> {
+            .handler(context -> withCaptureLock(context, () -> {
                 if (!McmcpConfig.isAllowScreenshots()) {
                     return ToolResult.error("Screenshots are disabled by permissions.allowScreenshots "
                         + "in the MCMCP config.");
@@ -253,11 +256,17 @@ public final class ClientDebugTools {
                         }
                         final com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.Trip broughtFrom = trip;
                         try {
+                        final Object[] ownCamera = new Object[1];
                         view = context.onGameThread(new Callable<JsonObject>() {
                             @Override
                             public JsonObject call() {
-                                return applyView(from, lookAt, yawArgument, pitchArgument, fov, fullbright,
-                                    hideHud);
+                                JsonObject applied = applyView(from, lookAt, yawArgument, pitchArgument, fov,
+                                    fullbright, hideHud);
+                                ownCamera[0] = ClientCamera.current();
+                                if (from != null && !bringPlayer && !applied.has("error")) {
+                                    addStaleHint(applied, from, lookAt);
+                                }
+                                return applied;
                             }
                         });
                         if (view.has("error")) {
@@ -287,6 +296,13 @@ public final class ClientDebugTools {
                                         }
                                     }
                                     try {
+                                        // Never another call's frame (#178): if the view standing now
+                                        // is not the one this call applied, say so instead.
+                                        if (ClientCamera.current() != ownCamera[0]) {
+                                            JsonObject moved = new JsonObject();
+                                            moved.addProperty("cameraMoved", true);
+                                            return moved;
+                                        }
                                         return captureScreenshot(fileName);
                                     }
                                     finally {
@@ -326,6 +342,11 @@ public final class ClientDebugTools {
                     ClientActivityBanner.endCapture();
                 }
 
+                if (capture.has("cameraMoved")) {
+                    return ToolResult.error("The view this call set up was replaced before its frame was "
+                        + "read (something else moved the camera, or it stood past its 60 s limit), so "
+                        + "nothing was captured rather than another view's frame. Try again.");
+                }
                 final String savedPath = capture.get("path").getAsString();
                 File file = new File(savedPath);
                 if (!file.isFile()) {
@@ -453,8 +474,42 @@ public final class ClientDebugTools {
                     result.withContent(McpContent.image(png, "image/png"));
                 }
                 return result;
-            })
+            }))
             .build());
+    }
+
+    /** A screenshot call's work, run while it holds the client's capture lock. */
+    private interface Capture {
+        ToolResult run() throws Exception;
+    }
+
+    /**
+     * One screenshot at a time on this client, in the order they asked (#178). The camera, the
+     * full-bright gamma and a brought player are this client's alone: two agents on one connection took
+     * shots at once, one applied its camera over the other's mid-settle, and each got the other's frame.
+     * Held for the whole call, the trip and every view of a sheet included (reentrant, so a sheet's own
+     * views pass). A plain shot waits too: taken while another's camera stood, it captured that view.
+     */
+    private static final ReentrantLock CAPTURE_LOCK = new ReentrantLock(true);
+
+    private static ToolResult withCaptureLock(ToolContext context, Capture capture) throws Exception {
+        long waitMillis = Math.max(30, context.getBoundedInt("bringWaitSeconds", 30, 0, 120) + 30) * 1000L;
+        long deadline = System.currentTimeMillis() + waitMillis;
+        while (!CAPTURE_LOCK.tryLock(1000L, TimeUnit.MILLISECONDS)) {
+            context.getCancellation().throwIfCancelled();
+            // Alive while it waits: the orchestrator gives up on a call that is silent for 120 s.
+            context.reportProgress(0, 1, "waiting for another screenshot on this client to finish");
+            if (System.currentTimeMillis() > deadline) {
+                return ToolResult.error("Another screenshot on this client was still being taken after "
+                    + waitMillis / 1000 + " s, so this one was not. Nothing was captured; try again.");
+            }
+        }
+        try {
+            return capture.run();
+        }
+        finally {
+            CAPTURE_LOCK.unlock();
+        }
     }
 
     /**
@@ -819,6 +874,39 @@ public final class ClientDebugTools {
             values[i] = value.getAsDouble();
         }
         return values;
+    }
+
+    /** The view distance a remote server is assumed to have: vanilla's default, since none is sent. */
+    private static final int ASSUMED_SERVER_VIEW_DISTANCE = 10;
+
+    /**
+     * Says when a 'from' view may show a stale world (#178). A client can hold a chunk the server no
+     * longer sends it changes for, beyond the server's view distance from the player, and a view there
+     * drew a building as it was before a write minutes earlier, with nothing to say so. Client thread.
+     */
+    private static void addStaleHint(JsonObject view, double[] from, @Nullable double[] lookAt) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.player == null) {
+            return;
+        }
+        int playerX = MathHelper.floor(mc.player.posX) >> 4;
+        int playerZ = MathHelper.floor(mc.player.posZ) >> 4;
+        int far = Math.max(Math.abs((MathHelper.floor(from[0]) >> 4) - playerX),
+            Math.abs((MathHelper.floor(from[2]) >> 4) - playerZ));
+        if (lookAt != null) {
+            far = Math.max(far, Math.max(Math.abs((MathHelper.floor(lookAt[0]) >> 4) - playerX),
+                Math.abs((MathHelper.floor(lookAt[2]) >> 4) - playerZ)));
+        }
+        net.minecraft.server.integrated.IntegratedServer local = mc.getIntegratedServer();
+        boolean known = local != null && local.getPlayerList() != null;
+        int viewDistance = known ? local.getPlayerList().getViewDistance() : ASSUMED_SERVER_VIEW_DISTANCE;
+        if (far > viewDistance) {
+            view.addProperty("stale", "possible");
+            view.addProperty("staleReason", "The view is " + far + " chunks from the player, past the server's "
+                + "view distance of " + viewDistance + (known ? "" : " (assumed: a server does not send it)")
+                + ", so the server may have stopped sending this client changes there. Pass bringPlayer for a "
+                + "current picture.");
+        }
     }
 
     /**

@@ -2830,7 +2830,7 @@ after about three minutes and returns `nextIndex`.
 
 #### `client_input_lock`
 
-Requires `permissions.allowPlayerControl` for `set` · `op` `set` (default, with `locked`) \| `status` \| `wait` · optional `seconds`, `reason`, `exclusive`, `force`, `waitSeconds`
+Requires `permissions.allowPlayerControl` for `set` · `op` `set` (default, with `locked`) \| `status` \| `wait` · optional `seconds`, `reason`, `exclusive`, `force`, `waitSeconds`, `agent`
 
 Holds the human's own keyboard and mouse out of the game so a stray movement cannot disturb what a
 model is doing. While locked, nothing from the physical keyboard or mouse reaches the game — no
@@ -2893,7 +2893,7 @@ when the player lands.
 #### `client_screenshot`
 
 Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
-`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `hideHud`, `settle_ms`, `bringPlayer`, `bringWaitSeconds`, `burst`, `crop`, `views`
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `hideHud`, `settle_ms`, `bringPlayer`, `bringWaitSeconds`, `burst`, `crop`, `views`, `agent`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
 
@@ -2966,6 +2966,24 @@ Several agents can share one player, so `bringPlayer` takes the player's
 agent holds it (linking devices, or its own far photo), the call waits its turn in line, up to
 `bringWaitSeconds` (default 30, at most 120), and `view.waitedForPlayerMs` and `view.waitedFor` say
 how long and for whom. An agent that already holds the lease is never made to wait for itself.
+
+**One screenshot at a time.** The camera, full-bright and a brought player belong to the whole
+client, so `client_screenshot` calls on one client take turns, in the order they asked: each holds the
+client for its whole call, trip and every view of a sheet included, and a plain shot waits too. Two
+sub-agents sharing one connection once took `bringPlayer` shots at the same moment; one set its
+camera over the other's mid-settle, and each got the other's frame. A waiting call sends progress so
+it is not given up on, and is refused after its `bringWaitSeconds` plus 30 s. If the view standing at
+capture is not the one the call set up, it returns an error, never another view's frame.
+
+Sub-agents of one client share its connection, so they are one caller to the lease and to
+`client_input_lock` unless they say otherwise. `agent: "<a short name>"` on `client_screenshot` and
+`client_input_lock` makes each its own caller, so a lock or a lease is held by that agent alone.
+
+**Stale views.** A client can still hold a chunk the server stopped sending it changes for, past the
+server's view distance from the player, and a `from` view there showed a building as it was before a
+write minutes earlier. Such a view (without `bringPlayer`) gets `view.stale: "possible"` and a
+`staleReason`. The view distance is the server's own in singleplayer; a remote server does not send
+it, so vanilla's 10 is assumed and the reason says so.
 
 **`fullbright: true`** lights everything for this one frame, for night and interiors, without
 touching world time. It raises gamma and gives the player night vision on this client only, with
