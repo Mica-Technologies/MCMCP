@@ -646,25 +646,95 @@ public final class CompanionServer {
         }
     }
 
-    /** Tells online operators what agents changed, at most a line per player per ten seconds. */
+    /**
+     * Tells online operators what agents changed, each the way they chose (#177): a chat line per
+     * player every ten seconds, the same line on the action bar, one summary line per player every
+     * five minutes, or nothing. Several agents at once had pushed the real conversation out of chat,
+     * and people stopped answering agents' questions in game.
+     */
     private static void noticeOperators(MinecraftServer server) {
         if (!McmcpConfig.isCompanionNotifyOps()) {
             return;
         }
         long now = System.currentTimeMillis();
+        List<EntityPlayerMP> operators = new ArrayList<>();
+        for (EntityPlayerMP online : server.getPlayerList().getPlayers()) {
+            if (server.getPlayerList().canSendCommands(online.getGameProfile())) {
+                operators.add(online);
+            }
+        }
         for (CompanionPeer peer : PEERS.values()) {
             String notice = peer.takeNotice(now, NOTICE_INTERVAL_MILLIS);
-            if (notice == null) {
+            String summary = peer.takeSummary(now, SUMMARY_INTERVAL_MILLIS);
+            if (notice == null && summary == null) {
                 continue;
             }
-            TextComponentString text = new TextComponentString("[MCMCP] " + peer.playerName + "'s agent: " + notice);
-            text.getStyle().setColor(TextFormatting.GRAY).setItalic(true);
-            for (EntityPlayerMP online : server.getPlayerList().getPlayers()) {
-                if (server.getPlayerList().canSendCommands(online.getGameProfile())) {
-                    online.sendMessage(text);
+            for (EntityPlayerMP operator : operators) {
+                String mode = noticeModeOf(operator);
+                if (notice != null && ("chat".equals(mode) || "actionbar".equals(mode))) {
+                    TextComponentString text = new TextComponentString("[MCMCP] " + peer.playerName + "'s agent: "
+                        + notice);
+                    text.getStyle().setColor(TextFormatting.GRAY).setItalic(true);
+                    operator.sendStatusMessage(text, "actionbar".equals(mode));
+                }
+                else if (summary != null && "summary".equals(mode)) {
+                    TextComponentString text = new TextComponentString("[MCMCP] " + peer.playerName + "'s agent: "
+                        + summary + " (/mcmcp notices to change how you see these)");
+                    text.getStyle().setColor(TextFormatting.GRAY).setItalic(true);
+                    operator.sendMessage(text);
                 }
             }
         }
+    }
+
+    /** How often an operator taking summaries gets one per player. */
+    private static final long SUMMARY_INTERVAL_MILLIS = 5L * 60_000L;
+
+    /** Where a player's own choice of notice mode is kept, in their persisted data. */
+    private static final String NOTICE_MODE_KEY = "mcmcpNotices";
+
+    private static final java.util.Set<String> NOTICE_MODES = new java.util.HashSet<>(
+        java.util.Arrays.asList("chat", "actionbar", "summary", "off"));
+
+    /** How {@code player} sees agent notices: their own choice, else the config's default. Server thread. */
+    public static String noticeModeOf(EntityPlayerMP player) {
+        String own = persisted(player).getString(NOTICE_MODE_KEY);
+        if (NOTICE_MODES.contains(own)) {
+            return own;
+        }
+        String fallback = McmcpConfig.getCompanionNotifyMode();
+        return NOTICE_MODES.contains(fallback) ? fallback : "chat";
+    }
+
+    /** Whether {@code player} has chosen a notice mode for themselves. Server thread. */
+    public static boolean hasOwnNoticeMode(EntityPlayerMP player) {
+        return NOTICE_MODES.contains(persisted(player).getString(NOTICE_MODE_KEY));
+    }
+
+    /**
+     * Sets {@code player}'s own notice mode, or with "default" goes back to the config's. Server thread.
+     *
+     * @return false when {@code mode} is not one
+     */
+    public static boolean setNoticeMode(EntityPlayerMP player, String mode) {
+        net.minecraft.nbt.NBTTagCompound data = player.getEntityData();
+        net.minecraft.nbt.NBTTagCompound kept = persisted(player);
+        if ("default".equals(mode)) {
+            kept.removeTag(NOTICE_MODE_KEY);
+        }
+        else if (NOTICE_MODES.contains(mode)) {
+            kept.setString(NOTICE_MODE_KEY, mode);
+        }
+        else {
+            return false;
+        }
+        data.setTag(net.minecraft.entity.player.EntityPlayer.PERSISTED_NBT_TAG, kept);
+        return true;
+    }
+
+    /** Forge's per-player data that outlives death and dimension changes. */
+    private static net.minecraft.nbt.NBTTagCompound persisted(EntityPlayerMP player) {
+        return player.getEntityData().getCompoundTag(net.minecraft.entity.player.EntityPlayer.PERSISTED_NBT_TAG);
     }
 
     // ------------------------------------------------------------------

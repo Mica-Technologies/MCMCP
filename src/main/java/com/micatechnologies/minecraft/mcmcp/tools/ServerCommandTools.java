@@ -195,7 +195,7 @@ public final class ServerCommandTools {
                         }
                         try {
                             if (capture != null) {
-                                capture.into(sender);
+                                capture.into(sender, CommandText.deliversToPlayer(command));
                                 try {
                                     outcome = CommandRunner.run(server, origin, origin, command);
                                 }
@@ -236,6 +236,10 @@ public final class ServerCommandTools {
                             + "slot as replace|keep|destroy and drops a tag there while reporting success.");
                     }
                     json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
+                    if (capture != null && CommandText.deliversToPlayer(command)) {
+                        // Said, so a model does not read the output as the message having gone nowhere.
+                        json.addProperty("deliveredTo", asPlayer + "'s chat as well as the output");
+                    }
                     // Minecraft's convention: 0 means the command did not succeed. It is not an
                     // error code — the reason, when there is one, is in the captured output.
                     json.addProperty("result", outcome.result);

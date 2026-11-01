@@ -916,7 +916,7 @@ public final class ServerBulkTools {
                         double[] at = entries.get(index).at;
                         CapturingCommandSender sender = new CapturingCommandSender(origin);
                         if (capture != null) {
-                            capture.into(sender);
+                            capture.into(sender, CommandText.deliversToPlayer(command));
                         }
                         // Moved for this command only, and put back in the same task, whatever the
                         // command does: no tick sees the player at the borrowed position (#127). The

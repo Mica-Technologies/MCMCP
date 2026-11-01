@@ -147,6 +147,32 @@ final class CompanionPeer {
         if (unreported.size() < 100) {
             unreported.add(what);
         }
+        summaryCount++;
+        summaryLatest = what;
+    }
+
+    /** Changes since the last summary line, for operators who take one every few minutes (#177). */
+    private int summaryCount;
+    @Nullable
+    private String summaryLatest;
+    private long lastSummaryMillis = System.currentTimeMillis();
+
+    /**
+     * The summary line due now, or null: at most one per {@code intervalMillis}, counting every change
+     * since the last and naming the latest.
+     */
+    @Nullable
+    synchronized String takeSummary(long nowMillis, long intervalMillis) {
+        if (summaryCount == 0 || nowMillis - lastSummaryMillis < intervalMillis) {
+            return null;
+        }
+        long minutes = Math.max(1L, Math.round((nowMillis - lastSummaryMillis) / 60_000.0D));
+        String line = summaryCount + (summaryCount == 1 ? " change" : " changes") + " in the last " + minutes
+            + " min; latest: " + summaryLatest;
+        summaryCount = 0;
+        summaryLatest = null;
+        lastSummaryMillis = nowMillis;
+        return line;
     }
 
     /**

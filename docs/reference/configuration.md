@@ -420,6 +420,17 @@ them finishes.
 Tell online operators in chat when a player's agent changes something: at most one grey line per
 player every ten seconds. Every such call is logged and journalled either way.
 
+### `notifyMode`
+
+`string` · `chat`, `actionbar`, `summary` or `off` · default `chat`
+
+How operators see those notices unless they chose for themselves with
+[`/mcmcp notices`](commands.md#mcmcp-notices). `chat` is the grey line above. `actionbar` puts the
+same line above the hotbar, where it fades and never enters the chat history. `summary` sends one chat
+line per player every five minutes, with how many changes there were and the latest. `off` sends
+nothing. With several agents at work, `chat` pushes the conversation out of view, and people stop
+answering agents in game.
+
 ### `maxSessionsPerPlayer`
 
 `integer` 1–16 · default `4`

@@ -39,7 +39,7 @@ import net.minecraftforge.event.CommandEvent;
  * itself where it can ({@link PlayerChatCapture}), so commands that need the sender to be a player
  * work too (#64).
  */
-final class CommandRunner {
+public final class CommandRunner {
 
     /** What one command did. */
     static final class Outcome {
@@ -70,6 +70,32 @@ final class CommandRunner {
      *                 {@link PlayerChatCapture}, or a {@link CapturingCommandSender} wrapping the identity
      */
     static Outcome run(MinecraftServer server, ICommandSender identity, ICommandSender sender, String rawCommand) {
+        running++;
+        try {
+            return runCommand(server, identity, sender, rawCommand);
+        }
+        finally {
+            running--;
+        }
+    }
+
+    /** Commands MCMCP is running right now, on the server thread. Server thread only. */
+    private static int running;
+
+    /**
+     * Whether the command being executed came from an MCMCP tool call. Server thread only.
+     *
+     * <p>What {@code /mcmcp} asks before an agent may change who uses the companion or lift an
+     * emergency stop. It used to ask whether the sender was a {@link CapturingCommandSender}, but a
+     * player's command runs as the player itself since #64, so a tool call through the companion
+     * passed for a person typing.
+     */
+    public static boolean inToolCall() {
+        return running > 0;
+    }
+
+    private static Outcome runCommand(MinecraftServer server, ICommandSender identity, ICommandSender sender,
+                                      String rawCommand) {
         ICommandManager manager = server.getCommandManager();
         if (!(manager instanceof CommandHandler)) {
             // A replaced command system (Sponge and the like) is driven only through its own entry.

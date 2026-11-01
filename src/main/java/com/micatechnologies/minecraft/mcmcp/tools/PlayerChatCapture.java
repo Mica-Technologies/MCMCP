@@ -81,7 +81,19 @@ final class PlayerChatCapture {
 
     /** From here on, in packet order, messages go to {@code collector}. */
     void into(@Nullable CapturingCommandSender collector) {
-        channel.eventLoop().execute(() -> handler.collector = collector);
+        into(collector, false);
+    }
+
+    /**
+     * As {@link #into(CapturingCommandSender)}, and with {@code deliver} the messages also go on to
+     * the player: for a command whose point is a message, which the player is often the one meant to
+     * read (#183).
+     */
+    void into(@Nullable CapturingCommandSender collector, boolean deliver) {
+        channel.eventLoop().execute(() -> {
+            handler.collector = collector;
+            handler.deliver = deliver;
+        });
     }
 
     /** Stops capturing once every packet sent so far has passed; completes when it has. */
@@ -130,6 +142,8 @@ final class PlayerChatCapture {
         /** Read and written on the event loop only. */
         @Nullable
         CapturingCommandSender collector;
+        /** Whether a recorded message is also sent on. Event loop only. */
+        boolean deliver;
 
         @Override
         public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) throws Exception {
@@ -138,6 +152,10 @@ final class PlayerChatCapture {
                 ITextComponent component = componentOf((SPacketChat) message);
                 if (component != null) {
                     into.record(component);
+                    if (deliver) {
+                        super.write(context, message, promise);
+                        return;
+                    }
                     promise.trySuccess();
                     return;
                 }

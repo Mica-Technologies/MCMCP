@@ -79,4 +79,27 @@ public final class CommandText {
         }
         return text.toString();
     }
+
+    /** Commands that exist to put a message in front of players, by their vanilla names. */
+    private static final java.util.Set<String> MESSAGE_COMMANDS = new java.util.HashSet<>(
+        java.util.Arrays.asList("tellraw", "say", "me", "msg", "tell", "w"));
+
+    /**
+     * Whether {@code command}'s chat should still reach the player it runs as (#183). Taking it all
+     * was right for feedback such as "Set the time to 6000", but a tellraw an agent sent its own
+     * player, or a /say, was taken too: the call said it succeeded and nobody saw the message. A
+     * command's feedback and a message sent to its player take the same path, so it is told by the
+     * command.
+     */
+    public static boolean deliversToPlayer(String command) {
+        String word = command.trim();
+        if (word.startsWith("/")) {
+            word = word.substring(1);
+        }
+        int space = word.indexOf(' ');
+        word = (space < 0 ? word : word.substring(0, space)).toLowerCase(java.util.Locale.ROOT);
+        int colon = word.indexOf(':');
+        return MESSAGE_COMMANDS.contains(colon < 0 ? word : word.substring(colon + 1));
+    }
+
 }

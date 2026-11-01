@@ -530,16 +530,20 @@ public class ToolContext {
         // The spec has progress increase with every notification. A call made of several parts —
         // client_sequence's steps, each reporting on its own scale — would otherwise repeat a value
         // at each boundary, and a strict client may treat that as a protocol fault.
+        // A report that does not go up is still sent, as a heartbeat just past the last value and with no
+        // total, rather than dropped (#173). Dropping it starved a tiled load: the first piece's loading
+        // reached 600 of 600, every later piece counted from 1 again, and for minutes nothing was sent,
+        // so the orchestrator's no-progress limit gave up on a read that was working.
+        boolean rising;
         synchronized (this) {
-            if (progress <= lastProgress) {
-                return;
-            }
-            lastProgress = progress;
+            rising = progress > lastProgress;
+            lastProgress = rising ? progress : Math.nextUp(lastProgress + 1e-6D);
+            progress = lastProgress;
         }
         JsonObject params = new JsonObject();
         params.add("progressToken", progressToken);
         params.addProperty("progress", progress);
-        if (total >= 0) {
+        if (total >= 0 && rising) {
             params.addProperty("total", total);
         }
         if (message != null) {
@@ -592,6 +596,9 @@ public class ToolContext {
         };
         part.timings = timings;
         part.caller = caller;
+        // The same hold owner too: a job's piece of a tiled read is charged to the job, as the room it
+        // was cut to was.
+        part.holdCaller = holdCaller;
         return part;
     }
 

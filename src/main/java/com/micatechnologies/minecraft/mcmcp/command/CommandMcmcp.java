@@ -40,7 +40,7 @@ public class CommandMcmcp extends CommandBase {
 
     private static final List<String> SUBCOMMANDS =
         Arrays.asList("status", "link", "tools", "sessions", "token", "reload", "restart", "stop", "companion", "chunks",
-            "estop", "jobs", "kill");
+            "estop", "jobs", "kill", "notices");
 
     private static final List<String> COMPANION_SUBCOMMANDS =
         Arrays.asList("status", "list", "allow", "revoke", "on", "off");
@@ -52,7 +52,7 @@ public class CommandMcmcp extends CommandBase {
 
     @Override
     public String getUsage(ICommandSender sender) {
-        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop|companion|chunks|estop|jobs|kill>";
+        return "/mcmcp <status|link|tools|sessions|token|reload|restart|stop|companion|chunks|estop|jobs|kill|notices>";
     }
 
     /**
@@ -71,6 +71,9 @@ public class CommandMcmcp extends CommandBase {
                                           @Nullable BlockPos targetPos) {
         if (args.length == 1) {
             return getListOfStringsMatchingLastWord(args, SUBCOMMANDS);
+        }
+        if (args.length == 2 && "notices".equalsIgnoreCase(args[0])) {
+            return getListOfStringsMatchingLastWord(args, "chat", "actionbar", "summary", "off", "default");
         }
         if (args.length == 2 && "companion".equalsIgnoreCase(args[0])) {
             return getListOfStringsMatchingLastWord(args, COMPANION_SUBCOMMANDS);
@@ -116,6 +119,9 @@ public class CommandMcmcp extends CommandBase {
             case "jobs":
                 handleJobs(sender, args);
                 break;
+            case "notices":
+                handleNotices(sender, args);
+                break;
             case "kill":
                 handleKill(sender, args);
                 break;
@@ -141,6 +147,42 @@ public class CommandMcmcp extends CommandBase {
     }
 
     /**
+     * Whether this command came from an MCMCP tool call rather than a person. Both checks: a console
+     * command runs with a capturing sender, a player's runs as the player itself (#64).
+     */
+    private static boolean fromToolCall(ICommandSender sender) {
+        return sender instanceof com.micatechnologies.minecraft.mcmcp.tools.CapturingCommandSender
+            || com.micatechnologies.minecraft.mcmcp.tools.CommandRunner.inToolCall();
+    }
+
+    /**
+     * {@code /mcmcp notices [chat|actionbar|summary|off|default]}: how this operator sees agent activity
+     * notices (#177). Each operator chooses for themselves, so one who wants their chat back can mute
+     * the lines without turning them off for everyone. Stored with the player, so it lasts.
+     */
+    private void handleNotices(ICommandSender sender, String[] args) {
+        if (!(sender instanceof net.minecraft.entity.player.EntityPlayerMP)) {
+            reply(sender, TextFormatting.RED, "Notices are chosen per player; run this in game. The default "
+                + "for everyone is companion.notifyMode in the MCMCP config.");
+            return;
+        }
+        net.minecraft.entity.player.EntityPlayerMP player = (net.minecraft.entity.player.EntityPlayerMP) sender;
+        if (args.length < 2) {
+            String mine = CompanionServer.noticeModeOf(player);
+            reply(sender, TextFormatting.GRAY, "Agent notices for you: " + mine
+                + (CompanionServer.hasOwnNoticeMode(player) ? "" : " (the server's default)")
+                + ". /mcmcp notices chat|actionbar|summary|off|default");
+            return;
+        }
+        String wanted = args[1].toLowerCase(java.util.Locale.ROOT);
+        if (!CompanionServer.setNoticeMode(player, wanted)) {
+            reply(sender, TextFormatting.RED, "Use chat, actionbar, summary, off or default.");
+            return;
+        }
+        reply(sender, TextFormatting.GREEN, "Agent notices for you: " + CompanionServer.noticeModeOf(player) + ".");
+    }
+
+    /**
      * {@code /mcmcp companion status|list|allow <player>|revoke <player>|on|off}.
      *
      * <p>Changing who may use the companion is refused when the command arrives through an MCMCP tool
@@ -152,7 +194,7 @@ public class CommandMcmcp extends CommandBase {
         throws WrongUsageException {
         String sub = args.length < 2 ? "status" : args[1].toLowerCase(java.util.Locale.ROOT);
         boolean changes = "allow".equals(sub) || "revoke".equals(sub) || "on".equals(sub) || "off".equals(sub);
-        if (changes && sender instanceof com.micatechnologies.minecraft.mcmcp.tools.CapturingCommandSender) {
+        if (changes && fromToolCall(sender)) {
             reply(sender, TextFormatting.RED, "Changing who may use the MCMCP companion is for a person at "
                 + "the console or in the game, not for a tool call.");
             return;
@@ -222,7 +264,7 @@ public class CommandMcmcp extends CommandBase {
     private void handleEstop(ICommandSender sender, String[] args) {
         String sub = args.length < 2 ? "" : args[1].toLowerCase(java.util.Locale.ROOT);
         if ("reset".equals(sub) || "lift".equals(sub)) {
-            if (sender instanceof com.micatechnologies.minecraft.mcmcp.tools.CapturingCommandSender) {
+            if (fromToolCall(sender)) {
                 reply(sender, TextFormatting.RED, "Lifting the MCMCP emergency stop is for a person at the console "
                     + "or in the game, not for a tool call.");
                 return;

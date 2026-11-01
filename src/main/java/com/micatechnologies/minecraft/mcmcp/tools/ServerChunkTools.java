@@ -132,8 +132,12 @@ public final class ServerChunkTools {
                 continue;
             }
             ChunkLoadGovernor.Outcome outcome;
+            // Each piece's loading on one scale for the whole read, piece i of n: counted per piece, it
+            // started again from 1 every time and read as going backwards (#173).
+            ToolContext piece = context.forPart(context.getArguments(), tile.index, tiles.size(),
+                "piece " + (tile.index + 1) + " of " + tiles.size());
             try {
-                outcome = ChunkLoadGovernor.acquire(context, dimension, tile.holdChunks(), true,
+                outcome = ChunkLoadGovernor.acquire(piece, dimension, tile.holdChunks(), true,
                     McmcpConfig.getChunkHoldIdleSeconds() * 1000L, McmcpConfig.getChunkHoldMaxSeconds() * 1000L);
             }
             catch (ChunkLoadGovernor.Busy busy) {

@@ -121,7 +121,9 @@ player's `tools/list` shows only the tools their grants unlock.
 - **The server log.** Every write and command gets an INFO line, for example
   `MCMCP companion: Builder server_set_blocks written=9 undoPoint=u1791579262093`.
 - **Operators in chat.** Online operators see a grey line in chat, at most one per player every ten
-  seconds: `[MCMCP] Builder's agent: server_set_blocks written=9 (and 1 more)`. Turn it off with
+  seconds: `[MCMCP] Builder's agent: server_set_blocks written=9 (and 1 more)`. Each operator can move it
+  to the action bar, take a summary every five minutes, or mute it, with `/mcmcp notices`. Turn it off for
+  everyone with
   `companion.notifyOps`.
 - **Undo points.** Every write leaves an [undo point](../reference/tools.md#server_undo), single
   blocks included, whatever `undo.*` says. The point records who made it (`"by"`).

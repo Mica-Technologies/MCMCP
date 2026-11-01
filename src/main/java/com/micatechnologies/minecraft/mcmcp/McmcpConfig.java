@@ -133,6 +133,7 @@ public class McmcpConfig {
     private static int companionMaxSessionsPerPlayer = 4;
     private static int companionMaxConcurrentCalls = 4;
     private static boolean companionNotifyOps = true;
+    private static String companionNotifyMode = "chat";
 
     // Chunk loading
     private static int chunkLoadsPerTick = 8;
@@ -382,6 +383,12 @@ public class McmcpConfig {
             "Tell online operators in chat when a player's agent changes something through the companion "
                 + "(a write, a command): at most one grey line per player every ten seconds. Every such call "
                 + "is also logged, and every call journalled, whether or not this is on.");
+        companionNotifyMode = configuration.getString("notifyMode", CATEGORY_COMPANION, "chat",
+            "How operators see those notices unless they chose for themselves with '/mcmcp notices': 'chat' "
+                + "(a grey line per player every ten seconds), 'actionbar' (the same line above the hotbar, "
+                + "kept out of the chat history), 'summary' (one chat line per player every five minutes with "
+                + "a count and the latest change) or 'off'.",
+            new String[] {"chat", "actionbar", "summary", "off"});
 
         maxPackedReadCells = configuration.getInt("maxPackedReadCells", CATEGORY_LIMITS, 1_048_576, 4096,
             16_777_216, "Most cells one server_get_blocks call with encoding 'packed' reads. Read in game-thread "
@@ -881,6 +888,11 @@ public class McmcpConfig {
 
     public static int getCompanionMaxConcurrentCalls() {
         return companionMaxConcurrentCalls;
+    }
+
+    /** How operators see agent notices unless they chose for themselves: chat, actionbar, summary or off. */
+    public static String getCompanionNotifyMode() {
+        return companionNotifyMode;
     }
 
     public static boolean isCompanionNotifyOps() {

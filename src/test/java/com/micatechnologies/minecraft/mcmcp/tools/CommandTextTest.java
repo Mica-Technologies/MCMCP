@@ -1,6 +1,8 @@
 package com.micatechnologies.minecraft.mcmcp.tools;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import net.minecraft.util.text.TextComponentString;
 import net.minecraft.util.text.TextComponentTranslation;
@@ -46,5 +48,20 @@ class CommandTextTest {
         text.appendSibling(new TextComponentString(" McmcpDev"));
 
         assertEquals("Teleported McmcpDev", CommandText.plain(text));
+    }
+
+    @Test
+    void a_message_command_still_reaches_the_player_it_runs_as() {
+        assertTrue(CommandText.deliversToPlayer("tellraw MicaAlex {\"text\":\"hi\"}"));
+        assertTrue(CommandText.deliversToPlayer("/say hello"));
+        assertTrue(CommandText.deliversToPlayer("  /minecraft:tellraw @a []"));
+        assertTrue(CommandText.deliversToPlayer("MSG AngelWingsPanda hi"));
+    }
+
+    @Test
+    void feedback_from_other_commands_is_still_only_returned() {
+        assertFalse(CommandText.deliversToPlayer("time set 6000"));
+        assertFalse(CommandText.deliversToPlayer("/tellrawx foo"));
+        assertFalse(CommandText.deliversToPlayer("/fill 0 0 0 1 1 1 stone"));
     }
 }

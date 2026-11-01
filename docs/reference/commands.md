@@ -159,6 +159,19 @@ at the console or in the game.
 
 `/mcmcp reload` also re-checks everyone's companion access.
 
+## `/mcmcp notices`
+
+```
+/mcmcp notices [chat|actionbar|summary|off|default]
+```
+
+How you, the operator typing it, see agents' activity notices. With no argument it says your current
+choice. `chat` is a grey line per agent every ten seconds; `actionbar` shows that line above the
+hotbar and keeps it out of chat; `summary` is one chat line per agent every five minutes, with a count
+and the latest change; `off` mutes them. `default` goes back to the server's
+[`companion.notifyMode`](configuration.md#notifymode). The choice is kept with your player, so it
+lasts across restarts, and it changes nothing for anyone else. In game only.
+
 ## `/mcmcp chunks`
 
 ```

@@ -15,6 +15,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import java.util.Collections;
 import java.util.Locale;
 import java.util.UUID;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.inventory.Container;
 import net.minecraft.inventory.Slot;
@@ -25,7 +26,10 @@ import net.minecraft.util.EnumFacing;
 import net.minecraft.util.EnumHand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.WorldServer;
+import net.minecraftforge.common.ForgeHooks;
 import net.minecraftforge.common.util.FakePlayerFactory;
+import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.fml.common.eventhandler.Event;
 
 /**
  * Using an item on a block, or activating a block, as a player but from any distance (#57): stringing
@@ -52,6 +56,7 @@ public final class ServerInteractTools {
     }
 
     public static void register() {
+        ClickWatch.register();
         register("server_use_item_on_block", "Use an item on a block",
             "Use the item in a hotbar slot on a block, as that player and from any distance: the click a "
                 + "span-wire tool, a track tool or a door needs. Runs the game's own right-click path, so "
@@ -62,9 +67,12 @@ public final class ServerInteractTools {
         register("server_activate_block", "Activate a block",
             "Right-click a block with an empty hand, as that player and from any distance: press a button, "
                 + "open a controller, flip a lever, open a container. The player's selected slot moves to an "
-                + "empty hotbar slot for the click and back; with none empty, 'handEmpty' is false and the "
-                + "block sees the held item. Omit 'player' to click as MCMCP's own fake player, for a "
-                + "server nobody has joined; the result then says fakePlayer: true. With 'container', read "
+                + "empty hotbar slot for the click and back; with none empty, the held stack is set aside "
+                + "for the click and put back. 'activated' is the block's own answer (vanilla's 'result' is "
+                + "'pass' for an empty hand either way), and 'why' says what stopped it: a protection mod "
+                + "cancelling or denying the click, sneaking, or the block refusing. Omit 'player' to click "
+                + "as MCMCP's own fake player, for a server nobody has joined (through the companion the "
+                + "click is always yours); the result then says fakePlayer: true. With 'container', read "
                 + "the container that opens "
                 + "and press one of its buttons in the same moment — a container opened from afar closes again "
                 + "on the next tick.", false);
@@ -171,6 +179,7 @@ public final class ServerInteractTools {
                     int previousSlot = player.inventory.currentItem;
                     boolean previousSneak = player.isSneaking();
                     EnumActionResult outcomeResult;
+                    ItemStack setAside = ItemStack.EMPTY;
                     try {
                         if (withItem && slot >= 0) {
                             player.inventory.currentItem = slot;
@@ -178,12 +187,19 @@ public final class ServerInteractTools {
                         if (!withItem) {
                             // A block's onBlockActivated reads the player's hand, not the stack passed in, so
                             // an empty-hand press selects an empty slot (#87). Only the selection moves: an
-                            // item the block hands over lands in that slot and stays.
+                            // item the block hands over lands in that slot and stays. With none empty, the
+                            // selected stack is set aside for the click and put back (#174): a held tool is
+                            // exactly what some blocks refuse (CSM's buttons ignore their link tool).
                             int empty = emptyHotbarSlot(player);
                             if (empty >= 0) {
                                 player.inventory.currentItem = empty;
                             }
-                            result.addProperty("handEmpty", empty >= 0);
+                            else {
+                                setAside = player.inventory.getStackInSlot(player.inventory.currentItem);
+                                player.inventory.setInventorySlotContents(player.inventory.currentItem, ItemStack.EMPTY);
+                                result.addProperty("setAside", String.valueOf(setAside.getItem().getRegistryName()));
+                            }
+                            result.addProperty("handEmpty", player.getHeldItemMainhand().isEmpty());
                         }
                         player.setSneaking(sneak);
                         ItemStack stack = withItem ? player.getHeldItem(EnumHand.MAIN_HAND) : ItemStack.EMPTY;
@@ -192,9 +208,28 @@ public final class ServerInteractTools {
                                 + " is empty. Put the item in the player's hotbar first, or use "
                                 + "server_activate_block to press the block with an empty hand.");
                         }
-                        result.addProperty("item", stack.isEmpty() ? "empty hand" : String.valueOf(stack.getItem().getRegistryName()));
-                        outcomeResult = player.interactionManager.processRightClickBlock(player, world, stack,
-                            EnumHand.MAIN_HAND, pos, face, hitX, hitY, hitZ);
+                        ItemStack inHand = player.getHeldItemMainhand();
+                        result.addProperty("item", inHand.isEmpty() ? "empty hand" : String.valueOf(inHand.getItem().getRegistryName()));
+                        if (withItem) {
+                            ClickWatch.Seen seen;
+                            ClickWatch.begin(player, pos);
+                            try {
+                                outcomeResult = player.interactionManager.processRightClickBlock(player, world, stack,
+                                    EnumHand.MAIN_HAND, pos, face, hitX, hitY, hitZ);
+                            }
+                            finally {
+                                seen = ClickWatch.end();
+                            }
+                            if (outcomeResult != EnumActionResult.SUCCESS) {
+                                String why = seen == null ? null : seen.why(player.isSneaking());
+                                if (why != null) {
+                                    result.addProperty("why", why);
+                                }
+                            }
+                        }
+                        else {
+                            outcomeResult = activate(player, world, pos, face, hitX, hitY, hitZ, result);
+                        }
                         if (withItem) {
                             ItemStack after = player.getHeldItem(EnumHand.MAIN_HAND);
                             JsonObject held = new JsonObject();
@@ -204,11 +239,14 @@ public final class ServerInteractTools {
                         }
                     }
                     finally {
+                        if (!setAside.isEmpty()) {
+                            putBack(player, setAside, result);
+                        }
                         player.inventory.currentItem = previousSlot;
                         player.setSneaking(previousSneak);
                     }
-                    // Vanilla answers 'pass' for an empty hand even when the block reacted, so say plainly
-                    // whether anything changed.
+                    // Whether anything visible changed, beside 'activated': a button's press or a
+                    // controller's request often changes no block state.
                     result.addProperty("result", outcomeResult.name().toLowerCase(Locale.ROOT));
                     result.add("after", GameJson.block(world, pos));
                     result.add("besideAfter", GameJson.block(world, beside));
@@ -236,6 +274,159 @@ public final class ServerInteractTools {
                 }
                 return ToolResult.structured(json);
             });
+    }
+
+    /**
+     * An empty-hand right-click, step for step as {@code processRightClickBlock} makes one, with each
+     * step's outcome read rather than folded into one result (#174). Vanilla answers PASS for an empty
+     * hand even when the block reacted, so its result said nothing; this reports 'activated', the
+     * block's own answer, and 'why' when it was not asked or said no. Game thread.
+     *
+     * <p>One difference, on purpose: the event's hit point is where the click lands, not a ray traced
+     * from the player's eyes, which from 300 blocks away hits something else entirely.
+     */
+    private static EnumActionResult activate(EntityPlayerMP player, WorldServer world, BlockPos pos, EnumFacing face,
+                                             float hitX, float hitY, float hitZ, JsonObject result) {
+        if (player.interactionManager.getGameType() == net.minecraft.world.GameType.SPECTATOR) {
+            // Spectators only open containers; vanilla's own path does that.
+            EnumActionResult spectating = player.interactionManager.processRightClickBlock(player, world,
+                ItemStack.EMPTY, EnumHand.MAIN_HAND, pos, face, hitX, hitY, hitZ);
+            result.addProperty("activated", spectating == EnumActionResult.SUCCESS);
+            if (spectating != EnumActionResult.SUCCESS) {
+                result.addProperty("why", "The player is in spectator mode, which opens containers and "
+                    + "activates nothing else.");
+            }
+            return spectating;
+        }
+        PlayerInteractEvent.RightClickBlock event = ForgeHooks.onRightClickBlock(player, EnumHand.MAIN_HAND, pos, face,
+            new net.minecraft.util.math.Vec3d(pos.getX() + hitX, pos.getY() + hitY, pos.getZ() + hitZ));
+        if (event.isCanceled()) {
+            result.addProperty("activated", false);
+            result.addProperty("why", "A PlayerInteractEvent.RightClickBlock listener cancelled the click before "
+                + "the block saw it: usually a protection, claims or permissions mod refusing this player here.");
+            return event.getCancellationResult();
+        }
+        boolean bypass = player.getHeldItemMainhand().doesSneakBypassUse(world, pos, player)
+            && player.getHeldItemOffhand().doesSneakBypassUse(world, pos, player);
+        if (player.isSneaking() && !bypass && event.getUseBlock() != Event.Result.ALLOW) {
+            result.addProperty("activated", false);
+            result.addProperty("why", "The click was made sneaking, which skips the block's own handler. Leave "
+                + "'sneak' off to press it.");
+            return EnumActionResult.PASS;
+        }
+        if (event.getUseBlock() == Event.Result.DENY) {
+            result.addProperty("activated", false);
+            result.addProperty("why", "A RightClickBlock listener denied using the block (useBlock DENY): usually "
+                + "a protection or claims mod.");
+            return EnumActionResult.PASS;
+        }
+        IBlockState state = world.getBlockState(pos);
+        boolean activated = state.getBlock().onBlockActivated(world, pos, state, player, EnumHand.MAIN_HAND, face,
+            hitX, hitY, hitZ);
+        result.addProperty("activated", activated);
+        if (!activated) {
+            result.addProperty("why", "The block's own onBlockActivated returned false: it has no right-click "
+                + "action, or refused this click (the face, the hit point, the player or what they hold).");
+        }
+        return activated ? EnumActionResult.SUCCESS : EnumActionResult.PASS;
+    }
+
+    /**
+     * Puts a stack set aside for an empty-hand click back in its slot, or, when the block put something
+     * there, wherever it fits, and on the ground at the player's feet when nothing fits. Game thread.
+     */
+    private static void putBack(EntityPlayerMP player, ItemStack stack, JsonObject result) {
+        int slot = player.inventory.currentItem;
+        if (player.inventory.getStackInSlot(slot).isEmpty()) {
+            player.inventory.setInventorySlotContents(slot, stack);
+            return;
+        }
+        if (!player.inventory.addItemStackToInventory(stack) || !stack.isEmpty()) {
+            if (!stack.isEmpty()) {
+                player.dropItem(stack, false);
+                result.addProperty("setAsideDropped", true);
+            }
+        }
+        result.addProperty("setAsideMoved", "the block put an item in the hand's slot, so the set-aside stack "
+            + "went elsewhere in the inventory");
+    }
+
+    /**
+     * Records what {@code PlayerInteractEvent.RightClickBlock} listeners decided for an item use MCMCP
+     * makes, so a PASS or FAIL can say why (#174). Only the click in progress is recorded. Game thread.
+     */
+    static final class ClickWatch {
+
+        /** What the listeners left on the event. */
+        static final class Seen {
+            boolean fired;
+            boolean cancelled;
+            Event.Result useBlock = Event.Result.DEFAULT;
+            Event.Result useItem = Event.Result.DEFAULT;
+
+            /** A sentence for an unsuccessful click, or null when the listeners are not why. */
+            @javax.annotation.Nullable
+            String why(boolean sneaking) {
+                if (!fired) {
+                    return null;
+                }
+                if (cancelled) {
+                    return "A PlayerInteractEvent.RightClickBlock listener cancelled the click: usually a "
+                        + "protection, claims or permissions mod refusing this player here.";
+                }
+                if (useBlock == Event.Result.DENY && useItem == Event.Result.DENY) {
+                    return "A RightClickBlock listener denied both the block and the item.";
+                }
+                if (useItem == Event.Result.DENY) {
+                    return "A RightClickBlock listener denied using the item (useItem DENY).";
+                }
+                if (sneaking) {
+                    return "The click was made sneaking, which skips the block's own handler; the item had "
+                        + "nothing to do on this block.";
+                }
+                return "Neither the block nor the item did anything with this click: the block has no "
+                    + "right-click action for it, and the item cannot be used here.";
+            }
+        }
+
+        private static EntityPlayerMP player;
+        private static BlockPos pos;
+        private static Seen seen;
+        private static boolean registered;
+
+        static synchronized void register() {
+            if (!registered) {
+                net.minecraftforge.common.MinecraftForge.EVENT_BUS.register(new ClickWatch());
+                registered = true;
+            }
+        }
+
+        static void begin(EntityPlayerMP who, BlockPos where) {
+            player = who;
+            pos = where;
+            seen = new Seen();
+        }
+
+        static Seen end() {
+            Seen result = seen;
+            player = null;
+            pos = null;
+            seen = null;
+            return result;
+        }
+
+        @net.minecraftforge.fml.common.eventhandler.SubscribeEvent(
+            priority = net.minecraftforge.fml.common.eventhandler.EventPriority.LOWEST, receiveCanceled = true)
+        public void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+            Seen current = seen;
+            if (current == null || event.getEntityPlayer() != player || !event.getPos().equals(pos)) {
+                return;
+            }
+            current.fired = true;
+            current.cancelled = event.isCanceled();
+            current.useBlock = event.getUseBlock();
+            current.useItem = event.getUseItem();
+        }
     }
 
     /** The selected hotbar slot if it is empty, else the first empty one, else -1. Game thread. */

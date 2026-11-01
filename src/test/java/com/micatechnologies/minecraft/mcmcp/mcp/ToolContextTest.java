@@ -74,9 +74,10 @@ class ToolContextTest {
     }
 
     @Test
-    void progress_that_does_not_increase_is_not_sent() throws InterruptedException {
-        // The spec has progress increase with every notification; a repeat at a step boundary is
-        // what a strict client could treat as a fault.
+    void progress_that_does_not_increase_is_still_sent_but_only_ever_goes_up() throws InterruptedException {
+        // The spec has progress increase with every notification, so a repeat at a step boundary
+        // could be treated as a fault. But dropping it starved a tiled load of every report after its
+        // first piece, and the orchestrator gave up on a read that was working (#173).
         McpSession session = new McpSession("test", 0L);
         ToolContext context = context(session, new JsonObject());
 
@@ -85,7 +86,26 @@ class ToolContextTest {
         context.reportProgress(0.5, 10, null);
         context.reportProgress(2, 10, null);
 
-        assertEquals(2, progressSent(session).size());
+        List<Double> sent = progressSent(session);
+        assertEquals(4, sent.size());
+        for (int i = 1; i < sent.size(); i++) {
+            assertEquals(true, sent.get(i) > sent.get(i - 1), "progress went " + sent);
+        }
+        assertEquals(2.0, sent.get(3), 1e-9);
+    }
+
+    @Test
+    void a_heartbeat_carries_no_total_so_it_never_reads_as_past_the_end() throws InterruptedException {
+        McpSession session = new McpSession("test", 0L);
+        ToolContext context = context(session, new JsonObject());
+        context.reportProgress(600, 600, "Loading chunks: 600 of 600");
+        context.reportProgress(1, 600, "Loading chunks: 1 of 600");
+
+        JsonObject first = session.pollOutbound(0L).getAsJsonObject("params");
+        JsonObject heartbeat = session.pollOutbound(0L).getAsJsonObject("params");
+        assertEquals(600, first.get("total").getAsInt());
+        assertEquals(false, heartbeat.has("total"));
+        assertEquals("Loading chunks: 1 of 600", heartbeat.get("message").getAsString());
     }
 
     @Test

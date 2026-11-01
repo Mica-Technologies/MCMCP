@@ -485,6 +485,31 @@ the y of each top block, `-1` for a column with nothing in range, and `-2` for a
 isn't loaded. Up to `limits.maxSurfaceColumns` (262,144, which is 512 × 512) per call. This is the
 cheapest way to survey a district.
 
+#### `server_get_biomes`
+
+:material-eye: Read-only · `x`, `z` required · optional `toX`, `toZ`, `step`, `dimension`, `format`,
+`predict`, `match`, `villageBiomes`
+
+Which biomes cover a box of columns, sampled every `step` blocks (default: whatever keeps the box near
+4,096 samples). Nothing is loaded, generated or written. Each sample comes from the cheapest place that
+knows it:
+
+- a **loaded** chunk's own biome array;
+- a generated chunk's array as **saved** in its region file, read off the server thread. A region
+  file that does not exist is never created;
+- for a column not generated yet, the world's biome provider, which is what generation will use. These
+  are counted as **predicted**. `predict: false` leaves them unknown instead.
+
+`sources` counts the samples from each. `format: "summary"` (default) lists each biome with its
+`count` and `share` of the known samples, most common first, for up to 65,536 samples. `format:
+"grid"` returns `grid.palette`, a flat `grid.indexes` array (rows along X from the lowest Z, `-1` for
+unknown), and `grid.source`, one letter per sample (`L`, `S`, `P`, `-`), for up to 16,384 samples.
+
+`match: ["minecraft:plains", ...]` adds the share of samples in those biomes. `villageBiomes: true`
+adds `villageBiomes`: the share in the biomes a village may start in, as this game has them (vanilla's
+plains, desert, savanna and taiga, plus any a mod added), and the list itself. Asking why no village
+generated in a pregenerated square used to take a `server_get_block` and a chunk load per sample.
+
 #### `server_changes_since`
 
 :material-eye: Read-only · `x`, `z` required · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `since`, `limit`
@@ -1044,7 +1069,10 @@ needs no player and no render distance.
   sampled column's top y as a packed array (`-1` nothing in range, `-2` not loaded), so a long
   survey can be analysed from the one call.
 - `load: true` over more chunks than you may hold draws it a piece at a time (see
-  [chunk loading](#chunk-loading)).
+  [chunk loading](#chunk-loading)). Each piece's loading reports progress as "piece i of n" on one
+  scale for the whole plan, so a box of thousands of chunks keeps the orchestrator's 120 s
+  no-progress limit from ending it. Loads are paced: expect about ten chunks a second on a busy
+  server, so a 3,700-chunk box takes several minutes.
 
 The PNG is also written under `mcmcp-plans/` in the game directory, and its path returned.
 
@@ -2014,7 +2042,20 @@ player can lease only themselves.
 Right-clicks a block with an empty hand from any distance: press a button, open a controller, flip a
 lever, open a container. A block reads the hand of the player clicking it, so for the click the
 player's selection moves to an empty hotbar slot (the selected one if it is empty) and back again.
-With no hotbar slot empty, the reply says `handEmpty: false` and the block sees the held item.
+With no hotbar slot empty, the selected stack is set aside for the click and put back afterwards
+(`setAside` names it). If the block puts an item in that slot meanwhile, the stack goes elsewhere in
+the inventory, or on the ground when it is full, and the reply says so. A held tool is exactly what
+some blocks refuse: CSM's crosswalk buttons ignore a click made holding their link tool.
+
+**Why it did nothing.** Vanilla answers `result: "pass"` for an empty hand whether or not the block
+reacted, so that field says nothing. `activated` is the block's own answer: the click goes through
+the same steps as vanilla's, with each step's outcome kept. When it is `false`, `why` says which step
+stopped it: a `RightClickBlock` listener cancelled the click or denied the block (a protection or
+claims mod, usually), the click was made sneaking, or the block's `onBlockActivated` returned false.
+The event's hit point is where the click lands on the block, not a ray traced from the player's eyes,
+which from hundreds of blocks away hits something else. `changed` still says whether a block or the
+open container changed; a button's press often changes neither. `server_use_item_on_block` gives the
+same `why` for an item use that came back `pass` or `fail`.
 
 [`server_use_item_on_block`](#server_use_item_on_block) refuses an empty slot and points here.
 
@@ -2074,6 +2115,12 @@ that player, exactly as if they had typed it, so commands that act on "the sende
 `/gamemode 1` with no target, work. Its feedback is taken from the player's connection while the
 command runs and comes back in `output`, instead of appearing in their chat. That feedback follows
 the `sendCommandFeedback` game rule, as it would for the player.
+
+Commands whose point is a message — `tellraw`, `say`, `me`, `msg`, `tell`, `w` — are the exception:
+their chat is returned in `output` **and** still delivered, and the result says `deliveredTo`. A
+command's feedback and a message sent to its own player take the same path, so taking it all once
+meant a `tellraw` an agent sent to its player came back as a success that nobody saw. Messages to
+other players were never taken.
 
 **Mods that veto commands.** Forge lets a mod cancel a command before it runs, and permission mods
 (ForgeEssentials, for one) decide by who sent it, so MCMCP always shows them the real sender: the
