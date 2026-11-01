@@ -12,6 +12,7 @@ import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.mcp.Principal;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
+import com.micatechnologies.minecraft.mcmcp.perf.IdlePause;
 import com.micatechnologies.minecraft.mcmcp.perf.TickClock;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryPoolMXBean;
@@ -107,7 +108,32 @@ public final class ChunkLoadGovernor {
     /** Server thread: when this server's first tick was seen, by nanoTime; 0 before it. */
     private static long firstTickNanos;
 
+    /** Server thread: when ticks were last seen resuming after a pause the watchdog called idle; 0 before. */
+    private static long resumedNanos;
+
     private ChunkLoadGovernor() {
+    }
+
+    /**
+     * The real TPS over a window that never reaches back into a deliberate pause. A pause mod stops the
+     * ticks this counts, so the first measurement after the last player's return read near 0 TPS: the
+     * server was called overloaded in red to the op who had just joined, and back to OK a few seconds
+     * later. The window starts at the latest of the first tick, the end of a declared pause, and a
+     * measurement taken while the watchdog still said idle (its poll lags the first tick back).
+     */
+    private static double realTpsSincePause(long nowNanos) {
+        if (ServerLoad.idleReason() != null) {
+            resumedNanos = nowNanos;
+        }
+        long since = firstTickNanos;
+        long declaredEnd = IdlePause.resumedAtNanos(since);
+        if (declaredEnd - since > 0L) {
+            since = declaredEnd;
+        }
+        if (resumedNanos != 0L && resumedNanos - since > 0L) {
+            since = resumedNanos;
+        }
+        return ServerLoad.realTps(TickClock.SERVER, nowNanos, since);
     }
 
     /** Registers the ticket callback (required before any ticket) and the event handlers. Init. */
@@ -885,8 +911,7 @@ public final class ChunkLoadGovernor {
         // Ticks finished a second by the wall clock: the mean tick time leaves out the gaps between ticks,
         // so a server thread that stops for seconds between quick ticks reads fast by it. Not on an
         // integrated server, which stops ticking whenever its player pauses the game.
-        double realTps = server.isDedicatedServer()
-            ? ServerLoad.realTps(TickClock.SERVER, System.nanoTime(), firstTickNanos) : -1.0D;
+        double realTps = server.isDedicatedServer() ? realTpsSincePause(System.nanoTime()) : -1.0D;
         ServerLoad.measured(ServerLoad.fromHealth(CALLS.update(meanMspt, heap, realTps, now,
             McmcpConfig.getHealthHoldJobsMspt(), McmcpConfig.getHealthRefuseWritesMspt(),
             McmcpConfig.getChunkPauseHeapPercent(), McmcpConfig.getHealthHoldJobsBelowTps(),
@@ -1183,6 +1208,7 @@ public final class ChunkLoadGovernor {
         releaseAll("the server is stopping");
         ServerLoad.reset();
         firstTickNanos = 0L;
+        resumedNanos = 0L;
     }
 
     /** On Forge's bus. */

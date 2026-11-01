@@ -71,6 +71,16 @@ public final class ServerWatchdog {
     /** Watchdog thread only: the silence has been reported as a stall, with its dump. */
     private static boolean reported;
 
+    /**
+     * How many polls in a row must find the server thread inside a tick before a silence already
+     * taken for a pause is called a stall. A paused server's loop still runs {@code tick()} every
+     * 50 ms, only without tick events, so a single poll can land in one; a stuck tick stays put.
+     */
+    static final int POLLS_TO_TURN_PAUSE_INTO_STALL = 3;
+
+    /** Watchdog thread only: polls in a row, during a pause, that found the thread inside a tick. */
+    private static int notIdlePolls;
+
     private ServerWatchdog() {
     }
 
@@ -123,6 +133,7 @@ public final class ServerWatchdog {
                 stalledSinceNanos = 0L;
                 idle = false;
                 reported = false;
+                notIdlePolls = 0;
                 ServerLoad.stalled(false, 0L);
                 ServerLoad.idle(null, 0L);
             }
@@ -137,6 +148,7 @@ public final class ServerWatchdog {
             stalledSinceNanos = now - silent * 1_000_000L;
             idle = false;
             reported = false;
+            notIdlePolls = 0;
         }
         if (transition == StallDetector.Transition.RECOVERED) {
             long lasted = stalledSinceNanos == 0L ? 0L : (now - stalledSinceNanos) / 1_000_000L;
@@ -152,6 +164,7 @@ public final class ServerWatchdog {
             }
             idle = false;
             reported = false;
+            notIdlePolls = 0;
             return;
         }
         if (!current.isStalled()) {
@@ -159,8 +172,9 @@ public final class ServerWatchdog {
         }
         // Looked at on every poll of a silence: a pause can turn into a stall (a player joins and the
         // first tick hangs), and a stall is never taken back for a pause once it is reported.
-        String pause = reported ? null : IdlePause.reason(serverStack());
+        String pause = reported ? null : idleReason();
         if (pause != null) {
+            notIdlePolls = 0;
             if (!idle) {
                 idle = true;
                 Mcmcp.LOGGER.info("MCMCP: the server is not ticking on purpose (" + pause + "). Calls that change the "
@@ -169,9 +183,14 @@ public final class ServerWatchdog {
             ServerLoad.idle(pause, silent);
             return;
         }
+        if (idle && !reported && ++notIdlePolls < POLLS_TO_TURN_PAUSE_INTO_STALL) {
+            // Most likely a poll that caught the paused loop's empty tick; idle stands until it repeats.
+            return;
+        }
         if (!reported) {
             reported = true;
             idle = false;
+            notIdlePolls = 0;
             ServerLoad.idle(null, 0L);
             String file = writeDump(silent);
             ServerLoad.stallDumped(file);
@@ -184,10 +203,20 @@ public final class ServerWatchdog {
         ServerLoad.stalled(true, silent);
     }
 
+    /**
+     * Why the silence is a deliberate pause, or null when it is not. Runs on every poll of a silence,
+     * which for an empty paused server means once a second for hours. A declared pause is taken at its
+     * word without looking at any stack. Otherwise only the server thread's frames are read, never its
+     * lock details: asking for owned synchronizers costs a stop-the-world walk of the whole heap, which
+     * kept the VM Thread at ~95% of a core on an empty 24 GB server (#170).
+     */
     @Nullable
-    private static StackTraceElement[] serverStack() {
-        ThreadInfo info = GameThreads.snapshot(GameThreads.find(GameThreads.SERVER));
-        return info == null || !info.getThreadName().equals(GameThreads.SERVER) ? null : info.getStackTrace();
+    private static String idleReason() {
+        if (IdlePause.declared() != null) {
+            return IdlePause.reason(null);
+        }
+        ThreadInfo info = GameThreads.stackOnly(GameThreads.find(GameThreads.SERVER));
+        return IdlePause.reason(info == null || !info.getThreadName().equals(GameThreads.SERVER) ? null : info.getStackTrace());
     }
 
     /**

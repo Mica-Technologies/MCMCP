@@ -42,7 +42,23 @@ public final class IdlePause {
      * .getMethod("declare", String.class).invoke(null, "LDFX pauser")}.
      */
     public static void declare(@Nullable String pausedBy) {
+        if (pausedBy == null && declared != null) {
+            resumedAtNanos = System.nanoTime();
+            resumed = true;
+        }
         declared = pausedBy;
+    }
+
+    private static volatile long resumedAtNanos;
+    private static volatile boolean resumed;
+
+    /**
+     * When the last declared pause ended, by {@link System#nanoTime()}, or {@code fallback} if none
+     * has. A rate measured over a window reaching back into a pause would count the pause as missing
+     * ticks, so such a window starts here at the earliest.
+     */
+    public static long resumedAtNanos(long fallback) {
+        return resumed ? resumedAtNanos : fallback;
     }
 
     @Nullable

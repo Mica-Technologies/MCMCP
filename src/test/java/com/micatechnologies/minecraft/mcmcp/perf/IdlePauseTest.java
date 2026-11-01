@@ -72,4 +72,26 @@ class IdlePauseTest {
 
         assertEquals("paused by LDFX pauser", IdlePause.reason(null));
     }
+
+    /** The real TPS window starts at the end of a pause, so the pause is not counted as missing ticks. */
+    @Test
+    void theEndOfADeclaredPauseIsRemembered() {
+        long before = System.nanoTime();
+        IdlePause.declare("LDFX pauser");
+        IdlePause.declare(null);
+        long after = System.nanoTime();
+
+        long resumed = IdlePause.resumedAtNanos(Long.MIN_VALUE);
+        assertTrue(resumed - before >= 0L && after - resumed >= 0L, "resumed between the two clock reads");
+        assertNull(IdlePause.declared());
+    }
+
+    @Test
+    void clearingWithNoPauseDeclaredIsNotAResume() {
+        long marker = IdlePause.resumedAtNanos(42L);
+        IdlePause.declare(null);
+        IdlePause.declare(null);
+
+        assertEquals(marker, IdlePause.resumedAtNanos(42L));
+    }
 }

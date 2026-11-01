@@ -63,10 +63,27 @@ public final class GameThreads {
     }
 
     /**
+     * The thread's state and whole stack, without lock details, or null if no live thread has that
+     * id. Cheap enough to call every second, unlike {@link #snapshot}.
+     */
+    @Nullable
+    public static ThreadInfo stackOnly(long threadId) {
+        if (threadId < 0L) {
+            return null;
+        }
+        return ManagementFactory.getThreadMXBean().getThreadInfo(threadId, Integer.MAX_VALUE);
+    }
+
+    /**
      * The thread's state, whole stack and lock details, or null if no live thread has that id.
      *
      * <p>Asks for one thread only. Lock owners are included because the question a stuck thread
      * raises is almost always "waiting on whom".
+     *
+     * <p><b>Expensive: for one-off dumps only, never on a timer.</b> Asking for owned synchronizers
+     * makes HotSpot walk the entire heap while every thread is stopped, whichever thread is asked
+     * about: about 250 ms on an 8 GB heap and about a second on 24 GB (#170). Use
+     * {@link #stackOnly} for anything that polls.
      */
     @Nullable
     public static ThreadInfo snapshot(long threadId) {
