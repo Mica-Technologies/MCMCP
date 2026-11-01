@@ -2255,6 +2255,10 @@ answer is worth most.
 The usual first call. Position, orientation, health, hunger, held item, block underfoot, biome, world
 time and weather, what the crosshair is on, and render distance.
 
+`usingItem` appears while the player is using an item — a drawn bow, a raised shield, food being
+eaten, a mod's channelled ability — with the `hand`, the `item` and how many `ticks` it has been in
+use. It is how a `client_key` `hold` is observed.
+
 `window` says whether the client is running at a rate an agent can rely on: `focused`, the measured
 `fps`, the `frameLimit`, whether MCMCP is keeping the client awake (`keepAwake`, and
 `keepAwakeReplacedLimit` when it is overriding a lower limit), and `throttled`. A throttled client
@@ -2444,6 +2448,14 @@ window.
     command", which reads exactly like the mod having failed to register it. Mods that rewrite or
     cancel chat through `ClientChatEvent` were bypassed for the same reason.
 
+!!! warning "Hidden chat sends nothing"
+
+    With `chat_visibility` set to `hidden`, the server drops every chat message and command the
+    player sends, and drops its own "cannot send" reply too. So `client_send_chat` and
+    `client_run_commands` refuse while chat is hidden, rather than report `no_reply` for a command
+    that never ran. Client-side commands still run. To keep chat out of a screenshot, set
+    `chat_opacity` to 0, or take the shot with `from`.
+
 #### `client_run_commands`
 
 :material-alert: Destructive · Requires `permissions.allowChat` and `permissions.allowCommands` ·
@@ -2615,7 +2627,7 @@ Returns the **distance actually travelled**, which is zero if something was in t
 
 #### `client_key`
 
-Requires `permissions.allowPlayerControl` · `key`, `keys` or `bindings`, optional `ticks`, `raw`, `rawKeys`, `listBindings`, `filter`
+Requires `permissions.allowPlayerControl` · `key`, `keys` or `bindings`, optional `ticks`, `raw`, `rawKeys`, `listBindings`, `filter`, `hold`, `release`
 
 The general-purpose input tool. Named bindings only: `forward`, `back`, `left`, `right`, `jump`,
 `sneak`, `sprint`, `attack`, `use`, `drop`, `inventory`, `pickBlock`, `swapHands`.
@@ -2646,6 +2658,15 @@ with `keys`, and state keys lead it by a tick as they do an action. The reply li
 `pressedRead` the bindings something called `isPressed()` on during the hold; a press nobody read is
 cleared at release so it cannot fire later. `listBindings: true` lists every id as
 `[id, category, key]`, narrowed by `filter`.
+
+**Holding while you look.** Calls to one instance run one after another, so a hold that returns at
+its release can never be observed: a raised shield's barrier, a drawn bow or a channelled beam was
+gone by the time a screenshot ran. `hold: true` presses the keys (any of the forms above) and returns
+a tick later with them still down. They let go when `ticks` run out (default for a hold: the
+config's `maxInputTicks`, which is also the most, so a crashed agent cannot leave a key stuck), at
+`client_key {release: true}`, on leaving the world, and on an emergency stop. `release` lets go of
+only what `hold` calls left down. In `client_sequence`: `key {use, hold}`, then `screenshot` and
+`nearby_entities` steps, then `key {release}`.
 
 #### `client_interact`
 
@@ -2825,7 +2846,7 @@ when the player lands.
 #### `client_screenshot`
 
 Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
-`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `settle_ms`, `bringPlayer`, `bringWaitSeconds`, `burst`, `crop`, `views`
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `hideHud`, `settle_ms`, `bringPlayer`, `bringWaitSeconds`, `burst`, `crop`, `views`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
 
@@ -2858,14 +2879,19 @@ beside the full frame as `<name>-crop.png` and returned as `path`, at full resol
 inline or from the file, so the part under test costs a fraction of the frame and loses nothing.
 
 **A view without moving the player.** `from: [x, y, z]` renders the frame from that eye position,
-aimed at `look_at: [x, y, z]` or by `yaw`/`pitch`, without the HUD or hand. Nothing changes on the
-server, so other players see nothing. The client can only draw chunks it holds, so the camera must be
+aimed at `look_at: [x, y, z]` or by `yaw`/`pitch`, without the HUD, hand, chat, open screen or
+MCMCP's banners. Nothing changes on the server, so other players see nothing. The client can only draw chunks it holds, so the camera must be
 within its render distance. A position outside it is refused. The tool waits up to `settle_ms`
 (default 5000) for the chunk meshes around the new viewpoint to be built. `view.meshesSettled` in
 the result says whether they were. Settled means the client holds the chunks within two of the
 camera's and its build queue has stayed empty across frames after they arrived; an empty queue alone
 is not enough, since chunks still on their way from the server are not queued yet. When some never
 arrived, `view.chunksMissingAtCamera` says how many.
+
+`hideHud: true` does the same for an ordinary shot from the player's eyes, as F1 does. Setting
+`hideGUI` alone is not enough: vanilla still draws the whole in-game overlay, chat included, whenever
+a screen is open. So for the capture the overlay and the open screen's drawing are cancelled outright,
+and put back with everything else before the call returns.
 
 A frame that comes out one dark colour carries a `warning`, in its text and structured result: it is
 almost never the scene. The file is kept; check it before trusting it.
@@ -3240,7 +3266,7 @@ out at its own size, as LDIC's full-screen inventories are, reads the mouse with
 
 #### `client_gui_click`
 
-Requires `permissions.allowPlayerControl` · optional `label`, `index`, `mode`
+Requires `permissions.allowPlayerControl` · optional `label`, `index`, `mode`, `waitForChange`
 
 Click a button. `label` matches case-insensitively — exact first, then a unique substring, so
 "Game Mode" finds "Game Mode: Survival". An ambiguous substring is an error rather than a
@@ -3255,6 +3281,13 @@ at 0.9 about the centre, and its RESET button ignored every click at its stored 
 busy, so it is not the default.
 
 Reports the screen before and after, whether it changed, and `via`: the path the click took.
+
+**A button that waits on the server.** Respawn sends a packet, and the death screen closes only when
+the server's answer arrives, a tick or more later. So `screenChanged: false` straight after the click
+read as a failed respawn. `waitForChange: <ms>` (up to 5000) waits for the screen to change and ends
+as soon as it does; `waitedMs` says how long it took. It defaults to 1000 on the death, connecting
+and terrain screens and 0 elsewhere. A reply where the screen did not change carries a `note` saying
+it is as of that moment. `client_gui_click_at` takes the same argument.
 
 #### `client_gui_text`
 
@@ -3302,7 +3335,7 @@ enabled or disabled.
 
 #### `client_gui_click_at`
 
-Requires `permissions.allowPlayerControl` · `x`, `y` required · optional `space`, `button`
+Requires `permissions.allowPlayerControl` · `x`, `y` required · optional `space`, `button`, `waitForChange`, `hover`, `holdMs`
 
 Click a coordinate rather than a named widget.
 
@@ -3354,6 +3387,60 @@ and handled it itself (LDIC's themed advancement tabs do), so the screen never s
     Forge adds two more steps around it: `handleInput()` posts `MouseInputEvent.Pre`, skipping the
     screen when it is cancelled, and `MouseInputEvent.Post` after it. Mods that skin vanilla screens
     handle clicks there, so a click that called `handleMouseInput()` directly missed them too.
+
+**Hovering without a click.** `hover: true` moves the cursor to the point over the same frames and
+clicks nothing. The cursor is then held there for `holdMs` (default 5000, up to 30000), written back
+over every poll of the real mouse, so a tooltip drawn under it is still up when the next call takes a
+screenshot. Any later click, scroll, drag or hover ends the hold. On a container screen the reply has
+`hoveredSlot`: the slot number, its item, and the tooltip `lines`, as `client_item_tooltip` reads
+them. `client_gui_state` reports the same `hoveredSlot` whenever the cursor is over one.
+
+#### `client_gui_scroll`
+
+Requires `permissions.allowPlayerControl` · `amount` or `toText` · optional `x`, `y`, `space`
+
+Scroll a list. Clicks could select rows in a scrolling list, but nothing could scroll one: `GuiSlot`
+scrolls only on the wheel or a drag of its bar, and ignores keys, so a Controls-screen category below
+the first page could not be reached.
+
+`amount` is wheel notches, -100 to 100; positive scrolls up, as a real wheel turned away does. Each
+notch is one wheel event (`Mouse.getEventDWheel()`), delivered over frames through the same route as
+a click, after a frame with the cursor at `x`/`y` (default: the middle of the screen). Lists scroll
+only while the cursor is over them, and a vanilla list moves half a row a notch. `lists` in the reply
+gives each vanilla list's `scrolled` and `maxScroll`, and the text says whether one moved.
+`wheelCancelled` counts notches a mod took in `MouseInputEvent.Pre`.
+
+`toText` instead finds the row containing that text (case-insensitive; an exact match wins) in a
+vanilla-style list (`GuiListExtended`: Controls, the world list, resource packs, and mod lists built
+on it). A row's text is read from its own fields: its strings, a key binding's name and category, a
+button's label. The list is scrolled so the row sits a third of the way down its view, and the reply
+gives `index`, `text`, `rowX`, `rowY` and `rowHeight` in GUI coordinates, ready for
+`client_gui_click_at` with `space: "gui"`. A screen with no such list is refused with a pointer to
+`amount`.
+
+#### `client_gui_drag`
+
+Requires `permissions.allowPlayerControl` · `from`, `to` required · optional `space`, `button`, `steps`
+
+Press at `from: [x, y]`, move to `to: [x, y]` over `steps` frames (default 10, up to 60) with the
+button held, and release there: a scrollbar, a slider, or a drag-and-drop. Each move is a motion event
+through the screen's input route (vanilla turns it into `mouseClickMove`) and a frame drawn with
+LWJGL's button down, which is what `GuiSlot`'s scrollbar follows while it draws.
+
+#### `client_item_tooltip`
+
+:material-eye: Read-only · optional `slot`, `containerSlot`, `shift`, `advanced`, `formatted`
+
+The tooltip lines of an item the player has, as `ItemStack.getTooltip` returns them once Forge's
+`ItemTooltipEvent` has run, so every line a mod adds is there. Needs no open screen. `slot` is
+`mainhand` (default), `offhand`, `hovered` (the slot under the cursor on an open container screen) or
+an inventory index (0-8 hotbar, 9-35 main, 36-39 armour, 40 offhand); `containerSlot` is a slot
+number in the open container instead.
+
+`shift: true` holds Shift where LWJGL reports it for the call, which is what
+`GuiScreen.isShiftKeyDown()` reads, so "hold Shift for more" lines can be checked. `advanced` is the
+F3+H view and defaults to the game's setting. `lines` are plain text; `formatted: true` adds them
+with their colour codes.
 
 #### `client_gui_key`
 
@@ -3438,7 +3525,7 @@ Like `client_view`, a change lasts until the game restarts. Pass `persist: true`
 
 #### `client_view`
 
-Requires `permissions.allowScreenshots` · optional `hideHud`, `perspective`, `pauseOnLostFocus`
+Requires `permissions.allowScreenshots` · optional `hideHud`, `perspective`, `pauseOnLostFocus`, `grabInputFocus`, `windowSize`, `dismissTutorial`
 
 F1, F5, and the setting that makes unattended work possible.
 
@@ -3450,6 +3537,17 @@ unattended session is unusable: the pause menu reopens faster than `client_gui_c
 and it renders over every screenshot. The call also closes the menu if one is already open. It is a
 runtime override and is deliberately not saved to `options.txt` — it disables a safety behaviour on
 somebody's real client, so it resets on restart.
+
+`windowSize: [width, height]` resizes the window's client area, from 320x240 up to 7680 a side, so a
+fresh dev client stuck at 854x480 can shoot at 1920x1080 without touching the window from outside. It
+sets a new LWJGL display mode and then runs `Minecraft.resize`, as leaving fullscreen does, which
+re-lays out the open screen and rebuilds the framebuffer screenshots read. The reply's
+`displayWidth`/`displayHeight` are what the game now draws at. Refused in fullscreen.
+`options.txt`'s `overrideWidth`/`overrideHeight` set the size at startup instead.
+
+`dismissTutorial: true` ends the first-run tutorial and clears the toasts on screen. "Look around"
+otherwise stays over the top-right of every frame until the real mouse moves, which `client_look`
+does not count as.
 
 ### Timing
 

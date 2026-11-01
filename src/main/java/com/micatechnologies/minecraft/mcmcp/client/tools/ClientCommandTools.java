@@ -122,6 +122,16 @@ public final class ClientCommandTools {
                 final boolean stopOnError = context.getBoolean("stop_on_error", false);
                 final boolean checkLoaded = context.getBoolean("check_loaded", false);
                 final boolean allResults = context.getBoolean("all_results", false);
+                // Refused whole, not command by command: a batch where every entry says 'refused'
+                // still reads as a successful call inside client_sequence (#181).
+                if (ClientInputTools.chatHidden()) {
+                    for (String command : commands) {
+                        if (ClientInputTools.CHAT_HIDDEN.equals(
+                            ClientInputTools.chatRefusal(command.trim()))) {
+                            return ToolResult.error(ClientInputTools.CHAT_HIDDEN);
+                        }
+                    }
+                }
 
                 return ToolResult.structured(run(context, commands, delayMillis, replyTimeout,
                     stopOnError, checkLoaded, allResults));

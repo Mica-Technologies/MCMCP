@@ -13,6 +13,8 @@ import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.EnumHandSide;
 import net.minecraft.world.World;
+import net.minecraftforge.client.event.GuiScreenEvent;
+import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.ObfuscationReflectionHelper;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -83,9 +85,11 @@ public final class ClientCamera {
      * @param position   eye position for a detached camera, or null to keep the player's view
      * @param fov        field of view in degrees, or NaN to keep the player's
      * @param fullbright whether to light everything fully
+     * @param hideHud    whether to keep the HUD, chat, overlays and any open screen out of the
+     *                   frame; always so for a detached camera
      */
     public static void apply(@Nullable double[] position, float yaw, float pitch, float fov,
-                             boolean fullbright) {
+                             boolean fullbright, boolean hideHud) {
         restore();
         Minecraft mc = Minecraft.getMinecraft();
         Saved previous = new Saved();
@@ -110,7 +114,10 @@ public final class ClientCamera {
             // their hand and HUD do not belong in it, and third person would put the camera
             // behind the stand-in rather than at the point asked for.
             mc.gameSettings.thirdPersonView = 0;
+        }
+        if (position != null || hideHud) {
             mc.gameSettings.hideGUI = true;
+            previous.hidingHud = true;
         }
         if (!Float.isNaN(fov)) {
             mc.gameSettings.fovSetting = fov;
@@ -222,6 +229,8 @@ public final class ClientCamera {
         int thirdPersonView;
         boolean hideGui;
         boolean addedNightVision;
+        /** Whether the overlay and the open screen are being kept out of the frame. */
+        boolean hidingHud;
         long appliedAt;
     }
 
@@ -262,8 +271,35 @@ public final class ClientCamera {
         }
     }
 
+    /** Whether an override is keeping the HUD and any open screen out of the frame. */
+    private static boolean hidingHud() {
+        Saved current = saved;
+        return current != null && current.hidingHud;
+    }
+
     /** Nested so a second register() cannot put the statics on the bus twice. */
     public static class Events {
+
+        /**
+         * {@code hideGUI} alone was not enough (#179): vanilla still draws the whole in-game overlay
+         * whenever a screen is open ({@code EntityRenderer}: {@code !hideGUI || currentScreen != null}),
+         * so the chat history, the input-lock banner and the F3 text all landed in a 'from' view. The
+         * overlay is cancelled whole here, which takes chat and everything drawn on its Post with it.
+         */
+        @SubscribeEvent
+        public void onRenderOverlay(RenderGameOverlayEvent.Pre event) {
+            if (event.getType() == RenderGameOverlayEvent.ElementType.ALL && hidingHud()) {
+                event.setCanceled(true);
+            }
+        }
+
+        /** The open screen itself, drawn after the overlay; its default background dims the frame. */
+        @SubscribeEvent
+        public void onDrawScreen(GuiScreenEvent.DrawScreenEvent.Pre event) {
+            if (hidingHud()) {
+                event.setCanceled(true);
+            }
+        }
 
         @SubscribeEvent
         public void onClientTick(TickEvent.ClientTickEvent event) {

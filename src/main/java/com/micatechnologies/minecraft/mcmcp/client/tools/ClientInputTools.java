@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -34,7 +35,9 @@ import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
+import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.settings.KeyBinding;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.math.MathHelper;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.event.ForgeEventFactory;
@@ -222,7 +225,8 @@ public final class ClientInputTools {
             }
             codes.put(upper, code);
         }
-        final int ticks = context.getBoundedInt("ticks", 1, 1, McmcpConfig.getMaxInputTicks());
+        final int ticks = holdTicks(context);
+        final Object tag = holdTag(context);
         final List<String> bindingList = new ArrayList<>(bindingNames);
         // Resolved first and refused as a plain tool error, so nothing goes down for half a combination.
         String refusal = context.onGameThread(new Callable<String>() {
@@ -250,13 +254,18 @@ public final class ClientInputTools {
         CompletableFuture<Void> hold = context.onGameThread(new Callable<CompletableFuture<Void>>() {
             @Override
             public CompletableFuture<Void> call() {
-                List<CompletableFuture<Void>> holds = new ArrayList<>(codes.size());
-                for (int code : new LinkedHashSet<>(codes.values())) {
-                    holds.add(ClientInputScheduler.holdRaw(code, 0, ticks));
-                }
-                return CompletableFuture.allOf(holds.toArray(new CompletableFuture[0]));
+                return ClientInputScheduler.tagged(tag, () -> {
+                    List<CompletableFuture<Void>> holds = new ArrayList<>(codes.size());
+                    for (int code : new LinkedHashSet<>(codes.values())) {
+                        holds.add(ClientInputScheduler.holdRaw(code, 0, ticks));
+                    }
+                    return CompletableFuture.allOf(holds.toArray(new CompletableFuture[0]));
+                });
             }
         });
+        if (tag != null) {
+            return openHold(context, "raw " + String.join(" + ", codes.keySet()), ticks);
+        }
         awaitHold(hold, ticks);
         List<String> unseen = context.onGameThread(new Callable<List<String>>() {
             @Override
@@ -325,7 +334,8 @@ public final class ClientInputTools {
                     + String.join(", ", KEY_NAMES) + ".");
             }
         }
-        final int ticks = context.getBoundedInt("ticks", 1, 1, McmcpConfig.getMaxInputTicks());
+        final int ticks = holdTicks(context);
+        final Object tag = holdTag(context);
         final int lead = keys.isEmpty() ? 0 : comboLeadTicks(withAction(keys));
         final Map<String, KeyBinding> resolved = new LinkedHashMap<>();
         String refusal = context.onGameThread(new Callable<String>() {
@@ -360,18 +370,24 @@ public final class ClientInputTools {
         CompletableFuture<Void> hold = context.onGameThread(new Callable<CompletableFuture<Void>>() {
             @Override
             public CompletableFuture<Void> call() {
-                List<CompletableFuture<Void>> holds = new ArrayList<>();
-                if (!keys.isEmpty()) {
-                    // Held one tick longer than asked when bindings lead in, so they spend their
-                    // whole hold with the state keys down.
-                    holds.add(holdTogether(keys, ticks + (lead > 0 && comboLeadTicks(keys) == 0 ? lead : 0)));
-                }
-                for (KeyBinding binding : resolved.values()) {
-                    holds.add(ClientInputScheduler.holdDirect(binding, lead, ticks));
-                }
-                return CompletableFuture.allOf(holds.toArray(new CompletableFuture[0]));
+                return ClientInputScheduler.tagged(tag, () -> {
+                    List<CompletableFuture<Void>> holds = new ArrayList<>();
+                    if (!keys.isEmpty()) {
+                        // Held one tick longer than asked when bindings lead in, so they spend their
+                        // whole hold with the state keys down.
+                        holds.add(holdTogether(keys, ticks + (lead > 0 && comboLeadTicks(keys) == 0 ? lead : 0)));
+                    }
+                    for (KeyBinding binding : resolved.values()) {
+                        holds.add(ClientInputScheduler.holdDirect(binding, lead, ticks));
+                    }
+                    return CompletableFuture.allOf(holds.toArray(new CompletableFuture[0]));
+                });
             }
         });
+        if (tag != null) {
+            return openHold(context, String.join(" + ", ids) + (keys.isEmpty() ? ""
+                : " with '" + String.join("' + '", keys) + "'"), ticks);
+        }
         awaitHold(hold, ticks + lead + 1);
         JsonObject result = context.onGameThread(new Callable<JsonObject>() {
             @Override
@@ -421,6 +437,45 @@ public final class ClientInputTools {
      * long, and failing a tool because the game hitched would be wrong. The slack is bounded so a
      * genuinely stalled client still returns an error rather than holding an HTTP worker forever.
      */
+    /**
+     * The tag on holds a {@code hold: true} call leaves down (#171), so {@code release: true} lets go
+     * of those and never of a hold another call is still waiting on.
+     */
+    private static final Object OPEN_HOLD = new Object();
+
+    /** {@link #OPEN_HOLD} for a {@code hold: true} call, else null. */
+    @Nullable
+    private static Object holdTag(ToolContext context) {
+        return context.getBoolean("hold", false) ? OPEN_HOLD : null;
+    }
+
+    /**
+     * Ticks to hold for. An open hold defaults to the longest allowed, since its point is to stay
+     * down until released; the cap is what stops a crashed agent leaving a key stuck.
+     */
+    private static int holdTicks(ToolContext context) {
+        int max = McmcpConfig.getMaxInputTicks();
+        return context.getBoundedInt("ticks", context.getBoolean("hold", false) ? max : 1, 1, max);
+    }
+
+    /**
+     * The reply to a {@code hold: true} call, which returns as soon as the keys are down. Calls made
+     * to this instance run one after another, so a hold that waited for its own release could never
+     * be observed: the barrier a held shield projects was gone by the time a screenshot ran.
+     */
+    private static ToolResult openHold(ToolContext context, String what, int ticks) throws Exception {
+        // One tick, so the first observation sees the keys already acted on.
+        ClientFrameClock.await(0, 1, 1000L);
+        int held = context.onGameThread(() -> ClientInputScheduler.countTagged(OPEN_HOLD));
+        JsonObject json = new JsonObject();
+        json.addProperty("holding", true);
+        json.addProperty("ticks", ticks);
+        json.addProperty("heldKeys", held);
+        return ToolResult.text("Holding " + what + " for up to " + ticks + " tick(s), "
+            + String.format(Locale.ROOT, "%.1f", ticks / 20.0D) + " s. Observe now; client_key "
+            + "{release: true} lets go sooner.").withStructured(json);
+    }
+
     private static void awaitHold(CompletableFuture<Void> future, int ticks) throws Exception {
         future.get(ticks * 50L + 2000L, TimeUnit.MILLISECONDS);
     }
@@ -514,7 +569,42 @@ public final class ClientInputTools {
                 + ". Longer messages are rejected by the server, not truncated."
                 + (isCommand ? " Run a longer command with client_command_block_run." : "");
         }
+        if (chatHidden() && !(isCommand && isClientCommand(message))) {
+            return CHAT_HIDDEN;
+        }
         return null;
+    }
+
+    /**
+     * Why nothing is sent while chat visibility is hidden (#181). The server, not the client, does the
+     * refusing: {@code NetHandlerPlayServer.processChatMessage} drops every chat packet, commands
+     * included, from a player who reported HIDDEN, and answers with a "cannot send" line that its own
+     * {@code sendPacket} then drops for the same reason. So the command vanished without a trace and
+     * the tools reported 'no_reply' or 'ok' for something that never ran.
+     */
+    static final String CHAT_HIDDEN = "Chat visibility is hidden, so the server drops every chat "
+        + "message and command this player sends, and its replies too. Nothing was sent. Set "
+        + "client_options {set: {chat_visibility: \"shown\"}} (or \"commands\"); to keep chat out of "
+        + "screenshots, set chat_opacity to 0 instead, or take the shot with 'from', which hides it.";
+
+    /**
+     * Whether the player's chat visibility is hidden. One enum field the client thread writes when an
+     * option changes; read here from a worker, where a stale read costs one call at most.
+     */
+    static boolean chatHidden() {
+        GameSettings settings = Minecraft.getMinecraft().gameSettings;
+        return settings != null && settings.chatVisibility == EntityPlayer.EnumChatVisibility.HIDDEN;
+    }
+
+    /**
+     * Whether {@code command} names a command registered with Forge's client command handler. Those run
+     * on the client and never reach the server, so hidden chat does not stop them.
+     */
+    private static boolean isClientCommand(String command) {
+        String body = command.substring(1).trim();
+        int space = body.indexOf(' ');
+        String name = (space < 0 ? body : body.substring(0, space)).toLowerCase(Locale.ROOT);
+        return !name.isEmpty() && ClientCommandHandler.instance.getCommands().containsKey(name);
     }
 
     /**
@@ -843,12 +933,24 @@ public final class ClientInputTools {
                 .bool("raw", "Hold the keys at the LWJGL level instead of pressing keybindings.")
                 .array("rawKeys", "LWJGL key names to hold raw, such as W, SPACE, LSHIFT, NUMPAD8 or F; "
                     + "implies raw. At most " + MAX_RAW_KEYS + ".", Json.obj("type", "string"))
+                .bool("hold", "Press and return at once, leaving the keys down so other calls can observe "
+                    + "the game while they are held. They let go after 'ticks' (default and most: the "
+                    + "config's maxInputTicks), at client_key release, or on leaving the world.")
+                .bool("release", "Let go of every key an earlier 'hold' call left down. Takes no other "
+                    + "argument.")
                 .build())
             .clientOnly()
             .handler(context -> {
                 if (!McmcpConfig.isAllowPlayerControl()) {
                     return ToolResult.error("Player control is disabled by "
                         + "permissions.allowPlayerControl in the MCMCP config.");
+                }
+                if (context.getBoolean("release", false)) {
+                    int released = context.onGameThread(() -> ClientInputScheduler.releaseTagged(OPEN_HOLD));
+                    JsonObject json = new JsonObject();
+                    json.addProperty("released", released);
+                    return ToolResult.text(released == 0 ? "No key was left held by a 'hold' call."
+                        : "Released " + released + " held key(s).").withStructured(json);
                 }
 
                 // Both spellings are merged rather than one rejected: a model that sends key and keys
@@ -884,16 +986,20 @@ public final class ClientInputTools {
                     }
                 }
                 final List<String> keys = new ArrayList<>(requested);
-                final int ticks = context.getBoundedInt("ticks", 1, 1, McmcpConfig.getMaxInputTicks());
+                final int ticks = holdTicks(context);
+                final Object tag = holdTag(context);
 
                 CompletableFuture<Void> hold = context.onGameThread(new Callable<CompletableFuture<Void>>() {
                     @Override
                     public CompletableFuture<Void> call() {
                         ClientStateTools.requireInWorld();
-                        return holdTogether(keys, ticks);
+                        return ClientInputScheduler.tagged(tag, () -> holdTogether(keys, ticks));
                     }
                 });
 
+                if (tag != null) {
+                    return openHold(context, "'" + String.join("' + '", keys) + "'", ticks);
+                }
                 awaitHold(hold, ticks + comboLeadTicks(keys));
                 // Same focus gate client_interact explains: only continuous attack is affected, so
                 // only attack is worth warning about. Everything else applies regardless.

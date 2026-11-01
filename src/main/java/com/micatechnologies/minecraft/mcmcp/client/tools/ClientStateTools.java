@@ -15,6 +15,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.network.NetworkPlayerInfo;
 import net.minecraft.entity.Entity;
+import net.minecraft.util.EnumHand;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraftforge.fml.relauncher.Side;
@@ -130,6 +131,18 @@ public final class ClientStateTools {
                         json.add("standingOn", GameJson.block(world, GameJson.blockPosOf(mc.player).down()));
                         json.add("lookingAt", GameJson.rayTrace(world, mc.objectMouseOver));
                         json.addProperty("renderDistanceChunks", mc.gameSettings.renderDistanceChunks);
+                        // An item being used: a drawn bow, a raised shield, food being eaten, a mod's
+                        // channelled ability. What a client_key hold is observed by (#171).
+                        if (mc.player.isHandActive()) {
+                            JsonObject using = new JsonObject();
+                            using.addProperty("hand", mc.player.getActiveHand() == EnumHand.MAIN_HAND
+                                ? "mainhand" : "offhand");
+                            net.minecraft.util.ResourceLocation id =
+                                mc.player.getActiveItemStack().getItem().getRegistryName();
+                            using.addProperty("item", id == null ? "?" : id.toString());
+                            using.addProperty("ticks", mc.player.getItemInUseMaxCount());
+                            json.add("usingItem", using);
+                        }
                         json.add("window", windowState(mc));
                         return json;
                     }

@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.client.SyntheticMouse;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
@@ -14,10 +15,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -35,6 +38,7 @@ import net.minecraft.client.gui.GuiScreenOptionsSounds;
 import net.minecraft.client.gui.GuiVideoSettings;
 import net.minecraft.client.gui.GuiTextField;
 import net.minecraft.client.gui.ScaledResolution;
+import net.minecraft.client.tutorial.TutorialSteps;
 import net.minecraftforge.fml.client.FMLClientHandler;
 import net.minecraftforge.fml.client.GuiModList;
 import net.minecraftforge.fml.client.IModGuiFactory;
@@ -130,6 +134,8 @@ public final class ClientGuiTools {
         registerGuiWidgets();
         registerGuiClick();
         registerGuiClickAt();
+        registerGuiScroll();
+        registerGuiDrag();
         registerGuiKey();
         registerGuiText();
         registerGuiClose();
@@ -237,6 +243,12 @@ public final class ClientGuiTools {
         @Nullable
         CompletableFuture<SyntheticMouse.Outcome> future;
         String screenBefore;
+        /** How long to wait for the screen to change: the caller's waitForChange, or -1 for the default. */
+        long waitMillis = -1L;
+        /** How long the gesture may take to play out over frames before it is finished at once. */
+        long framesTimeoutMillis = CLICK_FRAMES_TIMEOUT_MILLIS;
+        /** Whether an unchanged screen is worth a note: so for a click, not for a scroll or hover. */
+        boolean expectChange = true;
     }
 
     /**
@@ -286,7 +298,7 @@ public final class ClientGuiTools {
         if (pending.future != null) {
             SyntheticMouse.Outcome outcome;
             try {
-                outcome = pending.future.get(CLICK_FRAMES_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+                outcome = pending.future.get(pending.framesTimeoutMillis, TimeUnit.MILLISECONDS);
             }
             catch (TimeoutException noFrames) {
                 // No frame drawn in time: finish what is left in one task, which is still right for
@@ -298,7 +310,7 @@ public final class ClientGuiTools {
                         return null;
                     }
                 });
-                outcome = pending.future.get(CLICK_FRAMES_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+                outcome = pending.future.get(pending.framesTimeoutMillis, TimeUnit.MILLISECONDS);
             }
             catch (ExecutionException failed) {
                 Throwable cause = failed.getCause();
@@ -306,11 +318,14 @@ public final class ClientGuiTools {
             }
             pending.json.addProperty("via", outcome.via);
             pending.json.addProperty("frames", outcome.frames);
+            if (outcome.wheelCancelled > 0) {
+                pending.json.addProperty("wheelCancelled", outcome.wheelCancelled);
+            }
             if (outcome.cancelledBy != null) {
                 pending.json.addProperty("cancelledBy", outcome.cancelledBy);
             }
         }
-        JsonObject result = context.onGameThread(new Callable<JsonObject>() {
+        Callable<JsonObject> describe = new Callable<JsonObject>() {
             @Override
             public JsonObject call() {
                 GuiScreen after = Minecraft.getMinecraft().currentScreen;
@@ -320,12 +335,49 @@ public final class ClientGuiTools {
                     || !pending.screenBefore.equals(after.getClass().getSimpleName()));
                 return json;
             }
-        });
+        };
+        JsonObject result = context.onGameThread(describe);
+        // Some buttons only send a packet, and the screen changes when the server answers (#172):
+        // Respawn closed GuiGameOver a tick or more after the click, and the reply had already said
+        // nothing changed. Waited for here, ending the moment the screen changes.
+        long waitMillis = pending.waitMillis >= 0 ? pending.waitMillis
+            : SERVER_ANSWERED_SCREENS.contains(pending.screenBefore) ? SERVER_ANSWER_WAIT_MILLIS : 0L;
+        long started = System.currentTimeMillis();
+        while (!result.get("screenChanged").getAsBoolean()
+            && System.currentTimeMillis() - started < waitMillis) {
+            context.getCancellation().throwIfCancelled();
+            Thread.sleep(25L);
+            result = context.onGameThread(describe);
+        }
+        if (waitMillis > 0) {
+            result.addProperty("waitedMs", System.currentTimeMillis() - started);
+        }
+        if (pending.expectChange && !result.get("screenChanged").getAsBoolean()) {
+            result.addProperty("note", "screenChanged is as of " + (waitMillis > 0 ? waitMillis
+                + " ms" : "the moment") + " after the click. A button that sends a packet changes "
+                + "the screen only when the server answers; check client_gui_state, or pass "
+                + "waitForChange, before treating the click as failed.");
+        }
         for (Map.Entry<String, JsonElement> entry : pending.json.entrySet()) {
             result.add(entry.getKey(), entry.getValue());
         }
         return result;
     }
+
+    /** Screens whose buttons act through the server, so a click is waited on by default. */
+    private static final Set<String> SERVER_ANSWERED_SCREENS = new HashSet<>(Arrays.asList(
+        "GuiGameOver", "GuiDownloadTerrain", "GuiConnecting", "GuiScreenWorking"));
+
+    /** How long a click on one of those waits for the screen to change, when not told otherwise. */
+    private static final long SERVER_ANSWER_WAIT_MILLIS = 1000L;
+
+    /** Most a caller may ask a click to wait for its screen to change. */
+    private static final int MAX_WAIT_FOR_CHANGE_MILLIS = 5000;
+
+    private static final String WAIT_FOR_CHANGE_DESCRIPTION = "Wait up to this many ms for the open "
+        + "screen to change before replying, ending as soon as it does. For buttons that only send a "
+        + "packet and change the screen when the server answers. Default 1000 on the death, "
+        + "connecting and terrain screens, 0 elsewhere.";
 
     /** A sentence for the reply when a mod took the press before the screen saw it, else "". */
     private static String cancelledNote(JsonObject result) {
@@ -789,6 +841,7 @@ public final class ClientGuiTools {
                 .enumeration("mode", "'click' (default) clicks the mouse at the button's stored "
                     + "centre. 'press' presses the button directly, for screens that draw scaled "
                     + "or moved.", "click", "press")
+                .integer("waitForChange", WAIT_FOR_CHANGE_DESCRIPTION, 0, MAX_WAIT_FOR_CHANGE_MILLIS)
                 .build())
             .clientOnly()
             .handler(context -> {
@@ -861,6 +914,8 @@ public final class ClientGuiTools {
                         return started;
                     }
                 });
+                pending.waitMillis = context.has("waitForChange")
+                    ? context.getBoundedInt("waitForChange", 0, 0, MAX_WAIT_FOR_CHANGE_MILLIS) : -1L;
                 JsonObject result = finishClick(context, pending);
 
                 return ToolResult.text("Clicked '" + result.get("clickedLabel").getAsString()
@@ -952,7 +1007,10 @@ public final class ClientGuiTools {
                 + "button is held for a frame, then released, through Forge's mouse events. So "
                 + "scrolling lists (the mod list, world list, Video Settings rows) and screens that "
                 + "poll the mouse can be clicked. 'cancelledBy' in the reply means a mod took the "
-                + "press in an event and handled it itself.")
+                + "press in an event and handled it itself.\n\n"
+                + "'hover': true moves the cursor there without clicking and holds it, so a "
+                + "tooltip is drawn for a screenshot and its lines come back as hoveredSlot. To scroll "
+                + "a list use client_gui_scroll; to drag a scrollbar or slider, client_gui_drag.")
             .schema(JsonSchema.object()
                 .integer("x", "Horizontal coordinate.")
                 .integer("y", "Vertical coordinate, measured from the top.")
@@ -961,6 +1019,12 @@ public final class ClientGuiTools {
                     + "client_gui_widgets reports button positions in, before any conversion a "
                     + "screen does itself.", "pixel", "gui")
                 .integer("button", "Mouse button: 0 left, 1 right, 2 middle. Defaults to 0.", 0, 2)
+                .integer("waitForChange", WAIT_FOR_CHANGE_DESCRIPTION, 0, MAX_WAIT_FOR_CHANGE_MILLIS)
+                .bool("hover", "Move the cursor there without clicking, and hold it there for holdMs so a "
+                    + "tooltip under it stays drawn for a screenshot. The reply has 'hoveredSlot' with "
+                    + "the slot's item and tooltip lines on a container screen. Default false.")
+                .integer("holdMs", "With hover: how long the cursor stays at the point afterwards. "
+                    + "Default 5000; any later click or hover ends it.", 0, MAX_HOVER_HOLD_MILLIS)
                 .required("x", "y")
                 .build())
             .clientOnly()
@@ -974,6 +1038,8 @@ public final class ClientGuiTools {
                 final int y = context.requireInt("y");
                 final String space = context.getString("space", "pixel");
                 final int mouseButton = context.getBoundedInt("button", 0, 0, 2);
+                final boolean hover = context.getBoolean("hover", false);
+                final long holdMillis = context.getBoundedInt("holdMs", 5000, 0, MAX_HOVER_HOLD_MILLIS);
 
                 final PendingClick pending = context.onGameThread(new Callable<PendingClick>() {
                     @Override
@@ -1000,11 +1066,41 @@ public final class ClientGuiTools {
                         started.json.addProperty("space", space);
                         started.json.addProperty("button", mouseButton);
                         addScreenSize(started.json, mc, screen);
-                        startClick(started, screen, point[0], point[1], mouseButton);
+                        if (hover) {
+                            started.screenBefore = screen.getClass().getSimpleName();
+                            started.future = SyntheticMouse.hover(point[0], point[1], holdMillis);
+                            if (started.future == null) {
+                                throw new IllegalStateException("LWJGL's mouse state cannot be driven "
+                                    + "in this game, so the cursor cannot be moved without a click.");
+                            }
+                            started.expectChange = false;
+                            started.waitMillis = 0L;
+                            started.json.remove("button");
+                        }
+                        else {
+                            startClick(started, screen, point[0], point[1], mouseButton);
+                        }
                         return started;
                     }
                 });
+
+                if (!hover) {
+                    pending.waitMillis = context.has("waitForChange")
+                        ? context.getBoundedInt("waitForChange", 0, 0, MAX_WAIT_FOR_CHANGE_MILLIS) : -1L;
+                }
                 JsonObject result = finishClick(context, pending);
+                if (hover) {
+                    JsonObject slot = context.onGameThread(() -> ClientTooltipTools.hoveredSlot(
+                        Minecraft.getMinecraft().currentScreen, false));
+                    if (slot != null) {
+                        result.add("hoveredSlot", slot);
+                    }
+                    result.addProperty("heldForMs", holdMillis);
+                    return ToolResult.text("Cursor at gui(" + result.get("clickedGuiX").getAsInt() + ", "
+                        + result.get("clickedGuiY").getAsInt() + "), held " + holdMillis + " ms; nothing "
+                        + "clicked." + (slot == null ? "" : " Over slot " + slot.get("slot") + ".")
+                        + cancelledNote(result)).withStructured(result);
+                }
 
                 return ToolResult.text("Clicked at gui(" + result.get("clickedGuiX").getAsInt() + ", "
                     + result.get("clickedGuiY").getAsInt() + "). Screen is now "
@@ -1012,6 +1108,224 @@ public final class ClientGuiTools {
                     .withStructured(result);
             })
             .build());
+    }
+
+    /** Longest a hover may hold the cursor after it returns. */
+    private static final int MAX_HOVER_HOLD_MILLIS = 30_000;
+
+    // ------------------------------------------------------------------
+    // Scrolling and dragging (#182)
+    // ------------------------------------------------------------------
+
+    /**
+     * Turns the mouse wheel over a point, or scrolls a vanilla list until a row is in view.
+     *
+     * <p>Clicks could select rows in a scrolling list (#166), but nothing could scroll one: GuiSlot
+     * scrolls only on the wheel or a drag of its bar, and ignores keys. A Controls-screen category
+     * below the first page was unreachable.
+     */
+    private static void registerGuiScroll() {
+        McpRegistry.registerTool(McpTool.named("client_gui_scroll")
+            .title("Scroll a GUI list")
+            .description("Turn the mouse wheel over a point on the open screen, or scroll a list until a "
+                + "row is in view.\n\n"
+                + "'amount' is wheel notches: positive scrolls up (toward the top), negative down; "
+                + "each is one real wheel event, delivered over frames through the screen's own input "
+                + "handling, so any list that scrolls on the wheel scrolls. A vanilla list moves half "
+                + "a row a notch. x/y say where the cursor is (default: the middle of the screen); "
+                + "lists only scroll while the cursor is over them.\n\n"
+                + "'toText' instead finds the row whose text contains it in a vanilla-style list "
+                + "(Controls, world list, resource packs, many mod lists) and scrolls it into view. "
+                + "The reply says the row's index and where it now is, in GUI coordinates, ready for "
+                + "client_gui_click_at with space 'gui'.")
+            .schema(JsonSchema.object()
+                .integer("amount", "Wheel notches, -" + SyntheticMouse.MAX_WHEEL_NOTCHES + " to "
+                    + SyntheticMouse.MAX_WHEEL_NOTCHES + "; positive scrolls up.",
+                    -SyntheticMouse.MAX_WHEEL_NOTCHES, SyntheticMouse.MAX_WHEEL_NOTCHES)
+                .string("toText", "Instead of amount: scroll a list until the row containing this "
+                    + "text (case-insensitive) is in view.")
+                .integer("x", "Cursor x for the wheel. Default the middle of the screen.")
+                .integer("y", "Cursor y for the wheel, from the top. Default the middle.")
+                .enumeration("space", "'pixel' (default) for screenshot pixels, 'gui' for GUI "
+                    + "coordinates.", "pixel", "gui")
+                .build())
+            .clientOnly()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("GUI control is disabled by permissions.allowPlayerControl "
+                        + "in the MCMCP config.");
+                }
+                final String toText = context.getString("toText", null);
+                if ((toText == null) == !context.has("amount")) {
+                    return ToolResult.error("Pass exactly one of 'amount' (wheel notches) or 'toText' "
+                        + "(a row to bring into view).");
+                }
+                if (toText != null) {
+                    if (toText.trim().isEmpty()) {
+                        return ToolResult.error("'toText' is empty.");
+                    }
+                    JsonObject found = context.onGameThread(() ->
+                        GuiLists.scrollToText(Minecraft.getMinecraft().currentScreen, toText.trim()));
+                    if (found.has("error")) {
+                        return ToolResult.error(found.get("error").getAsString());
+                    }
+                    // A frame, so the list is drawn at its new place before anyone screenshots it.
+                    com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock.await(2, 0, 1000L);
+                    return ToolResult.text("Scrolled '" + found.get("text").getAsString() + "' into view at "
+                        + "gui y " + found.get("rowY").getAsInt() + ".").withStructured(found);
+                }
+                final int amount = context.getBoundedInt("amount", 0,
+                    -SyntheticMouse.MAX_WHEEL_NOTCHES, SyntheticMouse.MAX_WHEEL_NOTCHES);
+                if (amount == 0) {
+                    return ToolResult.error("'amount' 0 scrolls nothing.");
+                }
+                final String space = context.getString("space", "pixel");
+                final Integer x = context.has("x") ? context.requireInt("x") : null;
+                final Integer y = context.has("y") ? context.requireInt("y") : null;
+                final PendingClick pending = context.onGameThread(() -> {
+                    Minecraft mc = Minecraft.getMinecraft();
+                    GuiScreen screen = requireScreen(mc);
+                    int[] point = gesturePoint(mc, screen, x, y, space);
+                    PendingClick started = gesture(mc, screen, point);
+                    started.future = SyntheticMouse.scroll(point[0], point[1], amount);
+                    requireDriven(started);
+                    started.json.addProperty("notches", amount);
+                    started.json.add("listsBefore", GuiLists.describe(screen));
+                    return started;
+                });
+                pending.framesTimeoutMillis = CLICK_FRAMES_TIMEOUT_MILLIS + Math.abs(amount) * 100L;
+                JsonObject result = finishClick(context, pending);
+                JsonArray after = context.onGameThread(() -> GuiLists.describe(
+                    Minecraft.getMinecraft().currentScreen));
+                result.add("lists", after);
+                boolean moved = !after.equals(result.get("listsBefore"));
+                result.remove("listsBefore");
+                return ToolResult.text("Turned the wheel " + Math.abs(amount) + " notch(es) "
+                    + (amount > 0 ? "up" : "down") + (after.size() == 0 ? "."
+                        : moved ? "; the list moved." : "; no vanilla list moved (the cursor may be "
+                            + "outside it, or it is already at that end).")
+                    + cancelledNote(result)).withStructured(result);
+            })
+            .build());
+    }
+
+    /** Presses at one point, moves with the button held, and releases at another. */
+    private static void registerGuiDrag() {
+        McpRegistry.registerTool(McpTool.named("client_gui_drag")
+            .title("Drag in a GUI")
+            .description("Press the mouse at 'from', move to 'to' with the button held over several "
+                + "frames, and release there: a scrollbar, a slider, or a drag-and-drop. Delivered "
+                + "like a person's drag, through the screen's own input handling and with LWJGL's "
+                + "button held, so lists that follow the cursor while they draw (GuiSlot's "
+                + "scrollbar) follow it.")
+            .schema(JsonSchema.object()
+                .array("from", "Start point [x, y].", Json.obj("type", "integer"))
+                .array("to", "End point [x, y].", Json.obj("type", "integer"))
+                .enumeration("space", "'pixel' (default) for screenshot pixels, 'gui' for GUI "
+                    + "coordinates.", "pixel", "gui")
+                .integer("button", "Mouse button: 0 left (default), 1 right, 2 middle.", 0, 2)
+                .integer("steps", "Frames the move is spread over. Default 10.", 1, 60)
+                .required("from", "to")
+                .build())
+            .clientOnly()
+            .handler(context -> {
+                if (!McmcpConfig.isAllowPlayerControl()) {
+                    return ToolResult.error("GUI control is disabled by permissions.allowPlayerControl "
+                        + "in the MCMCP config.");
+                }
+                final List<Integer> from = pair(context.getArguments(), "from");
+                final List<Integer> to = pair(context.getArguments(), "to");
+                if (from.size() != 2 || to.size() != 2) {
+                    return ToolResult.error("'from' and 'to' are each [x, y].");
+                }
+                final String space = context.getString("space", "pixel");
+                final int button = context.getBoundedInt("button", 0, 0, 2);
+                final int steps = context.getBoundedInt("steps", 10, 1, 60);
+                final PendingClick pending = context.onGameThread(() -> {
+                    Minecraft mc = Minecraft.getMinecraft();
+                    GuiScreen screen = requireScreen(mc);
+                    int[] start = gesturePoint(mc, screen, from.get(0), from.get(1), space);
+                    int[] end = gesturePoint(mc, screen, to.get(0), to.get(1), space);
+                    PendingClick started = gesture(mc, screen, start);
+                    started.future = SyntheticMouse.drag(start[0], start[1], end[0], end[1], button, steps);
+                    requireDriven(started);
+                    int[] endGui = SyntheticMouse.toGui(screen, end[0], end[1]);
+                    started.json.addProperty("toGuiX", endGui[0]);
+                    started.json.addProperty("toGuiY", endGui[1]);
+                    started.json.add("listsBefore", GuiLists.describe(screen));
+                    return started;
+                });
+                pending.framesTimeoutMillis = CLICK_FRAMES_TIMEOUT_MILLIS + steps * 100L;
+                JsonObject result = finishClick(context, pending);
+                JsonArray after = context.onGameThread(() -> GuiLists.describe(
+                    Minecraft.getMinecraft().currentScreen));
+                if (after.size() > 0) {
+                    result.add("lists", after);
+                }
+                result.remove("listsBefore");
+                return ToolResult.text("Dragged from gui(" + result.get("clickedGuiX").getAsInt() + ", "
+                    + result.get("clickedGuiY").getAsInt() + ") to gui(" + result.get("toGuiX").getAsInt()
+                    + ", " + result.get("toGuiY").getAsInt() + "). Screen is now "
+                    + result.get("screenName").getAsString() + "." + cancelledNote(result))
+                    .withStructured(result);
+            })
+            .build());
+    }
+
+    /** {@code [x, y]} from an argument as two whole numbers, or an empty list when it is not that. */
+    private static List<Integer> pair(JsonObject arguments, String name) {
+        List<Integer> values = new ArrayList<>();
+        JsonElement raw = arguments.get(name);
+        if (raw == null || !raw.isJsonArray() || raw.getAsJsonArray().size() != 2) {
+            return values;
+        }
+        for (JsonElement element : raw.getAsJsonArray()) {
+            try {
+                values.add((int) Math.round(element.getAsDouble()));
+            }
+            catch (RuntimeException notNumber) {
+                return new ArrayList<>();
+            }
+        }
+        return values;
+    }
+
+    private static GuiScreen requireScreen(Minecraft mc) {
+        if (mc.currentScreen == null) {
+            throw new IllegalStateException("No screen is open. Check client_gui_state first.");
+        }
+        return mc.currentScreen;
+    }
+
+    /** An LWJGL point from a caller's x/y in their space, or the middle of the screen when absent. */
+    private static int[] gesturePoint(Minecraft mc, GuiScreen screen, @Nullable Integer x,
+                                      @Nullable Integer y, String space) {
+        if ("gui".equals(space)) {
+            return SyntheticMouse.fromGui(screen, x == null ? screen.width / 2 : x,
+                y == null ? screen.height / 2 : y);
+        }
+        return SyntheticMouse.fromPixel(x == null ? mc.displayWidth / 2 : x,
+            y == null ? mc.displayHeight / 2 : y);
+    }
+
+    /** A pending gesture that reports where it started and never waits for a screen change. */
+    private static PendingClick gesture(Minecraft mc, GuiScreen screen, int[] point) {
+        PendingClick started = new PendingClick();
+        started.screenBefore = screen.getClass().getSimpleName();
+        started.expectChange = false;
+        started.waitMillis = 0L;
+        int[] gui = SyntheticMouse.toGui(screen, point[0], point[1]);
+        started.json.addProperty("clickedGuiX", gui[0]);
+        started.json.addProperty("clickedGuiY", gui[1]);
+        addScreenSize(started.json, mc, screen);
+        return started;
+    }
+
+    private static void requireDriven(PendingClick started) {
+        if (started.future == null) {
+            throw new IllegalStateException("LWJGL's mouse state cannot be driven in this game, so "
+                + "the wheel and drags cannot be delivered.");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1596,8 +1910,17 @@ public final class ClientGuiTools {
                 + "Minecraft gates CONTINUOUS left-click on that flag alone — so held attack applies "
                 + "the input, changes nothing, and reports no error. Set this true to hand input "
                 + "back. Everything else (movement, right-click, looking) works without it, which is "
-                + "exactly why the gap is easy to miss.")
+                + "exactly why the gap is easy to miss.\n\n"
+                + "'windowSize': [width, height] resizes the game window, and with it every later "
+                + "screenshot (a fresh client opens at 854x480). Not in fullscreen. The reply gives "
+                + "the size the game now draws at. 'dismissTutorial' ends the first-run tutorial and "
+                + "clears its toasts, which otherwise sit over the top-right of every frame.")
             .schema(JsonSchema.object()
+                .array("windowSize", "Window client area [width, height] in pixels, from "
+                    + MIN_WINDOW_WIDTH + "x" + MIN_WINDOW_HEIGHT + " to " + MAX_WINDOW_SIDE + " a side.",
+                    Json.obj("type", "integer"))
+                .bool("dismissTutorial", "End the tutorial ('Move with WASD', 'Look around') and "
+                    + "clear the toasts on screen.")
                 .bool("hideHud", "True hides the HUD, false shows it. Omit to leave it unchanged.")
                 .enumeration("perspective", "Camera perspective. Omit to leave it unchanged.",
                     "first", "third_back", "third_front")
@@ -1622,6 +1945,15 @@ public final class ClientGuiTools {
                 final boolean pauseOnLostFocus = context.getBoolean("pauseOnLostFocus", true);
                 final boolean grabInputFocus = context.getBoolean("grabInputFocus", false);
                 final String perspective = context.getString("perspective", null);
+                final boolean dismissTutorial = context.getBoolean("dismissTutorial", false);
+                final List<Integer> windowSize = pair(arguments, "windowSize");
+                if (arguments.has("windowSize") && (windowSize.size() != 2
+                    || windowSize.get(0) < MIN_WINDOW_WIDTH || windowSize.get(1) < MIN_WINDOW_HEIGHT
+                    || windowSize.get(0) > MAX_WINDOW_SIDE || windowSize.get(1) > MAX_WINDOW_SIDE)) {
+                    return ToolResult.error("'windowSize' is [width, height], each whole pixels from "
+                        + MIN_WINDOW_WIDTH + "x" + MIN_WINDOW_HEIGHT + " up to " + MAX_WINDOW_SIDE
+                        + ". Nothing was changed.");
+                }
 
                 final int perspectiveValue;
                 if (perspective == null) {
@@ -1667,6 +1999,14 @@ public final class ClientGuiTools {
                             && !mc.inGameHasFocus) {
                             mc.setIngameFocus();
                         }
+                        String windowError = null;
+                        if (windowSize.size() == 2) {
+                            windowError = resizeWindow(mc, windowSize.get(0), windowSize.get(1));
+                        }
+                        if (dismissTutorial) {
+                            mc.getTutorial().setStep(TutorialSteps.NONE);
+                            mc.getToastGui().clear();
+                        }
                         // Deliberately not saveOptions(): this is a runtime override for an
                         // automated session, not a change to how the person who owns this client
                         // wants their game to behave. It resets when the game restarts, which is
@@ -1680,14 +2020,57 @@ public final class ClientGuiTools {
                         json.addProperty("perspective",
                             mc.gameSettings.thirdPersonView == 0 ? "first"
                                 : mc.gameSettings.thirdPersonView == 1 ? "third_back" : "third_front");
+                        json.addProperty("displayWidth", mc.displayWidth);
+                        json.addProperty("displayHeight", mc.displayHeight);
+                        if (windowError != null) {
+                            json.addProperty("windowError", windowError);
+                        }
+                        if (dismissTutorial) {
+                            json.addProperty("tutorialDismissed", true);
+                        }
                         return json;
                     }
                 });
+                if (result.has("windowError")) {
+                    return ToolResult.error(result.get("windowError").getAsString());
+                }
                 return ToolResult.text("HUD "
                     + (result.get("hudHidden").getAsBoolean() ? "hidden" : "visible")
-                    + ", perspective " + result.get("perspective").getAsString() + ".")
+                    + ", perspective " + result.get("perspective").getAsString() + ", drawing at "
+                    + result.get("displayWidth").getAsInt() + "x" + result.get("displayHeight").getAsInt()
+                    + ".")
                     .withStructured(result);
             })
             .build());
+    }
+
+    private static final int MIN_WINDOW_WIDTH = 320;
+    private static final int MIN_WINDOW_HEIGHT = 240;
+    private static final int MAX_WINDOW_SIDE = 7680;
+
+    /**
+     * Resizes the window's client area (#180), the way leaving fullscreen does: a new display mode,
+     * then {@code Minecraft.resize}, which re-lays out the open screen and rebuilds the framebuffer
+     * that screenshots read. Client thread only.
+     *
+     * @return why it could not be done, or null
+     */
+    @Nullable
+    private static String resizeWindow(Minecraft mc, int width, int height) {
+        if (mc.isFullScreen()) {
+            return "The game is fullscreen, which takes the monitor's size; leave fullscreen first. "
+                + "Nothing was changed.";
+        }
+        try {
+            org.lwjgl.opengl.Display.setDisplayMode(new org.lwjgl.opengl.DisplayMode(width, height));
+            // Forge's fix for MC-68754: the window is not resizable by hand again until this is cycled.
+            org.lwjgl.opengl.Display.setResizable(false);
+            org.lwjgl.opengl.Display.setResizable(true);
+        }
+        catch (org.lwjgl.LWJGLException | RuntimeException e) {
+            return "The window could not be resized to " + width + "x" + height + ": " + e.getMessage();
+        }
+        mc.resize(width, height);
+        return null;
     }
 }

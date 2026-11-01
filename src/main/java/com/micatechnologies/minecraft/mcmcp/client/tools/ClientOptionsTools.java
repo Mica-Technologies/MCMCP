@@ -18,6 +18,7 @@ import java.util.function.ToIntFunction;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.settings.GameSettings;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.EnumHandSide;
 import net.minecraft.util.SoundCategory;
 import net.minecraftforge.fml.relauncher.Side;
@@ -183,6 +184,14 @@ public final class ClientOptionsTools {
                         }
                         json.add("changed", changed);
                         json.addProperty("persisted", persist);
+                        if (changes.containsKey("chat_visibility")
+                            && settings.chatVisibility == EntityPlayer.EnumChatVisibility.HIDDEN) {
+                            json.addProperty("warning", "With chat hidden the server drops every "
+                                + "command and chat message this player sends, so client_send_chat "
+                                + "and client_run_commands refuse until it is shown again. To keep "
+                                + "chat out of screenshots, chat_opacity 0 hides it and leaves "
+                                + "commands working.");
+                        }
                         return json;
                     }
                 });

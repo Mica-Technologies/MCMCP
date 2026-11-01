@@ -108,9 +108,10 @@ public final class ClientDebugTools {
                 + "otherwise: it caps the long edge of the inline copy only, and the file on disk is "
                 + "always saved at full resolution.\n\n"
                 + "Captures the most recently rendered frame, so anything drawn over the game — an "
-                + "open GUI, a chat window, a debug overlay — appears in it.\n\n"
+                + "open GUI, a chat window, a debug overlay — appears in it, unless hideHud is set.\n\n"
                 + "To see a place without moving the player, pass 'from' (and 'look_at', or "
-                + "'yaw'/'pitch'): the frame is rendered from there, without HUD, and nothing changes "
+                + "'yaw'/'pitch'): the frame is rendered from there, with no HUD, chat, open screen or "
+                + "overlay, and nothing changes "
                 + "for the server or other players. It can only draw chunks this client holds, so "
                 + "stay within the render distance. 'fullbright' lights everything for this one "
                 + "frame — for night and interiors, without touching world time; the result's "
@@ -150,6 +151,8 @@ public final class ClientDebugTools {
                 .number("fov", "Field of view in degrees for this frame; wide for aerials.",
                     MIN_FOV, MAX_FOV)
                 .bool("fullbright", "Light everything fully for this frame. Default false.")
+                .bool("hideHud", "Keep the HUD, hand, chat, any open screen and MCMCP's banners out of "
+                    + "this frame, as F1 does. Always so with 'from'. Default false.")
                 .integer("settle_ms", "With 'from': most time to let chunk meshes build at the new "
                     + "viewpoint before capturing. Default 5000.", 0, MAX_SETTLE_MILLIS)
                 .bool("bringPlayer", "With 'from': move the player to the camera first, so its chunks load, "
@@ -197,7 +200,8 @@ public final class ClientDebugTools {
                 final float fov = context.has("fov")
                     ? (float) Math.max(MIN_FOV, Math.min(MAX_FOV, context.getDouble("fov", 70.0D)))
                     : Float.NaN;
-                final boolean overriding = from != null || fullbright || !Float.isNaN(fov);
+                final boolean hideHud = context.getBoolean("hideHud", false);
+                final boolean overriding = from != null || fullbright || hideHud || !Float.isNaN(fov);
                 if (from != null && !ClientCamera.canDetach()) {
                     return ToolResult.error("A detached camera is not available in this game: the "
                         + "render view field could not be found. Nothing was captured.");
@@ -252,7 +256,8 @@ public final class ClientDebugTools {
                         view = context.onGameThread(new Callable<JsonObject>() {
                             @Override
                             public JsonObject call() {
-                                return applyView(from, lookAt, yawArgument, pitchArgument, fov, fullbright);
+                                return applyView(from, lookAt, yawArgument, pitchArgument, fov, fullbright,
+                                    hideHud);
                             }
                         });
                         if (view.has("error")) {
@@ -822,7 +827,7 @@ public final class ClientDebugTools {
      * @return a description of the view, or {@code error} when it cannot be drawn from there
      */
     private static JsonObject applyView(@Nullable double[] from, @Nullable double[] lookAt,
-        double yawArgument, double pitchArgument, float fov, boolean fullbright) {
+        double yawArgument, double pitchArgument, float fov, boolean fullbright, boolean hideHud) {
         Minecraft mc = ClientStateTools.requireInWorld();
         JsonObject json = new JsonObject();
         float yaw = mc.player.rotationYaw;
@@ -859,7 +864,7 @@ public final class ClientDebugTools {
             json.addProperty("yaw", Math.round(MathHelper.wrapDegrees(yaw) * 100.0F) / 100.0D);
             json.addProperty("pitch", Math.round(pitch * 100.0F) / 100.0D);
         }
-        ClientCamera.apply(from, yaw, pitch, fov, fullbright);
+        ClientCamera.apply(from, yaw, pitch, fov, fullbright, hideHud);
         if (!Float.isNaN(fov)) {
             json.addProperty("fov", fov);
         }
@@ -1164,6 +1169,11 @@ public final class ClientDebugTools {
                         json.addProperty("displayWidth", mc.displayWidth);
                         json.addProperty("displayHeight", mc.displayHeight);
                         json.addProperty("pendingSyntheticKeys", ClientInputScheduler.pendingCount());
+                        // The slot the cursor is over and its tooltip, as the last frame drew it (#176).
+                        JsonObject hovered = ClientTooltipTools.hoveredSlot(screen, false);
+                        if (hovered != null) {
+                            json.add("hoveredSlot", hovered);
+                        }
                         JsonObject query = ClientStartupQuery.describe(mc);
                         if (query != null) {
                             json.add("startupQuery", query);

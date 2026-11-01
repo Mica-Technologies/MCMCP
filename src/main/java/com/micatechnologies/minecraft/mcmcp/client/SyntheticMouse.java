@@ -3,6 +3,8 @@ package com.micatechnologies.minecraft.mcmcp.client;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import javax.annotation.Nullable;
@@ -124,10 +126,6 @@ public final class SyntheticMouse {
     @Nullable
     private static final Field FIELD_MOUSE_HANDLED = screenField("mouseHandled");
 
-    /** The click being played out, or null. Client thread only. */
-    @Nullable
-    private static Click active;
-
     private SyntheticMouse() {
     }
 
@@ -234,30 +232,62 @@ public final class SyntheticMouse {
     }
 
     // ------------------------------------------------------------------
-    // Playing a click out
+    // Playing a gesture out
     // ------------------------------------------------------------------
 
-    /** What happened to a click, for the tool to report. */
+    /** What happened to a gesture, for the tool to report. */
     public static final class Outcome {
         /** "lwjgl" across frames, or "lwjgl-immediate" when no frame was drawn in time. */
         public String via = "lwjgl";
         /** "MouseInputEvent.Pre" when a mod cancelled the press, so the screen never saw it. */
         @Nullable
         public String cancelledBy;
-        /** Frames drawn while the click played out. */
+        /** Frames drawn while the gesture played out. */
         public int frames;
         /** Whether LWJGL's button state could be held for polling widgets. */
         public boolean polled = FIELD_BUTTONS != null;
+        /** Wheel events a mod cancelled in MouseInputEvent.Pre. */
+        public int wheelCancelled;
     }
 
-    private static final class Click {
+    /** What one frame of a gesture does. */
+    private enum Kind {
+        /** The cursor is put at the point and a frame drawn, with no event. */
+        HOVER,
+        PRESS,
+        RELEASE,
+        /** The cursor moves to the point, as a motion event: a drag when the button is held. */
+        MOVE,
+        /** One notch of the wheel at the point. */
+        WHEEL
+    }
+
+    /** One frame of a gesture: where the cursor is, whether the button is down, and the event sent. */
+    private static final class Step {
+        final Kind kind;
         final int x;
         final int y;
+        final boolean down;
+        final int wheel;
+
+        Step(Kind kind, int x, int y, boolean down, int wheel) {
+            this.kind = kind;
+            this.x = x;
+            this.y = y;
+            this.down = down;
+            this.wheel = wheel;
+        }
+    }
+
+    private static final class Gesture {
+        final List<Step> steps;
         final int button;
+        /** How long the cursor stays at the last point once done, for a hover; 0 for none. */
+        final long parkMillis;
         final CompletableFuture<Outcome> future = new CompletableFuture<>();
         final Outcome outcome = new Outcome();
-        /** 0 hover, 1 pressed, 2 released, 3 done. */
-        int stage;
+        /** The step in force; the first is applied at once, the rest one per frame. */
+        int index;
 
         final int savedEventX = Mouse.getEventX();
         final int savedEventY = Mouse.getEventY();
@@ -265,110 +295,222 @@ public final class SyntheticMouse {
         final boolean savedEventState = Mouse.getEventButtonState();
         final int savedEventDWheel = Mouse.getEventDWheel();
 
-        Click(int x, int y, int button) {
-            this.x = x;
-            this.y = y;
+        Gesture(List<Step> steps, int button, long parkMillis) {
+            this.steps = steps;
             this.button = button;
+            this.parkMillis = parkMillis;
+        }
+
+        Step step() {
+            return steps.get(Math.min(index, steps.size() - 1));
         }
     }
 
+    /** The gesture being played out, or null. Client thread only. */
+    @Nullable
+    private static Gesture active;
+
+    /** Where a finished hover holds the cursor, until {@link #parkedUntil}. Client thread only. */
+    private static int parkedX;
+    private static int parkedY;
+    private static long parkedUntil;
+
+    /** Most wheel notches one scroll delivers. */
+    public static final int MAX_WHEEL_NOTCHES = 100;
+
+    /** What LWJGL reports for one notch of a real wheel. Screens use only its sign. */
+    private static final int WHEEL_NOTCH = 120;
+
     /**
-     * Starts a click at an LWJGL point and returns at once; the click plays out over the next three
-     * frames. Client thread only. The future completes on the client thread when it is done.
+     * Starts a click at an LWJGL point and returns at once; it plays out over the next three frames:
+     * hover, press held, release. Client thread only. The future completes on the client thread.
      *
-     * <p>A click still in flight is finished first, so two never interleave.
+     * <p>A gesture still in flight is finished first, so two never interleave.
      *
      * @return null when this LWJGL build cannot be driven; the caller should fall back to
      *         {@code mouseClicked}
      */
     @Nullable
     public static CompletableFuture<Outcome> begin(int lwjglX, int lwjglY, int button) {
+        List<Step> steps = new ArrayList<>();
+        steps.add(new Step(Kind.HOVER, lwjglX, lwjglY, false, 0));
+        steps.add(new Step(Kind.PRESS, lwjglX, lwjglY, true, 0));
+        steps.add(new Step(Kind.RELEASE, lwjglX, lwjglY, false, 0));
+        return start(new Gesture(steps, button, 0L));
+    }
+
+    /**
+     * Turns the wheel {@code notches} times at a point, one notch a frame after a hover frame
+     * (#182). Positive scrolls up, as a real wheel turned away does. {@code GuiSlot} reads
+     * {@code Mouse.getEventDWheel()} in {@code handleMouseInput}, and only while the cursor its last
+     * {@code drawScreen} saw is inside the list, which is what the hover frame is for.
+     */
+    @Nullable
+    public static CompletableFuture<Outcome> scroll(int lwjglX, int lwjglY, int notches) {
+        List<Step> steps = new ArrayList<>();
+        steps.add(new Step(Kind.HOVER, lwjglX, lwjglY, false, 0));
+        int count = Math.min(MAX_WHEEL_NOTCHES, Math.abs(notches));
+        for (int i = 0; i < count; i++) {
+            steps.add(new Step(Kind.WHEEL, lwjglX, lwjglY, false, notches > 0 ? WHEEL_NOTCH : -WHEEL_NOTCH));
+        }
+        steps.add(new Step(Kind.HOVER, lwjglX, lwjglY, false, 0));
+        return start(new Gesture(steps, -1, 0L));
+    }
+
+    /**
+     * Presses at one point, moves to another over {@code moves} frames with the button held, and
+     * releases there (#182): a scrollbar, a slider, or a drag-and-drop. {@code GuiSlot}'s bar follows
+     * {@code Mouse.isButtonDown} and the cursor while it draws, so each move is a frame of its own.
+     */
+    @Nullable
+    public static CompletableFuture<Outcome> drag(int fromX, int fromY, int toX, int toY, int button,
+                                                  int moves) {
+        List<Step> steps = new ArrayList<>();
+        steps.add(new Step(Kind.HOVER, fromX, fromY, false, 0));
+        // A motion event with the button up before the press: GuiSlot arms its drag only from that
+        // state, and its own scrollBy (a list scrolled by text) leaves it disarmed until one comes.
+        steps.add(new Step(Kind.MOVE, fromX, fromY, false, 0));
+        steps.add(new Step(Kind.PRESS, fromX, fromY, true, 0));
+        int count = Math.max(1, moves);
+        for (int i = 1; i <= count; i++) {
+            steps.add(new Step(Kind.MOVE, fromX + (toX - fromX) * i / count,
+                fromY + (toY - fromY) * i / count, true, 0));
+        }
+        steps.add(new Step(Kind.RELEASE, toX, toY, false, 0));
+        return start(new Gesture(steps, button, 0L));
+    }
+
+    /**
+     * Moves the cursor to a point without clicking, and keeps it there for {@code holdMillis} after
+     * the gesture ends (#176), so a tooltip drawn under it stays up for a screenshot taken next. A
+     * real cursor would stay put by itself; this one is overwritten by every poll of the real mouse.
+     */
+    @Nullable
+    public static CompletableFuture<Outcome> hover(int lwjglX, int lwjglY, long holdMillis) {
+        List<Step> steps = new ArrayList<>();
+        steps.add(new Step(Kind.HOVER, lwjglX, lwjglY, false, 0));
+        steps.add(new Step(Kind.MOVE, lwjglX, lwjglY, false, 0));
+        steps.add(new Step(Kind.HOVER, lwjglX, lwjglY, false, 0));
+        return start(new Gesture(steps, -1, Math.max(0L, holdMillis)));
+    }
+
+    /** Lets go of a parked cursor at once. Client thread only. */
+    public static void unpark() {
+        parkedUntil = 0L;
+    }
+
+    /** Whether a hover is holding the cursor, and where: {x, y} in LWJGL pixels, or null. */
+    @Nullable
+    public static int[] parked() {
+        return System.currentTimeMillis() < parkedUntil ? new int[] {parkedX, parkedY} : null;
+    }
+
+    @Nullable
+    private static CompletableFuture<Outcome> start(Gesture gesture) {
         if (!isAvailable()) {
             return null;
         }
         finishNow();
-        Click click = new Click(lwjglX, lwjglY, button);
-        active = click;
-        assertState(click);
-        return click.future;
+        unpark();
+        active = gesture;
+        assertState(gesture);
+        return gesture.future;
     }
 
-    /** Writes the click's point and button back over LWJGL's latest poll. Client thread only. */
+    /** Writes the gesture's point and button back over LWJGL's latest poll. Client thread only. */
     public static void reassert() {
-        Click click = active;
-        if (click != null) {
-            assertState(click);
+        Gesture gesture = active;
+        if (gesture != null) {
+            assertState(gesture);
+        }
+        else if (parkedUntil != 0L) {
+            assertParked();
         }
     }
 
-    /** Advances the click by one frame. Called at the start of every render tick. */
+    /** Advances the gesture by one frame. Called at the start of every render tick. */
     public static void onFrame() {
-        Click click = active;
-        if (click == null) {
+        Gesture gesture = active;
+        if (gesture == null) {
+            if (parkedUntil != 0L) {
+                assertParked();
+            }
             return;
         }
-        // The first render tick after begin() draws the hover frame; each one after it moves on.
-        if (++click.outcome.frames > 1) {
-            advance(click);
+        // The first render tick after start() draws the first step's frame; each one after moves on.
+        if (++gesture.outcome.frames > 1) {
+            advance(gesture);
         }
         else {
-            assertState(click);
+            assertState(gesture);
         }
     }
 
     /**
-     * Plays out whatever is left of the click in flight at once. Client thread only. Used when no
-     * frame arrives in time, and before a new click starts.
+     * Plays out whatever is left of the gesture in flight at once. Client thread only. Used when no
+     * frame arrives in time, and before a new gesture starts.
      */
     public static void finishNow() {
-        Click click = active;
-        if (click == null) {
+        Gesture gesture = active;
+        if (gesture == null) {
             return;
         }
-        if (click.stage < 3) {
-            click.outcome.via = "lwjgl-immediate";
+        if (gesture.index < gesture.steps.size()) {
+            gesture.outcome.via = "lwjgl-immediate";
         }
-        while (active == click) {
-            advance(click);
+        while (active == gesture) {
+            advance(gesture);
         }
     }
 
-    private static void advance(Click click) {
+    private static void advance(Gesture gesture) {
         try {
-            click.stage++;
-            assertState(click);
-            if (click.stage == 1 || click.stage == 2) {
+            Step previous = gesture.step();
+            gesture.index++;
+            if (gesture.index >= gesture.steps.size()) {
+                end(gesture);
+                if (gesture.parkMillis > 0L) {
+                    parkedX = previous.x;
+                    parkedY = previous.y;
+                    parkedUntil = System.currentTimeMillis() + gesture.parkMillis;
+                }
+                gesture.future.complete(gesture.outcome);
+                return;
+            }
+            Step step = gesture.step();
+            assertState(gesture);
+            if (step.kind != Kind.HOVER) {
                 GuiScreen screen = Minecraft.getMinecraft().currentScreen;
                 if (screen != null) {
-                    boolean pressed = click.stage == 1;
-                    String cancelledBy = dispatch(screen, click, pressed);
-                    if (pressed && cancelledBy != null) {
-                        click.outcome.cancelledBy = cancelledBy;
+                    String cancelledBy = dispatch(screen, gesture, step, previous);
+                    if (cancelledBy != null) {
+                        if (step.kind == Kind.PRESS) {
+                            gesture.outcome.cancelledBy = cancelledBy;
+                        }
+                        else if (step.kind == Kind.WHEEL) {
+                            gesture.outcome.wheelCancelled++;
+                        }
                     }
                 }
             }
-            if (click.stage >= 3) {
-                end(click);
-                click.future.complete(click.outcome);
-            }
         }
         catch (Throwable failure) {
-            // Never out onto the game thread: the click fails, the game carries on.
-            end(click);
-            click.future.completeExceptionally(failure);
+            // Never out onto the game thread: the gesture fails, the game carries on.
+            end(gesture);
+            gesture.future.completeExceptionally(failure);
         }
     }
 
-    private static void end(Click click) {
-        if (active == click) {
+    private static void end(Gesture gesture) {
+        if (active == gesture) {
             active = null;
         }
         try {
-            setInt(FIELD_EVENT_X, click.savedEventX);
-            setInt(FIELD_EVENT_Y, click.savedEventY);
-            setInt(FIELD_EVENT_BUTTON, click.savedEventButton);
-            setBoolean(FIELD_EVENT_STATE, click.savedEventState);
-            setInt(FIELD_EVENT_DWHEEL, click.savedEventDWheel);
+            setInt(FIELD_EVENT_X, gesture.savedEventX);
+            setInt(FIELD_EVENT_Y, gesture.savedEventY);
+            setInt(FIELD_EVENT_BUTTON, gesture.savedEventButton);
+            setBoolean(FIELD_EVENT_STATE, gesture.savedEventState);
+            setInt(FIELD_EVENT_DWHEEL, gesture.savedEventDWheel);
             // The point and button stay until the next poll hands the real mouse back.
         }
         catch (IllegalAccessException | RuntimeException e) {
@@ -376,16 +518,34 @@ public final class SyntheticMouse {
         }
     }
 
-    private static void assertState(Click click) {
+    private static void assertState(Gesture gesture) {
+        Step step = gesture.step();
         try {
-            setInt(FIELD_X, click.x);
-            setInt(FIELD_Y, click.y);
-            setInt(FIELD_EVENT_X, click.x);
-            setInt(FIELD_EVENT_Y, click.y);
-            setButton(click.button, click.stage == 1);
+            setInt(FIELD_X, step.x);
+            setInt(FIELD_Y, step.y);
+            setInt(FIELD_EVENT_X, step.x);
+            setInt(FIELD_EVENT_Y, step.y);
+            if (gesture.button >= 0) {
+                setButton(gesture.button, step.down);
+            }
         }
         catch (IllegalAccessException | RuntimeException e) {
             Mcmcp.LOGGER.warn("MCMCP could not set LWJGL's mouse state", e);
+        }
+    }
+
+    private static void assertParked() {
+        if (System.currentTimeMillis() >= parkedUntil) {
+            // Not written back: the next poll hands the real mouse back.
+            parkedUntil = 0L;
+            return;
+        }
+        try {
+            setInt(FIELD_X, parkedX);
+            setInt(FIELD_Y, parkedY);
+        }
+        catch (IllegalAccessException | RuntimeException e) {
+            parkedUntil = 0L;
         }
     }
 
@@ -408,14 +568,16 @@ public final class SyntheticMouse {
      * @return "MouseInputEvent.Pre" if a handler cancelled it before the screen saw it, else null
      */
     @Nullable
-    private static String dispatch(GuiScreen screen, Click click, boolean pressed) throws Exception {
-        setInt(FIELD_EVENT_BUTTON, click.button);
-        setBoolean(FIELD_EVENT_STATE, pressed);
-        // A click carries no movement and no scroll. Leaving stale deltas here makes a screen that
-        // reads them treat the click as a drag.
-        setInt(FIELD_EVENT_DX, 0);
-        setInt(FIELD_EVENT_DY, 0);
-        setInt(FIELD_EVENT_DWHEEL, 0);
+    private static String dispatch(GuiScreen screen, Gesture gesture, Step step, Step previous)
+        throws Exception {
+        boolean buttonEvent = step.kind == Kind.PRESS || step.kind == Kind.RELEASE;
+        setInt(FIELD_EVENT_BUTTON, buttonEvent ? gesture.button : -1);
+        setBoolean(FIELD_EVENT_STATE, step.kind == Kind.PRESS);
+        // Only a move carries movement and only a wheel event a scroll. Stale deltas left here make a
+        // screen that reads them treat a click as a drag.
+        setInt(FIELD_EVENT_DX, step.kind == Kind.MOVE ? step.x - previous.x : 0);
+        setInt(FIELD_EVENT_DY, step.kind == Kind.MOVE ? step.y - previous.y : 0);
+        setInt(FIELD_EVENT_DWHEEL, step.kind == Kind.WHEEL ? step.wheel : 0);
         setLong(FIELD_EVENT_NANOS, System.nanoTime());
 
         if (FIELD_MOUSE_HANDLED != null) {

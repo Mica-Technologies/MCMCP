@@ -114,6 +114,7 @@ public final class ClientInputScheduler {
     }
 
     private static CompletableFuture<Void> schedule(PendingRelease pending) {
+        pending.tag = scheduleTag;
         if (pending.delayTicks == 0) {
             pending.press();
         }
@@ -121,6 +122,67 @@ public final class ClientInputScheduler {
             PENDING.add(pending);
         }
         return pending.future;
+    }
+
+    /** Tag given to holds scheduled inside {@link #tagged}. Client thread only. */
+    private static Object scheduleTag;
+
+    /**
+     * Runs {@code body} with every hold it schedules tagged {@code tag}, so {@link #releaseTagged}
+     * can let go of exactly those. Client thread only.
+     */
+    public static <T> T tagged(Object tag, java.util.function.Supplier<T> body) {
+        Object previous = scheduleTag;
+        scheduleTag = tag;
+        try {
+            return body.get();
+        }
+        finally {
+            scheduleTag = previous;
+        }
+    }
+
+    /**
+     * Releases every hold tagged {@code tag} at once, and completes its future. Client thread only.
+     *
+     * @return how many holds were let go
+     */
+    public static int releaseTagged(Object tag) {
+        List<PendingRelease> releasing = new ArrayList<>();
+        synchronized (PENDING) {
+            for (Iterator<PendingRelease> it = PENDING.iterator(); it.hasNext(); ) {
+                PendingRelease pending = it.next();
+                if (pending.tag == tag) {
+                    releasing.add(pending);
+                    it.remove();
+                }
+            }
+        }
+        for (PendingRelease pending : releasing) {
+            try {
+                if (pending.pressed) {
+                    pending.release();
+                }
+            }
+            catch (Exception e) {
+                Mcmcp.LOGGER.error("MCMCP failed to release a synthetic key press", e);
+            }
+            pending.future.complete(null);
+        }
+        return releasing.size();
+    }
+
+    /** How many holds tagged {@code tag} are still waiting to be released. */
+    public static int countTagged(Object tag) {
+        int count = 0;
+        synchronized (PENDING) {
+            for (PendingRelease pending : PENDING) {
+                if (pending.tag == tag) {
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     /**
@@ -246,6 +308,8 @@ public final class ClientInputScheduler {
         boolean pressed;
         /** Press the binding's own state ({@link KeyBindingPress}) rather than its key code. */
         boolean direct;
+        /** What scheduled it, for {@link #releaseTagged}; null for an ordinary hold. */
+        Object tag;
 
         PendingRelease(KeyBinding binding, int rawKeyCode, int delayTicks, int remainingTicks,
                        CompletableFuture<Void> future) {
