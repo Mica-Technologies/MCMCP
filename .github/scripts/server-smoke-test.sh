@@ -1177,8 +1177,10 @@ case "$BJOB_STATE" in
   *'"state":"done"'*'"wouldWrite":0'*) echo "    as a job it expands, replays, and finds nothing left to write" ;;
   *) mcp_failure "the build job did not finish clean: ${BJOB_STATE}" ;;
 esac
-mcp_call 706 server_set_block "{\"x\":$((HX + 12)),\"y\":$((HY + 2)),\"z\":$((HZ + 4)),\"block\":\"minecraft:air\"}" > /dev/null
-PLAN_BODY="$(mcp_call 707 server_plan_view '{"target":"smoke-house/*","diffTarget":"smoke-house/*","max_dimension":256}')" \
+# The house is 130 blocks out, past the spawn chunks: load for the break and the plan, or both can
+# land on an unloaded chunk depending on how soon the server unloads it.
+mcp_call 706 server_set_blocks "{\"mode\":\"list\",\"blocks\":[{\"x\":$((HX + 12)),\"y\":$((HY + 2)),\"z\":$((HZ + 4)),\"block\":\"minecraft:air\"}],\"load\":true}" > /dev/null
+PLAN_BODY="$(mcp_call 707 server_plan_view '{"target":"smoke-house/*","diffTarget":"smoke-house/*","max_dimension":256,"load":true}')" \
   || mcp_failure "server_plan_view failed: ${PLAN_BODY}"
 case "$PLAN_BODY" in
   *'"type":"image"'*'"differColumns":1'*|*'"differColumns":1'*'"type":"image"'*) echo "    plan view: the house drawn from the server, the one broken column in red" ;;
@@ -1190,13 +1192,13 @@ echo "==> Tile entities reloaded in place (#141): a chest keeps its contents"
 KX=$((SPAWN_X + 170)); KY=$((UNDO_Y + 50)); KZ=$((SPAWN_Z + 170))
 mcp_call 720 server_apply_ops "{\"ops\":[\"setblock ${KX} ${KY} ${KZ} minecraft:chest 0 {Items:[{Slot:0b,id:\\\"minecraft:diamond\\\",Count:3b}]}\"]}" > /dev/null \
   || mcp_failure "could not place the chest"
-RELOAD_TE="$(mcp_call 721 server_reload_tile_entities "{\"x\":$((KX - 1)),\"y\":${KY},\"z\":$((KZ - 1)),\"toX\":$((KX + 1)),\"toZ\":$((KZ + 1))}")" \
+RELOAD_TE="$(mcp_call 721 server_reload_tile_entities "{\"x\":$((KX - 1)),\"y\":${KY},\"z\":$((KZ - 1)),\"toX\":$((KX + 1)),\"toZ\":$((KZ + 1)),\"load\":true}")" \
   || mcp_failure "server_reload_tile_entities failed: ${RELOAD_TE}"
 case "$RELOAD_TE" in
   *'"reloaded":1'*'"minecraft:chest":1'*) ;;
   *) mcp_failure "the chest was not reloaded: ${RELOAD_TE}" ;;
 esac
-CHEST_TE="$(mcp_call 722 server_get_tile_entities "{\"x\":${KX},\"y\":${KY},\"z\":${KZ}}")" || mcp_failure "reading the chest failed: ${CHEST_TE}"
+CHEST_TE="$(mcp_call 722 server_get_tile_entities "{\"x\":${KX},\"y\":${KY},\"z\":${KZ},\"load\":true}")" || mcp_failure "reading the chest failed: ${CHEST_TE}"
 case "$CHEST_TE" in
   *'minecraft:diamond'*) echo "    the chest went through an unload and load in place, diamonds and all" ;;
   *) mcp_failure "the chest lost its contents: ${CHEST_TE}" ;;
