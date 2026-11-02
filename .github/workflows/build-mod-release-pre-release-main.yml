@@ -320,6 +320,9 @@ jobs:
     name: Orchestrator (${{ matrix.target }})
     needs: assemble_release
     runs-on: ${{ matrix.os }}
+    env:
+      # The Tauri CLI that bundles the installers. Pinned so it can be cached; see "Restore the Tauri CLI".
+      TAURI_CLI_VERSION: 2.12.4
     permissions:
       contents: write
     strategy:
@@ -370,11 +373,30 @@ jobs:
           sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      # `cargo install` rather than a prebuilt-binary action. It costs a couple of minutes per
-      # platform, in parallel so wall clock barely moves, and it cannot fail because a third-party
+      # `cargo install` rather than a prebuilt-binary action: it cannot fail because a third-party
       # action's supported-tool list changed. A release job should be boring.
+      #
+      # Built once per version, then cached on its own. Building it from source costs 3 to 10 minutes
+      # a platform (Windows is the slow one), and rust-cache did not keep it: that cache is keyed on
+      # our Cargo.lock, so on a full key match it restores and never saves, while a floating "^2"
+      # rebuilt every time a newer CLI came out and threw the build away. Pinned, so the binary is
+      # the cache's whole key (the CLI is a host tool, hence the runner's OS and arch, not the target;
+      # the two macOS jobs share one). To move to a newer CLI, change the version here.
+      - name: Restore the Tauri CLI
+        id: tauri-cli-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install the Tauri CLI
-        run: cargo install tauri-cli --locked --version "^2"
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --locked --version "=${{ env.TAURI_CLI_VERSION }}" --force
+
+      - name: Check the Tauri CLI
+        run: cargo tauri --version
 
       # The app carries the date it was built from, like the jar beside it in the release.
       #
