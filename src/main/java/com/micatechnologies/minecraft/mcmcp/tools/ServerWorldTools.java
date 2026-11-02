@@ -529,6 +529,7 @@ public final class ServerWorldTools {
                 .integer("metadata", "Block metadata / state value. Defaults to 0.", 0, 15)
                 .property("nbt", ServerBuildTools.nbtSchema("Tile-entity data merged into the block "
                     + "after it is placed, as /blockdata does."))
+                .enumeration("drops", WriteDrops.SCHEMA, "discard", "keep")
                 .integer("dimension", "Dimension id. Defaults to 0.")
                 .required("block", "x", "y", "z")
                 .build())
@@ -568,6 +569,7 @@ public final class ServerWorldTools {
                 // Only with undo.recordSingleBlockWrites: one block is one file, which is an audit
                 // trail somebody chose rather than a default.
                 final UndoPoints.Recorder recorder = ServerUndoTools.start(context, true);
+                final WriteDrops.Tally drops = new WriteDrops.Tally("keep".equals(context.getString("drops", "discard")));
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override
                     public JsonObject call() {
@@ -585,7 +587,14 @@ public final class ServerWorldTools {
                         IBlockState state = target.getStateFromMeta(metadata);
                         // Flag 3 = update neighbours + send to clients. Anything less leaves
                         // connected players seeing the old block until they reload the chunk.
-                        boolean changed = BlockWriteFaults.set(world, pos, state, 3, null, null);
+                        WriteDrops.Tally previousDrops = WriteDrops.count(drops);
+                        boolean changed;
+                        try {
+                            changed = BlockWriteFaults.set(world, pos, state, 3, null, null);
+                        }
+                        finally {
+                            WriteDrops.count(previousDrops);
+                        }
                         boolean wrote = changed;
 
                         JsonObject json = new JsonObject();
@@ -600,6 +609,7 @@ public final class ServerWorldTools {
                         }
                         json.add("previous", previous);
                         json.add("current", GameJson.block(world, pos));
+                        WriteDrops.add(json, drops, 0);
                         return json;
                     }
                 });

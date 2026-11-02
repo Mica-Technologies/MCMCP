@@ -1691,7 +1691,7 @@ player data. Saving blocks the server thread for its duration, which is noticeab
 
 :material-alert: Destructive · requires `permissions.allowWorldEdits`
 
-One block. `block`, `x`, `y`, `z` required; optional `metadata`, `nbt`, `dimension`. Returns the
+One block. `block`, `x`, `y`, `z` required; optional `metadata`, `nbt`, `drops`, `dimension`. Returns the
 previous and current state. A block in an unloaded chunk is an error and nothing is written. Hold
 the area first, or use `server_set_blocks` with `load: true`. `nbt` is merged into the tile entity after placing, as for
 `server_set_blocks`, and the result says whether it was `applied`, `unchanged` or found
@@ -1713,6 +1713,7 @@ the area first, or use `server_set_blocks` with `load: true`. `nbt` is merged in
 | `load` | boolean | Default false. Load the chunks the write touches, and release them afterwards. |
 | `pairTwoPart` | boolean | Default true. False writes every cell as given, deriving no second half. |
 | `holdPhysics` | boolean | Palette mode. Default false. Keeps sand, gravel and fluids still until the call ends; see [holding physics](#holding-physics). |
+| `drops` | string | `"discard"` (default) or `"keep"`: what an overwritten block drops. See **Drops** below. |
 
 Fill a cuboid, or apply an explicit list. The intended shape of a build is: fill the bulk volumes
 first, then one list call for the detail.
@@ -1801,9 +1802,17 @@ complete, so a block several cells big is whole before any of its cells hears of
 blocks check their other cells when a neighbour changes and remove themselves when one is missing:
 CSM's 2×2 beds, LBE's casino cabinets. Written cell by cell with updates sent at once, a king bed
 lost its head and a cabinet its top, each reported as written. Every cell is then read back:
-`notKept` and `notKeptAt` list cells the world did not keep, and `itemsDropped` (palette mode)
-counts the item entities that appeared in the box. A block that checks its support the moment it is
-placed, as a torch does, gets no help from this and is reported the same way.
+`notKept` and `notKeptAt` list cells the world did not keep. A block that checks its support the
+moment it is placed, as a torch does, gets no help from this and is reported the same way.
+
+**Drops.** Overwriting a cell runs the old block's own break code, with neighbour updates or
+without, and many blocks drop an item from there: a chest its contents, a door or a CSM bed itself.
+A write is not a player breaking a block, so in every mode, and in `server_set_block`, those items
+and experience orbs are cancelled as they spawn within a couple of cells of the cell being written
+or of a neighbour being told of it. `itemsDropped` counts them and `drops` says `"discarded"`. Pass
+`drops: "keep"` to leave them in the world (`drops: "kept"`). An item that spawns a tick later is not
+caught; palette mode counts those too (`"discarded N, M left in the world"`). `server_apply_ops`
+and `server_undo` discard drops the same way, without counting them.
 
 **Undo.** Each call records what every block it changed was before, and names the record in
 `undoPoint`; `server_undo` puts it back. See below.

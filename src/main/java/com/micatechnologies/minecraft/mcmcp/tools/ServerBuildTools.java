@@ -419,7 +419,8 @@ public final class ServerBuildTools {
                 + "half's metadata; in any mode an explicit upper half in the cell above is used. "
                 + "Neighbour updates are held until each slice is written, so a block several cells "
                 + "big (a 2x2 bed) is whole before its cells check each other; cells the world did not "
-                + "keep come back as notKept, and dropped items as itemsDropped.\n\n"
+                + "keep come back as notKept. What an overwritten block drops is discarded and counted as "
+                + "itemsDropped, unless drops is 'keep'.\n\n"
                 + "Like server_set_block, this writes directly and does not fire block-place events, "
                 + "so other mods' protection and machinery hooks do not run. Disabled unless "
                 + "permissions.allowWorldEdits is enabled in the MCMCP config.")
@@ -457,6 +458,7 @@ public final class ServerBuildTools {
                     + "do, so a redstone block written beside a machine powers it. Default true, in every mode. "
                     + "false still updates clients and lighting but tells no neighbour, for removing networks "
                     + "(wires, tracks) without each removal recalculating them.")
+                .enumeration("drops", WriteDrops.SCHEMA, "discard", "keep")
                 .bool("holdPhysics", "palette mode: hold sand, gravel and fluids in and next to the write still "
                     + "until the call ends, then report what would still move (physics) and let it. Default false.")
                 .string("block", "Namespaced block id for fill mode, e.g. 'minecraft:stone'.")
@@ -504,6 +506,7 @@ public final class ServerBuildTools {
                 final int dimension = context.getInt("dimension", 0);
                 final String replaceOnlyId = context.getString("replaceOnly", null);
                 final int flags = context.getBoolean("neighbourUpdates", true) ? 3 : 2 | 16;
+                final boolean keepDrops = "keep".equals(context.getString("drops", "discard"));
                 final int batchLimit = McmcpConfig.getMaxBlockVolume();
                 final long callLimit = (long) batchLimit * MAX_BATCHES;
 
@@ -578,6 +581,7 @@ public final class ServerBuildTools {
                     final int[] area = recorder == null ? null : listArea(placements);
                     final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                     final Tally tally = new Tally();
+                    tally.drops = new WriteDrops.Tally(keepDrops);
                     final java.util.Map<Long, IBlockState> twoPart = new java.util.HashMap<>();
                     final TwoPartBlocks.Writer pairs = new TwoPartBlocks.Writer(twoPart, flags);
                     pairs.pairing = context.getBoolean("pairTwoPart", true);
@@ -696,6 +700,7 @@ public final class ServerBuildTools {
                 final int[] area = recorder == null ? null : UndoPoints.imageArea(minX, minZ, maxX, maxZ);
                 final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                 final Tally tally = new Tally();
+                tally.drops = new WriteDrops.Tally(keepDrops);
                 runInBatches(context, (int) volume, batchLimit, new Batch() {
                     @Override
                     public void run(int from, int to) {
@@ -899,7 +904,13 @@ public final class ServerBuildTools {
             context.onGameThread(new Callable<Void>() {
                 @Override
                 public Void call() {
-                    batch.run(start, end);
+                    WriteDrops.Tally previous = WriteDrops.count(tally.drops);
+                    try {
+                        batch.run(start, end);
+                    }
+                    finally {
+                        WriteDrops.count(previous);
+                    }
                     return null;
                 }
             });
@@ -925,6 +936,8 @@ public final class ServerBuildTools {
         int unchanged;
         int refusedCount;
         final JsonArray refusedList = new JsonArray();
+        /** Items the old blocks dropped as they were overwritten (#184). */
+        WriteDrops.Tally drops = new WriteDrops.Tally(false);
 
         void refused(BlockPos pos, @Nullable String id, String reason) {
             refusedCount++;
@@ -969,6 +982,7 @@ public final class ServerBuildTools {
             if (batches > 1) {
                 json.addProperty("batches", batches);
             }
+            WriteDrops.add(json, drops, 0);
             int nbtTotal = 0;
             for (int count : nbt) {
                 nbtTotal += count;

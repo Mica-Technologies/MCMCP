@@ -54,6 +54,8 @@ final class DeferredNeighbours {
         for (int i = 0; i < positions.size(); i++) {
             BlockPos pos = positions.get(i);
             IBlockState now = world.getBlockState(pos);
+            // A door's other half that removes itself on hearing of this one drops here (#184).
+            WriteDrops.begin(world, pos);
             try {
                 world.notifyNeighborsRespectDebug(pos, before.get(i), true);
                 if (now.getBlock() != before.get(i)) {
@@ -67,6 +69,9 @@ final class DeferredNeighbours {
                 // A neighbour's hook threw (#81). The cell is written; its neighbours heard of it in part.
                 faults++;
                 BlockWriteFaults.reason(e, pos, String.valueOf(now.getBlock().getRegistryName()));
+            }
+            finally {
+                WriteDrops.end();
             }
         }
         for (int i = 0; i < positions.size(); i++) {

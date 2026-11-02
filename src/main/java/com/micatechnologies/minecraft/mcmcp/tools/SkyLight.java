@@ -30,6 +30,17 @@ final class SkyLight {
      * {@code world.setBlockState}, repairing the section's open-sky cells if the write created it.
      */
     static boolean setBlockState(World world, BlockPos pos, IBlockState state, int flags) {
+        // What the old block drops as it is overwritten is the write's, not loot (#184).
+        WriteDrops.begin(world, pos);
+        try {
+            return setWithLight(world, pos, state, flags);
+        }
+        finally {
+            WriteDrops.end();
+        }
+    }
+
+    private static boolean setWithLight(World world, BlockPos pos, IBlockState state, int flags) {
         if (!world.provider.hasSkyLight() || pos.getY() < 0 || pos.getY() > 255 || !world.isBlockLoaded(pos)) {
             return world.setBlockState(pos, state, flags);
         }

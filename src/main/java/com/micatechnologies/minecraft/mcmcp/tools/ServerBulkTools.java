@@ -271,6 +271,7 @@ public final class ServerBulkTools {
         final boolean abortOnConflict = "abort".equals(context.getString("onConflict", "skip"));
         final boolean skipTileEntities = context.getBoolean("skipIfTileEntity", false);
         final int flags = context.getBoolean("neighbourUpdates", true) ? 3 : 2 | 16;
+        final WriteDrops.Tally drops = new WriteDrops.Tally("keep".equals(context.getString("drops", "discard")));
         final boolean holdPhysics = context.getBoolean("holdPhysics", false);
         final Set<Long> chunks = new LinkedHashSet<>();
         int minX = Integer.MAX_VALUE;
@@ -380,6 +381,7 @@ public final class ServerBulkTools {
                 context.onGameThread(() -> {
                     WorldServer world = ServerWorldTools.requireWorld(dimension);
                     TwoPartBlocks.Recorder undo = TwoPartBlocks.undo(world, recorder);
+                    WriteDrops.Tally previousDrops = WriteDrops.count(drops);
                     try {
                     for (int i = start; i < end; i++) {
                         BlockPos at = new BlockPos(xs[i], ys[i], zs[i]);
@@ -472,6 +474,7 @@ public final class ServerBulkTools {
                             }
                         }
                         finally {
+                            WriteDrops.count(previousDrops);
                             // Before the world ticks again: the ticks this batch scheduled are where sand falls.
                             if (hold != null) {
                                 hold.capture(world);
@@ -505,9 +508,7 @@ public final class ServerBulkTools {
             // work would fail the call before its undo point is saved (#133).
             int dropped = context.onGameThreadFollowUp(
                 () -> DeferredNeighbours.itemsDropped(ServerWorldTools.requireWorld(dimension), written, itemsBefore));
-            if (dropped > 0) {
-                json.addProperty("itemsDropped", dropped);
-            }
+            WriteDrops.add(json, drops, dropped);
             json.add("chunks", context.onGameThreadFollowUp(() -> {
                 ChunkLoadGovernor.touch(dimension, chunks);
                 return outcome != null ? outcome.toJson()

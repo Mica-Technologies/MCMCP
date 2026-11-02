@@ -928,6 +928,31 @@ case "$CACTUS_BODY" in
   *) mcp_failure "the cactus with no sand was not reported: ${CACTUS_BODY}" ;;
 esac
 
+echo "==> What an overwritten block drops is discarded and counted (#184)"
+# A chest spills its contents from breakBlock when anything overwrites it, neighbour updates or not;
+# a door's lower half drops the door when the upper half is taken away. Neither may be left lying.
+DX=$((NX + 3)); DY=$((NY + 3))
+mcp_call 575 server_set_blocks "{\"mode\":\"list\",\"blocks\":[{\"x\":${DX},\"y\":${DY},\"z\":${NZ},\"block\":\"minecraft:chest\",\"nbt\":\"{Items:[{Slot:0b,id:\\\"minecraft:diamond\\\",Count:3b}]}\"},{\"x\":$((DX + 2)),\"y\":$((DY - 1)),\"z\":${NZ},\"block\":\"minecraft:stone\"},{\"x\":$((DX + 2)),\"y\":${DY},\"z\":${NZ},\"block\":\"minecraft:wooden_door\"}]}" > /dev/null \
+  || mcp_failure "could not place the chest and the door"
+SPILL_BODY="$(mcp_call 576 server_set_blocks "{\"mode\":\"list\",\"neighbourUpdates\":false,\"blocks\":[{\"x\":${DX},\"y\":${DY},\"z\":${NZ},\"block\":\"minecraft:stone\"}]}")" \
+  || mcp_failure "overwriting the chest failed: ${SPILL_BODY}"
+case "$SPILL_BODY" in
+  *'"itemsDropped":1'*'"drops":"discarded"'*) echo "    the chest's diamonds were discarded and counted, with neighbour updates off" ;;
+  *) mcp_failure "the chest's spill was not discarded and counted: ${SPILL_BODY}" ;;
+esac
+DOOR_BODY="$(mcp_call 577 server_set_blocks "{\"mode\":\"list\",\"pairTwoPart\":false,\"blocks\":[{\"x\":$((DX + 2)),\"y\":$((DY + 1)),\"z\":${NZ},\"block\":\"minecraft:air\"}]}")" \
+  || mcp_failure "taking the door's upper half failed: ${DOOR_BODY}"
+case "$DOOR_BODY" in
+  *'"itemsDropped":1'*'"drops":"discarded"'*) echo "    the door the lower half dropped was discarded and counted" ;;
+  *) mcp_failure "the door's drop was not discarded and counted: ${DOOR_BODY}" ;;
+esac
+LEFT_BODY="$(mcp_call 578 server_remove_entities "{\"types\":[\"item\"],\"x\":$((DX - 3)),\"y\":$((DY - 3)),\"z\":$((NZ - 3)),\"toX\":$((DX + 5)),\"toY\":$((DY + 4)),\"toZ\":$((NZ + 3)),\"dryRun\":true}")" \
+  || mcp_failure "counting the items left failed: ${LEFT_BODY}"
+case "$LEFT_BODY" in
+  *'"wouldRemove":0'*) echo "    no item left lying" ;;
+  *) mcp_failure "items were left in the world: ${LEFT_BODY}" ;;
+esac
+
 echo "==> holdPhysics holds a write's sand still, then reports it and lets it fall (#118)"
 # Sand on stone on a stone floor. Digging the stone out with holdPhysics takes the tick the dig gave
 # the sand out of the world's queue for the call, reports the sand as unsupported, and puts the tick
