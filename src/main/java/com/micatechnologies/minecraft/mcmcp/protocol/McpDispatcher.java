@@ -398,6 +398,7 @@ public class McpDispatcher {
             extractProgressToken(params));
 
         context.setCaller(caller);
+        context.setToolName(name);
         long activity = ToolActivity.callStarted(side, name);
         context.trackActivity(activity);
         context.setMutating(!tool.isReadOnly() && !ESTOP_EXEMPT.contains(name));

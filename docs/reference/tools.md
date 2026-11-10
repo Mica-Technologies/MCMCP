@@ -672,6 +672,12 @@ who holds what:
 It carries `retryAfterMs` only when calls still running hold some of those chunks; otherwise a hold
 has to be released first ([`server_keep_loaded`](#server_keep_loaded) `list` shows them).
 
+`yourHeldChunks` is what the calling agent holds itself, the number its own `list` shows. Through
+the companion the per-caller cap is the **player's**, shared by every agent driving that player, so
+the refusal also carries `playerHeldChunks` and says `they hold 510 chunk(s) between them, 0 of them
+yours`. When another of those agents has a call still running, the call first waits up to ten
+seconds for it to end, and only then returns `busy` with `retryAfterMs`.
+
 #### `server_keep_loaded`
 
 :material-cog: · `op` `hold` (default) \| `renew` \| `list`
@@ -683,6 +689,7 @@ has to be released first ([`server_keep_loaded`](#server_keep_loaded) `list` sho
 | `id` | string | `renew`: the hold to extend. |
 | `maxSeconds` | integer 60–86400 | The lease from now. Default `chunks.holdMaxSeconds` (900), at most `chunks.holdLongestLeaseSeconds` (4 hours). A longer request is cut and the reply carries `maxSecondsRequested`. |
 | `idleSeconds` | integer 10–86400 | Release after this long with no read or write inside. Default `chunks.holdIdleSeconds` (120), at most the lease. |
+| `agent` | string | Your own short name when several agents share one connection (sub-agents of one client). Holds taken with it are that agent's: another sub-agent's `server_release_loaded all` leaves them alone. Pass the same name to `server_release_loaded`. |
 
 Holds the chunks under a box loaded with no player nearby, and returns once they're in memory:
 `{id, chunks, idleSeconds, leaseSeconds}`. A hold ends after its `idleSeconds` with no reads or
@@ -695,7 +702,16 @@ shows the governor's state, both caps, `yourHeldChunks`, and each hold with its 
 `ownerLabel`, the agent's name), `chunks`, `expiresInSeconds` and `leaseEndsInSeconds`. On the
 endpoint it also lists every caller's share in `byCaller` (`caller`, `label`, `chunks`, `holds`,
 `calls` in progress, `nextExpiresInSeconds`), biggest first, so a stale hold in the way can be found
-and released by id. A player through the companion sees only their own holds.
+and released by id. A player through the companion sees the holds of every agent driving that
+player, and `playerHeldChunks`, the count their shared cap is checked against.
+
+A hold with `temporary: true` belongs to a call that is loading or using chunks right now. It
+carries the `tool`, `call` (`running`, or `ended, being released`) and `heldForSeconds`, and it ends
+with its call whatever `expiresInSeconds` says: that lease is only a backstop. It is not a leak to
+clean up. `recentlyEnded` lists the lasting holds that ended in the last ten minutes with `why`
+(`nothing read or wrote in it for its idleSeconds (120)`, `its lease of 900 s ran out`,
+`server_release_loaded all, by <agent>`, `the server has been struggling and shed it`), so a hold
+that is gone is explained.
 
 Limited to `chunks.maxHeldChunksPerCaller` (512, about 360 × 360 blocks) per caller and
 `chunks.maxHeldChunks` server-wide. Each agent and each job is its own caller. Work a larger area in
@@ -714,6 +730,10 @@ endpoint and through the companion: several agents driving one player each own t
 the player's `chunks.maxHeldChunksPerCaller` counts them all together. A read or write still loading chunks for another
 of your calls keeps its own, so one script cleaning up cannot fail another running on the same account.
 A call whose hold is ended while it waits fails with a message naming what ended it.
+
+Through the companion, any agent of a player may release another's hold by `id`, but not the
+`temporary` hold of a call that is still running: that would unload the chunks under it. Releasing
+an `id` that ended lately answers with when and why it did.
 
 #### `server_pregen_chunks`
 

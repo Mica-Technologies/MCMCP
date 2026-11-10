@@ -411,4 +411,58 @@ class ChunkLoadTest {
         assertFalse(HoldLedger.covers("player:u1~agent:b", "player:u1~agent:a"));
         assertFalse(HoldLedger.covers("player:u1", "player:u10~agent:a"));
     }
+
+    @Test
+    void anAgentRefusedByItsPlayersCapIsToldItsOwnCountApartFromTheOtherAgents() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("player:u1~agent:a", 0, range(0, 300), true, 0L, 1L, 3_600_000L));
+        ledger.add(ledger.create("player:u1~agent:b", 0, range(300, 210), false, 0L, 1L, 1L));
+        HoldLedger.CapRefusal refusal = ledger.checkCaps("player:u1~agent:c", 0, range(1000, 20), 4096, 512);
+        assertEquals(HoldLedger.LIMIT_PER_CALLER, refusal.limit);
+        assertEquals(0, refusal.callerHeldChunks, "what agent c's own listing shows");
+        assertEquals(510, refusal.groupHeldChunks, "what the player's cap counts");
+        String message = refusal.message();
+        assertFalse(message.contains("you hold 510"), message);
+        assertTrue(message.contains("they hold 510 chunk(s) between them, 0 of them yours"), message);
+        assertTrue(message.contains("shared by every agent on your connection"), message);
+    }
+
+    @Test
+    void anotherAgentOfTheSamePlayersRunningCallMakesThePlayersCapWorthWaitingFor() {
+        HoldLedger ledger = new HoldLedger();
+        ledger.add(ledger.create("player:u1~agent:a", 0, range(0, 500), true, 0L, 1L, 3_600_000L));
+        HoldLedger.CapRefusal sibling = ledger.checkCaps("player:u1~agent:b", 0, range(1000, 20), 4096, 512);
+        assertTrue(sibling.callsInProgress, "agent a's call gives its chunks back when it ends");
+        assertFalse(sibling.ownCallsInProgress);
+        assertTrue(sibling.message().contains("retry after busy.retryAfterMs"), sibling.message());
+        HoldLedger lasting = new HoldLedger();
+        lasting.add(lasting.create("player:u1~agent:a", 0, range(0, 500), false, 0L, 1L, 1L));
+        assertFalse(lasting.checkCaps("player:u1~agent:b", 0, range(1000, 20), 4096, 512).callsInProgress,
+            "a lasting hold does not end in a moment");
+        HoldLedger other = new HoldLedger();
+        other.add(other.create("player:u1~agent:a", 0, range(0, 500), false, 0L, 1L, 1L));
+        other.add(other.create("player:u2~agent:z", 0, range(600, 5), true, 0L, 1L, 3_600_000L));
+        assertFalse(other.checkCaps("player:u1~agent:b", 0, range(1000, 20), 4096, 512).callsInProgress,
+            "another player's call does not count against this player's cap");
+    }
+
+    @Test
+    void aHoldThatEndedIsRememberedWithWhyForItsPlayersAgentsAndNobodyElse() {
+        HoldLedger ledger = new HoldLedger();
+        HoldLedger.Hold hold = ledger.create("player:u1~agent:a", 0, range(0, 20), false, 0L, 1_800_000L, 3_600_000L);
+        ledger.add(hold);
+        ledger.noteEnded(hold, "server_release_loaded all, by builder (c4)", 5_000L);
+        ledger.remove(hold.id);
+        assertEquals("server_release_loaded all, by builder (c4)", ledger.endOf(hold.id).why);
+        assertEquals(20, ledger.endOf(hold.id).chunks);
+        assertEquals(1, ledger.recentlyEnded("player:u1").size(), "any agent of the player is told");
+        assertEquals(1, ledger.recentlyEnded(null).size(), "and the endpoint's owner");
+        assertTrue(ledger.recentlyEnded("player:u2").isEmpty());
+        assertNull(ledger.endOf("h999"));
+        for (int i = 0; i < HoldLedger.ENDED_KEPT + 5; i++) {
+            ledger.noteEnded(ledger.create("x", 0, range(0, 1), false, 0L, 1L, 1L), "it idled out", 6_000L);
+        }
+        assertEquals(HoldLedger.ENDED_KEPT, ledger.recentlyEnded(null).size());
+        assertNull(ledger.endOf(hold.id), "the oldest are forgotten");
+    }
 }

@@ -44,6 +44,9 @@ public final class HoldLedger {
         /** Who the caller is, for people to read (the agent's name); null when only the id is known. */
         @Nullable
         public String label;
+        /** The tool whose call took this, for a listing to say what a call's hold is for; null if unknown. */
+        @Nullable
+        public String tool;
         /**
          * For a temporary hold: when the call it belongs to ended or stopped waiting, or 0 while it has
          * not. Its release is normally already on its way then; a hold still here {@link #CALL_GONE_GRACE_MILLIS}
@@ -114,7 +117,63 @@ public final class HoldLedger {
     private final Map<String, Hold> holds = new LinkedHashMap<>();
     private final Map<Place, Integer> references = new HashMap<>();
     private final Set<Place> loadedByUs = new HashSet<>();
+    private final java.util.ArrayDeque<Ended> ended = new java.util.ArrayDeque<>();
     private int nextId = 1;
+
+    /** How many ended holds are remembered, newest last. */
+    public static final int ENDED_KEPT = 32;
+
+    /** A lasting hold that is over, and what ended it. */
+    public static final class Ended {
+
+        public final String id;
+        public final String caller;
+        public final int chunks;
+        public final String why;
+        public final long atMillis;
+
+        Ended(String id, String caller, int chunks, String why, long atMillis) {
+            this.id = id;
+            this.caller = caller;
+            this.chunks = chunks;
+            this.why = why;
+            this.atMillis = atMillis;
+        }
+    }
+
+    /**
+     * Remembers that a lasting hold ended and why, so its owner can be told instead of finding it gone:
+     * a hold that idled out under a test nothing read during took the test's chunks with it, and
+     * nothing said so.
+     */
+    public void noteEnded(Hold hold, String why, long nowMillis) {
+        ended.addLast(new Ended(hold.id, hold.caller, hold.chunks.size(), why, nowMillis));
+        while (ended.size() > ENDED_KEPT) {
+            ended.removeFirst();
+        }
+    }
+
+    /** The lasting holds that ended lately, oldest first; those {@code key} covers, or all for null. */
+    public List<Ended> recentlyEnded(@Nullable String key) {
+        List<Ended> out = new ArrayList<>();
+        for (Ended entry : ended) {
+            if (key == null || covers(key, entry.caller)) {
+                out.add(entry);
+            }
+        }
+        return out;
+    }
+
+    /** The remembered end of hold {@code id}, or null. */
+    @Nullable
+    public Ended endOf(String id) {
+        for (Ended entry : ended) {
+            if (entry.id.equals(id)) {
+                return entry;
+            }
+        }
+        return null;
+    }
 
     public String newId(boolean temporary) {
         return (temporary ? "call" : "h") + nextId++;
@@ -276,7 +335,13 @@ public final class HoldLedger {
         public final int adding;
         public final int heldChunks;
         public final int callers;
+        /** What the asker holds under its own key: the count its own listing shows. */
         public final int callerHeldChunks;
+        /**
+         * What the asker's group holds: a player's agents together, which is what the per-caller cap
+         * counts. The same as {@link #callerHeldChunks} for a caller that is a group of one.
+         */
+        public final int groupHeldChunks;
         /**
          * Whether another caller's call in progress holds chunks that count against this cap. Those end
          * with their call, so a moment's wait may make room; a lasting hold never frees up that soon.
@@ -290,13 +355,14 @@ public final class HoldLedger {
         public final boolean ownCallsInProgress;
 
         CapRefusal(String limit, int cap, int adding, int heldChunks, int callers, int callerHeldChunks,
-                   boolean callsInProgress, boolean ownCallsInProgress) {
+                   int groupHeldChunks, boolean callsInProgress, boolean ownCallsInProgress) {
             this.limit = limit;
             this.cap = cap;
             this.adding = adding;
             this.heldChunks = heldChunks;
             this.callers = callers;
             this.callerHeldChunks = callerHeldChunks;
+            this.groupHeldChunks = groupHeldChunks;
             this.callsInProgress = callsInProgress;
             this.ownCallsInProgress = ownCallsInProgress;
         }
@@ -308,7 +374,17 @@ public final class HoldLedger {
         /** The refusal as a caller reads it: which cap, the server's count and callers, and their own. */
         public String message() {
             StringBuilder text = new StringBuilder();
-            if (perCaller()) {
+            if (perCaller() && groupHeldChunks != callerHeldChunks) {
+                // The cap is the player's, and other agents on the same connection hold most of it. Said
+                // as "you hold 510" it sent an agent holding nothing to look for holds to release (#192).
+                text.append("Hold cap reached for your player (").append(limit).append(" = ").append(cap)
+                    .append(", shared by every agent on your connection): they hold ").append(groupHeldChunks)
+                    .append(" chunk(s) between them, ").append(callerHeldChunks).append(" of them yours, and this ")
+                    .append("needs ").append(adding).append(" more. The server holds ").append(heldChunks)
+                    .append(" for ").append(callers).append(" caller(s). server_keep_loaded op 'list' shows which ")
+                    .append("agent holds what; work in smaller pieces, or wait for the others.");
+            }
+            else if (perCaller()) {
                 text.append("Hold cap reached for you (").append(limit).append(" = ").append(cap)
                     .append("): you hold ").append(callerHeldChunks).append(" chunk(s) and this needs ")
                     .append(adding).append(" more. The server holds ").append(heldChunks).append(" for ")
@@ -348,8 +424,9 @@ public final class HoldLedger {
         int held = heldChunks();
         Set<Place> mine = placesOfGroup(groupOf(caller));
         int addingTotal = added(dimension, chunks);
+        int own = heldChunks(caller);
         if (held + addingTotal > maxTotal) {
-            return new CapRefusal(LIMIT_TOTAL, maxTotal, addingTotal, held, callers(), mine.size(),
+            return new CapRefusal(LIMIT_TOTAL, maxTotal, addingTotal, held, callers(), own, mine.size(),
                 hasCallInProgress(caller, false), hasCallInProgress(caller, true));
         }
         if (maxPerCaller > 0) {
@@ -360,9 +437,10 @@ public final class HoldLedger {
                 }
             }
             if (mine.size() + addingMine > maxPerCaller) {
-                // Only the asker's own chunks count here, so only their own calls could make room.
-                return new CapRefusal(LIMIT_PER_CALLER, maxPerCaller, addingMine, held, callers(), mine.size(),
-                    false, hasCallInProgress(caller, true));
+                // Only the group's chunks count here, so only its calls could make room: another agent
+                // of the same player's, which is worth a moment's wait, or the asker's own, which is not.
+                return new CapRefusal(LIMIT_PER_CALLER, maxPerCaller, addingMine, held, callers(), own, mine.size(),
+                    hasGroupCallInProgress(caller), hasCallInProgress(caller, true));
             }
         }
         return null;
@@ -372,6 +450,17 @@ public final class HoldLedger {
     private boolean hasCallInProgress(String caller, boolean own) {
         for (Hold hold : holds.values()) {
             if (hold.temporary && hold.caller.equals(caller) == own) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether another caller of {@code caller}'s group (another agent of the same player) has a call's hold. */
+    private boolean hasGroupCallInProgress(String caller) {
+        String group = groupOf(caller);
+        for (Hold hold : holds.values()) {
+            if (hold.temporary && !hold.caller.equals(caller) && groupOf(hold.caller).equals(group)) {
                 return true;
             }
         }

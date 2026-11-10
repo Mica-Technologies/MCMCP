@@ -96,6 +96,10 @@ public class ToolContext {
     @Nullable
     private volatile String holdCaller;
 
+    /** The tool being run. Set by the dispatcher; a part shares its whole's. */
+    @Nullable
+    private volatile String toolName;
+
     /**
      * Time spent per kind of step, for the request journal's end line. Shared with every
      * {@link #forPart} context, so a sequence's steps all add to the one call's totals.
@@ -231,6 +235,16 @@ public class ToolContext {
 
     public void setHoldCaller(@Nullable String value) {
         this.holdCaller = value;
+    }
+
+    /** The tool this call is running, for what it holds to be listed by; null where nobody set it. */
+    @Nullable
+    public String getToolName() {
+        return toolName;
+    }
+
+    public void setToolName(@Nullable String value) {
+        this.toolName = value;
     }
 
     /** Ties this call's progress to its {@link ToolActivity} entry. Set once, by the dispatcher. */
@@ -599,6 +613,7 @@ public class ToolContext {
         // The same hold owner too: a job's piece of a tiled read is charged to the job, as the room it
         // was cut to was.
         part.holdCaller = holdCaller;
+        part.toolName = toolName;
         return part;
     }
 

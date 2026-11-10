@@ -334,15 +334,18 @@ public final class ChunkLoadGovernor {
                 + "waiting for chunk loads would wait forever. Call it from the tool's worker.");
         }
         final String caller = holdCallerOf(context);
-        final String label = context.getHoldCaller() != null || context.getPrincipal().isCompanion()
-            ? null : context.getCaller().label();
+        // A player's agents are named too: their listing shows each other's holds, and "which agent" is
+        // the question it answers (#192). A job's hold is named by its job key.
+        final String label = context.getHoldCaller() != null ? null : context.getCaller().label();
+        final String tool = context.getToolName();
         final long started = System.currentTimeMillis();
         // A call's own hold has no idle timer, only a lease longer than any call runs: what ends it is the
         // call, through release(Outcome), and callEnded says when that has happened.
         final long lease = temporary ? temporaryLeaseMillis() : maxMillis;
         final AtomicLong callEnded = new AtomicLong();
         try {
-            return acquire(context, caller, label, dimension, chunks, temporary, idleMillis, lease, started, callEnded);
+            return acquire(context, caller, label, tool, dimension, chunks, temporary, idleMillis, lease, started,
+                callEnded);
         }
         catch (Busy | RuntimeException e) {
             endCall(callEnded);
@@ -364,14 +367,14 @@ public final class ChunkLoadGovernor {
     }
 
     private static Outcome acquire(ToolContext context, final String caller, @Nullable final String label,
-                                   final int dimension, final Set<Long> chunks, final boolean temporary,
+                                   @Nullable final String tool, final int dimension, final Set<Long> chunks, final boolean temporary,
                                    final long idleMillis, final long maxMillis, final long started,
                                    final AtomicLong callEnded) throws Busy {
         Object admitted;
         while (true) {
             // If this call stops waiting while admit runs, the hold admit takes is nobody's: give it back
             // as soon as admit ends (#132). If it stops waiting before admit starts, admit never runs.
-            admitted = context.onGameThreadWithCleanup(() -> admit(caller, label, dimension, chunks, temporary,
+            admitted = context.onGameThreadWithCleanup(() -> admit(caller, label, tool, dimension, chunks, temporary,
                 idleMillis, maxMillis, System.currentTimeMillis(), callEnded), orphan -> {
                     endCall(callEnded);
                     if (orphan instanceof Request) {
@@ -494,7 +497,8 @@ public final class ChunkLoadGovernor {
     }
 
     /** Server thread: limits, the hold itself, and what is already loaded. */
-    private static Object admit(String caller, @Nullable String label, int dimension, Set<Long> chunks,
+    private static Object admit(String caller, @Nullable String label, @Nullable String tool, int dimension,
+                                Set<Long> chunks,
                                 boolean temporary, long idleMillis, long maxMillis, long nowMillis,
                                 AtomicLong callEnded) {
         if (callEnded.get() != 0L) {
@@ -517,6 +521,7 @@ public final class ChunkLoadGovernor {
 
         HoldLedger.Hold hold = LEDGER.create(caller, dimension, chunks, temporary, nowMillis, idleMillis, maxMillis);
         hold.label = label;
+        hold.tool = tool;
         if (temporary) {
             hold.callEndedAt = callEnded::get;
         }
@@ -673,10 +678,41 @@ public final class ChunkLoadGovernor {
                     + why + ".", busy("released", null, 0L)));
             }
         }
+        if (!hold.temporary) {
+            // Kept so its owner can be told why it is gone (#192): op 'list' and server_release_loaded say.
+            LEDGER.noteEnded(hold, why, System.currentTimeMillis());
+        }
         WorldServer world = DimensionManager.getWorld(hold.dimension);
         for (HoldLedger.Released released : LEDGER.remove(holdId)) {
             unforce(world, released);
         }
+    }
+
+    /**
+     * Why hold {@code holdId} is not there, if it ended lately: for a release or renew that finds it
+     * gone. Server thread.
+     */
+    @Nullable
+    public static String endedNote(String holdId) {
+        HoldLedger.Ended ended = LEDGER.endOf(holdId);
+        if (ended == null) {
+            return null;
+        }
+        return "Hold '" + holdId + "' ended " + Math.max(0L, (System.currentTimeMillis() - ended.atMillis) / 1000L)
+            + " s ago: " + ended.why + ".";
+    }
+
+    /**
+     * Whether {@code holdId} is the hold of a call that is still running: releasing it would unload the
+     * chunks under that call. Server thread.
+     */
+    public static boolean isRunningCall(String holdId) {
+        HoldLedger.Hold hold = LEDGER.get(holdId);
+        if (hold == null || !hold.temporary) {
+            return false;
+        }
+        java.util.function.LongSupplier ended = hold.callEndedAt;
+        return ended == null || ended.getAsLong() == 0L;
     }
 
     /** Ends every hold and returns every ticket. Server stopping. */
@@ -704,10 +740,13 @@ public final class ChunkLoadGovernor {
     public static String renew(String holdId, String caller, long maxMillis, long idleMillis) {
         HoldLedger.Hold hold = LEDGER.get(holdId);
         if (hold == null || hold.temporary) {
-            return "There is no hold '" + holdId + "'.";
+            String ended = endedNote(holdId);
+            return ended != null ? ended + " Take a new one with op 'hold'." : "There is no hold '" + holdId + "'.";
         }
-        // The endpoint's agents may renew any hold, as before each had its own (#121); a player only theirs.
-        if (!hold.caller.equals(caller) && !caller.startsWith("endpoint")) {
+        // The endpoint's agents may renew any hold, as before each had its own (#121); a player only
+        // theirs, any agent of theirs included.
+        if (!hold.caller.equals(caller) && !caller.startsWith("endpoint")
+            && !HoldLedger.groupOf(hold.caller).equals(HoldLedger.groupOf(caller))) {
             return "Hold '" + holdId + "' is not yours.";
         }
         long now = System.currentTimeMillis();
@@ -841,8 +880,13 @@ public final class ChunkLoadGovernor {
         if (QUEUE.size() > 1) {
             QUEUE.addLast(QUEUE.pollFirst());
         }
+        // Expiry every second: a call's hold that was never given back counts against its player's cap
+        // until it is, and at every ten seconds a slow server kept refusing loads for it (#192).
+        if (ticks % 20 == 0) {
+            expire(now);
+        }
         if (ticks % 200 == 0) {
-            housekeeping(now);
+            reconcile();
         }
     }
 
@@ -950,17 +994,27 @@ public final class ChunkLoadGovernor {
         }
     }
 
-    private static void housekeeping(long now) {
+    private static void expire(long now) {
         for (String id : LEDGER.expired(now)) {
             HoldLedger.Hold hold = LEDGER.get(id);
-            if (hold != null && hold.temporary) {
+            if (hold == null) {
+                continue;
+            }
+            if (hold.temporary) {
                 // A call's hold ends with its call. One still here was never given back (#132).
                 Mcmcp.LOGGER.warn("MCMCP released hold " + id + " (" + hold.chunks.size() + " chunks, " + hold.caller
                     + "): " + (hold.callGone(now) ? "its call had ended without releasing it" : "its lease ran out") + ".");
+                releaseNow(id, "it expired");
+                continue;
             }
-            releaseNow(id, "it expired");
+            boolean lease = now >= hold.createdMillis + hold.maxMillis;
+            releaseNow(id, lease ? "its lease of " + hold.maxMillis / 1000L + " s ran out"
+                : "nothing read or wrote in it for its idleSeconds (" + hold.idleMillis / 1000L + ")");
         }
-        // Reconcile: a forced chunk no hold references is a leak; give it back.
+    }
+
+    private static void reconcile() {
+        // A forced chunk no hold references is a leak; give it back.
         for (HoldLedger.Place place : new ArrayList<>(FORCED.keySet())) {
             if (!LEDGER.isHeld(place.dimension, place.chunk)) {
                 Mcmcp.LOGGER.warn("MCMCP found a forced chunk no hold uses, " + ChunkKeys.describe(place.chunk)
@@ -1016,6 +1070,9 @@ public final class ChunkLoadGovernor {
         json.addProperty("heldChunks", cap.heldChunks);
         json.addProperty("callers", cap.callers);
         json.addProperty("yourHeldChunks", cap.callerHeldChunks);
+        if (cap.groupHeldChunks != cap.callerHeldChunks) {
+            json.addProperty("playerHeldChunks", cap.groupHeldChunks);
+        }
         Busy busy = new Busy(cap.message(), json);
         busy.capMayClear = cap.callsInProgress;
         return busy;
@@ -1139,6 +1196,11 @@ public final class ChunkLoadGovernor {
         if (you != null) {
             json.addProperty("you", you);
             json.addProperty("yourHeldChunks", LEDGER.heldChunks(you));
+            int group = LEDGER.heldChunksOfGroup(you);
+            if (group != LEDGER.heldChunks(you)) {
+                // What the per-caller cap counts: every agent of the player (#192).
+                json.addProperty("playerHeldChunks", group);
+            }
         }
         json.addProperty("loadsLastMinute", BUDGET.lastMinute(now));
         json.addProperty("waitingRequests", QUEUE.size());
@@ -1160,6 +1222,17 @@ public final class ChunkLoadGovernor {
             entry.addProperty("dimension", hold.dimension);
             entry.addProperty("chunks", hold.chunks.size());
             entry.addProperty("temporary", hold.temporary);
+            if (hold.tool != null) {
+                entry.addProperty("tool", hold.tool);
+            }
+            if (hold.temporary) {
+                // A call's hold ends with its call, not at this lease: said, so a running call's is not
+                // read as a leak and released from under it (#192).
+                java.util.function.LongSupplier ended = hold.callEndedAt;
+                boolean running = ended == null || ended.getAsLong() == 0L;
+                entry.addProperty("call", running ? "running" : "ended, being released");
+                entry.addProperty("heldForSeconds", Math.max(0L, (now - hold.createdMillis) / 1000L));
+            }
             entry.addProperty("expiresInSeconds", Math.max(0L, (hold.expiresAtMillis() - now) / 1000L));
             if (!hold.temporary) {
                 entry.addProperty("leaseEndsInSeconds",
@@ -1185,6 +1258,23 @@ public final class ChunkLoadGovernor {
                 byCaller.add(entry);
             }
             json.add("byCaller", byCaller);
+        }
+        JsonArray ended = new JsonArray();
+        for (HoldLedger.Ended entry : LEDGER.recentlyEnded(onlyCaller)) {
+            // Ten minutes: long enough to explain a hold that is gone, short enough not to be a history.
+            if (now - entry.atMillis > 600_000L) {
+                continue;
+            }
+            JsonObject item = new JsonObject();
+            item.addProperty("id", entry.id);
+            item.addProperty("owner", entry.caller);
+            item.addProperty("chunks", entry.chunks);
+            item.addProperty("secondsAgo", Math.max(0L, (now - entry.atMillis) / 1000L));
+            item.addProperty("why", entry.why);
+            ended.add(item);
+        }
+        if (ended.size() > 0) {
+            json.add("recentlyEnded", ended);
         }
         synchronized (SHED_LOG) {
             if (!SHED_LOG.isEmpty()) {

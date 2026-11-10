@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
+import com.micatechnologies.minecraft.mcmcp.chunkload.HoldLedger;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ReadTiles;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -193,7 +194,8 @@ public final class ServerChunkTools {
                 + "writing in it renews the idle timer but not the lease; op 'renew' renews both. A read "
                 + "inside a hold whose lease ends within two minutes says so (holdLeaseEndsInSeconds). For a "
                 + "long test nothing reads during, pass a long idleSeconds. op 'list' shows the holds, who "
-                + "holds what (byCaller) and when each ends.\n\n"
+                + "holds what and when each ends, the holds of calls still running (temporary, with their "
+                + "tool; they end with their call) and why holds that ended lately did (recentlyEnded).\n\n"
                 + "Limited per caller (chunks.maxHeldChunksPerCaller, 512 by default, about 360 x 360 "
                 + "blocks; each agent and each job is its own caller) and for the server "
                 + "(chunks.maxHeldChunks). A refusal names the cap, the count held and by how many callers, "
@@ -211,6 +213,7 @@ public final class ServerChunkTools {
                     + "chunks.holdMaxSeconds (900); at most chunks.holdLongestLeaseSeconds.", 60, 86400)
                 .integer("idleSeconds", "hold, renew: release the hold after this long with no read or "
                     + "write in it. Defaults to chunks.holdIdleSeconds (120); at most the lease.", 10, 86400)
+                .string("agent", com.micatechnologies.minecraft.mcmcp.mcp.CallerId.AGENT_ARGUMENT)
                 .build())
             .serverOnly()
             .handler(context -> {
@@ -218,7 +221,10 @@ public final class ServerChunkTools {
                 String caller = ChunkLoadGovernor.holdCallerOf(context);
                 boolean everyone = !context.getPrincipal().isCompanion();
                 if ("list".equals(op)) {
-                    JsonObject status = context.onGameThread(() -> ChunkLoadGovernor.status(everyone ? null : caller, caller));
+                    // A player sees every agent of theirs: the cap is shared between them, so a listing
+                    // of one agent's own holds showed 0 beside a refusal for 510 (#192).
+                    JsonObject status = context.onGameThread(() -> ChunkLoadGovernor.status(
+                        everyone ? null : HoldLedger.groupOf(caller), caller));
                     return ToolResult.structured(status);
                 }
                 int longest = McmcpConfig.getChunkHoldLongestLeaseSeconds();
@@ -293,6 +299,7 @@ public final class ServerChunkTools {
             .schema(JsonSchema.object()
                 .string("id", "The hold to release.")
                 .bool("all", "Release every server_keep_loaded hold of yours. Loads still running for your other calls are left alone.")
+                .string("agent", "The name you gave server_keep_loaded, if any: 'all' is then that agent's holds.")
                 .build())
             .serverOnly()
             .idempotent()
@@ -300,7 +307,8 @@ public final class ServerChunkTools {
                 String caller = ChunkLoadGovernor.holdCallerOf(context);
                 if (context.getBoolean("all", false)) {
                     return ToolResult.structured(context.onGameThread(() -> released(caller,
-                        ChunkLoadGovernor.releaseCallerNow(caller, "server_release_loaded all"))));
+                        ChunkLoadGovernor.releaseCallerNow(caller, "server_release_loaded all, by "
+                            + context.callerLabel()))));
                 }
                 final String id = context.getString("id", null);
                 if (id == null) {
@@ -308,13 +316,21 @@ public final class ServerChunkTools {
                 }
                 String owner = context.onGameThread(() -> ChunkLoadGovernor.ownerOf(id));
                 if (owner == null) {
-                    return ToolResult.error("There is no hold '" + id + "'.");
+                    String ended = context.onGameThread(() -> ChunkLoadGovernor.endedNote(id));
+                    return ToolResult.error(ended != null ? ended : "There is no hold '" + id + "'.");
                 }
-                if (context.getPrincipal().isCompanion() && !owner.equals(caller)) {
+                // A player's agents may release each other's: the access, and the cap, are the player's.
+                if (context.getPrincipal().isCompanion()
+                    && !HoldLedger.groupOf(owner).equals(HoldLedger.groupOf(caller))) {
                     return ToolResult.error("Hold '" + id + "' is not yours.");
                 }
+                if (context.getPrincipal().isCompanion() && context.onGameThread(() -> ChunkLoadGovernor.isRunningCall(id))) {
+                    return ToolResult.error("Hold '" + id + "' belongs to a call that is still running, and ends when "
+                        + "it does: releasing it would unload the chunks under that call. server_keep_loaded op "
+                        + "'list' shows its tool and how long it has run.");
+                }
                 return ToolResult.structured(context.onGameThread(() -> {
-                    ChunkLoadGovernor.releaseNow(id, "server_release_loaded");
+                    ChunkLoadGovernor.releaseNow(id, "server_release_loaded, by " + context.callerLabel());
                     return released(caller, Collections.singletonList(id));
                 }));
             })
