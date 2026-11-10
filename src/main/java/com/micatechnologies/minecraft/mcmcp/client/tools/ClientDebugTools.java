@@ -918,10 +918,14 @@ public final class ClientDebugTools {
      * @return the server's answer ({@code resent}, {@code live}, {@code unloaded}, {@code viewDistance}),
      *         or null when it could not be asked
      */
+    /** Until when {@link #refreshView} does not ask: the server said it has no such tool for this player. */
+    private static volatile long refreshUnavailableUntil;
+
     @Nullable
     private static JsonObject refreshView(ToolContext context, double[] from, @Nullable double[] lookAt) {
         Minecraft mc = Minecraft.getMinecraft();
-        if (mc.getIntegratedServer() != null || mc.getSession() == null) {
+        if (mc.getIntegratedServer() != null || mc.getSession() == null
+            || System.currentTimeMillis() < refreshUnavailableUntil) {
             return null;
         }
         int[] box = com.micatechnologies.minecraft.mcmcp.chunkload.ViewRefresh.box(from, lookAt);
@@ -936,7 +940,16 @@ public final class ClientDebugTools {
             JsonObject result = com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.callServerTool(
                 "server_refresh_chunks", args, 60_000L, context.getCaller().stamp());
             if (Json.getBoolean(result, "isError", false)) {
-                // Without 'load' access the loaded chunks can still be sent.
+                String why = com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.textOf(result);
+                if (why.contains("not available through the MCMCP companion") || why.contains("Unknown tool")
+                    || why.contains("does not include")) {
+                    // A server without the tool, or a player without 'read' there: neither changes from
+                    // one screenshot to the next, so it is not asked again for a while.
+                    refreshUnavailableUntil = System.currentTimeMillis() + 300_000L;
+                    return null;
+                }
+                // Otherwise, most likely no 'load' access, or the server too busy to load: the chunks it
+                // already has loaded can still be sent.
                 args.remove("load");
                 result = com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.callServerTool(
                     "server_refresh_chunks", args, 30_000L, context.getCaller().stamp());
@@ -954,6 +967,10 @@ public final class ClientDebugTools {
         catch (RuntimeException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
+            }
+            else if (String.valueOf(e.getMessage()).contains("No tool named")) {
+                // A server whose MCMCP predates the tool answers at the protocol level.
+                refreshUnavailableUntil = System.currentTimeMillis() + 300_000L;
             }
             return null;
         }
