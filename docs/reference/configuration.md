@@ -236,6 +236,18 @@ inheriting another's access.
 
 Clearing it generates a new one, and costs you the approval.
 
+A **copy** of the folder is a different game. It is given a new id and secret the first time it
+starts, as long as the original is still where [`instanceHome`](#instancehome) says; see
+[A copied game folder](../guide/orchestrator.md#a-copied-game-folder).
+
+### `instanceHome`
+
+`string` · written by MCMCP
+
+The game folder this identity was generated in. It is how a copied folder is told from a moved one:
+when the game starts somewhere else and the folder named here still holds a config with the same
+`instanceId`, this one is the copy. Updated when the folder has simply moved. Not meant to be edited.
+
 ### `instanceSecret`
 
 `string` · generated

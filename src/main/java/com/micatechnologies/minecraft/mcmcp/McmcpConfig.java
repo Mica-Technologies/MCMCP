@@ -162,6 +162,7 @@ public class McmcpConfig {
 
     // Identity
     private static String instanceId = "";
+    private static String instanceHome = "";
     private static String instanceSecret = "";
     private static String instanceName = "";
 
@@ -292,7 +293,15 @@ public class McmcpConfig {
             "Stable id for this game instance, generated on first launch if left empty.\n"
                 + "An orchestrator stores its approval of this instance against this id, so changing "
                 + "it means being asked to approve the instance again. It survives moving or renaming "
-                + "the instance folder; that is the point of it.");
+                + "the instance folder; that is the point of it.\n"
+                + "A COPY of this folder is a different game: it is given an id and secret of its own the "
+                + "first time it starts, as long as the original is still where instanceHome says. If a "
+                + "copy still comes up with this id (the orchestrator refuses it as a duplicate), clear "
+                + "instanceId and instanceSecret in the copy and restart it.");
+
+        instanceHome = configuration.getString("instanceHome", CATEGORY_IDENTITY, "",
+            "The game folder this identity was generated in. Written by MCMCP; it is how a copied "
+                + "folder is told from a moved one. Leave it alone.");
 
         instanceSecret = configuration.getString("instanceSecret", CATEGORY_IDENTITY, "",
             "Secret this instance proves its identity with when connecting to an orchestrator. "
@@ -657,9 +666,41 @@ public class McmcpConfig {
      * {@code mcmcp_endpoint_info} report, and an instance that can be told apart from its neighbours
      * is useful whether or not it is currently linked to anything.
      */
+    private static String canonicalPath(File directory) {
+        try {
+            return directory.getCanonicalPath();
+        }
+        catch (java.io.IOException e) {
+            return directory.getAbsolutePath();
+        }
+    }
+
     private static void ensureIdentity() {
         String directoryName = gameDirectory == null ? null : gameDirectory.getName();
         boolean changed = false;
+
+        // A copied game folder carries the original's id and secret, and with them took its place in
+        // an orchestrator's roster (#188). Where the identity was generated is recorded, so a copy can
+        // be told from a move: the original is still there, with this id.
+        String here = gameDirectory == null ? "" : canonicalPath(gameDirectory);
+        if (!here.isEmpty() && !instanceId.trim().isEmpty() && !instanceHome.trim().isEmpty()
+            && McmcpIdentity.isCopyOf(new File(instanceHome.trim()), gameDirectory, instanceId)) {
+            Mcmcp.LOGGER.warn("MCMCP: this game folder (" + here + ") is a copy of " + instanceHome.trim()
+                + ", which still has the instance id " + instanceId + ". Two games cannot share one identity, "
+                + "so this one is being given its own; an orchestrator will ask to approve it as a new game.");
+            String originalName = new File(instanceHome.trim()).getName();
+            if (instanceName.trim().equals(originalName)) {
+                // The label was the original folder's name by default; this folder has its own.
+                instanceName = "";
+            }
+            instanceId = "";
+            instanceSecret = "";
+        }
+        if (!here.isEmpty() && !here.equals(instanceHome.trim())) {
+            instanceHome = here;
+            configuration.get(CATEGORY_IDENTITY, "instanceHome", "").set(instanceHome);
+            changed = true;
+        }
 
         if (instanceId.trim().isEmpty()) {
             instanceId = McmcpIdentity.generateInstanceId(directoryName);

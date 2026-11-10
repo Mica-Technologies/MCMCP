@@ -84,6 +84,42 @@ class McmcpIdentityTest {
         assertTrue(shown.contains("ATM9"));
     }
 
+    private static java.io.File gameFolder(java.io.File parent, String name, String instanceId) throws java.io.IOException {
+        java.io.File folder = new java.io.File(parent, name);
+        java.io.File config = new java.io.File(folder, "config");
+        assertTrue(config.mkdirs());
+        if (instanceId != null) {
+            java.nio.file.Files.write(new java.io.File(config, "mcmcp.cfg").toPath(), java.util.Arrays.asList(
+                "# Configuration file", "", "identity {", "    # Stable id for this game instance.",
+                "    S:instanceId=" + instanceId, "    S:instanceSecret=0123abcd", "}"),
+                java.nio.charset.StandardCharsets.UTF_8);
+        }
+        return folder;
+    }
+
+    @Test
+    void aCopiedGameFolderIsToldFromAMovedOneByTheOriginalStillBeingThereWithItsId(
+        @org.junit.jupiter.api.io.TempDir java.io.File parent) throws java.io.IOException {
+        java.io.File original = gameFolder(parent, "run", "run-85bcdf");
+        java.io.File copy = gameFolder(parent, "bob", "run-85bcdf");
+        assertTrue(McmcpIdentity.isCopyOf(original, copy, "run-85bcdf"), "the original is still there, with this id");
+
+        // Moved: nothing is left at the old path, or what is there is no longer this game.
+        assertFalse(McmcpIdentity.isCopyOf(new java.io.File(parent, "gone"), copy, "run-85bcdf"));
+        assertFalse(McmcpIdentity.isCopyOf(gameFolder(parent, "empty", null), copy, "run-85bcdf"));
+        assertFalse(McmcpIdentity.isCopyOf(gameFolder(parent, "other", "alice-f12b5a"), copy, "run-85bcdf"));
+    }
+
+    @Test
+    void aGameIsNeverACopyOfItselfHoweverItsFolderIsWritten(@org.junit.jupiter.api.io.TempDir java.io.File parent)
+        throws java.io.IOException {
+        java.io.File original = gameFolder(parent, "run", "run-85bcdf");
+        assertFalse(McmcpIdentity.isCopyOf(original, new java.io.File(parent, "run/../run"), "run-85bcdf"));
+        assertFalse(McmcpIdentity.isCopyOf(original, original, "run-85bcdf"));
+        assertFalse(McmcpIdentity.isCopyOf(null, original, "run-85bcdf"), "a config from before the home was recorded");
+        assertFalse(McmcpIdentity.isCopyOf(original, gameFolder(parent, "bob", "run-85bcdf"), ""));
+    }
+
     @Test
     void knowsWhetherItHasASecretYet() {
         assertTrue(new McmcpIdentity("a", "secret", "A").hasSecret());

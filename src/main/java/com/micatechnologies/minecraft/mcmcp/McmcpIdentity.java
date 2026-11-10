@@ -137,6 +137,61 @@ public final class McmcpIdentity {
         return slug.length() == 0 ? "instance" : slug.toString();
     }
 
+    // ------------------------------------------------------------------
+    // A copied game folder
+    // ------------------------------------------------------------------
+
+    /**
+     * Whether an identity recorded as generated in {@code recordedHome} and now found in
+     * {@code currentDirectory} got there by the folder being <b>copied</b>, not moved (#188).
+     *
+     * <p>An identity is meant to survive a move: same game, new path. A copy is a second game, and
+     * with the first one's id and secret it replaced it in an orchestrator's roster, silently. The two
+     * look the same from inside the config, so the old path is what tells them apart: after a move
+     * nothing is there, and after a copy the original is, with the same id in its own config.
+     *
+     * <p>Says no whenever it cannot tell: an unreadable original, or one that has since been given
+     * another id. Wrongly keeping an identity costs a refused link with instructions; wrongly
+     * replacing one costs the person their approval and their label.
+     *
+     * @param recordedHome     the game directory the config says this identity was generated in
+     * @param currentDirectory the game directory the config was just read from
+     */
+    public static boolean isCopyOf(@Nullable java.io.File recordedHome, @Nullable java.io.File currentDirectory,
+                                   @Nullable String instanceId) {
+        if (recordedHome == null || currentDirectory == null || instanceId == null || instanceId.trim().isEmpty()
+            || sameDirectory(recordedHome, currentDirectory)) {
+            return false;
+        }
+        java.io.File original = new java.io.File(new java.io.File(recordedHome, "config"), "mcmcp.cfg");
+        if (!original.isFile() || original.length() > 4L * 1024L * 1024L) {
+            return false;
+        }
+        try {
+            for (String line : java.nio.file.Files.readAllLines(original.toPath(),
+                java.nio.charset.StandardCharsets.UTF_8)) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("S:instanceId=")) {
+                    return trimmed.substring("S:instanceId=".length()).trim().equals(instanceId.trim());
+                }
+            }
+        }
+        catch (java.io.IOException | RuntimeException e) {
+            return false;
+        }
+        return false;
+    }
+
+    /** Whether two paths name one folder, however each is written. */
+    public static boolean sameDirectory(java.io.File a, java.io.File b) {
+        try {
+            return a.getCanonicalFile().equals(b.getCanonicalFile());
+        }
+        catch (java.io.IOException e) {
+            return a.getAbsoluteFile().equals(b.getAbsoluteFile());
+        }
+    }
+
     private static String randomHex(int byteCount) {
         byte[] entropy = new byte[byteCount];
         RANDOM.nextBytes(entropy);

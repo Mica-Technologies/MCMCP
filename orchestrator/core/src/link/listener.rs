@@ -236,6 +236,57 @@ async fn handle_connection(stream: TcpStream, context: LinkContext) -> Result<()
     }
 
     // ------------------------------------------------------------------
+    // A copied folder
+    // ------------------------------------------------------------------
+
+    // After the secret has been checked, so only a game that really holds this identity is told
+    // where the other one runs from. Before anything is stored, so the copy's folder does not
+    // become the game's recorded one.
+    if let Some(held_from) = context
+        .registry
+        .conflicting_directory(&hello.instance_id, hello.game_directory.as_deref())
+    {
+        let here = hello.game_directory.as_deref().unwrap_or("(unknown)");
+        let message = format!(
+            "instance id {id} is already connected from {held_from}. This game runs from {here}, whose \
+             config/mcmcp.cfg was copied from that one: clear identity.instanceId and \
+             identity.instanceSecret in this folder's copy and restart the game",
+            id = hello.instance_id,
+        );
+        let frame = protocol::rejected(protocol::REASON_DUPLICATE_INSTANCE, &message);
+        let _ = framing::write_frame(&mut write_half, &frame).await;
+        warn!(
+            instance = %hello.instance_id,
+            label = %hello.fallback_label(),
+            connected_from = %held_from,
+            refused_from = %here,
+            "refused a link: its instance id is connected from another folder (a copied config)"
+        );
+        if let Some(log) = &context.event_log {
+            log.note_about(
+                Actor::System,
+                Some(hello.instance_id.clone()),
+                hello.fallback_label(),
+                format!(
+                    "refused a second game using this instance id, from {here}: its config was copied \
+                     from {held_from}. Clear identity.instanceId and identity.instanceSecret in the \
+                     copy's config/mcmcp.cfg and restart it"
+                ),
+            );
+        }
+        context.registry.note_conflict(crate::registry::IdentityConflict {
+            instance_id: hello.instance_id.clone(),
+            side: hello.side.as_str(),
+            label: hello.fallback_label(),
+            game_directory: hello.game_directory.clone(),
+            pid: hello.pid,
+            connected_directory: held_from,
+            seen: std::time::Instant::now(),
+        });
+        return Ok(());
+    }
+
+    // ------------------------------------------------------------------
     // Accepted
     // ------------------------------------------------------------------
 

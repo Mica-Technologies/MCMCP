@@ -12,6 +12,10 @@ class LinkProtocolTest {
     void rejectionsThatOnlyAHumanCanClearAreNotRetried() {
         assertFalse(LinkProtocol.isRetryable(LinkProtocol.REASON_SECRET_MISMATCH));
         assertFalse(LinkProtocol.isRetryable(LinkProtocol.REASON_REVOKED));
+        // Retried, a copied folder's game would take the original's place the moment it closed (#188).
+        assertFalse(LinkProtocol.isRetryable(LinkProtocol.REASON_DUPLICATE_INSTANCE));
+        assertTrue(LinkProtocol.explain(LinkProtocol.REASON_DUPLICATE_INSTANCE, "connected from E:/dev/run")
+            .contains("identity.instanceId"));
         assertFalse(LinkProtocol.isRetryable(LinkProtocol.REASON_UNSUPPORTED_PROTOCOL));
         assertFalse(LinkProtocol.isRetryable(LinkProtocol.REASON_MALFORMED_HELLO));
     }

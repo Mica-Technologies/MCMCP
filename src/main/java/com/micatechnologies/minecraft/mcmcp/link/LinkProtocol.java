@@ -116,6 +116,14 @@ public final class LinkProtocol {
     /** A human explicitly revoked this instance. Not retryable; they have to approve it again. */
     public static final String REASON_REVOKED = "revoked";
 
+    /**
+     * Another game, running from a different folder, is connected under this instance id (#188): this
+     * folder's config was copied from that one's, id and secret with it. Not retryable. Trying again
+     * would only succeed once the other game closed, and would then take its place in the roster under
+     * its name, which is the confusion the refusal exists to prevent.
+     */
+    public static final String REASON_DUPLICATE_INSTANCE = "duplicate-instance";
+
     private LinkProtocol() {
     }
 
@@ -138,6 +146,7 @@ public final class LinkProtocol {
             case REASON_UNSUPPORTED_PROTOCOL:
             case REASON_MALFORMED_HELLO:
             case REASON_REVOKED:
+            case REASON_DUPLICATE_INSTANCE:
                 return false;
             default:
                 return true;
@@ -167,6 +176,11 @@ public final class LinkProtocol {
             case REASON_REVOKED:
                 return "this instance's approval was revoked in the orchestrator" + detail
                     + ". Approve it again there to reconnect. Not retrying.";
+            case REASON_DUPLICATE_INSTANCE:
+                return "another game is connected to the orchestrator under this instance id" + detail
+                    + ". This game folder's config/mcmcp.cfg was copied from that game's. Clear "
+                    + "identity.instanceId and identity.instanceSecret in this folder's copy and restart: it "
+                    + "then gets an identity of its own and asks to be approved. Not retrying.";
             default:
                 return "the orchestrator rejected the link: " + reason + detail;
         }

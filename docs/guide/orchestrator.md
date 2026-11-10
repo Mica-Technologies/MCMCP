@@ -295,6 +295,29 @@ nothing can be called on it until it is approved. The game logs one line when it
 naming its instance id and the orchestrator it reached. Each entry also carries a `hint` naming the
 `trust-root` command below, so an agent can tell you the one-time fix rather than wait.
 
+### A copied game folder
+
+Copying a game folder copies `config/mcmcp.cfg`, and with it the game's `instanceId` and
+`instanceSecret`. To a handshake the copy *is* the original. Two such games running at once used to
+replace each other in the roster without a word: one was listed under the other's name, the other
+not at all, and the copy's client was shown as the other half of the original's server.
+
+Two things stop that:
+
+- **The copy gives itself an identity.** The config records the folder its identity was generated
+  in (`identity.instanceHome`). A game that starts in a different folder while the original is still
+  there, with the same id in its own config, is a copy: it generates a new id and secret, logs a
+  warning saying so, and asks to be approved as a new game. A folder that was *moved* leaves nothing
+  behind at the old path, so it keeps its identity, as before.
+- **The orchestrator refuses a second folder.** A game whose id is already connected from another
+  folder is refused with `duplicate-instance` and does not retry. Its log says which folder holds
+  the id and what to clear. `mcmcp_instances` lists it under `conflicts`, with its own
+  `gameDirectory`, the `connectedFrom` folder and a note, until it comes back fixed. This is what
+  catches a copy made from a config older than `instanceHome`.
+
+To fix a refused copy by hand, clear `instanceId` and `instanceSecret` in its `config/mcmcp.cfg` and
+restart it.
+
 ### Trusted folders: approving ahead of time
 
 An agent that runs a dev client from its own git worktree (`<repo>\.claude\worktrees\agent-…\run`)

@@ -38,6 +38,47 @@ pub struct Registry {
     focus: RwLock<Option<String>>,
     /// Links held open while a human decides whether to approve them, by `<instance>.<side>`.
     pending: RwLock<HashMap<String, PendingApproval>>,
+    /// Games refused because another folder's game holds their instance id, by `<instance>.<side>`.
+    conflicts: RwLock<HashMap<String, IdentityConflict>>,
+}
+
+/// A game refused because its instance id is already connected from another folder (#188).
+///
+/// Copying a game folder copies `config/mcmcp.cfg`, id and secret included, so the copy is the same
+/// instance as far as a handshake can tell. Registered, it replaced the original in the roster, and
+/// its client was shown as the other half of the original's server: a roster that looked right and
+/// was wrong, which is the dangerous kind. So the newcomer is refused, and listed here with both
+/// folders so a person or a model can see what to fix.
+#[derive(Debug, Clone)]
+pub struct IdentityConflict {
+    pub instance_id: String,
+    pub side: &'static str,
+    pub label: String,
+    /// The refused game's folder.
+    pub game_directory: Option<String>,
+    pub pid: Option<i64>,
+    /// The folder of the game that holds the id.
+    pub connected_directory: String,
+    pub seen: std::time::Instant,
+}
+
+/// How long a refused game stays listed. It is not retrying (the refusal is final until its config
+/// is fixed and it is restarted), so this is how long the explanation outlives the knock.
+const CONFLICT_LINGER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Whether two game directories are the same folder, as far as their spelling can say: separators
+/// and a trailing one aside, and letter case aside on Windows, where paths ignore it.
+pub fn same_directory(a: &str, b: &str) -> bool {
+    fn normal(path: &str) -> String {
+        let unified = path.replace('\\', "/");
+        let trimmed = unified.trim_end_matches('/');
+        if cfg!(windows) {
+            trimmed.to_lowercase()
+        } else {
+            trimmed.to_string()
+        }
+    }
+    normal(a) == normal(b)
 }
 
 /// A link that reached the orchestrator and is waiting on a human (#108).
@@ -239,6 +280,61 @@ impl Registry {
             key,
             linger: true,
         }
+    }
+
+    /// The folder a live game holds `instance_id` from, when that is not `directory`: the sign that
+    /// the game now knocking is a copy of it (#188). Either side of that game counts, since a copy's
+    /// client beside the original's server is the same clash. `None` when nothing holds the id, when
+    /// it is held from the same folder (a relaunch, which replaces the old link as it always has),
+    /// or when either folder is unknown and so nothing can be said.
+    pub fn conflicting_directory(&self, instance_id: &str, directory: Option<&str>) -> Option<String> {
+        let directory = directory?;
+        self.instances
+            .read()
+            .expect("registry lock")
+            .values()
+            .filter(|instance| instance.is_alive())
+            .map(|instance| instance.info())
+            .filter(|info| info.approval_id == instance_id)
+            .filter_map(|info| info.game_directory)
+            .find(|held| !same_directory(held, directory))
+    }
+
+    /// Remembers a game refused for holding someone else's instance id, to list it.
+    pub fn note_conflict(&self, conflict: IdentityConflict) {
+        let key = format!(
+            "{}{}{}",
+            conflict.instance_id,
+            crate::instance::ENDPOINT_SEPARATOR,
+            conflict.side
+        );
+        self.conflicts
+            .write()
+            .expect("conflicts lock")
+            .insert(key, conflict);
+    }
+
+    /// The games refused for an instance id another folder's game holds, oldest first. One leaves
+    /// the list after [`CONFLICT_LINGER`], or as soon as a game is connected from its folder: fixed
+    /// and restarted it comes back under an id of its own, and this entry is history.
+    pub fn conflicts(&self) -> Vec<IdentityConflict> {
+        let connected_from: Vec<String> = self
+            .all()
+            .iter()
+            .filter(|instance| instance.is_alive())
+            .filter_map(|instance| instance.info().game_directory)
+            .collect();
+        let mut map = self.conflicts.write().expect("conflicts lock");
+        map.retain(|_, conflict| {
+            let back = conflict
+                .game_directory
+                .as_deref()
+                .is_some_and(|refused| connected_from.iter().any(|held| same_directory(held, refused)));
+            !back && conflict.seen.elapsed() < CONFLICT_LINGER
+        });
+        let mut all: Vec<IdentityConflict> = map.values().cloned().collect();
+        all.sort_by_key(|conflict| conflict.seen);
+        all
     }
 
     /// The links waiting for approval, oldest first.
@@ -449,6 +545,112 @@ mod tests {
         registry.insert(instance("alpha"));
 
         assert_eq!(registry.ids(), vec!["alpha".to_string(), "zulu".to_string()]);
+    }
+
+    fn instance_in(id: &str, game: &str, directory: Option<&str>) -> Arc<Instance> {
+        let (sender, receiver) = mpsc::channel(4);
+        Box::leak(Box::new(receiver));
+        Arc::new(Instance::new(
+            InstanceInfo {
+                id: id.into(),
+                approval_id: game.into(),
+                label: game.into(),
+                side: Side::Server,
+                game_directory: directory.map(str::to_string),
+                mod_version: "test".into(),
+                minecraft_version: "1.12.2".into(),
+                endpoint_url: None,
+                pid: None,
+                started_at: None,
+                via: None,
+            },
+            sender,
+        ))
+    }
+
+    #[test]
+    fn a_copied_game_folder_is_told_apart_from_a_relaunch_by_where_it_runs_from() {
+        let registry = Registry::new();
+        registry.insert(instance_in(
+            "run-85bcdf.server",
+            "run-85bcdf",
+            Some("E:\\dev\\run"),
+        ));
+
+        // The copy's client, beside the original's server: a different side of the same id.
+        assert_eq!(
+            registry
+                .conflicting_directory("run-85bcdf", Some("E:\\dev\\run\\players\\bob"))
+                .as_deref(),
+            Some("E:\\dev\\run")
+        );
+        // The same game relaunched, however its folder is spelled, replaces its old link as before.
+        assert_eq!(
+            registry.conflicting_directory("run-85bcdf", Some("E:/dev/run/")),
+            None
+        );
+        // Another game entirely, and a hello too old to say where it runs from.
+        assert_eq!(
+            registry.conflicting_directory("alice-f12b5a", Some("E:\\dev\\alice")),
+            None
+        );
+        assert_eq!(registry.conflicting_directory("run-85bcdf", None), None);
+    }
+
+    #[test]
+    fn a_game_that_has_gone_no_longer_holds_its_id_against_a_copy() {
+        let registry = Registry::new();
+        let original = instance_in("run-85bcdf.server", "run-85bcdf", Some("E:/dev/run"));
+        registry.insert(Arc::clone(&original));
+        original.mark_closed();
+        assert_eq!(
+            registry.conflicting_directory("run-85bcdf", Some("E:/dev/copy")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_refused_copy_is_listed_with_both_folders() {
+        let registry = Registry::new();
+        registry.note_conflict(IdentityConflict {
+            instance_id: "run-85bcdf".into(),
+            side: "client",
+            label: "run".into(),
+            game_directory: Some("E:/dev/run/players/bob".into()),
+            pid: Some(7),
+            connected_directory: "E:/dev/run".into(),
+            seen: std::time::Instant::now(),
+        });
+        // Knocking again replaces its entry rather than adding one.
+        registry.note_conflict(IdentityConflict {
+            instance_id: "run-85bcdf".into(),
+            side: "client",
+            label: "run".into(),
+            game_directory: Some("E:/dev/run/players/bob".into()),
+            pid: Some(8),
+            connected_directory: "E:/dev/run".into(),
+            seen: std::time::Instant::now(),
+        });
+        let listed = registry.conflicts();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].pid, Some(8));
+        assert_eq!(listed[0].connected_directory, "E:/dev/run");
+        assert!(registry.ids().is_empty(), "refused is not connected");
+
+        // Its config fixed, it comes back from the same folder as a game of its own.
+        registry.insert(instance_in(
+            "bob-e9e031.client",
+            "bob-e9e031",
+            Some("E:\\dev\\run\\players\\bob"),
+        ));
+        assert!(registry.conflicts().is_empty());
+    }
+
+    #[test]
+    fn folders_are_compared_by_where_they_are_not_how_they_are_written() {
+        assert!(same_directory("E:\\dev\\run", "E:/dev/run/"));
+        assert!(!same_directory("E:/dev/run", "E:/dev/run/players/bob"));
+        assert_eq!(same_directory("E:/Dev/Run", "e:/dev/run"), cfg!(windows));
     }
 
     fn waiting(id: &str) -> PendingApproval {

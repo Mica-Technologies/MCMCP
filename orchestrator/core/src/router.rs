@@ -1664,6 +1664,33 @@ impl Router {
                          orchestrator app's approval prompt. It appears under connected once approved."
                     );
                 }
+                // Only when there is one: a game refused for another's instance id (#188). Without
+                // it the game is simply missing, and the roster gives no reason.
+                let conflicts: Vec<Value> = self
+                    .registry
+                    .conflicts()
+                    .into_iter()
+                    .map(|conflict| {
+                        json!({
+                            "game": conflict.instance_id,
+                            "label": conflict.label,
+                            "side": conflict.side,
+                            "gameDirectory": conflict.game_directory,
+                            "pid": conflict.pid,
+                            "connectedFrom": conflict.connected_directory,
+                            "refusedSecondsAgo": conflict.seen.elapsed().as_secs(),
+                        })
+                    })
+                    .collect();
+                if !conflicts.is_empty() {
+                    listing["conflicts"] = json!(conflicts);
+                    listing["conflictNote"] = json!(
+                        "Running but refused: each uses the instance id of the game connected from \
+                         connectedFrom, because its config/mcmcp.cfg was copied from it. Clear \
+                         identity.instanceId and identity.instanceSecret in the copy (gameDirectory) \
+                         and restart it; it then asks to be approved as a game of its own."
+                    );
+                }
                 structured_result(listing)
             }
             "mcmcp_focus" => {

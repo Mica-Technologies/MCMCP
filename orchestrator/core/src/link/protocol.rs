@@ -35,6 +35,10 @@ pub const REASON_UNSUPPORTED_PROTOCOL: &str = "unsupported-protocol";
 pub const REASON_MALFORMED_HELLO: &str = "malformed-hello";
 /// Not retryable. A human revoked this instance.
 pub const REASON_REVOKED: &str = "revoked";
+/// Not retryable. Another game, running from a different folder, is connected under this instance
+/// id: this one's config was copied from it. Its `identity.instanceId` and `instanceSecret` have to
+/// be cleared and the game restarted.
+pub const REASON_DUPLICATE_INSTANCE: &str = "duplicate-instance";
 
 /// Which endpoint inside a game instance a link belongs to.
 ///
