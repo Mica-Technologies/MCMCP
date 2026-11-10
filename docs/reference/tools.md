@@ -135,6 +135,11 @@ There is deliberately no structured form. A client may show `structuredContent` 
 when both are present, so a structured payload carrying only the counts hid the lines themselves, and
 one carrying the lines as well doubled the cost of every log read.
 
+Through the [server companion](../guide/companion.md) it reads the **server's** log, for a player
+with the `mcmcp.companion.logs` node: the place a dropped connection's reason is written
+(`lost connection: Internal Exception: ...`). Network addresses are masked as `<address>` before the
+filter is applied, and `logger` is not served there.
+
 With `logger`, the lines come from that capture's memory, laid out as `latest.log` lays them out but
 with milliseconds. The header carries `next: <n>`; pass it back as `since` to read only newer lines.
 It also says whether the capture is still running, whether more lines follow a page cut short by
@@ -2122,8 +2127,15 @@ loop should treat as "already done".
 **Running as the player.** With `asPlayer` (and always through the companion) the command runs as
 that player, exactly as if they had typed it, so commands that act on "the sender", such as
 `/gamemode 1` with no target, work. Its feedback is taken from the player's connection while the
-command runs and comes back in `output`, instead of appearing in their chat. That feedback follows
-the `sendCommandFeedback` game rule, as it would for the player.
+command runs and comes back in `output`, instead of appearing in their chat. It comes back whatever
+the `sendCommandFeedback` game rule says.
+
+**Nobody else is told.** Vanilla echoes a command's success to every other operator as a grey
+`[Name: ...]` chat line. A command run by a tool does not: the message goes to `output` and, cut to
+2,000 characters, to the server log (when `logAdminCommands` is on). The echo was noise at an agent's
+rate, and a `/blockdata` on a large tile entity made one too long for a chat packet, which
+disconnected every operator online. One `output` line is cut at 8,000 characters and says how much
+was left out; read a tile entity in full with [`server_get_block`](#server_get_block).
 
 Commands whose point is a message — `tellraw`, `say`, `me`, `msg`, `tell`, `w` — are the exception:
 their chat is returned in `output` **and** still delivered, and the result says `deliveredTo`. A

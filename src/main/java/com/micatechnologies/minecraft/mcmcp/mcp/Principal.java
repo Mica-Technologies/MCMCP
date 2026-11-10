@@ -38,6 +38,11 @@ public final class Principal {
      * server_census. Its own class because a profile costs the server tick time while it runs.
      */
     public static final String CLASS_PROFILE = "profile";
+    /**
+     * Reading the server's log files: game_read_log, with network addresses masked. Its own class
+     * because the log holds what every player said and did, not only the caller.
+     */
+    public static final String CLASS_LOGS = "logs";
     /** Naming a player other than oneself in a tool that takes one. */
     public static final String CLASS_OTHERS = "others";
     /** Running a command with the server console's authority instead of one's own. */
@@ -108,6 +113,8 @@ public final class Principal {
                 return has(CLASS_COMMAND);
             case ITEM_USE:
                 return has(CLASS_USE);
+            case LOG_ACCESS:
+                return has(CLASS_LOGS);
             default:
                 return false;
         }
@@ -124,6 +131,8 @@ public final class Principal {
                 return CLASS_COMMAND;
             case ITEM_USE:
                 return CLASS_USE;
+            case LOG_ACCESS:
+                return CLASS_LOGS;
             default:
                 return null;
         }

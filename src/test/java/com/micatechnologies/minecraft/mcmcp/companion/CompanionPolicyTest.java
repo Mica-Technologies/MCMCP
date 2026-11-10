@@ -47,14 +47,26 @@ class CompanionPolicyTest {
 
     @Test
     void aToolInNoClassIsNeitherListedNorRunEvenWithEveryGrant() {
-        McpSession everything = session("read", "write", "command", "load", "use", "profile", "others",
+        McpSession everything = session("read", "write", "command", "load", "use", "profile", "logs", "others",
             "command.console");
-        for (String name : new String[] {"server_stop", "server_save_world", "game_read_log", "game_storage",
+        for (String name : new String[] {"server_stop", "server_save_world", "game_set_log_level", "game_storage",
             "server_broadcast", "game_heap_histogram", "a_tool_added_next_year"}) {
             assertFalse(policy.lists(everything, tool(name)), name);
             assertNotNull(policy.admit(everything, tool(name), new JsonObject()), name);
         }
         assertFalse(policy.servesResourcesAndPrompts(everything));
+    }
+
+    @Test
+    void theServerLogNeedsItsOwnNodeAndNoOtherClassReachesIt() {
+        McpSession logs = session("logs");
+        McpSession everythingElse = session("read", "write", "command", "load", "use", "profile", "others",
+            "command.console");
+        assertFalse(policy.lists(everythingElse, tool("game_read_log")));
+        assertNotNull(policy.admit(everythingElse, tool("game_read_log"), new JsonObject()));
+        assertTrue(policy.lists(logs, tool("game_read_log")));
+        assertNull(policy.admit(logs, tool("game_read_log"), new JsonObject()));
+        assertTrue(CompanionPolicy.grants(true, true, node -> node.equals("mcmcp.companion.logs")).contains("logs"));
     }
 
     @Test

@@ -179,7 +179,7 @@ code the server does not control.
 | An agent acts as another player | `asPlayer` and `player` arguments are pinned to the caller unless they hold `mcmcp.companion.others`. |
 | An agent gets console authority | A command with no `asPlayer` runs as the caller. Console authority needs `mcmcp.companion.command.console`, which nobody has by default. `blockedCommands` applies either way. |
 | An agent widens its own access | `/mcmcp companion allow/revoke/on/off` is refused when it comes through a tool call. |
-| A new tool leaks onto a live server | Tools are served by an allowlist of classes. A tool in no class (`server_stop`, `server_save_world`, profilers, log readers, `game_storage`, `server_broadcast`, and anything added later until it is classified) is never listed or run. Resources and prompts are not served. |
+| A new tool leaks onto a live server | Tools are served by an allowlist of classes. A tool in no class (`server_stop`, `server_save_world`, `game_heap_histogram`, `game_set_log_level`, `game_storage`, `server_broadcast`, and anything added later until it is classified) is never listed or run. Resources and prompts are not served. |
 | A client floods the server | Message size, partly sent messages, sessions, concurrent calls and queued reply bytes are all capped. Breaking a cap drops that player's companion, never their connection. |
 | A bug in the companion disconnects players | Packet handlers catch everything. A fault costs the companion session only. |
 | Nobody can tell what an agent did | Every call is in the request journal with the player. Every change is an INFO line in the server log, and a rate-limited notice to online operators. Every write leaves an undo point marked with who made it. |

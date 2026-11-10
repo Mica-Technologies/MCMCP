@@ -23,7 +23,7 @@ import javax.annotation.Nullable;
  *
  * A tool is served over the companion only if it is named in {@link #CLASSES}. A tool added to MCMCP
  * later is therefore not reachable from a live server until someone decides which class it belongs
- * in. Stopping the server, saving the world, profilers and samplers, log readers, storage expiry and
+ * in. Stopping the server, saving the world, the heap histogram, changing log levels, storage expiry and
  * server-wide broadcasts are in no class and are never served.
  *
  * <h2>The caller is the connection</h2>
@@ -43,7 +43,8 @@ public final class CompanionPolicy implements CallFilter {
     /** Every class a player can be granted, in the order they are checked and listed. */
     public static final Set<String> ALL_CLASSES = Collections.unmodifiableSet(new LinkedHashSet<>(
         java.util.Arrays.asList(Principal.CLASS_READ, Principal.CLASS_WRITE, Principal.CLASS_COMMAND,
-            Principal.CLASS_LOAD, Principal.CLASS_USE, Principal.CLASS_PROFILE, Principal.CLASS_OTHERS,
+            Principal.CLASS_LOAD, Principal.CLASS_USE, Principal.CLASS_PROFILE, Principal.CLASS_LOGS,
+            Principal.CLASS_OTHERS,
             Principal.CLASS_CONSOLE)));
 
     /** Tool name to the class that unlocks it. Anything absent is never served. */
@@ -83,6 +84,9 @@ public final class CompanionPolicy implements CallFilter {
             "server_census"}) {
             CLASSES.put(profile, Principal.CLASS_PROFILE);
         }
+        // Why the server dropped a connection is written in its log and nowhere else (#195). Reading
+        // only: raising a logger's level is not served.
+        CLASSES.put("game_read_log", Principal.CLASS_LOGS);
         PLAYER_ARGUMENTS.put("server_run_command", "asPlayer");
         PLAYER_ARGUMENTS.put("server_run_commands", "asPlayer");
         PLAYER_ARGUMENTS.put("server_player_state", "player");

@@ -10,7 +10,9 @@ import com.micatechnologies.minecraft.mcmcp.game.McmcpPaths;
 import com.micatechnologies.minecraft.mcmcp.game.McmcpProcess;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.logging.LogCapture;
+import com.micatechnologies.minecraft.mcmcp.logging.LogRedaction;
 import com.micatechnologies.minecraft.mcmcp.logging.LogRing;
+import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
@@ -226,15 +228,23 @@ public final class CommonTools {
             .closedWorld()
             .offGameThread()
             .handler(context -> {
-                if (!McmcpConfig.isAllowLogAccess()) {
-                    return ToolResult.error("Log access is disabled by permissions.allowLogAccess in the "
-                        + "MCMCP config.");
+                String denied = context.refusal(Capability.LOG_ACCESS, McmcpConfig.isAllowLogAccess(),
+                    "Log access is disabled by permissions.allowLogAccess in the MCMCP config.");
+                if (denied != null) {
+                    return ToolResult.error(denied);
                 }
+                // A player reading a server's log through the companion gets it with addresses masked
+                // (#195): the log names where every player connected from.
+                final boolean masked = context.getPrincipal().isCompanion();
 
                 int lineCount = context.getBoundedInt("lines", 100, 1, McmcpConfig.getMaxLogLines());
                 String filter = context.getString("filter", null);
                 String logger = context.getString("logger", null);
                 if (logger != null && !logger.trim().isEmpty()) {
+                    if (masked) {
+                        return ToolResult.error("'logger' reads a capture game_set_log_level started, which the "
+                            + "companion does not serve. Read the log file: leave 'logger' out.");
+                    }
                     return readCaptured(logger.trim(), context.has("since") ? (long) context.getInt("since", 0) : null,
                         lineCount, filter);
                 }
@@ -252,10 +262,11 @@ public final class CommonTools {
                 File logFile = new File(McmcpPaths.logsDirectory(), fileName);
                 if (!logFile.isFile()) {
                     return ToolResult.error("No log file named '" + fileName + "' exists in "
-                        + McmcpPaths.logsDirectory().getAbsolutePath());
+                        + (masked ? "the server's logs directory." : McmcpPaths.logsDirectory().getAbsolutePath()));
                 }
 
-                List<String> lines = McmcpPaths.tail(logFile, lineCount, filter);
+                List<String> lines = McmcpPaths.tail(logFile, lineCount, filter,
+                    masked ? LogRedaction::maskAddresses : null);
 
                 // Text and nothing else, with the metadata as a header line rather than as structured
                 // content. It was once both — the lines as text, and {file, returnedLines, filter}
@@ -267,10 +278,14 @@ public final class CommonTools {
                 // read as text, and JSON-escaping every line makes it materially harder to read for
                 // no gain.
                 boolean filtered = filter != null && !filter.isEmpty();
-                StringBuilder text = new StringBuilder("# ").append(logFile.getAbsolutePath())
+                StringBuilder text = new StringBuilder("# ")
+                    .append(masked ? "logs/" + logFile.getName() : logFile.getAbsolutePath())
                     .append(" — ").append(lines.size()).append(lines.size() == 1 ? " line" : " lines");
                 if (filtered) {
                     text.append(" matching \"").append(filter).append('"');
+                }
+                if (masked) {
+                    text.append(" · network addresses masked");
                 }
                 if (lines.isEmpty()) {
                     text.append(filtered ? "\n(no lines match)" : "\n(the file is empty)");

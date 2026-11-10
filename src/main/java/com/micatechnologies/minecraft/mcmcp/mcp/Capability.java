@@ -25,6 +25,6 @@ public enum Capability {
     /** Stopping the server or the game. Never granted to a companion caller. */
     PROCESS_CONTROL,
 
-    /** Reading the game's log files. Never granted to a companion caller. */
+    /** Reading the game's log files. A companion caller needs the logs class, and gets addresses masked. */
     LOG_ACCESS
 }

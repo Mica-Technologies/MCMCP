@@ -63,6 +63,16 @@ public final class McmcpPaths {
      * @param filter case-insensitive substring; null or empty keeps every line
      */
     public static List<String> tail(File file, int lineCount, @Nullable String filter) throws IOException {
+        return tail(file, lineCount, filter, null);
+    }
+
+    /**
+     * As {@link #tail(File, int, String)}, with each line passed through {@code rewrite} before the
+     * filter sees it: a line is matched as the caller will read it, so a filter cannot test for what
+     * the rewrite took out.
+     */
+    public static List<String> tail(File file, int lineCount, @Nullable String filter,
+                                    @Nullable java.util.function.UnaryOperator<String> rewrite) throws IOException {
         List<String> lines = new ArrayList<>();
         if (!file.isFile()) {
             return lines;
@@ -93,6 +103,9 @@ public final class McmcpPaths {
                     byte current = buffer[i];
                     if (current == '\n') {
                         String line = pending.drainReversed();
+                        if (rewrite != null) {
+                            line = rewrite.apply(line);
+                        }
                         scanned++;
                         if (accept(line, needle)) {
                             collected.addFirst(line);
@@ -111,6 +124,9 @@ public final class McmcpPaths {
             // preceding newline to terminate it.
             if (collected.size() < lineCount && pointer == 0) {
                 String line = pending.drainReversed();
+                if (rewrite != null) {
+                    line = rewrite.apply(line);
+                }
                 if (!line.isEmpty() && accept(line, needle)) {
                     collected.addFirst(line);
                 }
