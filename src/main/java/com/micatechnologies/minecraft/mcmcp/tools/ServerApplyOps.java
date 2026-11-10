@@ -117,7 +117,7 @@ public final class ServerApplyOps {
     }
 
     /** Counts for the reply. Written on the game thread, read after the last slice. */
-    private static final class Tally {
+    static final class Tally {
         long written;
         long unchanged;
         long unloaded;
@@ -531,7 +531,7 @@ public final class ServerApplyOps {
      * Diffs the overlay against the world and writes the difference, bottom section first. Returns the
      * pair writer, for the reply's {@code pairs}.
      */
-    private static TwoPartBlocks.Writer write(ToolContext context, int dimension, CellOverlay overlay,
+    static TwoPartBlocks.Writer write(ToolContext context, int dimension, CellOverlay overlay,
                                               StatePalette palette, Set<Long> protectedCells, int flags,
                                               boolean dryRun, Tally tally, @Nullable UndoPoints.Recorder recorder,
                                               @Nullable PhysicsHold hold) {

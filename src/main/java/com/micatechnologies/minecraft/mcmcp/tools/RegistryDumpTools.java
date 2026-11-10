@@ -74,7 +74,9 @@ public final class RegistryDumpTools {
             .description("For a block id, what each metadata 0-15 decodes to (getStateFromMeta), with "
                 + "property values both as blockstate JSON names them and, where different, as "
                 + "toString gives them; plus every property's allowed values and how many valid states "
-                + "no metadata can store (worked out at render time, or lost on save). No world "
+                + "no metadata can store (worked out at render time, or lost on save). For the other way, "
+                + "state to meta: 'storesAs' on a meta is what the game writes that state back as when it "
+                + "is not that meta, and the 'sameAs' entry that is the stored one says canonical. No world "
                 + "writes: this replaces placing a block per meta and reading it back. 'namespace' "
                 + "instead decodes every block of a mod into a JSON file under <game directory>/"
                 + DUMP_DIRECTORY + "/ and returns its path, SHA-256 and counts.")
@@ -207,6 +209,16 @@ public final class RegistryDumpTools {
                 // Most blocks use fewer than 16 metas; the rest repeat a state. Saying so is shorter
                 // than repeating it, and is the fact that matters.
                 item.addProperty("sameAs", earlier);
+                // Of the metas that decode to one state, this is the one the game stores it as (#191): a
+                // railing's 0 and 1 both read north=true, 0 was the one listed in full, and a block
+                // written as 0 read back as 1.
+                try {
+                    if (block.getMetaFromState(state) == meta) {
+                        item.addProperty("canonical", true);
+                    }
+                } catch (RuntimeException e) {
+                    // Nothing to add: the meta it is the same as says storesAs -1.
+                }
             }
             else {
                 GameJson.addStateNames(item, state);

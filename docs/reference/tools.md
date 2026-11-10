@@ -1,6 +1,6 @@
 # Tools
 
-103 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+123 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -110,7 +110,12 @@ order is registration order, inside a world it is the saved id mapping.
 What each metadata decodes to through `getStateFromMeta`, with no world write: replaces placing a
 block per meta and reading it back. Each meta carries `state`, named as blockstate JSON names the
 values, and `stateToString` where `toString` differs; `sameAs` when it decodes to the same state as an
-earlier meta, and `storesAs` when that state saves under a different meta. `properties` lists each
+earlier meta, and `storesAs` when that state saves under a different meta. For the other way, state
+to meta: of the metas that decode to one state, the one the game stores it as (`getMetaFromState`)
+is either the entry listed in full, when it has no `storesAs`, or the `sameAs` entry marked
+`canonical: true`. A CSM railing's metas 0 and 1 both read `north=true`, and a block written as
+meta 0 reads back as 1: meta 0 says `storesAs: 1`, and meta 1 says `sameAs: 0, canonical: true`.
+`properties` lists each
 property's allowed values, `validStates` counts them, and `unstoredStates` counts states no meta can
 hold, worked out in `getActualState` or lost on save. With `namespace` the result is the file's path,
 SHA-256 and block count.
@@ -1926,6 +1931,66 @@ tick held are only reported: a write without neighbour updates never sets them m
     These do not fire block-place events. Claim protection, machinery callbacks and other mods'
     hooks do not run. On a world with protection mods, build through commands or player actions
     instead.
+
+#### `server_copy_structure`
+
+:material-alert: Destructive · requires `permissions.allowWorldEdits` · `x`, `y`, `z`, `toX`, `toY`, `toZ`, `to` required · optional `rotate`, `dimension`, `skipAir`, `tileEntities`, `expect`, `dryRun`, `neighbourUpdates`, `load`
+
+| Argument | Notes |
+| --- | --- |
+| `x`, `y`, `z`, `toX`, `toY`, `toZ` | The source box, corners inclusive. |
+| `to` | `[x, y, z]`: where the copy's **minimum corner** goes. |
+| `rotate` | Degrees clockwise seen from above: `0` (default), `90`, `180`, `270`. At 90, north-facing becomes east-facing. |
+| `skipAir` | Leave the destination as it is where the source is air. Default `false`: an exact copy, air included. |
+| `tileEntities` | Copy tile-entity data. Default `true`. |
+| `expect` | `"air"` writes nothing if a destination cell that would change already holds a block; the error lists a sample under `occupied`. Default `"any"`. |
+| `dryRun` | Read, turn and diff, write nothing: the counts and a `sample` of changes. |
+
+Copies a box of the world to another place, turned by quarter turns, without the cells leaving the
+server. The copy fills `destination`, whose x and z sizes are the source's swapped at 90 and 270. The
+whole source is read before anything is written, so the two boxes may overlap. From there it is
+[`server_apply_ops`](#server_apply_ops)' own write: only cells that differ are written, two-part
+blocks (doors, beds, tall furniture) land whole, drops are discarded, and the call leaves an undo
+point. One call copies up to 4 × `limits.maxWriteCells` cells.
+
+**How a state is turned.** The game's own `withRotation` first, which every vanilla block and many
+mod blocks implement. A state it leaves unchanged is then turned by its property names and values as
+the blockstate file spells them: a compass word in a value turns (`east` to `south`, `north_south`
+to `east_west`, `ascending_north` to `ascending_east`), `x` and `z` change places on an odd turn
+(`axis`, `up_x`, `lines_z`), a 16-step `rotation` moves four steps a quarter turn, and four
+properties named `north`, `east`, `south` and `west` hand their values round (a railing's edges, a
+fence's arms). `turned` counts the cells whose state changed.
+
+**Tile entities.** Each one's saved data is set on the tile entity at its new place, and then its
+own `rotate` hook is called, as a structure block's placement does. Block positions *inside* that
+data are moved with the copy when they point into the source box, whatever key they are under: three
+whole numbers named alike but for a final `x`, `y`, `z` (`x/y/z` in a nested tag, `linkX/linkY/linkZ`,
+an `x` and `z` pair with no `y`), an int array of three, or a packed position. So a copied thermostat
+runs the copied rooftop unit, not the original's. `nbt.moved` counts them by key shape. A position
+that points *outside* the box is left as it was and counted under `nbt.outside`: the copy still
+refers to the original's.
+
+**What is not turned, and how the reply says so.**
+
+- `unturned`: block ids whose state names a direction that has no value for where the turn points it
+  (a block that can only face north or south, turned a quarter), with a count, and `unturnedAt`, the
+  first twenty places they landed. They are copied facing as they did.
+- `nbt.directionKeys`: tile entities that keep a `facing`, `rotation`, `dir` or the like in their
+  data. Nothing here can turn that unless the mod's `rotate` hook does.
+- `chiselledNotTurned`: Chisels & Bits blocks, whose shape is in their data.
+- A direction that is part of a block's **id** or metadata variant (painted road markings) is not
+  seen at all.
+- `entitiesNotCopied`: item frames, paintings, armour stands and anything else that is an entity,
+  not a block.
+
+Undo restores the destination's blocks and their data as they were. A cell whose block was already
+right and only took new tile-entity data is not in the undo point, as with `server_apply_ops`.
+
+```json
+{"name": "server_copy_structure", "arguments": {
+  "x": -808, "y": 77, "z": -7001, "toX": -784, "toY": 84, "toZ": -6971,
+  "to": [-900, 77, -7100], "rotate": 270, "expect": "air", "load": true}}
+```
 
 #### `server_undo`
 
