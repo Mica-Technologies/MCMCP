@@ -99,6 +99,25 @@ public final class CompanionPolicy implements CallFilter {
         PLAYER_ARGUMENTS.put("server_player_lease", "player");
     }
 
+    /** The config key of the cap on one player's running calls, as a refusal's {@code busy.limit} names it. */
+    public static final String LIMIT_CONCURRENT_CALLS = "companion.maxConcurrentCalls";
+
+    /**
+     * Short calls that put something back or stop something: a player's return teleport, their lease,
+     * a chunk hold's release, the emergency stop, a job's cancel or pause. They are counted apart from
+     * the calls that do the work, with an allowance of the same size, so a player whose long calls
+     * fill {@code companion.maxConcurrentCalls} can still be put back where they were (#194): a
+     * screenshot's return teleport was refused by the cap, and left the player at the camera.
+     */
+    static final Set<String> CONTROL_CALLS = Collections.unmodifiableSet(new java.util.HashSet<>(
+        java.util.Arrays.asList("server_teleport_player", "server_player_lease", "server_release_loaded",
+            "server_estop", "server_job_cancel", "server_job_pause")));
+
+    /** Whether a tool's calls are counted under the control allowance, not with the working calls. */
+    public static boolean isControlCall(@Nullable String toolName) {
+        return toolName != null && CONTROL_CALLS.contains(toolName);
+    }
+
     /** The class a tool belongs to, or null when the companion never serves it. */
     @Nullable
     public static String classOf(String toolName) {

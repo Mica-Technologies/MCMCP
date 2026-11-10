@@ -493,11 +493,22 @@ public final class CompanionServer {
             return;
         }
         final boolean toolCall = McpProtocol.METHOD_TOOLS_CALL.equals(JsonRpc.getMethod(message));
-        if (toolCall && peer.runningCalls.incrementAndGet() > McmcpConfig.getCompanionMaxConcurrentCalls()) {
-            peer.runningCalls.decrementAndGet();
+        // A return teleport, a lease, a release or a stop is counted apart from the calls doing the
+        // work, so a full set of those cannot strand a player or keep a stop out (#194).
+        final java.util.concurrent.atomic.AtomicInteger running = toolCall && CompanionPolicy.isControlCall(
+            Json.getString(Json.getObjectOrEmpty(message, "params"), "name", null))
+            ? peer.runningControlCalls : peer.runningCalls;
+        if (toolCall && running.incrementAndGet() > McmcpConfig.getCompanionMaxConcurrentCalls()) {
+            running.decrementAndGet();
+            // Said as busy with a wait, like every other refusal that passes on its own: as bare text
+            // a caller could not tell it from a refusal that would never clear.
+            JsonObject busy = new JsonObject();
+            busy.addProperty("reason", "limit");
+            busy.addProperty("limit", CompanionPolicy.LIMIT_CONCURRENT_CALLS);
+            busy.addProperty("retryAfterMs", 1000);
             refuse(peer, key, message, "You already have " + McmcpConfig.getCompanionMaxConcurrentCalls()
-                + " companion calls running on this server (companion.maxConcurrentCalls). Wait for one to "
-                + "finish.");
+                + " companion calls running on this server (companion.maxConcurrentCalls), every agent of yours "
+                + "counted together. Nothing was done; retry after busy.retryAfterMs.", Json.obj("busy", busy));
             return;
         }
         try {
@@ -513,14 +524,14 @@ public final class CompanionServer {
                 }
                 finally {
                     if (toolCall) {
-                        peer.runningCalls.decrementAndGet();
+                        running.decrementAndGet();
                     }
                 }
             });
         }
         catch (RejectedExecutionException e) {
             if (toolCall) {
-                peer.runningCalls.decrementAndGet();
+                running.decrementAndGet();
             }
         }
     }
@@ -538,12 +549,22 @@ public final class CompanionServer {
 
     /** Answers a request that will not be run: a tool error for a tool call, a JSON-RPC error otherwise. */
     private static void refuse(CompanionPeer peer, String key, JsonObject message, String why) {
+        refuse(peer, key, message, why, null);
+    }
+
+    /** As above, with structured content beside a tool call's refusal: its {@code busy} block. */
+    private static void refuse(CompanionPeer peer, String key, JsonObject message, String why,
+                               @Nullable JsonObject structured) {
         JsonElement id = JsonRpc.getId(message);
         if (id == null || !JsonRpc.isRequest(message)) {
             return;
         }
+        ToolResult refusal = ToolResult.error(why);
+        if (structured != null) {
+            refusal.withStructured(structured);
+        }
         JsonObject response = McpProtocol.METHOD_TOOLS_CALL.equals(JsonRpc.getMethod(message))
-            ? JsonRpc.result(id, ToolResult.error(why).toJson(McpProtocol.LATEST_VERSION))
+            ? JsonRpc.result(id, refusal.toJson(McpProtocol.LATEST_VERSION))
             : JsonRpc.error(id, JsonRpcException.INTERNAL_ERROR, why);
         peer.outbox.offer(CompanionProtocol.TYPE_MCP,
             CompanionHandshake.bytes(CompanionPeer.envelope(key, response)), Long.MAX_VALUE);

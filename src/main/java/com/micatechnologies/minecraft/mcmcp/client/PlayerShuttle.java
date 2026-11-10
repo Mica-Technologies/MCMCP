@@ -82,6 +82,15 @@ public final class PlayerShuttle {
     private static final int RETURN_ATTEMPTS = 5;
 
     /**
+     * How long each attempt at the return waits for a free companion call slot on the server (#194).
+     * Long, and not the caller's to shorten: the trip out can be given up, the trip home cannot.
+     */
+    private static final long RETURN_SLOT_WAIT_MILLIS = 60_000L;
+
+    /** How long a hop between a sheet's cameras waits for a slot. */
+    private static final long HOP_SLOT_WAIT_MILLIS = 30_000L;
+
+    /**
      * A return that failed: where the player should have gone, and where they were left. A later
      * {@link #bring} that finds the player still where they were left goes back from here, not from the
      * camera, so one failed return cannot become every later shot's "home" (#129).
@@ -101,10 +110,12 @@ public final class PlayerShuttle {
     public static Trip bring(ToolContext context, double[] to, long waitMillis) throws Exception {
         String player = Minecraft.getMinecraft().getSession().getUsername();
         // The turn first, then where the player is: another agent's trip may still be bringing them back.
+        long began = System.currentTimeMillis();
         Turn turn = takeTurn(context, player, waitMillis);
         Trip trip;
         try {
-            trip = start(context, to);
+            // What is left of the wait is spent on a free call slot, should the server be out of them.
+            trip = start(context, to, Math.max(5_000L, waitMillis - (System.currentTimeMillis() - began)));
         }
         catch (Exception e) {
             giveTurnBack(context, player, turn);
@@ -114,7 +125,7 @@ public final class PlayerShuttle {
         return trip;
     }
 
-    private static Trip start(ToolContext context, double[] to) throws Exception {
+    private static Trip start(ToolContext context, double[] to, long slotWaitMillis) throws Exception {
         // Decided on the game thread, thrown here: an exception from inside onGameThread comes back as
         // a protocol failure, not as the sentence the agent needs.
         Object checked = context.onGameThread(() -> {
@@ -146,7 +157,7 @@ public final class PlayerShuttle {
             throw new IllegalStateException((String) checked);
         }
         Trip trip = (Trip) checked;
-        teleport(context, to[0], to[1], to[2], trip.yaw, trip.pitch, true);
+        teleport(context, to[0], to[1], to[2], trip.yaw, trip.pitch, true, slotWaitMillis);
         try {
             waitUntilAt(context, to[0], to[1], to[2]);
         }
@@ -167,7 +178,7 @@ public final class PlayerShuttle {
      *         trip's {@link #back} still applies
      */
     public static void hop(ToolContext context, Trip trip, double[] to) throws Exception {
-        teleport(context, to[0], to[1], to[2], trip.yaw, trip.pitch, true);
+        teleport(context, to[0], to[1], to[2], trip.yaw, trip.pitch, true, HOP_SLOT_WAIT_MILLIS);
         waitUntilAt(context, to[0], to[1], to[2]);
     }
 
@@ -199,7 +210,7 @@ public final class PlayerShuttle {
                 pause *= 2L;
             }
             try {
-                teleport(context, trip.x, trip.y, trip.z, trip.yaw, trip.pitch, trip.flying);
+                teleport(context, trip.x, trip.y, trip.z, trip.yaw, trip.pitch, trip.flying, RETURN_SLOT_WAIT_MILLIS);
                 waitUntilAt(context, trip.x, trip.y, trip.z);
                 stranded = null;
                 strandedAt = null;
@@ -262,17 +273,26 @@ public final class PlayerShuttle {
                 }
                 JsonObject structured = com.micatechnologies.minecraft.mcmcp.json.Json.getObject(result, "structuredContent");
                 JsonObject busy = structured == null ? null : com.micatechnologies.minecraft.mcmcp.json.Json.getObject(structured, "busy");
-                if (busy == null) {
+                if (outOfCallSlots(result)) {
+                    // Not "this server cannot lease": it is full for a moment, and waited for like a holder.
+                    holder = "a free companion call slot on the server";
+                }
+                else if (busy == null) {
                     return Turn.NONE;
                 }
-                holder = com.micatechnologies.minecraft.mcmcp.json.Json.getString(busy, "holder", "an agent ahead in line");
+                else {
+                    holder = com.micatechnologies.minecraft.mcmcp.json.Json.getString(busy, "holder", "an agent ahead in line");
+                }
             }
             waitedFor = holder;
             if (now - start >= waitMillis) {
                 if (local) {
                     com.micatechnologies.minecraft.mcmcp.mcp.PlayerLeases.get().stopWaiting(player, key);
                 }
-                throw new IllegalStateException("The player is leased by " + holder + ", and was not free after "
+                throw new IllegalStateException((holder.startsWith("a free companion call slot")
+                    ? "The server had no free companion call slot for this player (companion.maxConcurrentCalls: "
+                        + "their other calls fill it)"
+                    : "The player is leased by " + holder) + ", and was not free after "
                     + (waitMillis / 1000L) + " s of waiting (bringWaitSeconds). Try again, or wait longer.");
             }
             context.awaitBudget(1000L, "waiting for " + holder + " to finish with " + player);
@@ -319,8 +339,28 @@ public final class PlayerShuttle {
         return result.has("isError") && result.get("isError").getAsBoolean();
     }
 
+    /**
+     * Whether the server refused a call only because this player's other calls fill
+     * {@code companion.maxConcurrentCalls}: it passes when one of them ends. Told by the refusal's
+     * {@code busy.limit}, or by its text from a server older than that.
+     */
+    static boolean outOfCallSlots(JsonObject result) {
+        if (!isError(result)) {
+            return false;
+        }
+        JsonObject structured = com.micatechnologies.minecraft.mcmcp.json.Json.getObject(result, "structuredContent");
+        JsonObject busy = structured == null ? null : com.micatechnologies.minecraft.mcmcp.json.Json.getObject(structured, "busy");
+        String limit = "companion.maxConcurrentCalls";
+        return busy != null && limit.equals(com.micatechnologies.minecraft.mcmcp.json.Json.getString(busy, "limit", null))
+            || ClientCompanion.textOf(result).contains(limit);
+    }
+
+    /**
+     * @param slotWaitMillis how long to keep asking while the server answers that this player's other
+     *                       calls fill its call slots (#194)
+     */
     private static void teleport(ToolContext context, double x, double y, double z, float yaw, float pitch,
-                                 boolean fly) throws Exception {
+                                 boolean fly, long slotWaitMillis) throws Exception {
         Minecraft mc = Minecraft.getMinecraft();
         IntegratedServer server = mc.getIntegratedServer();
         if (server != null) {
@@ -352,8 +392,26 @@ public final class PlayerShuttle {
         args.addProperty("yaw", yaw);
         args.addProperty("pitch", pitch);
         args.addProperty("fly", fly);
-        JsonObject result = ClientCompanion.callServerTool("server_teleport_player", args, 15_000L,
-            context.getCaller().stamp());
+        long deadline = System.currentTimeMillis() + slotWaitMillis;
+        long pause = 250L;
+        JsonObject result;
+        while (true) {
+            result = ClientCompanion.callServerTool("server_teleport_player", args, 15_000L,
+                context.getCaller().stamp());
+            if (!outOfCallSlots(result) || System.currentTimeMillis() + pause > deadline) {
+                break;
+            }
+            try {
+                // Alive while it waits: the orchestrator gives up on a call that is silent for 120 s.
+                context.reportProgress(0, 1, "waiting for a free companion call slot on the server to move "
+                    + mc.getSession().getUsername());
+            }
+            catch (RuntimeException e) {
+                // Progress is a courtesy; the move is not.
+            }
+            Thread.sleep(pause);
+            pause = Math.min(2_000L, pause * 2L);
+        }
         if (result.has("isError") && result.get("isError").getAsBoolean()) {
             throw new IllegalStateException("The server refused the teleport: " + ClientCompanion.textOf(result));
         }

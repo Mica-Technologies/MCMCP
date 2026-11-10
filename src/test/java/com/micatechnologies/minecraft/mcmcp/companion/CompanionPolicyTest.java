@@ -58,6 +58,20 @@ class CompanionPolicyTest {
     }
 
     @Test
+    void theCallsThatPutAPlayerBackOrStopSomethingAreCountedApartFromTheWork() {
+        for (String name : new String[] {"server_teleport_player", "server_player_lease", "server_release_loaded",
+            "server_estop", "server_job_cancel", "server_job_pause"}) {
+            assertTrue(CompanionPolicy.isControlCall(name), name);
+            assertNotNull(CompanionPolicy.classOf(name), name + " must still need a class");
+        }
+        for (String name : new String[] {"server_set_blocks", "server_get_blocks", "server_run_commands",
+            "server_job_submit", "server_keep_loaded", "a_tool_added_next_year"}) {
+            assertFalse(CompanionPolicy.isControlCall(name), name);
+        }
+        assertFalse(CompanionPolicy.isControlCall(null));
+    }
+
+    @Test
     void theServerLogNeedsItsOwnNodeAndNoOtherClassReachesIt() {
         McpSession logs = session("logs");
         McpSession everythingElse = session("read", "write", "command", "load", "use", "profile", "others",

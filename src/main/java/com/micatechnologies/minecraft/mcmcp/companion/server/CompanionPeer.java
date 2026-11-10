@@ -37,6 +37,9 @@ final class CompanionPeer {
     /** Tool calls running now, against {@code companion.maxConcurrentCalls}. */
     final AtomicInteger runningCalls = new AtomicInteger();
 
+    /** Control calls running now ({@code CompanionPolicy.isControlCall}), against the same number. */
+    final AtomicInteger runningControlCalls = new AtomicInteger();
+
     /**
      * Who this player's calls run as. Created at hello; its grants are replaced in place when they
      * change, so every session sees the change at once.

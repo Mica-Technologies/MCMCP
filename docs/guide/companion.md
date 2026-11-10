@@ -113,7 +113,13 @@ player's `tools/list` shows only the tools their grants unlock.
   decompressed, and at most `companion.maxOpenMessages` may be partly sent at once.
 - **A broken client loses only its companion.** One that breaks either limit, or sends something
   unreadable, has its companion session dropped and logged. The player is never kicked.
-- **Calls per player are capped.** `companion.maxConcurrentCalls` (4) are allowed at once.
+- **Calls per player are capped.** `companion.maxConcurrentCalls` (4) are allowed at once, every
+  agent of the player counted together. One more is a tool error with
+  `busy: {reason: "limit", limit: "companion.maxConcurrentCalls", retryAfterMs}`. Short calls that
+  put something back or stop something (`server_teleport_player`, `server_player_lease`,
+  `server_release_loaded`, `server_estop`, `server_job_cancel`, `server_job_pause`) are counted apart,
+  with an allowance of the same size, so a full set of long calls cannot leave a player stranded
+  at a screenshot's camera or keep a stop out.
 
 ## What is recorded
 

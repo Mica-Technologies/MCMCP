@@ -410,8 +410,9 @@ naming this setting.
 
 `integer` 1–16 · default `4`
 
-Tool calls one player may have running at once. One more is refused with a tool error until one of
-them finishes.
+Tool calls one player may have running at once, all their agents together. One more is refused
+with a tool error carrying `busy.retryAfterMs` until one of them finishes. Teleports, leases,
+releases, the emergency stop and a job's cancel or pause are counted apart, up to the same number.
 
 ### `notifyOps`
 
