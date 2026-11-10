@@ -59,7 +59,7 @@ public final class CompanionPolicy implements CallFilter {
             "server_player_inventory", "server_tick_stats", "server_changes_since", "server_watch_blocks", "server_wait_tick", "server_get_tile_entities", "server_wire_connections", "server_get_biomes", "server_count_blocks", "mcmcp_endpoint_info", "game_list_mods",
             "game_health", "game_block_states", "server_run_test", "server_job_submit", "server_job_status", "server_job_list", "server_job_cancel",
             "server_job_pause", "server_job_resume", "server_estop", "server_get_entity_nbt", "server_verify", "server_check_enclosure", "server_plan_view",
-            "server_check_walk"}) {
+            "server_check_walk", "server_refresh_chunks"}) {
             CLASSES.put(read, Principal.CLASS_READ);
         }
         for (String write : new String[] {"server_set_block", "server_set_blocks", "server_undo", "server_relight", "server_apply_ops",
@@ -97,6 +97,7 @@ public final class CompanionPolicy implements CallFilter {
         PLAYER_ARGUMENTS.put("server_use_item_on_blocks", "player");
         PLAYER_ARGUMENTS.put("server_activate_block", "player");
         PLAYER_ARGUMENTS.put("server_player_lease", "player");
+        PLAYER_ARGUMENTS.put("server_refresh_chunks", "player");
     }
 
     /** The config key of the cap on one player's running calls, as a refusal's {@code busy.limit} names it. */

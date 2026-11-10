@@ -812,6 +812,22 @@ near any player never unloads. `blocks` (patterns) limits it to some, and `dryRu
 `reloaded`, `byBlock`, and any `failed`; a tile entity that cannot be re-created from its NBT is put
 back as it was. At most 4,096 a call.
 
+#### `server_refresh_chunks`
+
+:material-eye: Read-only · `player`, `x`, `z` required · optional `toX`, `toZ`, `load`
+
+Sends one player's client again the chunks under a block box that the server has stopped sending it
+changes for. A server sends a player block changes and tile-entity data only within its view
+distance of them; a client can hold chunks farther out, as they were when the player was last near,
+and draws them stale. Each loaded chunk in the box the player is not being sent is sent whole
+(`resent`), an unload first, as on walking back into range. Chunks the player is being sent anyway
+are current and are left alone (`live`); `unloaded` ones are skipped unless `load: true`. Returns
+those counts and `viewDistance`, the server's, in chunks. At most 121 chunks a call.
+
+Nothing in the world changes. [`client_screenshot`](#client_screenshot) calls it itself for a `from`
+view, so it is only needed before reading the client's world some other way. Through the companion
+it sends to the calling player, and to another only with `mcmcp.companion.others`.
+
 #### `server_wire_connections`
 
 :material-eye: Read-only · listed only when Immersive Engineering is loaded · `x`, `z` required unless `whole` · optional `y`, `toX`, `toY`, `toZ`, `dimension`, `whole`, `groupBy`, `ends`, `load`, `limit`
@@ -2934,7 +2950,7 @@ when the player lands.
 #### `client_screenshot`
 
 Requires `permissions.allowScreenshots` · optional `name`, `inline`, `max_dimension`, `from`,
-`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `hideHud`, `settle_ms`, `bringPlayer`, `bringWaitSeconds`, `burst`, `crop`, `views`, `agent`
+`look_at`, `yaw`, `pitch`, `fov`, `fullbright`, `hideHud`, `settle_ms`, `refresh`, `bringPlayer`, `bringWaitSeconds`, `burst`, `crop`, `views`, `agent`
 
 Saves a PNG under `screenshots/` and returns the absolute path plus a `resource_link`.
 
@@ -2993,9 +3009,12 @@ them settle again. `view.tileEntities` reports `inRange`, `drawn`, and `rebuilt`
 
 **A view beyond the render distance.** `bringPlayer: true` moves the player to the camera first, so
 the chunks there load, waits for them, captures, and puts the player back where they were, facing the
-same way and flying or not as before. `view.playerReturnedTo` says where. The return is retried for a
-few seconds; if it still fails, the error says the player was left at the camera, and the next
-`bringPlayer` call returns them to where they started, as long as nothing moved them meanwhile. The move is the server's own
+same way and flying or not as before. `view.playerReturnedTo` says where. The return is retried; if
+it still fails, the error says the player was left at the camera, and the next
+`bringPlayer` call returns them to where they started, as long as nothing moved them meanwhile. When
+the server answers that the player's other calls fill `companion.maxConcurrentCalls`, the trip keeps
+asking instead of failing: the way out for what is left of `bringWaitSeconds`, the way home for a
+minute an attempt. The move is the server's own
 teleport: the integrated server's in singleplayer, and `server_teleport_player` over the companion on
 a remote server, which needs the player's companion `write` access there. It needs creative or
 spectator mode, because the player hovers at the camera, and a survival player put in the air is
@@ -3021,10 +3040,22 @@ Sub-agents of one client share its connection, so they are one caller to the lea
 `client_input_lock` makes each its own caller, so a lock or a lease is held by that agent alone.
 
 **Stale views.** A client can still hold a chunk the server stopped sending it changes for, past the
-server's view distance from the player, and a `from` view there showed a building as it was before a
-write minutes earlier. Such a view (without `bringPlayer`) gets `view.stale: "possible"` and a
-`staleReason`. The view distance is the server's own in singleplayer; a remote server does not send
-it, so vanilla's 10 is assumed and the reason says so.
+server's view distance from the player, and a `from` view there showed a street of new houses as
+bare grass, and two open doors closed. So on a remote server a `from` view (without `bringPlayer`)
+first has the server send those chunks again, through
+[`server_refresh_chunks`](#server_refresh_chunks): the camera, what it looks at and 40 blocks round
+them, or the eleven chunks square round the subject when that is more. `view.refreshed` reports
+`resent` and any `notSent`. `refresh: false` skips it.
+
+When that could not be done (no companion access, a server without the tool, chunks the server has
+not loaded and may not load for you), the view gets `view.stale: "possible"` and a `staleReason`,
+and the result's text carries the same as a `WARNING`. The view distance is then the server's own if
+it answered, and otherwise vanilla's 10 is assumed and the reason says so.
+
+**The player's own overlays.** Vanilla draws the in-block, underwater and on-fire overlays over the
+whole frame from where the player is, not from where the view is drawn. With `bringPlayer` the
+player hovers at the camera, so in a room their head is in the ceiling, and interior frames came back
+one dark colour. Those overlays are not drawn in a `from` view.
 
 **`fullbright: true`** lights everything for this one frame, for night and interiors, without
 touching world time. It raises gamma and gives the player night vision on this client only, with

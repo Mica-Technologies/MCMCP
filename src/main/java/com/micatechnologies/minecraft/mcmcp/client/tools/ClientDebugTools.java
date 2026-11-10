@@ -115,7 +115,9 @@ public final class ClientDebugTools {
                 + "'yaw'/'pitch'): the frame is rendered from there, with no HUD, chat, open screen or "
                 + "overlay, and nothing changes "
                 + "for the server or other players. It can only draw chunks this client holds, so "
-                + "stay within the render distance. 'fullbright' lights everything for this one "
+                + "stay within the render distance. On a server, the chunks in view that the server has "
+                + "stopped sending this client changes for are sent again first (view.refreshed), so the "
+                + "picture is current; view.stale says when they could not be. 'fullbright' lights everything for this one "
                 + "frame — for night and interiors, without touching world time; the result's "
                 + "'fullbrightApplied' says whether it took. Both are put back "
                 + "before the call returns. For a place beyond the render distance, 'bringPlayer' moves "
@@ -157,6 +159,7 @@ public final class ClientDebugTools {
                     + "this frame, as F1 does. Always so with 'from'. Default false.")
                 .integer("settle_ms", "With 'from': most time to let chunk meshes build at the new "
                     + "viewpoint before capturing. Default 5000.", 0, MAX_SETTLE_MILLIS)
+                .bool("refresh", "With 'from' on a server: resend the chunks in view first. Default true.")
                 .bool("bringPlayer", "With 'from': move the player to the camera first, so its chunks load, "
                     + "and back to where they were, facing the same way, after the capture. Takes the player's "
                     + "lease for the trip, so it waits its turn behind other agents using the same player.")
@@ -255,6 +258,11 @@ public final class ClientDebugTools {
                             }
                         }
                         final com.micatechnologies.minecraft.mcmcp.client.PlayerShuttle.Trip broughtFrom = trip;
+                        // A view of somewhere the player is not: the server sends this client the chunks
+                        // it has stopped sending it changes for, so the picture is of the world as it is
+                        // (#187). Before the camera moves, so a slow load is not on the camera's clock.
+                        final JsonObject refreshed = from != null && !bringPlayer && context.getBoolean("refresh", true)
+                            ? refreshView(context, from, lookAt) : null;
                         try {
                         final Object[] ownCamera = new Object[1];
                         view = context.onGameThread(new Callable<JsonObject>() {
@@ -264,7 +272,7 @@ public final class ClientDebugTools {
                                     fullbright, hideHud);
                                 ownCamera[0] = ClientCamera.current();
                                 if (from != null && !bringPlayer && !applied.has("error")) {
-                                    addStaleHint(applied, from, lookAt);
+                                    noteFreshness(applied, from, lookAt, refreshed);
                                 }
                                 return applied;
                             }
@@ -366,8 +374,9 @@ public final class ClientDebugTools {
                 BufferedImage written = ImageIO.read(file);
                 if (written != null && ScreenshotImages.isBlankDark(written)) {
                     blankWarning = "The frame is one dark colour: the view was probably not rendered"
-                        + (from != null ? " (chunks round the camera not built; try a longer settle_ms, or "
-                        + "client_wait chunksRendered near it first)" : "") + ". Check it before trusting it.";
+                        + (from != null ? " (chunks round the camera not built, or the camera is inside a "
+                        + "solid block; try a longer settle_ms, or move 'from' into open air)" : "")
+                        + ". Check it before trusting it.";
                 }
                 JsonObject cropped = null;
                 String shownPath = savedPath;
@@ -437,7 +446,11 @@ public final class ClientDebugTools {
                         + (capture.has("redirected")
                             ? " (a mod's ScreenshotEvent handler moved it there)"
                             : "")
-                        + (blankWarning != null ? ". WARNING: " + blankWarning : ""))
+                        + (blankWarning != null ? ". WARNING: " + blankWarning : "")
+                        // In the text too: a model that read only "saved" reported finished work as not
+                        // built from a picture of the chunks as they had been (#187).
+                        + (view != null && view.has("staleReason")
+                            ? ". WARNING: this view may be out of date. " + view.get("staleReason").getAsString() : ""))
                     .withStructured(structured);
                 if (linkable) {
                     result.withContent(McpContent.resourceLink(
@@ -897,11 +910,84 @@ public final class ClientDebugTools {
     private static final int ASSUMED_SERVER_VIEW_DISTANCE = 10;
 
     /**
+     * Has the server send this client again the chunks a detached view looks at, where it has stopped
+     * sending changes for them (#187): see {@code server_refresh_chunks}. Not in singleplayer, where the
+     * server's view distance is the client's own. Never fails the capture: with no companion, an older
+     * server or no access, the view is taken as before and {@link #noteFreshness} says it may be stale.
+     *
+     * @return the server's answer ({@code resent}, {@code live}, {@code unloaded}, {@code viewDistance}),
+     *         or null when it could not be asked
+     */
+    @Nullable
+    private static JsonObject refreshView(ToolContext context, double[] from, @Nullable double[] lookAt) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.getIntegratedServer() != null || mc.getSession() == null) {
+            return null;
+        }
+        int[] box = com.micatechnologies.minecraft.mcmcp.chunkload.ViewRefresh.box(from, lookAt);
+        JsonObject args = new JsonObject();
+        args.addProperty("player", mc.getSession().getUsername());
+        args.addProperty("x", box[0]);
+        args.addProperty("z", box[1]);
+        args.addProperty("toX", box[2]);
+        args.addProperty("toZ", box[3]);
+        args.addProperty("load", true);
+        try {
+            JsonObject result = com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.callServerTool(
+                "server_refresh_chunks", args, 60_000L, context.getCaller().stamp());
+            if (Json.getBoolean(result, "isError", false)) {
+                // Without 'load' access the loaded chunks can still be sent.
+                args.remove("load");
+                result = com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.callServerTool(
+                    "server_refresh_chunks", args, 30_000L, context.getCaller().stamp());
+            }
+            JsonObject structured = Json.getObject(result, "structuredContent");
+            if (Json.getBoolean(result, "isError", false) || structured == null || !structured.has("resent")) {
+                return null;
+            }
+            if (Json.getInt(structured, "resent", 0) > 0) {
+                // The chunks are handled on the client thread a frame or two after they arrive.
+                ClientFrameClock.await(3, 2, 3000L);
+            }
+            return structured;
+        }
+        catch (RuntimeException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Says in {@code view} how current a 'from' view's chunks are: what the server resent, or, when it
+     * could not be asked or could not send them all, that the view may be stale. Client thread.
+     */
+    private static void noteFreshness(JsonObject view, double[] from, @Nullable double[] lookAt,
+                                      @Nullable JsonObject refreshed) {
+        int viewDistance = refreshed == null ? -1 : Json.getInt(refreshed, "viewDistance", -1);
+        if (refreshed != null) {
+            JsonObject json = new JsonObject();
+            json.addProperty("resent", Json.getInt(refreshed, "resent", 0));
+            int unloaded = Json.getInt(refreshed, "unloaded", 0);
+            if (unloaded > 0) {
+                json.addProperty("notSent", unloaded);
+            }
+            view.add("refreshed", json);
+            if (unloaded == 0) {
+                return;
+            }
+        }
+        addStaleHint(view, from, lookAt, viewDistance);
+    }
+
+    /**
      * Says when a 'from' view may show a stale world (#178). A client can hold a chunk the server no
      * longer sends it changes for, beyond the server's view distance from the player, and a view there
      * drew a building as it was before a write minutes earlier, with nothing to say so. Client thread.
      */
-    private static void addStaleHint(JsonObject view, double[] from, @Nullable double[] lookAt) {
+    private static void addStaleHint(JsonObject view, double[] from, @Nullable double[] lookAt,
+                                     int serverViewDistance) {
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.player == null) {
             return;
@@ -915,14 +1001,18 @@ public final class ClientDebugTools {
                 Math.abs((MathHelper.floor(lookAt[2]) >> 4) - playerZ)));
         }
         net.minecraft.server.integrated.IntegratedServer local = mc.getIntegratedServer();
-        boolean known = local != null && local.getPlayerList() != null;
-        int viewDistance = known ? local.getPlayerList().getViewDistance() : ASSUMED_SERVER_VIEW_DISTANCE;
-        if (far > viewDistance) {
+        boolean known = serverViewDistance > 0 || local != null && local.getPlayerList() != null;
+        int viewDistance = serverViewDistance > 0 ? serverViewDistance
+            : known ? local.getPlayerList().getViewDistance() : ASSUMED_SERVER_VIEW_DISTANCE;
+        // One chunk short of it: the server re-centres on a player only once they have moved eight
+        // blocks, so its edge can sit a chunk nearer than the player's own position says.
+        if (far > viewDistance - 1) {
             view.addProperty("stale", "possible");
-            view.addProperty("staleReason", "The view is " + far + " chunks from the player, past the server's "
-                + "view distance of " + viewDistance + (known ? "" : " (assumed: a server does not send it)")
-                + ", so the server may have stopped sending this client changes there. Pass bringPlayer for a "
-                + "current picture.");
+            view.addProperty("staleReason", "The view is " + far + " chunks from the player, at or past the "
+                + "server's view distance of " + viewDistance + (known ? "" : " (assumed: a server does not send it)")
+                + ", so the server may have stopped sending this client changes there, and they could not be "
+                + "resent (no companion access, an older server, or chunks it has not loaded). Pass bringPlayer "
+                + "for a current picture.");
         }
     }
 

@@ -65,6 +65,7 @@ public final class CommonTools {
         ServerComponentTools.registerStair();
         ServerTileEntityReloadTools.register();
         ServerWireTools.register();
+        ServerChunkRefreshTools.register();
         ServerBiomeTools.register();
         ServerPlayerLeaseTools.register();
         ServerJobTools.register();
