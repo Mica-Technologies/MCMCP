@@ -78,4 +78,74 @@ class InputClaimTest {
         claim.released();
         assertNull(claim.refusalFor(other, 1_000L));
     }
+
+    private static CallerId direct(String session) {
+        return CallerId.of(new McpSession(session, 0L), null);
+    }
+
+    @Test
+    void theHoldersOwnSecondConnectionIsLetThroughOnceItPresentsTheLocksToken() {
+        InputClaim claim = new InputClaim();
+        CallerId agent = throughOrchestrator("c4", "claude-code");
+        CallerId script = direct("companion-script");
+        CallerId stranger = direct("someone-else");
+        claim.claimed(agent, "finishing the fire alarm", true, 1_500_000L);
+
+        assertNotNull(claim.refusalFor(script, 1_000L), "until it joins it is anyone");
+        assertTrue(claim.refusalFor(script, 1_000L).contains("op 'join'"));
+        String token = claim.tokenFor(agent, 1_000L);
+        assertNotNull(token);
+        assertEquals(16, token.length());
+
+        assertNull(claim.join(script, token, 1_000L));
+        assertNull(claim.refusalFor(script, 2_000L), "the script now drives the client as its agent does");
+        assertNotNull(claim.refusalFor(stranger, 2_000L), "and nobody else got in with it");
+        assertTrue(claim.status(script, 2_000L).has("joined"));
+        assertFalse(claim.status(script, 2_000L).get("yours").getAsBoolean());
+        assertTrue(claim.heldExclusivelyByAnother(script, 2_000L), "the lock is still the agent's to set or release");
+    }
+
+    @Test
+    void theTokenIsToldOnlyToTheHolderAndAWrongOneLetsNobodyIn() {
+        InputClaim claim = new InputClaim();
+        CallerId agent = throughOrchestrator("c4", "claude-code");
+        CallerId stranger = direct("someone-else");
+        claim.claimed(agent, "", true, 60_000L);
+
+        assertNull(claim.tokenFor(stranger, 1_000L));
+        assertFalse(claim.status(stranger, 1_000L).has("token"));
+        assertEquals(claim.tokenFor(agent, 1_000L), claim.status(agent, 1_000L).get("token").getAsString());
+        assertNotNull(claim.join(stranger, "0000000000000000", 1_000L));
+        assertNotNull(claim.join(stranger, null, 1_000L));
+        assertNotNull(claim.refusalFor(stranger, 1_000L));
+    }
+
+    @Test
+    void whoWasLetInStaysInWhileTheHolderExtendsAndIsOutWhenTheLockEnds() {
+        InputClaim claim = new InputClaim();
+        CallerId agent = throughOrchestrator("c4", "claude-code");
+        CallerId script = direct("companion-script");
+        claim.claimed(agent, "", true, 60_000L);
+        String token = claim.tokenFor(agent, 1_000L);
+        assertNull(claim.join(script, token, 1_000L));
+
+        claim.claimed(agent, "", true, 120_000L);
+        assertEquals(token, claim.tokenFor(agent, 70_000L), "extending keeps the token");
+        assertNull(claim.refusalFor(script, 70_000L));
+
+        claim.released();
+        claim.claimed(throughOrchestrator("c9", "towers"), "", true, 200_000L);
+        assertNotNull(claim.refusalFor(script, 130_000L), "another agent's lock is not the one it joined");
+        assertNotNull(claim.join(script, token, 130_000L), "and the old token opens nothing");
+    }
+
+    @Test
+    void aLockThatIsNotExclusiveHasNoTokenAndNothingToJoin() {
+        InputClaim claim = new InputClaim();
+        CallerId agent = throughOrchestrator("c4", "claude-code");
+        claim.claimed(agent, "", false, 60_000L);
+        assertNull(claim.tokenFor(agent, 1_000L));
+        assertNotNull(claim.join(direct("companion-script"), "anything", 1_000L));
+        assertNull(claim.refusalFor(direct("companion-script"), 1_000L), "which is fine: nobody is refused");
+    }
 }

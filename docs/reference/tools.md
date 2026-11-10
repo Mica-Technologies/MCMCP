@@ -2895,7 +2895,7 @@ after about three minutes and returns `nextIndex`.
 
 #### `client_input_lock`
 
-Requires `permissions.allowPlayerControl` for `set` · `op` `set` (default, with `locked`) \| `status` \| `wait` · optional `seconds`, `reason`, `exclusive`, `force`, `waitSeconds`, `agent`
+Requires `permissions.allowPlayerControl` for `set` · `op` `set` (default, with `locked`) \| `status` \| `wait` \| `join` · optional `seconds`, `reason`, `exclusive`, `force`, `waitSeconds`, `token`, `agent`
 
 Holds the human's own keyboard and mouse out of the game so a stray movement cannot disturb what a
 model is doing. While locked, nothing from the physical keyboard or mouse reaches the game — no
@@ -2932,6 +2932,12 @@ for a direct client, its session.
   refused with a `busy` tool error naming the holder, with `retryAfterMs`. Read-only tools still
   answer. Another agent's lock or release is refused too, unless it passes `force: true`, which is
   for a lock known to be abandoned.
+- **Your own second connection.** A script that drives the client over a connection of its own (a
+  direct HTTP session beside the agent's) is another caller, and an exclusive lock refuses it like
+  anyone else. Taking an exclusive lock returns a `token` (`op: "status"` shows it to the holder
+  again). The script calls `client_input_lock {op: "join", token: "..."}` once and is then let
+  through until the lock ends, extensions included. It cannot set or release the lock, and its
+  status shows `joined: true`. The holder's status counts `joinedConnections`.
 
 #### `client_select_slot`
 

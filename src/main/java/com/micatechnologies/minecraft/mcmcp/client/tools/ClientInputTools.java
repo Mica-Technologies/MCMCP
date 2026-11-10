@@ -1138,10 +1138,13 @@ public final class ClientInputTools {
                 + "whom ('yours' when by you) and for how long; op 'wait' waits until it is free. "
                 + "exclusive: true makes the client's other input tools refuse other agents with a "
                 + "'busy' error until your lock ends; another agent's lock or release is refused too, "
-                + "unless it passes force: true.")
+                + "unless it passes force: true. An exclusive lock returns a 'token': a script of yours on "
+                + "another connection calls op 'join' with it once and is then let through like you.")
             .schema(JsonSchema.object()
                 .enumeration("op", "'set' (default) takes or gives back the lock as 'locked' says; "
-                    + "'status' only reports; 'wait' waits for it to be free.", "set", "status", "wait")
+                    + "'status' only reports; 'wait' waits for it to be free; 'join' enters another "
+                    + "connection's exclusive lock with its token.", "set", "status", "wait", "join")
+                .string("token", "join: the token the exclusive lock's holder was given.")
                 .bool("locked", "set: true to take the keyboard and mouse, false to give them back.")
                 .bool("exclusive", "set: other agents' input calls are refused while you hold it. "
                     + "Default false.")
@@ -1161,6 +1164,14 @@ public final class ClientInputTools {
                 if ("status".equals(op)) {
                     return ToolResult.structured(InputClaim.get().status(caller, System.currentTimeMillis()));
                 }
+                if ("join".equals(op)) {
+                    long now = System.currentTimeMillis();
+                    String refused = InputClaim.get().join(caller, context.getString("token", null), now);
+                    if (refused != null) {
+                        return ToolResult.error(refused);
+                    }
+                    return ToolResult.structured(InputClaim.get().status(caller, now));
+                }
                 if ("wait".equals(op)) {
                     long deadline = System.currentTimeMillis() + context.getBoundedInt("waitSeconds", 60, 1, 600) * 1000L;
                     long started = System.currentTimeMillis();
@@ -1168,7 +1179,7 @@ public final class ClientInputTools {
                         long now = System.currentTimeMillis();
                         JsonObject status = InputClaim.get().status(caller, now);
                         boolean free = !status.get("locked").getAsBoolean()
-                            || status.get("yours").getAsBoolean();
+                            || status.get("yours").getAsBoolean() || status.has("joined");
                         if (free || now >= deadline) {
                             status.addProperty("free", free);
                             status.addProperty("waitedMillis", now - started);
@@ -1221,6 +1232,10 @@ public final class ClientInputTools {
                         json.addProperty("wasLocked", was);
                         if (wanted) {
                             json.addProperty("exclusive", exclusive);
+                            String token = InputClaim.get().tokenFor(caller, System.currentTimeMillis());
+                            if (token != null) {
+                                json.addProperty("token", token);
+                            }
                         }
                         return json;
                     }
