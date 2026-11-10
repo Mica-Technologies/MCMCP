@@ -1153,6 +1153,89 @@ case "$ENC_BODY" in
   *) mcp_failure "the leak was not reported as a cluster: ${ENC_BODY}" ;;
 esac
 
+echo "==> Walking through a block that collides only along an edge (#186): a ladder is not a wall"
+# A corridor one cell wide, three long, with a ladder on its wall in the middle cell. The ladder's
+# collision box is a thin slab against the wall, so the cell is walked through and the far end reached.
+WX=$((SPAWN_X + 60)); WY=$((UNDO_Y + 70)); WZ=$((SPAWN_Z + 60))
+mcp_call 6850 server_apply_ops "{\"load\":true,\"ops\":[\"fill $((WX - 1)) ${WY} $((WZ - 1)) $((WX + 3)) $((WY + 3)) $((WZ + 1)) minecraft:stone\",\"fill ${WX} $((WY + 1)) ${WZ} $((WX + 2)) $((WY + 2)) ${WZ} minecraft:air\",\"setblock $((WX + 1)) $((WY + 1)) ${WZ} minecraft:ladder facing=south\"]}" > /dev/null \
+  || mcp_failure "could not build the corridor"
+EDGE_BODY="$(mcp_call 6851 server_check_walk "{\"load\":true,\"box\":[$((WX - 1)),${WY},$((WZ - 1)),$((WX + 3)),$((WY + 3)),$((WZ + 1))],\"seeds\":[[${WX},$((WY + 1)),${WZ}]],\"probes\":[{\"name\":\"far end\",\"at\":[$((WX + 2)),$((WY + 1)),${WZ}]}],\"doors\":\"open\",\"minCluster\":1}")" \
+  || mcp_failure "server_check_walk failed: ${EDGE_BODY}"
+case "$EDGE_BODY" in
+  *'"isError":true'*) mcp_failure "the corridor walk was refused: ${EDGE_BODY}" ;;
+  *'"reached":3'*) echo "    all three cells are reached, the ladder's among them" ;;
+  *) mcp_failure "the walk did not pass the ladder's cell: ${EDGE_BODY}" ;;
+esac
+
+echo "==> Copying a structure turned a quarter (#191): states, a door, a chest's contents, a linked position"
+# A 5 x 3 x 4 box: stairs facing east, a chest facing north with diamonds in it, a door facing south, a
+# standing sign, and an end gateway whose exit is the stairs' cell. Turned 90 degrees clockwise, north
+# becomes east: each is read back where the turn puts it, facing where the turn points it.
+SX=$((SPAWN_X + 60)); SY=$((UNDO_Y + 80)); SZ=$((SPAWN_Z + 60))
+DX=${SX}; DY=$((SY + 10)); DZ=${SZ}
+mcp_call 6860 server_apply_ops "{\"load\":true,\"ops\":[\"fill ${SX} ${SY} ${SZ} $((SX + 4)) $((DY + 3)) $((SZ + 4)) minecraft:air\",\"fill ${SX} ${SY} ${SZ} $((SX + 4)) ${SY} $((SZ + 3)) minecraft:stone\",\"setblock $((SX + 1)) $((SY + 1)) ${SZ} minecraft:oak_stairs facing=east,half=bottom,shape=straight\",\"setblock $((SX + 2)) $((SY + 1)) ${SZ} minecraft:chest facing=north replace {Items:[{Slot:0b,id:\\\"minecraft:diamond\\\",Count:3b,Damage:0s}]}\",\"setblock $((SX + 3)) $((SY + 1)) $((SZ + 1)) minecraft:wooden_door facing=south,half=lower\",\"setblock $((SX + 3)) $((SY + 2)) $((SZ + 1)) minecraft:wooden_door half=upper\",\"setblock ${SX} $((SY + 1)) $((SZ + 3)) minecraft:standing_sign rotation=0\",\"setblock $((SX + 4)) $((SY + 1)) $((SZ + 3)) minecraft:end_gateway 0 replace {ExactTeleport:1b,ExitPortal:{X:$((SX + 1)),Y:$((SY + 1)),Z:${SZ}}}\"]}" > /dev/null \
+  || mcp_failure "could not build the structure to copy"
+COPY_ARGS="\"x\":${SX},\"y\":${SY},\"z\":${SZ},\"toX\":$((SX + 4)),\"toY\":$((SY + 2)),\"toZ\":$((SZ + 3)),\"to\":[${DX},${DY},${DZ}],\"rotate\":90,\"load\":true"
+COPY_DRY="$(mcp_call 6861 server_copy_structure "{${COPY_ARGS},\"dryRun\":true}")" || mcp_failure "server_copy_structure dry run failed: ${COPY_DRY}"
+COPY_BODY="$(mcp_call 6862 server_copy_structure "{${COPY_ARGS}}")" || mcp_failure "server_copy_structure failed: ${COPY_BODY}"
+read_block() {
+  mcp_call "$1" server_get_block "{\"x\":$2,\"y\":$3,\"z\":$4,\"nbt\":true}"
+}
+printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$COPY_DRY" "$COPY_BODY" \
+  "$(read_block 6863 $((DX + 3)) $((DY + 1)) $((DZ + 1)))" \
+  "$(read_block 6864 $((DX + 3)) $((DY + 1)) $((DZ + 2)))" \
+  "$(read_block 6865 $((DX + 2)) $((DY + 1)) $((DZ + 3)))" \
+  "$(read_block 6866 $((DX + 2)) $((DY + 2)) $((DZ + 3)))" \
+  "$(read_block 6867 ${DX} $((DY + 1)) ${DZ})" \
+  "$(read_block 6868 ${DX} $((DY + 1)) $((DZ + 4)))" \
+  | "$PYTHON_BIN" -c '
+import json, sys
+dx, dy, dz = (int(v) for v in sys.argv[1:4])
+rows = [json.loads(line)["result"] for line in sys.stdin if line.strip()]
+for row in rows:
+    assert not row.get("isError"), row
+dry, copy, stairs, chest, door, door_top, sign, gateway = (row["structuredContent"] for row in rows)
+assert dry["dryRun"] and dry["wouldWrite"] > 0 and "undoPoint" not in dry, dry
+assert copy["rotate"] == 90 and copy["cells"] == 60, copy
+# The door is written whole from its lower half, so its upper half is counted as done by its partner.
+assert copy["written"] + copy.get("byPartner", 0) == dry["wouldWrite"], (copy, dry["wouldWrite"])
+assert copy["destination"]["to"] == {"x": dx + 3, "y": dy + 2, "z": dz + 4}, copy["destination"]
+assert copy["refused"] == 0 and "unturned" not in copy and copy.get("undoPoint"), copy
+# The chest and the gateway take the data copied to them; a blank sign already holds the same as its source.
+assert copy["nbt"]["tileEntities"] == 3 and copy["nbt"]["applied"] >= 2, copy["nbt"]
+assert copy["nbt"]["applied"] + copy["nbt"]["unchanged"] == 3, copy["nbt"]
+assert copy["nbt"]["moved"] == {"X/Y/Z": 1}, copy["nbt"]
+assert stairs["block"] == "minecraft:oak_stairs" and stairs["state"]["facing"] == "south", stairs
+assert chest["block"] == "minecraft:chest" and chest["state"]["facing"] == "east", chest
+items = json.dumps(chest["blockEntity"])
+assert "minecraft:diamond" in items, chest
+assert door["block"] == "minecraft:wooden_door" and door["state"]["facing"] == "west" and door["state"]["half"] == "lower", door
+assert door_top["block"] == "minecraft:wooden_door" and door_top["state"]["half"] == "upper", door_top
+assert sign["block"] == "minecraft:standing_sign" and sign["state"]["rotation"] == "4", sign
+exit_portal = json.dumps(gateway["blockEntity"]).replace(" ", "")
+assert gateway["block"] == "minecraft:end_gateway", gateway
+for part in ("X:%d" % (dx + 3), "Y:%d" % (dy + 1), "Z:%d" % (dz + 1)):
+    assert part in exit_portal.replace("\"", ""), (part, exit_portal)
+' "$DX" "$DY" "$DZ" || mcp_failure "the turned copy is not what the turn makes of the source: ${COPY_BODY}"
+echo "    stairs, chest, door and sign face a quarter turn on; the chest kept its diamonds; the gateway's exit moved with the stairs"
+OCCUPIED_BODY="$(mcp_call 6869 server_copy_structure "{${COPY_ARGS},\"rotate\":180,\"expect\":\"air\"}")" || mcp_failure "server_copy_structure with expect failed outright: ${OCCUPIED_BODY}"
+case "$OCCUPIED_BODY" in
+  *'"isError":true'*'"occupied":{"cells":'*) echo "    expect 'air' refuses a destination the first copy now stands in" ;;
+  *) mcp_failure "expect 'air' did not refuse an occupied destination: ${OCCUPIED_BODY}" ;;
+esac
+
+echo "==> Chunks resent to a player (#187), and a command's echo kept to its caller (#196)"
+REFRESH_BODY="$(mcp_call 6870 server_refresh_chunks "{\"player\":\"Nobody\",\"x\":${SPAWN_X},\"z\":${SPAWN_Z}}")" || mcp_failure "server_refresh_chunks failed outright: ${REFRESH_BODY}"
+case "$REFRESH_BODY" in
+  *"No player named 'Nobody'"*'"isError":true'*) echo "    a player who is not on the server is a tool error naming them" ;;
+  *) mcp_failure "server_refresh_chunks did not refuse a player who is not connected: ${REFRESH_BODY}" ;;
+esac
+QUIET_BODY="$(mcp_call 6871 server_run_command '{"command":"time set 6000"}')" || mcp_failure "server_run_command failed: ${QUIET_BODY}"
+case "$QUIET_BODY" in
+  *'"succeeded":true'*'Set the time to 6000'*) echo "    a command's success message still comes back in its output" ;;
+  *) mcp_failure "the command's own output was lost: ${QUIET_BODY}" ;;
+esac
+
 echo "==> Components: a door pair with its header, and railings that face the drop"
 CX=$((SPAWN_X + 110)); CY=$((UNDO_Y + 50)); CZ=$((SPAWN_Z + 110))
 mcp_call 690 server_target '{"op":"delete","name":"smoke-doors"}' > /dev/null
