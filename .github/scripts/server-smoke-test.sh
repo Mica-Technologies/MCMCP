@@ -1298,8 +1298,14 @@ mcp_call 705 server_target '{"op":"delete","name":"smoke-house/*"}' > /dev/null
 
 echo "==> Tile entities reloaded in place (#141): a chest keeps its contents"
 KX=$((SPAWN_X + 170)); KY=$((UNDO_Y + 50)); KZ=$((SPAWN_Z + 170))
-mcp_call 720 server_apply_ops "{\"ops\":[\"setblock ${KX} ${KY} ${KZ} minecraft:chest 0 {Items:[{Slot:0b,id:\\\"minecraft:diamond\\\",Count:3b}]}\"]}" > /dev/null \
-  || mcp_failure "could not place the chest"
+# load: true, as for the read below: 170 blocks out is past the spawn chunks, and placed without it
+# the chest only landed while the chunk happened to still be loaded from the step before.
+CHEST_PLACED="$(mcp_call 720 server_apply_ops "{\"load\":true,\"ops\":[\"setblock ${KX} ${KY} ${KZ} minecraft:chest 0 {Items:[{Slot:0b,id:\\\"minecraft:diamond\\\",Count:3b}]}\"]}")" \
+  || mcp_failure "could not place the chest: ${CHEST_PLACED}"
+case "$CHEST_PLACED" in
+  *'"unloaded":0'*) ;;
+  *) mcp_failure "the chest's chunk was not loaded for the write: ${CHEST_PLACED}" ;;
+esac
 RELOAD_TE="$(mcp_call 721 server_reload_tile_entities "{\"x\":$((KX - 1)),\"y\":${KY},\"z\":$((KZ - 1)),\"toX\":$((KX + 1)),\"toZ\":$((KZ + 1)),\"load\":true}")" \
   || mcp_failure "server_reload_tile_entities failed: ${RELOAD_TE}"
 case "$RELOAD_TE" in
