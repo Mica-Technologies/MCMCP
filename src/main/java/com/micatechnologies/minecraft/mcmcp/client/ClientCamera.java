@@ -110,6 +110,7 @@ public final class ClientCamera {
             camera.prevRotationYaw = camera.rotationYawHead = camera.prevRotationYawHead = yaw;
             camera.prevRotationPitch = pitch;
             setRenderView(camera);
+            previous.detached = true;
             // A view from somewhere else is a picture of the world, not of the player's screen:
             // their hand and HUD do not belong in it, and third person would put the camera
             // behind the stand-in rather than at the point asked for.
@@ -240,6 +241,8 @@ public final class ClientCamera {
         boolean addedNightVision;
         /** Whether the overlay and the open screen are being kept out of the frame. */
         boolean hidingHud;
+        /** Whether the world is being drawn from a stand-in camera, not from the player. */
+        boolean detached;
         long appliedAt;
     }
 
@@ -298,6 +301,21 @@ public final class ClientCamera {
         @SubscribeEvent
         public void onRenderOverlay(RenderGameOverlayEvent.Pre event) {
             if (event.getType() == RenderGameOverlayEvent.ElementType.ALL && hidingHud()) {
+                event.setCanceled(true);
+            }
+        }
+
+        /**
+         * The player's own in-block, underwater and on-fire overlays, which vanilla draws over the whole
+         * frame from where the <em>player</em> is, whatever the view is drawn from (#185). With
+         * bringPlayer the player hovers at the camera, feet at its position, so in a room their head is
+         * in the ceiling, and every interior frame came back as that block's texture at a tenth of its
+         * brightness: one dark colour, with the meshes settled and full-bright applied.
+         */
+        @SubscribeEvent
+        public void onBlockOverlay(net.minecraftforge.client.event.RenderBlockOverlayEvent event) {
+            Saved current = saved;
+            if (current != null && current.detached) {
                 event.setCanceled(true);
             }
         }
