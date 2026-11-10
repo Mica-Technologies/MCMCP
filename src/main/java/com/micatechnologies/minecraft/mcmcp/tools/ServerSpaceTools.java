@@ -71,7 +71,9 @@ public final class ServerSpaceTools {
             .title("Check where people can walk")
             .description("Flood where a person can walk from seeds (a lift lobby, front doors): a cell is standable "
                 + "when it and the headroom above are clear and the cell below is solid, and a step moves to a "
-                + "neighbour up to 'step' blocks higher or lower. Reports how many cells each door mode reaches "
+                + "neighbour up to 'step' blocks higher or lower. A block that collides only along its cell's "
+                + "edges (a railing, a wall handrail, a ladder) leaves the cell clear and stops only the steps "
+                + "across those edges, so a guard that blocks a landing shows as one. Reports how many cells each door mode reaches "
                 + "(doors 'open', 'closed' or 'both'), and the standable places nobody can reach, as clusters "
                 + "(a room with no way in), at least minCluster cells each so furniture tops are left out. "
                 + "probes name one cell per room and come back as unreachedProbes per flood: the exact check "
@@ -215,7 +217,7 @@ public final class ServerSpaceTools {
                 json.addProperty("note", unloaded + " cells were in unloaded chunks and count as solid. Pass load: true.");
             }
             final int headroom = context.getBoundedInt("headroom", 2, 1, 4);
-            SpaceChecks.CellTest usable = enclosure ? (x, y, z) -> grid.get(x, y, z) == VoxelGrid.OPEN
+            SpaceChecks.CellTest usable = enclosure ? (x, y, z) -> grid.get(x, y, z) == VoxelGrid.OPEN // an EDGE cell is closed here
                 : (x, y, z) -> SpaceChecks.standable(grid, x, y, z, headroom, true);
             JsonArray snapped = new JsonArray();
             if (context.getBoolean("snap", true)) {
@@ -433,7 +435,26 @@ public final class ServerSpaceTools {
             return VoxelGrid.DOOR;
         }
         try {
-            return state.getCollisionBoundingBox(world, pos) == Block.NULL_AABB ? VoxelGrid.OPEN : VoxelGrid.SOLID;
+            if (state.isFullCube()) {
+                return VoxelGrid.SOLID;
+            }
+            // Every collision box the block has in its cell, not the one getCollisionBoundingBox names:
+            // a railing or a wall handrail collides only along its edges, the cell over a stair tread
+            // that holds one stays walkable in game, and counted solid every floor above the first of a
+            // house with guarded stairs read as unreachable (#186).
+            java.util.List<net.minecraft.util.math.AxisAlignedBB> boxes = new java.util.ArrayList<>(4);
+            state.addCollisionBoxToList(world, pos, new net.minecraft.util.math.AxisAlignedBB(pos), boxes, null, false);
+            if (boxes.isEmpty()) {
+                return VoxelGrid.OPEN;
+            }
+            java.util.List<double[]> inCell = new java.util.ArrayList<>(boxes.size());
+            for (net.minecraft.util.math.AxisAlignedBB box : boxes) {
+                inCell.add(new double[] {
+                    Math.max(0.0D, box.minX - pos.getX()), Math.max(0.0D, box.minY - pos.getY()),
+                    Math.max(0.0D, box.minZ - pos.getZ()), Math.min(1.0D, box.maxX - pos.getX()),
+                    Math.min(1.0D, box.maxY - pos.getY()), Math.min(1.0D, box.maxZ - pos.getZ())});
+            }
+            return VoxelGrid.fromCollisionBoxes(inCell);
         }
         catch (RuntimeException e) {
             return VoxelGrid.SOLID;

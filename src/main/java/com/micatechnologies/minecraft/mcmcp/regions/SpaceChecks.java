@@ -156,12 +156,32 @@ public final class SpaceChecks {
             return false;
         }
         for (int h = 0; h < headroom; h++) {
-            byte cell = grid.get(x, y + h, z);
-            if (!(cell == VoxelGrid.OPEN || (doorsOpen && cell == VoxelGrid.DOOR))) {
+            byte cell = VoxelGrid.kind(grid.get(x, y + h, z));
+            // A railing's cell is stood in like air: it only collides along its edges (#186).
+            if (!(cell == VoxelGrid.OPEN || cell == VoxelGrid.EDGE || (doorsOpen && cell == VoxelGrid.DOOR))) {
                 return false;
             }
         }
         return true;
+    }
+
+    /**
+     * Whether something along a cell's edge stops a person stepping from a column to its neighbour:
+     * a guard on the side being left, or on the side being entered, at any height the body passes.
+     *
+     * @param dx the move along x, -1, 0 or 1; exactly one of {@code dx} and {@code dz} is not 0
+     */
+    static boolean edgeBlocks(VoxelGrid grid, int fromX, int fromY, int fromZ, int toX, int toY, int toZ,
+                              int dx, int dz, int headroom) {
+        int leaving = dx > 0 ? VoxelGrid.EAST : dx < 0 ? VoxelGrid.WEST : dz > 0 ? VoxelGrid.SOUTH : VoxelGrid.NORTH;
+        int entering = dx > 0 ? VoxelGrid.WEST : dx < 0 ? VoxelGrid.EAST : dz > 0 ? VoxelGrid.NORTH : VoxelGrid.SOUTH;
+        for (int h = 0; h < headroom; h++) {
+            if ((VoxelGrid.edges(grid.get(fromX, fromY + h, fromZ)) & leaving) != 0
+                || (VoxelGrid.edges(grid.get(toX, toY + h, toZ)) & entering) != 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -199,7 +219,8 @@ public final class SpaceChecks {
                     if (seen.get(at)) {
                         continue;
                     }
-                    if (standable(grid, x, y, z, headroom, doorsOpen)) {
+                    if (standable(grid, x, y, z, headroom, doorsOpen)
+                        && !edgeBlocks(grid, cell[0], cell[1], cell[2], x, y, z, d[0], d[1], headroom)) {
                         seen.set(at);
                         queue.add(new int[] {x, y, z});
                         break;

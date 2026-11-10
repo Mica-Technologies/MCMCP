@@ -1076,6 +1076,14 @@ strictly inside the box's y range. `doors: "both"` (default) gives `doorsOpen` a
 each with `reached`, and `unreachedCells` / `unreachedAreas` / `unreached` (clusters of standable
 places nobody gets to: a room with no way in). `separate` floods each seed with doors closed.
 
+A block that collides only along its cell's edges (a railing, a wall handrail, a ladder: every
+collision box within 0.3 of a side) leaves its cell open to stand in, and stops only the steps across
+the sides that carry something. So a stair with a guard in the cell above each tread is climbed, and
+a guard that really does run across a landing or a doorway shows as the unreached area behind it. A
+block that reaches into the middle of its cell (a fence post, a pane, a slab) is solid as before, and
+for [`server_check_enclosure`](#server_check_enclosure) an edge-only block still closes the wall.
+`passable` is for a block that should not count at all.
+
 - **Furniture tops are not rooms.** Areas smaller than `minCluster` (default 6) are not listed or
   counted in `unreachedAreas`, and `smallAreas` says how many were left out. `floorY: [174]` reports
   only places at those standing heights, the floors themselves.
