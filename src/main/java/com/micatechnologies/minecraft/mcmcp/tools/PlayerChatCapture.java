@@ -152,7 +152,9 @@ final class PlayerChatCapture {
                 ITextComponent component = componentOf((SPacketChat) message);
                 if (component != null) {
                     into.record(component);
-                    if (deliver) {
+                    // A chat packet over 32,767 bytes fails to encode and disconnects the player, so
+                    // one that long is kept for the result and not sent on (#196).
+                    if (deliver && fitsAPacket(component)) {
                         super.write(context, message, promise);
                         return;
                     }
@@ -161,6 +163,17 @@ final class PlayerChatCapture {
                 }
             }
             super.write(context, message, promise);
+        }
+    }
+
+    /** Whether {@code component} encodes within {@code SPacketChat}'s 32,767-byte string limit. */
+    static boolean fitsAPacket(ITextComponent component) {
+        try {
+            return ITextComponent.Serializer.componentToJson(component)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 32767;
+        }
+        catch (RuntimeException e) {
+            return false;
         }
     }
 

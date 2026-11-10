@@ -32,6 +32,9 @@ import net.minecraft.world.World;
  */
 public class CapturingCommandSender implements ICommandSender {
 
+    /** The longest line kept from a command; server_get_block reads a tile entity in full. */
+    static final int LINE_LIMIT = 8000;
+
     private final ICommandSender delegate;
     private final List<String> output = new ArrayList<>();
     private final List<String> errors = new ArrayList<>();
@@ -71,7 +74,9 @@ public class CapturingCommandSender implements ICommandSender {
     public void record(ITextComponent component) {
         // Unformatted: the colour codes and click events that make sense in a chat window are noise
         // in a tool result. CommandText keeps a mod's untranslatable key's arguments (#67).
-        String text = CommandText.plain(component);
+        // One line is cut at LINE_LIMIT: /blockdata answers with the whole tile entity, and a linked
+        // fire panel's was 135 KB, some 34,000 tokens in one reply (#196).
+        String text = QuietCommandListener.clip(CommandText.plain(component), LINE_LIMIT);
         output.add(text);
         // Red is how the command handler reports a CommandException, whether the command's usage was
         // wrong or it declined to act. It is the only thing that tells a failure apart from a command

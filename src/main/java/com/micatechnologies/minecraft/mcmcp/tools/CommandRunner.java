@@ -8,6 +8,7 @@ import net.minecraft.command.CommandHandler;
 import net.minecraft.command.CommandResultStats;
 import net.minecraft.command.EntitySelector;
 import net.minecraft.command.ICommand;
+import net.minecraft.command.ICommandListener;
 import net.minecraft.command.ICommandManager;
 import net.minecraft.command.ICommandSender;
 import net.minecraft.command.PlayerNotFoundException;
@@ -70,12 +71,16 @@ public final class CommandRunner {
      *                 {@link PlayerChatCapture}, or a {@link CapturingCommandSender} wrapping the identity
      */
     static Outcome run(MinecraftServer server, ICommandSender identity, ICommandSender sender, String rawCommand) {
+        // Success messages go to the sender and the log only, not to every operator's chat (#196). The
+        // outermost command swaps the listener; one run from inside another finds it already swapped.
+        ICommandListener replaced = running == 0 ? QuietCommandListener.install() : null;
         running++;
         try {
             return runCommand(server, identity, sender, rawCommand);
         }
         finally {
             running--;
+            QuietCommandListener.restore(replaced);
         }
     }
 
