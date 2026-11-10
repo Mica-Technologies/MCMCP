@@ -349,7 +349,7 @@ public final class ClientDebugTools {
                 }
                 final String savedPath = capture.get("path").getAsString();
                 File file = new File(savedPath);
-                if (!file.isFile()) {
+                if (!file.isFile() || capture.has("stale")) {
                     // Never "saved" when nothing was written. The text used to say so regardless,
                     // and only exists=false in the structured half disagreed — a model reading the
                     // text believed it had a frame (#29).
@@ -532,6 +532,14 @@ public final class ClientDebugTools {
         File gameDirectory = McmcpPaths.gameDirectory();
         File target = canonical(new File(new File(gameDirectory, "screenshots"), fileName));
 
+        // A reused name must give this frame, never the last one (#189). When the game's own save
+        // failed, the file already there under that name passed for the one just written: same bytes,
+        // same picture, and nothing to say the save had failed. So the old file goes first; one that
+        // cannot be deleted is remembered, and counts as written only once it has changed.
+        final boolean leftover = target.isFile() && !target.delete();
+        final long leftoverModified = leftover ? target.lastModified() : 0L;
+        final long leftoverLength = leftover ? target.length() : 0L;
+
         ScreenshotOutcome.reset();
         ITextComponent reply = ScreenShotHelper.saveScreenshot(gameDirectory, fileName,
             mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
@@ -545,7 +553,8 @@ public final class ClientDebugTools {
             return json;
         }
         json.addProperty("path", target.getAbsolutePath());
-        if (target.isFile()) {
+        if (target.isFile()
+            && !(leftover && target.lastModified() == leftoverModified && target.length() == leftoverLength)) {
             return json;
         }
 
@@ -574,6 +583,14 @@ public final class ClientDebugTools {
         if (!target.isFile()) {
             json.addProperty("reason", "Saving it through the game failed: " + why + ", and the "
                 + "direct write produced no file either.");
+            return json;
+        }
+        if (leftover && target.lastModified() == leftoverModified && target.length() == leftoverLength) {
+            // The earlier file of this name is still there, unchanged: say so rather than return it.
+            json.addProperty("stale", true);
+            json.addProperty("reason", "Saving it through the game failed: " + why + ", and the file already "
+                + "there under this name could be neither replaced nor deleted, so it is an EARLIER frame. Use "
+                + "another name.");
             return json;
         }
         json.addProperty("fallback", why);
