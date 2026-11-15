@@ -1199,9 +1199,13 @@ public final class ClientDebugTools {
                 + "to catch a short visual effect a screenshot would miss: a strobe, a flicker, a "
                 + "light that should blink. Crop to the part of the screen the effect is in, or it "
                 + "is diluted by everything else in view.\n\n"
-                + "'changed' counts reads that differ from the first by more than threshold. The "
-                + "crop is in window pixels from the top-left, as in a screenshot. Blocks for "
-                + "count x interval, at most 60 seconds.")
+                + "The summary answers 'did it flicker': 'maxStep' is the largest change between two "
+                + "consecutive reads (with its ms), 'steps' counts consecutive changes over threshold "
+                + "and 'firstSteps' lists the first few. 'changed' and 'maxDeltaFromFirst' compare "
+                + "with the first read instead, which a moving camera drifts away from. The reads "
+                + "themselves come only with output 'samples', as arrays. The crop is in window "
+                + "pixels from the top-left, as in a screenshot. Blocks for count x interval, at most "
+                + "60 seconds.")
             .schema(JsonSchema.object()
                 .integer("count", "How many reads. Default 20.", 1, 600)
                 .integer("interval_ms", "Time between reads. 0 (default) reads every rendered frame.",
@@ -1210,9 +1214,12 @@ public final class ClientDebugTools {
                 .integer("y", "Crop: top edge in window pixels. Default 0.", 0, 16384)
                 .integer("width", "Crop width in pixels. Default: to the right edge.", 1, 16384)
                 .integer("height", "Crop height in pixels. Default: to the bottom edge.", 1, 16384)
-                .number("threshold", "Luminance difference from the first read that counts as "
-                    + "changed. Default 8.", 0.0D, 255.0D)
-                .bool("per_channel", "Also return mean red, green and blue per read. Default false.")
+                .number("threshold", "Luminance difference that counts as a change, between "
+                    + "consecutive reads ('steps') and from the first ('changed'). Default 8.", 0.0D, 255.0D)
+                .enumeration("output", "'summary' (default): the figures only. 'samples': also every "
+                    + "read, as arrays 'ms' and 'lum'.", "summary", "samples")
+                .bool("per_channel", "With output 'samples', also mean red, green and blue per read. "
+                    + "Default false.")
                 .build())
             .clientOnly()
             .readOnly()
@@ -1264,32 +1271,20 @@ public final class ClientDebugTools {
                 }
 
                 List<ScreenSampler.Sample> samples = sampled.samples;
+                int n = samples.size();
                 long firstNanos = samples.get(0).nanos;
-                double first = samples.get(0).luminance;
-                double min = Double.MAX_VALUE;
-                double max = -Double.MAX_VALUE;
-                double sum = 0.0D;
-                double maxDelta = 0.0D;
-                int changed = 0;
-                com.google.gson.JsonArray reads = new com.google.gson.JsonArray();
-                for (ScreenSampler.Sample sample : samples) {
-                    min = Math.min(min, sample.luminance);
-                    max = Math.max(max, sample.luminance);
-                    sum += sample.luminance;
-                    double delta = Math.abs(sample.luminance - first);
-                    maxDelta = Math.max(maxDelta, delta);
-                    if (delta > threshold) {
-                        changed++;
+                long[] ms = new long[n];
+                double[] lum = new double[n];
+                double[][] rgb = perChannel ? new double[3][n] : null;
+                for (int i = 0; i < n; i++) {
+                    ScreenSampler.Sample sample = samples.get(i);
+                    ms[i] = Math.round((sample.nanos - firstNanos) / 1.0e6D);
+                    lum[i] = sample.luminance;
+                    if (rgb != null) {
+                        rgb[0][i] = sample.red;
+                        rgb[1][i] = sample.green;
+                        rgb[2][i] = sample.blue;
                     }
-                    JsonObject read = new JsonObject();
-                    read.addProperty("ms", Math.round((sample.nanos - firstNanos) / 1.0e6D));
-                    read.addProperty("lum", round1(sample.luminance));
-                    if (perChannel) {
-                        read.addProperty("r", round1(sample.red));
-                        read.addProperty("g", round1(sample.green));
-                        read.addProperty("b", round1(sample.blue));
-                    }
-                    reads.add(read);
                 }
 
                 JsonObject region = new JsonObject();
@@ -1300,21 +1295,14 @@ public final class ClientDebugTools {
 
                 JsonObject json = new JsonObject();
                 json.add("region", region);
-                json.addProperty("reads", samples.size());
-                json.addProperty("spanMs", Math.round((samples.get(samples.size() - 1).nanos - firstNanos) / 1.0e6D));
-                json.addProperty("minLum", round1(min));
-                json.addProperty("maxLum", round1(max));
-                json.addProperty("meanLum", round1(sum / samples.size()));
-                json.addProperty("maxDeltaFromFirst", round1(maxDelta));
-                json.addProperty("changed", changed);
-                json.add("samples", reads);
+                JsonObject summary = com.micatechnologies.minecraft.mcmcp.perf.ScreenSeries.summarise(ms, lum, rgb,
+                    threshold, "samples".equals(context.getString("output", "summary")));
+                for (java.util.Map.Entry<String, com.google.gson.JsonElement> entry : summary.entrySet()) {
+                    json.add(entry.getKey(), entry.getValue());
+                }
                 return ToolResult.structured(json);
             })
             .build());
-    }
-
-    private static double round1(double value) {
-        return Math.round(value * 10.0D) / 10.0D;
     }
 
     /**

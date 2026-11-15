@@ -3260,8 +3260,9 @@ under `screenshots/`.
 | `count` | integer 1–600 | Default 20. How many reads. |
 | `interval_ms` | integer 0–5000 | Default 0: every rendered frame. |
 | `x`, `y`, `width`, `height` | integer | Crop, in window pixels from the top-left, as in a screenshot. Default: the whole window. |
-| `threshold` | number 0–255 | Default 8. Luminance difference from the first read that counts as changed. |
-| `per_channel` | boolean | Default false. Also return mean red, green and blue per read. |
+| `threshold` | number 0–255 | Default 8. Luminance difference that counts as a change, between consecutive reads (`steps`) and from the first (`changed`). |
+| `output` | `summary` \| `samples` | Default `summary`: the figures only. `samples` also returns every read, as arrays. |
+| `per_channel` | boolean | Default false. With `samples`, also mean red, green and blue per read. |
 
 Reads the rendered frame repeatedly and returns each read's mean brightness — no image is saved or
 sent. This is for effects too short for a screenshot to catch reliably: a strobe lit for 75 ms of
@@ -3271,8 +3272,16 @@ apart, so whether a burst hits the flash is luck; this reads at the frame rate.
 ```json
 {"region": {"x": 600, "y": 300, "width": 200, "height": 200}, "reads": 60, "spanMs": 995,
  "minLum": 31.2, "maxLum": 188.4, "meanLum": 44.0, "maxDeltaFromFirst": 157.2, "changed": 5,
- "samples": [{"ms": 0, "lum": 31.2}, {"ms": 16, "lum": 31.4}]}
+ "maxStep": {"delta": 157.2, "ms": 516, "from": 31.2, "to": 188.4}, "steps": 2,
+ "firstSteps": [{"ms": 516, "from": 31.2, "to": 188.4}, {"ms": 600, "from": 186.9, "to": 31.5}]}
 ```
+
+**A flicker is a step.** `changed` and `maxDeltaFromFirst` compare each read with the first, and a
+moving camera drifts away from its first frame, which hides a one-frame dip inside the drift.
+`maxStep` is the largest change between consecutive reads, `steps` counts those over `threshold`,
+and `firstSteps` lists the first five. With `output: "samples"` the reads come back as
+`"samples": {"ms": [...], "lum": [...]}`, which is still several kilobytes for a few hundred reads.
+Ask for them only when the summary is not enough.
 
 **Crop to the effect.** Averaged over the whole window, a small light is diluted by everything else
 in view and may not cross the threshold at all. Luminance uses Rec. 709 weights on the stored
