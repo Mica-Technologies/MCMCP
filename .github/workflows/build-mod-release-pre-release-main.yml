@@ -352,8 +352,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Pinned, not stable. Rust 1.100's Cargo moved build-script output to
+      # build/<package>/<hash>/out, and tauri-build 2.6 finds the target directory by walking three
+      # parents up from OUT_DIR, so it landed in build/ and tried to replace the CLI package's build
+      # directory with the sidecar: "Is a directory" on macOS and Linux (Windows wrote the .exe to the
+      # wrong place and went on). Move to stable once tauri-build handles the new layout.
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.target }}
 
