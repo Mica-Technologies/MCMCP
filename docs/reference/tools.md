@@ -3385,9 +3385,10 @@ percentiles mean nothing. `client_frame_stats` and `client_profile_rendering` ca
 measured. They also say how much of it: `unfocusedFraction` and `throttledFraction` are the share
 of the measurement the window spent in the background or under 20 fps. `client_frame_stats` gives
 them per window too. `keepAwake` raises only the frame-limit setting, which is how FPS Reducer
-throttles. A cap from elsewhere (OptiFine, the graphics driver's background frame-rate limit, the
-OS) still applies to a window in the background, and it raises `renderWork` as well, so discard a
-throttled sample rather than adjusting it.
+throttles. A background cap set any other way still applies: one was seen holding a client at
+10 fps with its limit at 260, from a source not yet pinned down (possibly a renderer mod, the
+graphics driver or the OS). It raises `renderWork` as well, so discard a throttled sample rather
+than adjusting it.
 
 #### `client_frame_stats`
 

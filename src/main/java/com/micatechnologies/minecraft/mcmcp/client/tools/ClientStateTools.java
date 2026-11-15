@@ -210,9 +210,9 @@ public final class ClientStateTools {
         return "The client was throttled (under " + ClientKeepAwake.THROTTLED_FPS + " fps, or its frame limit "
             + "was) during this measurement, so frame rates and percentiles describe the throttle, not the game. "
             + "Check 'window', bring the client forward or call client_view with grabInputFocus true and "
-            + "pauseOnLostFocus false, and measure again. keepAwake raises only the frame limit setting; a "
-            + "cap from elsewhere (OptiFine, the graphics driver's background frame limit, the OS) still "
-            + "applies while the window is in the background, and renderWork rises with it too.";
+            + "pauseOnLostFocus false, and measure again. keepAwake raises only the frame limit setting, so a "
+            + "background cap set any other way (possibly a renderer mod, the graphics driver or the OS) "
+            + "still applies, and renderWork rises under it too.";
     }
 
     /**
