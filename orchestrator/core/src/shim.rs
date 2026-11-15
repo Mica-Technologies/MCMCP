@@ -230,6 +230,14 @@ pub struct AppConnection {
     writer: OwnedWriteHalf,
 }
 
+impl AppConnection {
+    /// The connection's two halves, for a client of the app that is not the shim's pump: the event
+    /// relay's socket client reads answers from one and writes requests to the other.
+    pub fn into_parts(self) -> (tokio::io::Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf) {
+        (self.lines, self.writer)
+    }
+}
+
 /// Presents the token and waits to be let in.
 pub async fn attach(stream: TcpStream, token: &str) -> Result<AppConnection> {
     let _ = stream.set_nodelay(true);

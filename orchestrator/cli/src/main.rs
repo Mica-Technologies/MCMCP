@@ -19,7 +19,7 @@ use mcmcp_orchestrator_core::router::Router;
 use mcmcp_orchestrator_core::store::ApprovalStore;
 use mcmcp_orchestrator_core::tasks::TaskStore;
 use mcmcp_orchestrator_core::trust::TrustedRoots;
-use mcmcp_orchestrator_core::{catalogue, control, link, paths, stdio};
+use mcmcp_orchestrator_core::{catalogue, control, event_relay, link, paths, stdio};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -62,6 +62,59 @@ enum Command {
         /// Accept links but do not serve MCP on stdout. For proving a link works.
         #[arg(long)]
         no_stdio: bool,
+
+        /// Port for the game events WebSocket (`ws://127.0.0.1:<port>/events`). 0 turns it off.
+        #[arg(long, default_value_t = mcmcp_orchestrator_core::events_ws::DEFAULT_EVENTS_PORT)]
+        events_port: u16,
+    },
+    /// Stream game events — chat, joins, leaves, deaths, advancements, commands — from every linked
+    /// game, one JSON object per line on stdout.
+    ///
+    /// Made for a watcher such as Claude Code's Monitor: each line is one notification. Every event
+    /// carries its `instance` and a `cursor`; pass the last cursor seen per game back with --resume
+    /// after a restart and nothing in between is lost. Notice lines (`link`, `orchestrator`,
+    /// `unsupported`, `reset`, `missed`, `error`) say when the stream itself changed, so silence
+    /// always means nothing happened. Needs the orchestrator app running.
+    Events {
+        /// Only these event types: chat, join, leave, death, advancement, command.
+        #[arg(long, value_delimiter = ',')]
+        types: Vec<String>,
+
+        /// Only events about these players (case-insensitive names).
+        #[arg(long, value_delimiter = ',')]
+        players: Vec<String>,
+
+        /// Never events about these players: usually the agent's own.
+        #[arg(long, value_delimiter = ',')]
+        exclude_players: Vec<String>,
+
+        /// Only events whose text contains this, case-insensitively, such as "@Claude".
+        #[arg(long)]
+        contains: Option<String>,
+
+        /// Only these instances (repeatable). Every connected game by default.
+        #[arg(long)]
+        instance: Vec<String>,
+
+        /// Resume a game from a cursor an earlier line carried (repeatable, one per game).
+        #[arg(long)]
+        resume: Vec<String>,
+
+        /// Start each game from the oldest event it still holds, rather than from now.
+        #[arg(long)]
+        backlog: bool,
+
+        /// Port the orchestrator app's MCP socket listens on.
+        #[arg(long, default_value_t = mcmcp_orchestrator_core::mcp_socket::DEFAULT_MCP_PORT)]
+        port: u16,
+
+        /// Print the WebSocket URL for these filters, token included, and exit.
+        #[arg(long)]
+        ws_url: bool,
+
+        /// The WebSocket port --ws-url names.
+        #[arg(long, default_value_t = mcmcp_orchestrator_core::events_ws::DEFAULT_EVENTS_PORT)]
+        events_port: u16,
     },
     /// Bridge an MCP client's stdio to a running orchestrator app.
     ///
@@ -205,7 +258,41 @@ async fn main() -> Result<()> {
         Command::Serve {
             strict_approval,
             no_stdio,
-        } => serve(cli.link_port, !strict_approval, no_stdio).await,
+            events_port,
+        } => serve(cli.link_port, !strict_approval, no_stdio, events_port).await,
+        Command::Events {
+            types,
+            players,
+            exclude_players,
+            contains,
+            instance,
+            resume,
+            backlog,
+            port,
+            ws_url,
+            events_port,
+        } => {
+            let mut subscription = event_relay::Subscription {
+                types: types.into_iter().map(|kind| kind.to_lowercase()).collect(),
+                players,
+                exclude_players,
+                contains: contains.filter(|text| !text.is_empty()),
+                instances: instance,
+                backlog,
+                ..Default::default()
+            };
+            for cursor in &resume {
+                subscription
+                    .add_resume(cursor)
+                    .map_err(|error| anyhow::anyhow!(error))?;
+            }
+            subscription.validate().map_err(|error| anyhow::anyhow!(error))?;
+            if ws_url {
+                print_ws_url(&subscription, events_port)
+            } else {
+                stream_events(subscription, port).await
+            }
+        }
         Command::Shim { mcp_port, no_launch } => {
             let result = shim(mcp_port, !no_launch).await;
             // Exit here rather than returning. Returning drops the runtime, and the drop waits for
@@ -289,6 +376,98 @@ async fn shim(mcp_port: u16, may_launch: bool) -> Result<()> {
         }
     })
     .await
+}
+
+/// Prints the events WebSocket URL for a subscription, token included.
+///
+/// The token is what makes the URL work, and it lives in a file whose path differs by platform; a
+/// watcher that needs a URL asks for this rather than assembling one.
+fn print_ws_url(subscription: &event_relay::Subscription, events_port: u16) -> Result<()> {
+    let token = mcmcp_orchestrator_core::mcp_socket::read_token(&paths::state_directory()?)
+        .context("reading the orchestrator's token; start the orchestrator app once to create it")?;
+    let mut url = format!(
+        "ws://127.0.0.1:{events_port}/events?token={}",
+        event_relay::percent_encode(&token)
+    );
+    let query = subscription.to_query();
+    if !query.is_empty() {
+        url.push('&');
+        url.push_str(&query);
+    }
+    println!("{url}");
+    Ok(())
+}
+
+/// One line on stdout, flushed: a watcher that reads lines sees each the moment it is written.
+///
+/// False once stdout is gone, which is the watcher saying it has stopped.
+fn emit_line(line: &serde_json::Value) -> bool {
+    let mut out = std::io::stdout().lock();
+    let text = serde_json::to_string(line).unwrap_or_default();
+    writeln!(out, "{text}").is_ok() && out.flush().is_ok()
+}
+
+/// Streams events to stdout until stdout closes, reconnecting to the app if it goes away.
+///
+/// The first connection failing is an error: nothing is running, and a watcher should hear that at
+/// once. After that, losing the app is a notice line and a retry, with every game's cursor kept, so a
+/// restarted app picks the stream up where it stopped.
+async fn stream_events(subscription: event_relay::Subscription, port: u16) -> Result<()> {
+    use mcmcp_orchestrator_core::mcp_socket;
+    use serde_json::json;
+
+    let state = paths::state_directory()?;
+    let states = event_relay::States::default();
+    let mut connected_once = false;
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        let attached = match mcp_socket::read_token(&state) {
+            Ok(token) => event_relay::SocketCall::connect(port, &token).await,
+            Err(error) => Err(error
+                .context("reading the orchestrator's token; start the orchestrator app once to create it")),
+        };
+        let call = match attached {
+            Ok(call) => call,
+            Err(error) if !connected_once => {
+                emit_line(&json!({"type": "error", "message": format!("{error:#}")}));
+                return Err(error);
+            }
+            Err(error) => {
+                debug!(error = %format!("{error:#}"), "the orchestrator is still away");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+                continue;
+            }
+        };
+        if connected_once {
+            emit_line(&json!({"type": "orchestrator", "state": "up"}));
+        }
+        connected_once = true;
+        backoff = Duration::from_secs(1);
+
+        let (sink, mut lines) = mpsc::channel::<serde_json::Value>(256);
+        let relay = tokio::spawn(event_relay::run_with(
+            Arc::new(call),
+            subscription.clone(),
+            sink,
+            Arc::clone(&states),
+        ));
+        while let Some(line) = lines.recv().await {
+            if !emit_line(&line) {
+                relay.abort();
+                return Ok(());
+            }
+        }
+        // The relay ended, so the app did: it only returns once its transport has closed.
+        let reason = match relay.await {
+            Ok(Err(error)) => format!("{error:#}"),
+            _ => "the connection closed".to_string(),
+        };
+        if !emit_line(&json!({"type": "orchestrator", "state": "down", "message": reason})) {
+            return Ok(());
+        }
+        tokio::time::sleep(backoff).await;
+    }
 }
 
 async fn connect(port: u16) -> Result<tokio::net::TcpStream> {
@@ -621,7 +800,7 @@ fn list_instances() -> Result<()> {
     Ok(())
 }
 
-async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Result<()> {
+async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool, events_port: u16) -> Result<()> {
     let store = open_store()?;
     store
         .lock()
@@ -726,6 +905,7 @@ async fn serve(link_port: u16, trust_on_first_use: bool, no_stdio: bool) -> Resu
     };
 
     let links = tokio::spawn(link::listener::serve(listener, context));
+    mcmcp_orchestrator_core::events_ws::spawn_listener(Arc::clone(&router), events_port);
 
     if no_stdio {
         info!("serving links only; MCP over stdio is disabled");

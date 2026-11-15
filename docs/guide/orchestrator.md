@@ -586,6 +586,9 @@ encrypted and carries your instance secret followed by full control of the game.
 
 That is not the same as "one machine only" — see below.
 
+The orchestrator also serves every game's chat, joins and leaves as one stream, over a WebSocket on
+port 25582 or as `mcmcp-orchestrator events`. See [Watching game events](events.md).
+
 ## A game on another machine
 
 A dedicated server elsewhere can reach your orchestrator over an **SSH tunnel**, with no

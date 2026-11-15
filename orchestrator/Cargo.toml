@@ -42,6 +42,9 @@ base64 = "0.22"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The game events stream's WebSocket listener (#201). Handshake only: the orchestrator never dials out.
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [profile.release]
 # The orchestrator is a long-lived desktop process sitting next to two or three modded Minecraft

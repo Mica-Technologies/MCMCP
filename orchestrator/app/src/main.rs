@@ -1659,6 +1659,11 @@ fn spawn_background(
     link_port: u16,
     mcp_port: u16,
 ) {
+    // The game events WebSocket (#201), overridable like the other ports; 0 turns it off.
+    let events_port: u16 = std::env::var("MCMCP_EVENTS_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(mcmcp_orchestrator_core::events_ws::DEFAULT_EVENTS_PORT);
     std::thread::Builder::new()
         .name("mcmcp-orchestrator".into())
         .spawn(move || {
@@ -1772,6 +1777,9 @@ fn spawn_background(
                         }
                     });
                 }
+
+                // Game events for watchers that hold a socket rather than run a command.
+                mcmcp_orchestrator_core::events_ws::spawn_listener(Arc::clone(&router), events_port);
 
                 // The MCP side, which a shim attaches to on an MCP client's behalf.
                 {

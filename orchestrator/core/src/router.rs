@@ -55,6 +55,17 @@ pub use crate::orchestrator_tools::NAMES as ORCHESTRATOR_TOOLS;
 /// keeps the newest world state, which is what a client catching up actually wants.
 const DOWNSTREAM_CAPACITY: usize = 512;
 
+/// The game tool the event relay long-polls.
+pub const EVENTS_WAIT_TOOL: &str = "game_events_wait";
+
+/// The `_meta` key the event relay sets on its own long polls.
+///
+/// A relay holds one `game_events_wait` open per game, all day. Recorded like a model's calls, each
+/// minute's poll was a line in the event log, a row in the activity view and, read back by the flight
+/// recorder, a session that never ended. Honoured on that one read-only tool only, so setting it can
+/// hide nothing that changes a game.
+pub const QUIET_META_KEY: &str = "mcmcp/quiet";
+
 pub struct Router {
     registry: Arc<Registry>,
     store: Arc<Mutex<ApprovalStore>>,
@@ -708,6 +719,7 @@ impl Router {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        let quiet = is_quiet_call(name, &params);
 
         let requested_instance = arguments
             .remove(INSTANCE_ARGUMENT)
@@ -901,6 +913,8 @@ impl Router {
                 meta.remove(crate::caller::META_KEY);
             }
         }
+        // The orchestrator's own business; the game has no use for it.
+        meta.remove(QUIET_META_KEY);
         let mut forwarded = Map::new();
         forwarded.insert("name".into(), json!(name));
         forwarded.insert("arguments".into(), Value::Object(arguments));
@@ -939,10 +953,14 @@ impl Router {
             Err(error) => return Ok(tool_error(&format!("could not reach that instance: {error}"))),
         };
 
-        // Recorded once the call has reached the game: one that never got there was not activity.
-        let call = self
-            .activity
-            .start(&instance.id(), name, &logged_arguments, Some(&progress_token));
+        // Recorded once the call has reached the game: one that never got there was not activity. A
+        // quiet call takes an id the activity view has never issued, so finishing it is a no-op.
+        let call = if quiet {
+            crate::activity::CallId(u64::MAX)
+        } else {
+            self.activity
+                .start(&instance.id(), name, &logged_arguments, Some(&progress_token))
+        };
         self.inflight.lock().expect("inflight lock").insert(
             tracking_key.clone(),
             (Arc::clone(&instance), instance_request_id.clone(), call),
@@ -987,6 +1005,10 @@ impl Router {
                 stamp_process(&mut result, info.pid, info.started_at.as_deref());
                 for note in notes.iter().rev() {
                     insert_after_banner(&mut result, note);
+                }
+                if quiet {
+                    debug!(instance = %info.id, tool = %name, is_error, duration_ms, "a quiet call finished");
+                    return Ok(result);
                 }
                 self.record_event(Event::new(
                     Actor::Model,
@@ -1036,6 +1058,10 @@ impl Router {
                     message = format!("{note}\n{message}");
                 }
                 let result = tool_error(&message);
+                if quiet {
+                    debug!(instance = %instance.id(), tool = %name, %message, "a quiet call failed");
+                    return Ok(result);
+                }
                 self.record_event(Event::new(
                     Actor::Model,
                     Level::Error,
@@ -2896,6 +2922,16 @@ fn pending_hint(game_directory: Option<&str>) -> String {
 }
 
 /// A successful response carrying a failure the model must read.
+/// Whether a call asked to stay out of the event log and activity view, and may: see [`QUIET_META_KEY`].
+pub fn is_quiet_call(name: &str, params: &Value) -> bool {
+    name == EVENTS_WAIT_TOOL
+        && params
+            .get("_meta")
+            .and_then(|meta| meta.get(QUIET_META_KEY))
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
 pub fn tool_error(message: &str) -> Value {
     json!({
         "content": [{ "type": "text", "text": message }],
@@ -3676,6 +3712,77 @@ mod tests {
                 .await;
         }
         router
+    }
+
+    /// Calls `name` with `_meta`, has the game answer, and returns what the game was sent.
+    async fn call_answered(
+        router: &Arc<Router>,
+        alpha: &Arc<Instance>,
+        outbound: &mut tokio::sync::mpsc::Receiver<Value>,
+        name: &str,
+        meta: Value,
+    ) -> Value {
+        let calling = {
+            let router = Arc::clone(router);
+            let name = name.to_string();
+            tokio::spawn(async move {
+                router
+                    .handle(json!({
+                        "jsonrpc": "2.0", "id": "q1", "method": "tools/call",
+                        "params": { "name": name, "arguments": {}, "_meta": meta },
+                    }))
+                    .await
+            })
+        };
+        let request = outbound.recv().await.expect("the call is forwarded");
+        alpha.complete(json!({
+            "jsonrpc": "2.0",
+            "id": jsonrpc::id_of(&request).unwrap(),
+            "result": { "content": [{ "type": "text", "text": "{}" }], "isError": false },
+        }));
+        calling.await.unwrap().expect("an answer");
+        request
+    }
+
+    #[tokio::test]
+    async fn the_event_relays_quiet_polls_stay_out_of_the_log_and_the_activity_view() {
+        let (router, alpha, mut outbound) = router_with("alpha");
+        alpha.set_catalogue(Catalogue {
+            tools: vec![
+                json!({ "name": EVENTS_WAIT_TOOL, "description": "wait" }),
+                json!({ "name": "client_move", "description": "move" }),
+            ],
+            ..Catalogue::default()
+        });
+        router
+            .handle_upstream(UpstreamEvent::Connected {
+                instance: "alpha".into(),
+            })
+            .await;
+        let tool_calls = |router: &Router| {
+            router
+                .events()
+                .slice(&crate::events::Filter::default(), 50)
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ToolCall { .. }))
+                .count()
+        };
+
+        let quiet = json!({ QUIET_META_KEY: true });
+        let sent = call_answered(&router, &alpha, &mut outbound, EVENTS_WAIT_TOOL, quiet.clone()).await;
+        assert!(
+            sent["params"]["_meta"].get(QUIET_META_KEY).is_none(),
+            "the flag is the orchestrator's own and is not forwarded: {sent}"
+        );
+        assert_eq!(tool_calls(&router), 0);
+        assert!(router.activity().snapshot(None).recent.is_empty());
+
+        // Honoured on that one read-only tool only: on anything else it hides nothing.
+        call_answered(&router, &alpha, &mut outbound, "client_move", quiet).await;
+        assert_eq!(tool_calls(&router), 1);
+        // And a model's own wait, without the flag, is recorded like any call.
+        call_answered(&router, &alpha, &mut outbound, EVENTS_WAIT_TOOL, json!({})).await;
+        assert_eq!(tool_calls(&router), 2);
     }
 
     async fn call(router: &Router, arguments: Value) -> Value {

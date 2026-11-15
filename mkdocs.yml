@@ -90,6 +90,7 @@ nav:
       - Connecting a client: guide/connecting.md
       - Client vs server endpoint: guide/endpoints.md
       - Running several instances: guide/orchestrator.md
+      - Watching game events: guide/events.md
       - Server companion: guide/companion.md
       - Jobs and the emergency stop: guide/jobs.md
       - Security model: guide/security.md
