@@ -789,7 +789,7 @@ esac
 TYPO_BODY="$(mcp_call 6902 game_events_wait '{"types":["joins"],"timeout_s":0}')" \
   || mcp_failure "game_events_wait with a typo failed outright: ${TYPO_BODY}"
 case "$TYPO_BODY" in
-  *'"isError":true'*'Unknown event type'*) echo "    a misspelled type is refused, not waited on" ;;
+  *'Unknown event type'*'"isError":true'*) echo "    a misspelled type is refused, not waited on" ;;
   *) mcp_failure "a misspelled event type was not refused: ${TYPO_BODY}" ;;
 esac
 # The stream never ends by itself, so curl stops it after two seconds (exit 28) and the first line is read.
