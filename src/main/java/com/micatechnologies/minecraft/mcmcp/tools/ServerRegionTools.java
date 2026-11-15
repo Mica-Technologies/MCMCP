@@ -286,34 +286,35 @@ public final class ServerRegionTools {
             return;
         }
         item.addProperty("nonRoundTrip", true);
-        IBlockState stored = null;
-        int matches = 0;
-        for (IBlockState candidate : block.getBlockState().getValidStates()) {
-            try {
-                if (block.getMetaFromState(candidate) == meta) {
-                    stored = candidate;
-                    matches++;
-                }
-            }
-            catch (RuntimeException ignored) {
-                // A state this block cannot store is not the one in the world.
-            }
-        }
-        if (matches != 1) {
-            // Several states store as this meta; the chunk keeps only the meta, so which one is unknown.
-            return;
-        }
-        GameJson.addStateNames(item, stored);
+        // By metas, not getValidStates(): those include properties computed at render time (a fence's
+        // connections), so many states would store as one meta. A write goes through getStateFromMeta,
+        // so the metas that matter are the ones whose decoded state stores back as this one.
+        IBlockState decoded = null;
+        int writeMeta = -1;
         for (int write = 0; write < 16; write++) {
+            IBlockState state;
             try {
-                if (block.getStateFromMeta(write) == stored) {
-                    item.addProperty("writeMeta", write);
-                    return;
+                state = block.getStateFromMeta(write);
+                if (block.getMetaFromState(state) != meta) {
+                    continue;
                 }
             }
             catch (RuntimeException ignored) {
-                // Not a meta this block decodes.
+                continue;
             }
+            if (decoded == null) {
+                decoded = state;
+                writeMeta = write;
+            }
+            else if (decoded != state) {
+                // Two metas write different states that both store as this one: which the world holds
+                // is not in the chunk, so no meta can be promised.
+                return;
+            }
+        }
+        if (decoded != null) {
+            GameJson.addStateNames(item, decoded);
+            item.addProperty("writeMeta", writeMeta);
         }
     }
 

@@ -1952,7 +1952,7 @@ and `server_undo` discard drops the same way, without counting them.
 | `palette` | Blocks the cells refer to by index: `"mod:block"`, `"mod:block:meta"`, `"mod:block meta"`, or `{block, metadata, nbt}` to set tile-entity data on every cell using that entry (one entry per distinct NBT). `"mcmcp:skip"` writes nothing. |
 | `origin` | `{x, y, z}` the cells are relative to. Default 0, 0, 0. |
 | `cells` | Flat numbers: `dx, dy, dz, paletteIndex` per cell, or five per cell with `expectPalette`. |
-| `indices`, `sizeX`, `sizeY`, `sizeZ` | A dense box instead of `cells`: indices packed exactly as `server_get_blocks` `encoding: "packed"` returns them. A packed read can be written back elsewhere as it is. |
+| `indices`, `sizeX`, `sizeY`, `sizeZ` | A dense box instead of `cells`: indices packed exactly as `server_get_blocks` `encoding: "packed"` returns them. A packed read can be written back elsewhere as it is, except palette entries marked `nonRoundTrip`: give those their `writeMeta`, or the block turns. |
 | `expect` | Write a cell only if it holds this block now. `"mod:block"` matches any metadata. |
 | `expectPalette` | Per-cell expectations: the fifth number of each cell indexes it, and `-1` means none. |
 | `onConflict` | `skip` (default) writes the rest; `abort` writes nothing if any cell conflicts. |
