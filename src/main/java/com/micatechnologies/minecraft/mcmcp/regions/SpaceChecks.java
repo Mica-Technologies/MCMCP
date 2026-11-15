@@ -189,6 +189,21 @@ public final class SpaceChecks {
      * inside its y range, as the builder's walker does.
      */
     public static BitSet walk(VoxelGrid grid, List<int[]> seeds, int headroom, int step, boolean doorsOpen) {
+        return walk(grid, seeds, headroom, (double) step, doorsOpen);
+    }
+
+    /** Rises this small (a carpet, two snow layers) are level ground for a fractional step. */
+    static final int LEVEL_SIXTEENTHS = 2;
+
+    /**
+     * The walk with a step in blocks. A whole number counts cells, exactly as before. A fraction
+     * (0.5: accessible routes, #199) measures the real rise between the floors stood on, from each
+     * solid block's collision top, so a ramp of half slabs passes and a full-block ledge does not.
+     */
+    public static BitSet walk(VoxelGrid grid, List<int[]> seeds, int headroom, double stepBlocks, boolean doorsOpen) {
+        boolean measured = stepBlocks != Math.rint(stepBlocks);
+        int limit = (int) Math.round(stepBlocks * 16.0D) + LEVEL_SIXTEENTHS;
+        int step = measured ? (int) Math.ceil(stepBlocks) : (int) stepBlocks;
         BitSet seen = new BitSet(grid.volume());
         ArrayDeque<int[]> queue = new ArrayDeque<>();
         for (int[] seed : seeds) {
@@ -220,6 +235,7 @@ public final class SpaceChecks {
                         continue;
                     }
                     if (standable(grid, x, y, z, headroom, doorsOpen)
+                        && (!measured || Math.abs(grid.floor(x, y, z) - grid.floor(cell[0], cell[1], cell[2])) <= limit)
                         && !edgeBlocks(grid, cell[0], cell[1], cell[2], x, y, z, d[0], d[1], headroom)) {
                         seen.set(at);
                         queue.add(new int[] {x, y, z});

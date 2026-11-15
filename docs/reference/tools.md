@@ -1148,6 +1148,12 @@ strictly inside the box's y range. `doors: "both"` (default) gives `doorsOpen` a
 each with `reached`, and `unreachedCells` / `unreachedAreas` / `unreached` (clusters of standable
 places nobody gets to: a room with no way in). `separate` floods each seed with doors closed.
 
+**Step-free routes.** A whole-number `step` counts cells, so standing on a half slab counts as a
+one-block rise. `step: 0.5` measures each block's real collision height instead. A rise or drop of
+up to half a block between floors is allowed, and rises of an eighth or less (a carpet, two snow
+layers) count as level. So a ramp of half slabs reaches its deck, while the same deck behind a
+full-block ledge is reported unreached. Use it to prove wheelchair routes, ramps and kerb cuts.
+
 A block that collides only along its cell's edges (a railing, a wall handrail, a ladder: every
 collision box within 0.3 of a side) leaves its cell open to stand in, and stops only the steps across
 the sides that carry something. So a stair with a guard in the cell above each tread is climbed, and

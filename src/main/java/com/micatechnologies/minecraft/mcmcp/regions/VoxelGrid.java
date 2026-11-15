@@ -127,6 +127,48 @@ public final class VoxelGrid {
         return cells.length;
     }
 
+    /**
+     * The top of a {@link #SOLID} cell's collision, in sixteenths of a block, for blocks lower than a
+     * full one: a bottom slab is 8, a carpet 1. Null until one is set; a cell with none set is 16.
+     * Only a fractional walk {@code step} reads these (#199): whole-block steps count cells, as the
+     * builder's checks do.
+     */
+    private byte[] tops;
+
+    /** Records a solid cell whose collision stops short of the cell's top, in sixteenths (1..15). */
+    public void setTop(int x, int y, int z, int sixteenths) {
+        if (sixteenths >= 16 || !contains(x, y, z)) {
+            return;
+        }
+        if (tops == null) {
+            tops = new byte[cells.length];
+        }
+        tops[index(x, y, z)] = (byte) Math.max(1, sixteenths);
+    }
+
+    /** The top of a cell's collision in sixteenths: 16 unless {@link #setTop} said otherwise. */
+    public int top(int x, int y, int z) {
+        if (tops == null || !contains(x, y, z)) {
+            return 16;
+        }
+        byte top = tops[index(x, y, z)];
+        return top == 0 ? 16 : top;
+    }
+
+    /** Where a person standing in a cell stands, in sixteenths of a block: the top of the cell below. */
+    public int floor(int x, int y, int z) {
+        return (y - 1) * 16 + top(x, y - 1, z);
+    }
+
+    /** The highest top among collision boxes in the cell's 0..1 space, in sixteenths rounded up. */
+    public static int topOf(java.util.List<double[]> boxes) {
+        double top = 0.0D;
+        for (double[] box : boxes) {
+            top = Math.max(top, box[4]);
+        }
+        return Math.max(1, Math.min(16, (int) Math.ceil(top * 16.0D - 1e-6D)));
+    }
+
     public long count(byte kind) {
         long n = 0;
         for (byte cell : cells) {

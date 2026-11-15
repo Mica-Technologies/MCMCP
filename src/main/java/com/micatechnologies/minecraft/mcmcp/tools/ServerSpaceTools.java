@@ -81,7 +81,9 @@ public final class ServerSpaceTools {
                 + "which other seeds and probes it reaches: homes or suites that open into each other.")
             .schema(spaceSchema(JsonSchema.object())
                 .integer("headroom", "Clear cells needed to stand. Default 2.", 1, 4)
-                .integer("step", "Most blocks up or down in one move. Default 1.", 0, 2)
+                .number("step", "Most blocks up or down in one move. Default 1. A whole number counts "
+                    + "cells. 0.5 proves a step-free route: it measures each block's real height, so a "
+                    + "half-slab ramp, a carpet or a snow layer passes and a full-block step does not.", 0.0D, 2.0D)
                 .enumeration("doors", "Doors open, closed, or both (two floods). Default both.", "open", "closed", "both")
                 .property("probes", described("array", "Cells that must be reached, one per room: {name, at: [x, y, z]} "
                     + "or [x, y, z]. Snapped like seeds."))
@@ -256,7 +258,7 @@ public final class ServerSpaceTools {
                 }
             }
             else {
-                int step = context.getBoundedInt("step", 1, 0, 2);
+                double step = Math.max(0.0D, Math.min(2.0D, context.getDouble("step", 1.0D)));
                 int minCluster = context.getBoundedInt("minCluster", 6, 1, 1000);
                 Set<Integer> floors = new HashSet<>();
                 JsonElement floorY = context.getArguments().get("floorY");
@@ -409,7 +411,12 @@ public final class ServerSpaceTools {
                         }
                         for (int y = grid.minY; y <= grid.maxY; y++) {
                             pos.setPos(x[0], y, z);
-                            grid.set(x[0], y, z, classify(world, pos, world.getBlockState(pos), passable));
+                            int[] top = {16};
+                            byte kind = classify(world, pos, world.getBlockState(pos), passable, top);
+                            grid.set(x[0], y, z, kind);
+                            if (kind == VoxelGrid.SOLID) {
+                                grid.setTop(x[0], y, z, top[0]);
+                            }
                         }
                     }
                     x[0]++;
@@ -421,7 +428,11 @@ public final class ServerSpaceTools {
         return unloaded[0];
     }
 
-    static byte classify(WorldServer world, BlockPos pos, IBlockState state, Set<String> passable) {
+    /**
+     * @param top set to the top of the block's collision in sixteenths when it is lower than a full
+     *            block (a slab, a carpet), for a fractional walk step; left alone otherwise
+     */
+    static byte classify(WorldServer world, BlockPos pos, IBlockState state, Set<String> passable, int[] top) {
         Block block = state.getBlock();
         if (state.getMaterial() == net.minecraft.block.material.Material.AIR) {
             return VoxelGrid.OPEN;
@@ -454,6 +465,7 @@ public final class ServerSpaceTools {
                     Math.max(0.0D, box.minZ - pos.getZ()), Math.min(1.0D, box.maxX - pos.getX()),
                     Math.min(1.0D, box.maxY - pos.getY()), Math.min(1.0D, box.maxZ - pos.getZ())});
             }
+            top[0] = VoxelGrid.topOf(inCell);
             return VoxelGrid.fromCollisionBoxes(inCell);
         }
         catch (RuntimeException e) {

@@ -237,4 +237,48 @@ class SpaceChecksTest {
             Collections.singletonList(new int[] {4, 4, 4, 4, 4, 4}));
         assertTrue(decked.leaks.cardinality() > 0);
     }
+
+    /**
+     * Ground, then a ramp rising half a block a cell (slab, block, block + slab, two blocks), then a
+     * full-block ledge. Columns run the width of the box.
+     */
+    private static VoxelGrid rampWithLedge() {
+        VoxelGrid grid = new VoxelGrid(0, 0, 0, 6, 7, 2);
+        // Solid cells per x from y = 1 up, and whether the top one is a bottom slab.
+        int[] solidTo = {1, 1, 2, 2, 3, 3, 4};
+        boolean[] slabTop = {false, false, true, false, true, false, false};
+        for (int x = 0; x <= 6; x++) {
+            for (int z = 0; z <= 2; z++) {
+                for (int y = 0; y <= 7; y++) {
+                    grid.set(x, y, z, y <= solidTo[x] ? VoxelGrid.SOLID : VoxelGrid.OPEN);
+                }
+                if (slabTop[x]) {
+                    grid.setTop(x, solidTo[x], z, 8);
+                }
+            }
+        }
+        return grid;
+    }
+
+    @Test
+    void aHalfBlockStepWalksAHalfSlabRampButNotAFullBlockLedge() {
+        VoxelGrid grid = rampWithLedge();
+        List<int[]> seed = Collections.singletonList(new int[] {0, 2, 1});
+
+        BitSet half = SpaceChecks.walk(grid, seed, 2, 0.5D, true);
+        assertTrue(half.get(grid.index(5, 4, 1)), "the top of the ramp is reached half a block at a time");
+        assertTrue(!half.get(grid.index(6, 5, 1)), "the full-block ledge is not");
+
+        assertTrue(SpaceChecks.walk(grid, seed, 2, 1, true).get(grid.index(6, 5, 1)),
+            "a whole step of 1 still climbs it, as before");
+        assertTrue(!SpaceChecks.walk(grid, seed, 2, 0, true).get(grid.index(5, 4, 1)),
+            "a step of 0 still counts the slab's cell as a rise");
+    }
+
+    @Test
+    void aCollisionTopIsRoundedUpToSixteenths() {
+        assertEquals(8, VoxelGrid.topOf(Collections.singletonList(new double[] {0, 0, 0, 1, 0.5, 1})));
+        assertEquals(1, VoxelGrid.topOf(Collections.singletonList(new double[] {0, 0, 0, 1, 0.0625, 1})));
+        assertEquals(16, VoxelGrid.topOf(Collections.singletonList(new double[] {0, 0, 0, 1, 1.0, 1})));
+    }
 }
