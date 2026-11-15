@@ -96,6 +96,17 @@ mcmcp-orchestrator events --types chat --resume alto.client@a1b2c3d4:1234
 A cursor from before the game restarted still works: the game answers with a `reset` notice and
 everything it holds.
 
+The WebSocket's watchers share one poll per game, however many connect, and each watcher's filter
+is applied by the orchestrator. The orchestrator remembers the last 256 events of each game. A
+watcher that connects with `resume` or `backlog` while others are watching is caught up from that
+memory. If its cursor is older than the memory, a `missed` notice says at most how many events it
+lost, followed by everything remembered.
+
+Polling stops a minute after the last watcher leaves, so a watch re-armed within that minute picks up
+from memory without starting new polls. After a longer gap, the first watcher back is resumed from
+its own cursors, and a game still holding those events loses none. The command form is one watcher of
+its own and always resumes from the game.
+
 ## Security
 
 The WebSocket listens on loopback only and wants the orchestrator's MCP token as `?token=`. It sits

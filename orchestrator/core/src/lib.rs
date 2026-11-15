@@ -22,6 +22,7 @@ pub mod catalogue;
 pub mod client_calls;
 pub mod control;
 pub mod crash;
+pub mod event_hub;
 pub mod event_relay;
 pub mod events;
 pub mod events_ws;

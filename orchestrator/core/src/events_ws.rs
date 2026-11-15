@@ -15,35 +15,33 @@
 //!
 //! # Lifetime
 //!
-//! Each connection runs its own relay against the in-process router; it ends when the socket does.
-//! A ping every [`PING_INTERVAL`] is what notices a peer that vanished without closing.
+//! Every connection is a watcher of one [`Hub`], which holds a single poll per game for all of them
+//! and applies each watcher's filter itself; a connection leaves the hub when its socket ends. A
+//! ping every [`PING_INTERVAL`] is what notices a peer that vanished without closing.
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tracing::{debug, info, warn};
 
+use crate::event_hub::Hub;
 use crate::event_relay::{self, RouterCall, Subscription};
 use crate::router::Router;
 
 /// Default port, beside the link (25580) and MCP (25581) ports.
 pub const DEFAULT_EVENTS_PORT: u16 = 25582;
 
-/// The most watchers at once. Each holds a long poll open on every game.
+/// The most watchers at once. They share one poll per game, so this bounds memory, not game load.
 pub const MAX_CLIENTS: usize = 8;
 
 /// How often a quiet connection is pinged.
 pub const PING_INTERVAL: Duration = Duration::from_secs(30);
-
-/// How many lines may wait for a slow reader before the relay waits for it.
-const LINE_BUFFER: usize = 256;
 
 /// Why a connection was turned away, as an HTTP status and a sentence.
 #[derive(Debug, PartialEq, Eq)]
@@ -169,6 +167,8 @@ pub async fn serve(listener: TcpListener, router: Arc<Router>, token: String) ->
         .context("reading the events listener address")?;
     info!(%address, "serving game events over WebSocket");
     let slots = Arc::new(Semaphore::new(MAX_CLIENTS));
+    // One poll per game for every watcher this listener has.
+    let hub = Hub::new(Arc::new(RouterCall::new(router)));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -178,10 +178,10 @@ pub async fn serve(listener: TcpListener, router: Arc<Router>, token: String) ->
             }
         };
         let permit = Arc::clone(&slots).try_acquire_owned().ok();
-        let router = Arc::clone(&router);
+        let hub = Arc::clone(&hub);
         let token = token.clone();
         tokio::spawn(async move {
-            match handle(stream, router, token, permit).await {
+            match handle(stream, hub, token, permit).await {
                 Ok(()) => debug!(%peer, "an events watcher disconnected"),
                 Err(error) => debug!(%peer, error = %format!("{error:#}"), "an events connection ended"),
             }
@@ -194,7 +194,7 @@ pub async fn serve(listener: TcpListener, router: Arc<Router>, token: String) ->
 #[allow(clippy::result_large_err)]
 async fn handle(
     stream: TcpStream,
-    router: Arc<Router>,
+    hub: Arc<Hub>,
     token: String,
     permit: Option<OwnedSemaphorePermit>,
 ) -> Result<()> {
@@ -244,12 +244,9 @@ async fn handle(
     let _permit = permit;
 
     let (mut write, mut read) = socket.split();
-    let (sink, mut lines) = mpsc::channel::<Value>(LINE_BUFFER);
-    let relay = tokio::spawn(event_relay::run(
-        Arc::new(RouterCall::new(router)),
-        subscription,
-        sink,
-    ));
+    // Dropped when this returns, which is what takes the watcher out of the hub.
+    let mut subscribed = hub.subscribe(subscription);
+    let lines = &mut subscribed.lines;
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.tick().await;
@@ -275,9 +272,7 @@ async fn handle(
             }
         }
     };
-    // Closing the receiver is what tells the relay, and its polls, that nobody is listening.
-    drop(lines);
-    relay.abort();
+    drop(subscribed);
     let _ = write.close().await;
     ended
 }

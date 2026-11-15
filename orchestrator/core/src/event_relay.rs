@@ -121,7 +121,14 @@ pub struct Subscription {
     pub resume: BTreeMap<String, Cursor>,
     /// Start every game without a resume cursor at the oldest event its ring still holds.
     pub backlog: bool,
+    /// Also send a [`POSITION_NOTICE`] after every poll: where each game's stream has been read to.
+    /// For [`crate::event_hub`], which needs it even when a poll brought nothing; never set from a
+    /// query string and never shown to a watcher.
+    pub positions: bool,
 }
+
+/// The internal line that says how far one game's events have been read.
+pub const POSITION_NOTICE: &str = "_position";
 
 impl Subscription {
     /// Refuses event types no game reports. A typo here would otherwise filter out everything, and
@@ -819,6 +826,19 @@ async fn poll_instance(
                         .lock()
                         .expect("states lock")
                         .insert(instance.clone(), state.clone());
+                    if subscription.positions
+                        && sink
+                            .send(json!({
+                                "type": POSITION_NOTICE,
+                                "instance": instance,
+                                "stream": state.stream,
+                                "next": state.since,
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        return;
+                    }
                     backoff = Duration::from_secs(1);
                     last_error = None;
                     continue;
