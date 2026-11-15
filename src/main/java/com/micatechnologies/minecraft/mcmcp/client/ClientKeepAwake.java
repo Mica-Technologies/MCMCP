@@ -94,8 +94,14 @@ public final class ClientKeepAwake {
         }
         // Noted every tick and frame, so a profile can say it measured a throttled client at any point
         // of its window, not only at its end (#102).
-        if (mc.world != null && isThrottled(mc)) {
-            TickClock.CLIENT_FRAMES.throttled(System.nanoTime());
+        if (mc.world != null) {
+            long now = System.nanoTime();
+            boolean throttled = isThrottled(mc);
+            if (throttled) {
+                TickClock.CLIENT_FRAMES.throttled(now);
+            }
+            // And for how long, so a measurement can say what share of it was affected (#198).
+            com.micatechnologies.minecraft.mcmcp.perf.WindowTimeline.CLIENT.note(now, !WindowFocus.isFocused(), throttled);
         }
         int current = mc.gameSettings.limitFramerate;
         if (isActive()) {

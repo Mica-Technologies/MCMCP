@@ -3382,7 +3382,12 @@ profile taken then measures the throttle: its per-frame figures can look fine wh
 percentiles mean nothing. `client_frame_stats` and `client_profile_rendering` carry the
 [`window`](#client_player_state) block, and they, `client_profile_sections` and a client-side
 `game_cpu_sample` carry a `warning` when the client was throttled at any point in the window they
-measured.
+measured. They also say how much of it: `unfocusedFraction` and `throttledFraction` are the share
+of the measurement the window spent in the background or under 20 fps. `client_frame_stats` gives
+them per window too. `keepAwake` raises only the frame-limit setting, which is how FPS Reducer
+throttles. A cap from elsewhere (OptiFine, the graphics driver's background frame-rate limit, the
+OS) still applies to a window in the background, and it raises `renderWork` as well, so discard a
+throttled sample rather than adjusting it.
 
 #### `client_frame_stats`
 

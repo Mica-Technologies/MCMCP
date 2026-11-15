@@ -83,7 +83,10 @@ public final class ClientPerformanceTools {
                 + "To measure what a change costs, compare 'renderWork' before and after, not fps. "
                 + "'frame' is the interval the player sees and includes the frame limiter's wait, "
                 + "so under an FPS cap or vsync it does not move until the cap is breached. "
-                + "'renderWork' is the CPU time spent drawing each frame and moves regardless.")
+                + "'renderWork' is the CPU time spent drawing each frame and moves regardless.\n\n"
+                + "'unfocusedFraction' and 'throttledFraction' (per window, and for the whole "
+                + "measurement) give the share of it the window was in the background or held under "
+                + "20 fps. A throttled sample measures the throttle: discard it and measure again.")
             .schema(JsonSchema.object()
                 .integer("sample_seconds", "Measure a fresh window of this length instead of "
                     + "reporting history. Default 0.", 0, 30)
@@ -150,6 +153,15 @@ public final class ClientPerformanceTools {
         }
         json.add("frame", frames.toJson());
         json.add("renderWork", ClientFrameRecorder.renderWork().summariseSince(sinceNanos).toJson());
+        // Per window, since last5s can be clean while last1m is not (#198).
+        double[] share = com.micatechnologies.minecraft.mcmcp.perf.WindowTimeline.CLIENT.fractions(sinceNanos,
+            System.nanoTime());
+        if (share[0] > 0.0D) {
+            json.addProperty("unfocusedFraction", share[0]);
+        }
+        if (share[1] > 0.0D) {
+            json.addProperty("throttledFraction", share[1]);
+        }
         return json;
     }
 

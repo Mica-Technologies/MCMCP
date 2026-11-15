@@ -188,8 +188,20 @@ public final class ClientStateTools {
      */
     public static void addMeasuredWindow(JsonObject into, Minecraft mc, long sinceNanos) {
         into.add("window", windowState(mc));
+        // What share of the measurement each held, not only whether one did at some point (#198): a
+        // sample that lost focus for a second and one in the background throughout are different.
+        double[] share = com.micatechnologies.minecraft.mcmcp.perf.WindowTimeline.CLIENT.fractions(sinceNanos,
+            System.nanoTime());
+        if (share[0] > 0.0D) {
+            into.addProperty("unfocusedFraction", share[0]);
+        }
+        if (share[1] > 0.0D) {
+            into.addProperty("throttledFraction", share[1]);
+        }
         if (com.micatechnologies.minecraft.mcmcp.perf.TickClock.CLIENT_FRAMES.throttledSince(sinceNanos)) {
-            into.addProperty("warning", throttleWarning());
+            into.addProperty("warning", (share[1] > 0.0D
+                ? "Throttled for " + Math.round(share[1] * 100.0D) + "% of this measurement. " : "")
+                + throttleWarning());
         }
     }
 
@@ -198,7 +210,9 @@ public final class ClientStateTools {
         return "The client was throttled (under " + ClientKeepAwake.THROTTLED_FPS + " fps, or its frame limit "
             + "was) during this measurement, so frame rates and percentiles describe the throttle, not the game. "
             + "Check 'window', bring the client forward or call client_view with grabInputFocus true and "
-            + "pauseOnLostFocus false, and measure again.";
+            + "pauseOnLostFocus false, and measure again. keepAwake raises only the frame limit setting; a "
+            + "cap from elsewhere (OptiFine, the graphics driver's background frame limit, the OS) still "
+            + "applies while the window is in the background, and renderWork rises with it too.";
     }
 
     /**
