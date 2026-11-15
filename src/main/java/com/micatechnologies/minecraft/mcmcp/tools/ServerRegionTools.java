@@ -159,6 +159,7 @@ public final class ServerRegionTools {
                 item.addProperty("index", entry.getValue());
                 item.addProperty("block", describe(entry.getKey()));
                 item.addProperty("count", counts.get(entry.getKey())[0]);
+                annotateRoundTrip(item, entry.getKey());
                 palette.add(item);
             }
 
@@ -245,16 +246,75 @@ public final class ServerRegionTools {
         }
     }
 
-    /** A state id as a palette name: {@code mod:block} or {@code mod:block:meta}. */
+    /**
+     * A state id as a palette name: {@code mod:block} or {@code mod:block:meta}.
+     *
+     * <p>The meta is read out of the id, which holds exactly what {@code getMetaFromState} gave for
+     * the state in the chunk, the same meta every other read reports. It used to go through
+     * {@code getStateById} and back: for a block whose metas do not round-trip, that named a
+     * different meta than the palette path (a conveyor stair stored as 13 read as 15), and a script
+     * that wrote the packed value back turned every step sideways (#200).
+     */
     static String describe(int stateId) {
         if (stateId < 0) {
             return UNLOADED;
         }
-        IBlockState state = Block.getStateById(stateId);
-        ResourceLocation name = state.getBlock().getRegistryName();
+        Block block = Block.getBlockById(stateId & 4095);
+        ResourceLocation name = block.getRegistryName();
         String id = name == null ? "unknown" : name.toString();
-        int meta = state.getBlock().getMetaFromState(state);
+        int meta = (stateId >> 12) & 15;
         return meta == 0 ? id : id + ":" + meta;
+    }
+
+    /**
+     * Flags a palette entry whose meta does not write back as the state the world holds (#200):
+     * {@code nonRoundTrip}, the state itself when only one state stores as that meta, and
+     * {@code writeMeta}, a meta that does produce it. Nothing is added for an ordinary block.
+     */
+    static void annotateRoundTrip(JsonObject item, int stateId) {
+        if (stateId < 0) {
+            return;
+        }
+        Block block = Block.getBlockById(stateId & 4095);
+        int meta = (stateId >> 12) & 15;
+        try {
+            if (block.getMetaFromState(block.getStateFromMeta(meta)) == meta) {
+                return;
+            }
+        }
+        catch (RuntimeException e) {
+            return;
+        }
+        item.addProperty("nonRoundTrip", true);
+        IBlockState stored = null;
+        int matches = 0;
+        for (IBlockState candidate : block.getBlockState().getValidStates()) {
+            try {
+                if (block.getMetaFromState(candidate) == meta) {
+                    stored = candidate;
+                    matches++;
+                }
+            }
+            catch (RuntimeException ignored) {
+                // A state this block cannot store is not the one in the world.
+            }
+        }
+        if (matches != 1) {
+            // Several states store as this meta; the chunk keeps only the meta, so which one is unknown.
+            return;
+        }
+        GameJson.addStateNames(item, stored);
+        for (int write = 0; write < 16; write++) {
+            try {
+                if (block.getStateFromMeta(write) == stored) {
+                    item.addProperty("writeMeta", write);
+                    return;
+                }
+            }
+            catch (RuntimeException ignored) {
+                // Not a meta this block decodes.
+            }
+        }
     }
 
     // ------------------------------------------------------------------

@@ -549,6 +549,12 @@ an 80 × 80 × 20 read, 128,000 cells, is about 6 KB. There is no listing cap be
 `limits.maxPackedReadCells` (default 1,048,576). The read runs in game-thread batches, so it never
 holds up a tick.
 
+A packed palette names the same meta as every other read: the one the chunk stores. Some modded
+blocks store a state as a meta that decodes to a different state. A conveyor stair facing south is
+stored as 13, but 13 written back faces east. Those palette entries carry `nonRoundTrip: true`, plus
+the `state` and a `writeMeta` that does produce it when that can be told. Copy `writeMeta`, not the
+stored meta, into a write.
+
 **Surface.** `mode: "surface"` scans each column down from `max(y, toY)` to `min(y, toY)` and
 returns the first block not in `ignore`. Pass `y: 255, toY: 0` for the whole column. The reply has a
 palette, packed `indices` with one entry per column (`dx + sizeX * dz`), and packed `heights`:
