@@ -642,6 +642,8 @@ pub async fn run_with(
 ) -> Result<()> {
     let subscription = Arc::new(subscription);
     let mut polling: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    // Instances whose own poll found them gone and already said `link down`.
+    let departed: Departed = Arc::new(Mutex::new(HashSet::new()));
 
     let result = loop {
         if sink.is_closed() {
@@ -673,12 +675,34 @@ pub async fn run_with(
             if let Some(task) = polling.remove(&instance) {
                 task.abort();
             }
+            // Said once, by whichever noticed first: claiming the instance in `departed` is the right
+            // to say it, and its own poll may have claimed it already.
+            if !departed.lock().expect("departed lock").insert(instance.clone()) {
+                continue;
+            }
             if sink
                 .send(json!({"type": "link", "instance": instance, "state": "down"}))
                 .await
                 .is_err()
             {
                 break;
+            }
+        }
+
+        // A poll that reported its game gone, when the game is listed again by now: it relinked
+        // between the two looks. Forget the stopped poll so it is announced and polled afresh.
+        {
+            let mut departed = departed.lock().expect("departed lock");
+            let relinked: Vec<String> = departed
+                .iter()
+                .filter(|instance| connected.contains(*instance))
+                .cloned()
+                .collect();
+            for instance in relinked {
+                departed.remove(&instance);
+                if let Some(task) = polling.remove(&instance) {
+                    task.abort();
+                }
             }
         }
 
@@ -708,6 +732,7 @@ pub async fn run_with(
                 instance.clone(),
                 state,
                 Arc::clone(&states),
+                Arc::clone(&departed),
                 sink.clone(),
             ));
             polling.insert(instance.clone(), task);
@@ -725,6 +750,23 @@ pub async fn run_with(
     result
 }
 
+/// Instances whose `link down` has been said, so it is said once. See [`run_with`].
+type Departed = Arc<Mutex<HashSet<String>>>;
+
+/// Whether the orchestrator still lists `instance` as connected and ready. True when it cannot say,
+/// so a failure on a game that may still be there is reported rather than hidden.
+async fn still_connected(call: &dyn McpCall, instance: &str) -> bool {
+    match call
+        .call("tools/call", json!({"name": "mcmcp_instances", "arguments": {}}))
+        .await
+    {
+        Ok(result) if structured(&result).is_some() => connected_instances(&result)
+            .iter()
+            .any(|connected| connected == instance),
+        _ => true,
+    }
+}
+
 /// Long-polls one game until its task is aborted, the sink closes, or the game turns out to lack the
 /// tool.
 async fn poll_instance(
@@ -733,6 +775,7 @@ async fn poll_instance(
     instance: String,
     mut state: PollState,
     states: States,
+    departed: Departed,
     sink: mpsc::Sender<Value>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -785,6 +828,18 @@ async fn poll_instance(
             Err(_) if call.is_closed() => return,
             Err(error) => format!("{error:#}"),
         };
+
+        // A game quitting fails the poll it was holding, and the next one finds no such instance.
+        // Both are the quit, which `link down` says once; as errors they woke a watcher twice more
+        // for something ordinary.
+        if !still_connected(call.as_ref(), &instance).await {
+            if departed.lock().expect("departed lock").insert(instance.clone()) {
+                let _ = sink
+                    .send(json!({"type": "link", "instance": instance, "state": "down"}))
+                    .await;
+            }
+            return;
+        }
 
         // Said once per distinct failure, not once per retry: a game refusing every poll for an hour
         // is one line, not a hundred and twenty.
@@ -1078,6 +1133,87 @@ mod tests {
 
         drop(lines);
         relay.abort();
+    }
+
+    /// A pretend orchestrator with one game whose first poll fails. With `quits`, the game has left
+    /// the roster by the time anyone looks again; without, it is still there.
+    struct FailingPoll {
+        quits: bool,
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    impl McpCall for FailingPoll {
+        fn call(&self, _method: &str, params: Value) -> BoxFuture<'_, Result<Value>> {
+            let listing = params["name"] == "mcmcp_instances";
+            let failed = self.failed.load(Ordering::SeqCst);
+            if !listing {
+                self.failed.store(true, Ordering::SeqCst);
+            }
+            let quits = self.quits;
+            Box::pin(async move {
+                if listing {
+                    let connected = if quits && failed {
+                        json!([])
+                    } else {
+                        json!([{"instance": "a.client", "ready": true}])
+                    };
+                    return Ok(json!({"structuredContent": {"connected": connected}}));
+                }
+                if failed {
+                    // Every poll after the first: a quiet game.
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+                Ok(json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": "instance 'a.client' did not complete that \
+                        call: the link to this instance closed before it answered"}],
+                }))
+            })
+        }
+    }
+
+    /// Every line the relay sends in two minutes of (paused, so instant) time.
+    async fn lines_over_two_minutes(call: Arc<dyn McpCall>) -> Vec<Value> {
+        let (sink, mut lines) = mpsc::channel(64);
+        let relay = tokio::spawn(run(call, Subscription::default(), sink));
+        let mut received = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while let Ok(Some(line)) = tokio::time::timeout_at(deadline, lines.recv()).await {
+            received.push(line);
+        }
+        relay.abort();
+        received
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_game_that_quits_mid_poll_is_one_link_down_and_no_errors() {
+        let received = lines_over_two_minutes(Arc::new(FailingPoll {
+            quits: true,
+            failed: Default::default(),
+        }))
+        .await;
+        assert_eq!(
+            received,
+            vec![
+                json!({"type": "link", "instance": "a.client", "state": "up"}),
+                json!({"type": "link", "instance": "a.client", "state": "down"}),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_poll_on_a_game_still_connected_is_reported_as_an_error() {
+        let received = lines_over_two_minutes(Arc::new(FailingPoll {
+            quits: false,
+            failed: Default::default(),
+        }))
+        .await;
+        let kinds: Vec<&str> = received
+            .iter()
+            .map(|line| line["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["link", "error"]);
+        assert_eq!(received[1]["instance"], "a.client");
     }
 
     #[tokio::test]
