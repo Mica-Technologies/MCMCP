@@ -63,8 +63,26 @@ pub fn token_path(state_directory: &Path) -> PathBuf {
 /// user profile's ACL, which is the same practical guarantee — the state directory is already under
 /// `%LOCALAPPDATA%`.
 pub fn ensure_token(state_directory: &Path) -> Result<String> {
-    let path = token_path(state_directory);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
+    ensure_token_at(state_directory, &token_path(state_directory))
+}
+
+/// Where the events WebSocket's token lives, beside the MCP one.
+pub fn events_token_path(state_directory: &Path) -> PathBuf {
+    state_directory.join("events-token")
+}
+
+/// The events WebSocket's token, generated on first use like [`ensure_token`].
+///
+/// A separate token because this one goes in a URL (`?token=`): neither browsers nor Claude Code's
+/// Monitor can send a header on a WebSocket, and a URL ends up in shell history, process lists and
+/// pasted transcripts. It opens the event stream and nothing else, so leaking it leaks chat, not
+/// control of anybody's game. Deleting the file and restarting the orchestrator rotates it.
+pub fn ensure_events_token(state_directory: &Path) -> Result<String> {
+    ensure_token_at(state_directory, &events_token_path(state_directory))
+}
+
+fn ensure_token_at(state_directory: &Path, path: &Path) -> Result<String> {
+    if let Ok(existing) = std::fs::read_to_string(path) {
         let existing = existing.trim().to_string();
         if !existing.is_empty() {
             return Ok(existing);
@@ -73,12 +91,12 @@ pub fn ensure_token(state_directory: &Path) -> Result<String> {
 
     let token = generate_token();
     std::fs::create_dir_all(state_directory)?;
-    std::fs::write(&path, &token).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(path, &token).with_context(|| format!("writing {}", path.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
 
     Ok(token)
@@ -411,6 +429,25 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.len(), 32);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_events_token_is_its_own_file_and_leaves_the_mcp_token_alone() {
+        let directory = std::env::temp_dir().join(format!("mcmcp-two-tokens-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let mcp = ensure_token(&directory).unwrap();
+        let events = ensure_events_token(&directory).unwrap();
+
+        assert_ne!(mcp, events);
+        assert_eq!(events.len(), 32);
+        assert_eq!(
+            ensure_events_token(&directory).unwrap(),
+            events,
+            "reused, not regenerated"
+        );
+        assert_eq!(read_token(&directory).unwrap(), mcp, "the MCP token is untouched");
+        assert!(events_token_path(&directory).exists());
         let _ = std::fs::remove_dir_all(&directory);
     }
 

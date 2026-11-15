@@ -6,8 +6,12 @@
 //!
 //! # Authentication
 //!
-//! The MCP socket's token, in the `token` query parameter. A header would be better, and is not
-//! possible: a browser's WebSocket and Monitor's `ws:` source can set neither. The listener binds
+//! The events token (`events-token` in the state directory, see
+//! [`crate::mcp_socket::ensure_events_token`]), in the `token` query parameter. A header would be
+//! better, and is not possible: a browser's WebSocket and Monitor's `ws:` source can set neither. A
+//! token in a URL leaks into shell history and transcripts, so it is not the MCP token: this one opens
+//! the event stream and nothing else, and the MCP token presented here is refused rather than quietly
+//! working, so a control token never becomes the habit in a URL. The listener binds
 //! loopback only, compares the token in constant time, and refuses a page from anywhere but this
 //! machine by its `Origin` — the defence against a website the user visits opening a socket to it.
 //! What it carries is read-only (chat, joins, leaves, deaths), but chat is still not the business of
@@ -84,7 +88,7 @@ pub fn authorize(
     if !constant_time_eq(presented.as_bytes(), token.as_bytes()) {
         return Err(refuse(
             401,
-            "missing or wrong token; pass the orchestrator's MCP token as ?token=…. \
+            "missing or wrong token; pass the events token (not the MCP token) as ?token=…. \
              `mcmcp-orchestrator events --ws-url` prints a complete URL.",
         ));
     }
@@ -140,14 +144,15 @@ pub fn spawn_listener(router: Arc<Router>, port: u16) {
         return;
     }
     tokio::spawn(async move {
-        let token =
-            match crate::paths::state_directory().and_then(|state| crate::mcp_socket::ensure_token(&state)) {
-                Ok(token) => token,
-                Err(error) => {
-                    warn!(%error, "could not prepare the token the events WebSocket checks");
-                    return;
-                }
-            };
+        let token = match crate::paths::state_directory()
+            .and_then(|state| crate::mcp_socket::ensure_events_token(&state))
+        {
+            Ok(token) => token,
+            Err(error) => {
+                warn!(%error, "could not prepare the token the events WebSocket checks");
+                return;
+            }
+        };
         let address = format!("127.0.0.1:{port}");
         match TcpListener::bind(&address).await {
             Ok(listener) => {
@@ -293,6 +298,31 @@ mod tests {
         .unwrap();
         assert_eq!(subscription.types, vec!["chat"]);
         assert_eq!(subscription.contains.as_deref(), Some("@Claude"));
+    }
+
+    #[test]
+    fn only_the_events_token_opens_the_stream_and_the_mcp_token_is_refused() {
+        let directory = std::env::temp_dir().join(format!("mcmcp-events-token-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let events = crate::mcp_socket::ensure_events_token(&directory).unwrap();
+        let mcp = crate::mcp_socket::ensure_token(&directory).unwrap();
+        assert_ne!(events, mcp, "two tokens, not one under two names");
+
+        let with = |token: &str| authorize("/events", Some(&format!("token={token}")), None, &events, true);
+        assert!(with(&events).is_ok(), "the events token is accepted");
+        assert_eq!(
+            with(&mcp).unwrap_err().status,
+            401,
+            "the MCP token in a URL is refused, not quietly honoured"
+        );
+        assert_eq!(
+            authorize("/events", Some("types=chat"), None, &events, true)
+                .unwrap_err()
+                .status,
+            401,
+            "no token is refused"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

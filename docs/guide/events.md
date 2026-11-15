@@ -109,9 +109,19 @@ its own and always resumes from the game.
 
 ## Security
 
-The WebSocket listens on loopback only and wants the orchestrator's MCP token as `?token=`. It sits
-in the URL because neither browsers nor Monitor can send a header on a WebSocket. Pages from another
-origin are refused, so a website cannot open the socket from your browser. The stream is read-only.
+The WebSocket listens on loopback only and wants the **events token** as `?token=`. It sits in the
+URL because neither browsers nor Monitor can send a header on a WebSocket. A URL leaks into shell
+history and transcripts, so this token is a separate one, `events-token` in the orchestrator's state
+directory beside `mcp-token`. It opens the event stream and nothing else: anyone holding it can read
+chat, joins and leaves, but cannot drive a game. The MCP token is refused here, so a control token
+never ends up in a URL by habit. `--ws-url` prints the URL with the right token.
+
+To rotate the events token, delete `events-token` and restart the orchestrator. A new token is made
+on first use, and watchers using the old URL are refused until they take the new one. MCP clients and
+the shim are unaffected either way: they use `mcp-token`, and so does the command form, which never
+puts a token in a URL.
+
+Pages from another origin are refused, so a website cannot open the socket from your browser.
 
 ## Configuration
 

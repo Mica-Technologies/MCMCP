@@ -381,10 +381,13 @@ async fn shim(mcp_port: u16, may_launch: bool) -> Result<()> {
 /// Prints the events WebSocket URL for a subscription, token included.
 ///
 /// The token is what makes the URL work, and it lives in a file whose path differs by platform; a
-/// watcher that needs a URL asks for this rather than assembling one.
+/// watcher that needs a URL asks for this rather than assembling one. It is the events token, which
+/// opens the event stream and nothing else: never the MCP token, which a URL would leak into shell
+/// history and transcripts. Created here if no orchestrator has made it yet; one started later reads
+/// the same file.
 fn print_ws_url(subscription: &event_relay::Subscription, events_port: u16) -> Result<()> {
-    let token = mcmcp_orchestrator_core::mcp_socket::read_token(&paths::state_directory()?)
-        .context("reading the orchestrator's token; start the orchestrator app once to create it")?;
+    let token = mcmcp_orchestrator_core::mcp_socket::ensure_events_token(&paths::state_directory()?)
+        .context("preparing the events token")?;
     let mut url = format!(
         "ws://127.0.0.1:{events_port}/events?token={}",
         event_relay::percent_encode(&token)
