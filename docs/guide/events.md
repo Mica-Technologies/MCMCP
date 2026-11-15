@@ -6,7 +6,7 @@ that costs a tool call every few seconds all day, misses lines that arrive faste
 can only find joins by searching server messages.
 
 Instead, every game keeps a ring of recent events and answers
-[`game_events_wait`](../reference/tools.md), which blocks until a matching event arrives and returns
+[`game_events_wait`](../reference/tools.md#game_events_wait), which blocks until a matching event arrives and returns
 a cursor that loses nothing between calls. The orchestrator turns that into a stream covering every
 linked game, which you can take two ways:
 
