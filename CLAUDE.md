@@ -84,8 +84,8 @@ that class-loads any of it dies at startup with Forge's "for invalid side SERVER
 common code may name these types** — they are reached only through `McmcpClientProxy`. This is the
 single easiest way to break the mod, and the CI smoke test exists largely to catch it.
 
-**`companion/`, and the pure halves of `chunkload/` and `regions/`, import no Minecraft class either.**
-The companion's framing, reassembly limits, outbox pacing, handshake and access policy; the chunk-load
+**`events/`, `companion/`, and the pure halves of `chunkload/` and `regions/`, import no Minecraft class either.**
+The event ring, cursor, filter and chat attribution behind `game_events_wait`; the companion's framing, reassembly limits, outbox pacing, handshake and access policy; the chunk-load
 budget, health state machine and hold ledger; the packed-index codec, change ring and NBT projection.
 These are what can be wrong without anything failing, so they are unit-tested as plain Java. Their
 Forge halves (`companion/server/`, `ChunkLoadGovernor`, `ChangeTracker`) are thin.

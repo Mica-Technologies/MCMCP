@@ -40,6 +40,9 @@ final class CompanionPeer {
     /** Control calls running now ({@code CompanionPolicy.isControlCall}), against the same number. */
     final AtomicInteger runningControlCalls = new AtomicInteger();
 
+    /** Event waits open now ({@code CompanionPolicy.isWaitCall}), against {@code MAX_WAITS_PER_PLAYER}. */
+    final AtomicInteger runningWaits = new AtomicInteger();
+
     /**
      * Who this player's calls run as. Created at hello; its grants are replaced in place when they
      * change, so every session sees the change at once.

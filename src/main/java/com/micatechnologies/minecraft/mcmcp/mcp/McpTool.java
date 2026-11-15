@@ -56,6 +56,7 @@ public final class McpTool {
     private final boolean idempotent;
     private final boolean openWorld;
     private final boolean requiresGameThread;
+    private final boolean passive;
     private final Map<String, String> aliases;
     private final Handler handler;
 
@@ -73,6 +74,7 @@ public final class McpTool {
         this.idempotent = builder.idempotent;
         this.openWorld = builder.openWorld;
         this.requiresGameThread = builder.requiresGameThread;
+        this.passive = builder.passive;
         this.aliases = Collections.unmodifiableMap(new LinkedHashMap<>(builder.aliases));
         this.handler = builder.handler;
     }
@@ -104,6 +106,15 @@ public final class McpTool {
     /** Whether the tool cannot change anything, as its annotations say. */
     public boolean isReadOnly() {
         return readOnly;
+    }
+
+    /**
+     * Waits for the world rather than acting on it, so a call does not count as an agent driving: it
+     * neither holds the client's frame rate up nor shows in the activity banner. A long-poll left open
+     * all day would otherwise keep both on all day.
+     */
+    public boolean isPassive() {
+        return passive;
     }
 
     public boolean requiresGameThread() {
@@ -180,6 +191,8 @@ public final class McpTool {
          * opt out explicitly via {@link #offGameThread()}.
          */
         private boolean requiresGameThread = true;
+
+        private boolean passive;
 
         private final Map<String, String> aliases = new LinkedHashMap<>();
 
@@ -262,6 +275,12 @@ public final class McpTool {
          */
         public Builder alias(String alias, String declared) {
             this.aliases.put(alias, declared);
+            return this;
+        }
+
+        /** See {@link McpTool#isPassive()}. Only for read-only waits. */
+        public Builder passive() {
+            this.passive = true;
             return this;
         }
 

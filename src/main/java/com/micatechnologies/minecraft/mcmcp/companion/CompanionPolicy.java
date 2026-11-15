@@ -59,7 +59,7 @@ public final class CompanionPolicy implements CallFilter {
             "server_player_inventory", "server_tick_stats", "server_changes_since", "server_watch_blocks", "server_wait_tick", "server_get_tile_entities", "server_wire_connections", "server_get_biomes", "server_count_blocks", "mcmcp_endpoint_info", "game_list_mods",
             "game_health", "game_block_states", "server_run_test", "server_job_submit", "server_job_status", "server_job_list", "server_job_cancel",
             "server_job_pause", "server_job_resume", "server_estop", "server_get_entity_nbt", "server_verify", "server_check_enclosure", "server_plan_view",
-            "server_check_walk", "server_refresh_chunks"}) {
+            "server_check_walk", "server_refresh_chunks", "game_events_wait"}) {
             CLASSES.put(read, Principal.CLASS_READ);
         }
         for (String write : new String[] {"server_set_block", "server_set_blocks", "server_undo", "server_relight", "server_apply_ops",
@@ -117,6 +117,21 @@ public final class CompanionPolicy implements CallFilter {
     /** Whether a tool's calls are counted under the control allowance, not with the working calls. */
     public static boolean isControlCall(@Nullable String toolName) {
         return toolName != null && CONTROL_CALLS.contains(toolName);
+    }
+
+    /**
+     * Calls that wait on the world and may sit for minutes doing nothing: an event subscription's
+     * long-poll (#201). They run on their own threads under their own small cap, so a player's open
+     * subscription neither takes one of the four workers every player shares nor counts against
+     * {@code companion.maxConcurrentCalls}.
+     */
+    static final Set<String> WAIT_CALLS = Collections.singleton("game_events_wait");
+
+    /** How many waits one player may hold open at once, every agent of theirs counted together. */
+    public static final int MAX_WAITS_PER_PLAYER = 2;
+
+    public static boolean isWaitCall(@Nullable String toolName) {
+        return toolName != null && WAIT_CALLS.contains(toolName);
     }
 
     /** The class a tool belongs to, or null when the companion never serves it. */

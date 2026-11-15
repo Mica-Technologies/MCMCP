@@ -778,6 +778,28 @@ case "$TICK_BODY" in
   *'"tick":'*) echo "    waited for the next even tick" ;;
   *) mcp_failure "server_wait_tick did not return a tick: ${TICK_BODY}" ;;
 esac
+
+echo "==> Event subscriptions: a cursor, a misspelled type refused, and the /events stream"
+EVENTS_BODY="$(mcp_call 6901 game_events_wait '{"since":0,"timeout_s":0}')" \
+  || mcp_failure "game_events_wait failed: ${EVENTS_BODY}"
+case "$EVENTS_BODY" in
+  *'"structuredContent":{"stream":"'*'"next":'*) echo "    a peek returned a stream id and a cursor" ;;
+  *) mcp_failure "game_events_wait returned no cursor: ${EVENTS_BODY}" ;;
+esac
+TYPO_BODY="$(mcp_call 6902 game_events_wait '{"types":["joins"],"timeout_s":0}')" \
+  || mcp_failure "game_events_wait with a typo failed outright: ${TYPO_BODY}"
+case "$TYPO_BODY" in
+  *'"isError":true'*'Unknown event type'*) echo "    a misspelled type is refused, not waited on" ;;
+  *) mcp_failure "a misspelled event type was not refused: ${TYPO_BODY}" ;;
+esac
+# The stream never ends by itself, so curl stops it after two seconds (exit 28) and the first line is read.
+STREAM_BODY="$(curl -sS -N --max-time 2 -H "Authorization: Bearer ${TOKEN}" \
+  "http://127.0.0.1:${MCP_PORT}/mcp/events?types=chat,join" 2>/dev/null || true)"
+case "$STREAM_BODY" in
+  '{"type":"hello","stream":"'*) echo "    /events opened with a hello line" ;;
+  *) mcp_failure "/events did not open with a hello line: ${STREAM_BODY}" ;;
+esac
+
 STOP_BODY="$(mcp_call 58 server_watch_blocks "{\"op\":\"stop\",\"id\":\"${WATCH_ID}\"}")" \
   || mcp_failure "server_watch_blocks stop failed: ${STOP_BODY}"
 case "$STOP_BODY" in

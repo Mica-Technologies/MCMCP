@@ -79,6 +79,7 @@ public class McmcpClientProxy implements McmcpProxy {
         ClientPerformanceTools.register();
         ClientTraceTools.register();
         ClientResources.register();
+        com.micatechnologies.minecraft.mcmcp.client.ClientEventHooks.register();
         ClientPrompts.register();
         com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion.register();
         com.micatechnologies.minecraft.mcmcp.client.ClientEstop.register();

@@ -117,6 +117,7 @@ public class Mcmcp {
         com.micatechnologies.minecraft.mcmcp.game.EndpointNotices.register();
         com.micatechnologies.minecraft.mcmcp.game.ServerHealthNotices.register();
         com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.register();
+        com.micatechnologies.minecraft.mcmcp.game.ServerEventHooks.register();
         proxy.registerSideSpecific();
     }
 

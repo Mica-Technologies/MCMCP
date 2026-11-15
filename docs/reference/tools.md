@@ -1,6 +1,6 @@
 # Tools
 
-123 tools ship built in. Each declares which endpoints it is available on; the registry filters both
+124 tools ship built in. Each declares which endpoints it is available on; the registry filters both
 the listing and the call path, so a tool never appears on an endpoint that cannot run it.
 
 Every tool also carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
@@ -351,6 +351,67 @@ a command, use its `profile` argument instead: see [Profiling a command](#profil
     ticks. The result reports `ticksSeen` and `ticksKept` (`framesSeen`, `framesKept`) in place of
     `idlePercent`; `ticksKept: 0` means no tick in the window was slow enough, not that the tool
     failed. It applies only to the game thread, since ticks and frames are that thread's.
+
+### `game_events_wait`
+
+:material-eye: Read-only
+
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `types` | string[] | `chat`, `join`, `leave`, `death`, `advancement`, `command`. Omit for all. A comma-separated string is read too. |
+| `players` | string[] | Only events about these players, any case. |
+| `exclude_players` | string[] | Ignore these players, e.g. your own name, so your own chat does not wake you. |
+| `contains` | string | Only events whose text contains this, any case (`@Claude`). |
+| `since` | integer | The `next` of your previous call. Omit to wait only for what happens from now on; `0` also returns what is already buffered. |
+| `stream` | string | The `stream` of the result `since` came from. |
+| `timeout_s` | integer 0–300 | Default 60. `0` answers at once. |
+| `max` | integer 1–200 | Default 50. |
+
+Blocks until an event matching the filter happens, then returns it, so an agent reacting to other
+players subscribes once instead of polling `client_read_chat` all day. The answer is
+`{"stream", "next", "events": [...]}`, plus `timedOut`, `missed` or `reset` when they apply:
+
+```json
+{"stream":"5f1c09ab","next":1235,"events":[
+  {"seq":1234,"t":"2026-11-15T14:02:11Z","type":"chat","player":"AngelWingsPanda","uuid":"…","text":"@Claude the door is backwards"},
+  {"seq":1235,"t":"2026-11-15T14:02:30Z","type":"join","player":"Akselhok","uuid":"…","online":["MicaAlex","AngelWingsPanda","Akselhok"]}]}
+```
+
+- **Nothing is lost or repeated between calls.** Pass `next` back as `since` and `stream` as
+  `stream`. `next` moves past events the filter did not match too, so a quiet filter on a busy
+  server does not rescan the same lines. Two identical chat lines are two events.
+- **`missed`** counts events (matching or not) that fell off the 512-event buffer before you came
+  back. **`reset`** means the game restarted since your cursor; the events are then the buffer from
+  its start.
+- **On a server endpoint** events come from Forge: exact sender and uuid, joins and leaves with the
+  `online` list, deaths with the death message, announced advancements (`advancement` holds the id)
+  and the commands players ran. The arguments of login and register commands are never recorded.
+- **On a client endpoint** chat is what this client received. The sender is exact for vanilla chat
+  and whispers, and read from the text (`[Rank] Name: hi`, `<Name> hi`) only when that name is in
+  the tab list. Joins and leaves come from the tab list. The action bar and this client's own
+  client-command output are left out.
+- **It does not count as an agent driving.** A long wait neither holds the client's frame rate up
+  nor shows in the activity banner. It reports progress every 10 s, so an orchestrator does not
+  give up on it.
+- **Over the companion** it is in the `read` class, with at most two waits open per player on their
+  own threads, and other players' commands are hidden unless the player holds `others`.
+
+The same events stream outside MCP: `GET <path>/events` on each endpoint (below), and the
+orchestrator's WebSocket and `events` command.
+
+#### The `/events` stream
+
+`GET http://127.0.0.1:25585/mcp/events?types=chat,join&contains=%40Claude` with the endpoint's bearer
+token returns one JSON object per line (`format=ndjson`, the default) or per SSE message
+(`format=sse`). The query takes this tool's arguments. The first line is
+`{"type":"hello","stream":…,"next":…}`, and `missed` and `reset` lines say when a cursor could not
+be honoured. Every event carries `stream`, so a reconnect resumes with `since` and `stream`. An idle
+NDJSON stream sends a blank line every 15 s. At most four streams per endpoint.
+
+```bash
+curl -N -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:25586/mcp/events?types=chat,join,leave&contains=%40Claude"
+```
 
 ## Server endpoint
 

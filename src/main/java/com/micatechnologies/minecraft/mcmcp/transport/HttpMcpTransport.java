@@ -186,6 +186,7 @@ public class HttpMcpTransport implements McpTransport {
         boundPort = created.getAddress().getPort();
         created.createContext(settings.getPath(), new McpHandler());
         created.createContext(settings.getPath() + "/health", new HealthHandler());
+        created.createContext(settings.getPath() + "/events", new EventsHandler());
         created.setExecutor(pool);
         created.start();
 
@@ -311,6 +312,139 @@ public class HttpMcpTransport implements McpTransport {
                 exchange.close();
             }
         }
+    }
+
+    /** How many {@code /events} streams may be open at once; each holds a pool thread for its life. */
+    static final int MAX_EVENT_STREAMS = 4;
+
+    /** How long an idle event stream goes between keepalives, which are what surface a dead peer. */
+    private static final long EVENT_KEEPALIVE_MILLIS = 15_000L;
+
+    private final AtomicInteger openEventStreams = new AtomicInteger();
+
+    /**
+     * {@code GET <path>/events}: this endpoint's game events as a stream (#201), one JSON object per
+     * line ({@code format=ndjson}, the default) or per SSE message ({@code format=sse}).
+     *
+     * <p>The query takes {@code game_events_wait}'s arguments ({@code types}, {@code players},
+     * {@code exclude_players}, {@code contains}, {@code since}, {@code stream}). The first line is a
+     * {@code hello} with the stream id and cursor, a {@code missed} or {@code reset} line says when
+     * the cursor could not be honoured, and every event carries {@code stream} so a reconnect can
+     * resume with {@code since} and {@code stream}. Idle NDJSON streams send a blank line every 15 s.
+     *
+     * <p>Same bearer token and origin check as the MCP path. A stream needs no MCP session.
+     */
+    private class EventsHandler implements HttpHandler {
+
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            boolean counted = false;
+            try {
+                stampInstance(exchange);
+                if (!checkOrigin(exchange) || !checkAuth(exchange)) {
+                    return;
+                }
+                if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                    exchange.getResponseHeaders().set("Allow", "GET");
+                    sendText(exchange, 405, "text/plain; charset=utf-8", "The events stream is GET only.");
+                    return;
+                }
+                JsonObject arguments = com.micatechnologies.minecraft.mcmcp.events.EventQuery.parse(
+                    exchange.getRequestURI().getRawQuery());
+                com.micatechnologies.minecraft.mcmcp.events.EventFilter filter =
+                    com.micatechnologies.minecraft.mcmcp.tools.GameEventTools.filterFrom(arguments);
+                if (!filter.unknownTypes().isEmpty()) {
+                    sendText(exchange, 400, "text/plain; charset=utf-8", "Unknown event type(s) "
+                        + filter.unknownTypes() + ". The types are "
+                        + com.micatechnologies.minecraft.mcmcp.events.GameEvent.TYPES + ".");
+                    return;
+                }
+                if (openEventStreams.incrementAndGet() > MAX_EVENT_STREAMS) {
+                    openEventStreams.decrementAndGet();
+                    exchange.getResponseHeaders().set("Retry-After", "30");
+                    sendText(exchange, 503, "text/plain; charset=utf-8", MAX_EVENT_STREAMS
+                        + " event streams are already open on this endpoint. Close one, or share one.");
+                    return;
+                }
+                counted = true;
+                streamEvents(exchange, arguments, filter,
+                    "sse".equalsIgnoreCase(Json.getString(arguments, "format", "ndjson")));
+            }
+            catch (IOException e) {
+                Mcmcp.LOGGER.debug("MCMCP events stream ended: " + e.getMessage());
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            catch (Exception e) {
+                Mcmcp.LOGGER.error("MCMCP events stream failed", e);
+                trySendError(exchange, 500, "Internal MCMCP error");
+            }
+            finally {
+                if (counted) {
+                    openEventStreams.decrementAndGet();
+                }
+                exchange.close();
+            }
+        }
+    }
+
+    private void streamEvents(HttpExchange exchange, JsonObject arguments,
+        com.micatechnologies.minecraft.mcmcp.events.EventFilter filter, boolean sse)
+        throws IOException, InterruptedException {
+        com.micatechnologies.minecraft.mcmcp.events.EventLog log =
+            com.micatechnologies.minecraft.mcmcp.events.EventLog.forSide(dispatcher.getSide().id());
+        Headers headers = exchange.getResponseHeaders();
+        headers.set("Content-Type", sse ? "text/event-stream; charset=utf-8" : "application/x-ndjson; charset=utf-8");
+        headers.set("Cache-Control", "no-cache, no-store");
+        headers.set("X-Accel-Buffering", "no");
+        applyCorsHeaders(exchange);
+        exchange.sendResponseHeaders(200, 0);
+
+        Long since = Json.has(arguments, "since") ? Json.getLong(arguments, "since", 0L) : null;
+        String stream = Json.getString(arguments, "stream", null);
+        try (OutputStream out = exchange.getResponseBody()) {
+            JsonObject hello = new JsonObject();
+            hello.addProperty("type", "hello");
+            hello.addProperty("stream", log.getStream());
+            hello.addProperty("next", since == null ? log.lastSeq() : since);
+            writeEventLine(out, hello, sse);
+            while (isRunning()) {
+                com.micatechnologies.minecraft.mcmcp.events.EventLog.Batch batch =
+                    log.await(since, stream, filter, 100, EVENT_KEEPALIVE_MILLIS, this::isRunning);
+                if (batch.reset) {
+                    JsonObject reset = new JsonObject();
+                    reset.addProperty("type", "reset");
+                    reset.addProperty("stream", batch.stream);
+                    writeEventLine(out, reset, sse);
+                }
+                if (batch.missed > 0) {
+                    JsonObject missed = new JsonObject();
+                    missed.addProperty("type", "missed");
+                    missed.addProperty("count", batch.missed);
+                    writeEventLine(out, missed, sse);
+                }
+                for (com.micatechnologies.minecraft.mcmcp.events.GameEvent event : batch.events) {
+                    JsonObject line = event.toJson();
+                    line.addProperty("stream", batch.stream);
+                    writeEventLine(out, line, sse);
+                }
+                if (batch.events.isEmpty()) {
+                    out.write((sse ? ": keepalive\n\n" : "\n").getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                }
+                since = batch.next;
+                stream = batch.stream;
+            }
+        }
+    }
+
+    private void writeEventLine(OutputStream out, JsonObject json, boolean sse) throws IOException {
+        String text = Json.write(json);
+        String frame = sse ? "id: " + Json.getString(json, "seq", "0") + "\nevent: " + Json.getString(json, "type", "event")
+            + "\ndata: " + text + "\n\n" : text + "\n";
+        out.write(frame.getBytes(StandardCharsets.UTF_8));
+        out.flush();
     }
 
     // ------------------------------------------------------------------

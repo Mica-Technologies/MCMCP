@@ -387,7 +387,11 @@ public class McpDispatcher {
             }
         }
 
-        ToolActivity.noteCall(side);
+        // A passive wait (game_events_wait) is not an agent driving: noted, it would hold the client's
+        // frame rate up and its activity banner on for as long as anyone was subscribed.
+        if (!tool.isPassive()) {
+            ToolActivity.noteCall(side);
+        }
 
         ToolContext context = new ToolContext(
             session,
@@ -399,7 +403,7 @@ public class McpDispatcher {
 
         context.setCaller(caller);
         context.setToolName(name);
-        long activity = ToolActivity.callStarted(side, name);
+        long activity = tool.isPassive() ? 0L : ToolActivity.callStarted(side, name);
         context.trackActivity(activity);
         context.setMutating(!tool.isReadOnly() && !ESTOP_EXEMPT.contains(name));
         ToolActivity.describe(activity, session.getPrincipal().isCompanion()

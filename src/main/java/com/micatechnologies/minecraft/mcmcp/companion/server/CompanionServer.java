@@ -100,6 +100,9 @@ public final class CompanionServer {
     @Nullable
     private static volatile ExecutorService workers;
 
+    /** Threads for event waits only (see {@code CompanionPolicy.WAIT_CALLS}); they block, the workers must not. */
+    private static volatile ExecutorService waiters;
+
     private static final Map<UUID, CompanionPeer> PEERS = new ConcurrentHashMap<>();
 
     private static int ticks;
@@ -169,6 +172,11 @@ public final class CompanionServer {
             thread.setDaemon(true);
             return thread;
         });
+        waiters = Executors.newFixedThreadPool(8, runnable -> {
+            Thread thread = new Thread(runnable, "MCMCP-companion-wait-" + WORKER_COUNT.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
         resolveAllowlist(server);
     }
 
@@ -179,10 +187,15 @@ public final class CompanionServer {
         }
         PEERS.clear();
         ExecutorService pool = workers;
+        ExecutorService waiting = waiters;
         workers = null;
+        waiters = null;
         dispatcher = null;
         if (pool != null) {
             pool.shutdownNow();
+        }
+        if (waiting != null) {
+            waiting.shutdownNow();
         }
     }
 
@@ -495,10 +508,30 @@ public final class CompanionServer {
         final boolean toolCall = McpProtocol.METHOD_TOOLS_CALL.equals(JsonRpc.getMethod(message));
         // A return teleport, a lease, a release or a stop is counted apart from the calls doing the
         // work, so a full set of those cannot strand a player or keep a stop out (#194).
-        final java.util.concurrent.atomic.AtomicInteger running = toolCall && CompanionPolicy.isControlCall(
-            Json.getString(Json.getObjectOrEmpty(message, "params"), "name", null))
+        final String toolName = toolCall
+            ? Json.getString(Json.getObjectOrEmpty(message, "params"), "name", null) : null;
+        final boolean wait = toolCall && CompanionPolicy.isWaitCall(toolName);
+        if (wait) {
+            ExecutorService waiting = waiters;
+            if (waiting != null) {
+                pool = waiting;
+            }
+            if (peer.runningWaits.incrementAndGet() > CompanionPolicy.MAX_WAITS_PER_PLAYER) {
+                peer.runningWaits.decrementAndGet();
+                JsonObject busy = new JsonObject();
+                busy.addProperty("reason", "limit");
+                busy.addProperty("retryAfterMs", 5000);
+                refuse(peer, key, message, "You already have " + CompanionPolicy.MAX_WAITS_PER_PLAYER
+                    + " event waits open on this server, every agent of yours counted together. Nothing "
+                    + "was done; retry after busy.retryAfterMs, or share one subscription.",
+                    Json.obj("busy", busy));
+                return;
+            }
+        }
+        final java.util.concurrent.atomic.AtomicInteger running = wait ? peer.runningWaits
+            : toolCall && CompanionPolicy.isControlCall(toolName)
             ? peer.runningControlCalls : peer.runningCalls;
-        if (toolCall && running.incrementAndGet() > McmcpConfig.getCompanionMaxConcurrentCalls()) {
+        if (toolCall && !wait && running.incrementAndGet() > McmcpConfig.getCompanionMaxConcurrentCalls()) {
             running.decrementAndGet();
             // Said as busy with a wait, like every other refusal that passes on its own: as bare text
             // a caller could not tell it from a refusal that would never clear.

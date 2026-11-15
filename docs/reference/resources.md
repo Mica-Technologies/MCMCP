@@ -49,6 +49,15 @@ a longer window or a filtered search.
 
 Returns an explanatory message rather than content when `permissions.allowLogAccess` is off.
 
+### `minecraft://client/events/recent`, `minecraft://server/events/recent`
+
+`application/json` · **subscribable** · one per endpoint
+
+The newest 50 [game events](tools.md#game_events_wait) this endpoint has seen (chat, joins, leaves,
+deaths, advancements, commands), oldest first, with the `stream` and `next` cursor to wait from.
+Subscribed, every new event sends `notifications/resources/updated`. To wait for particular events,
+use `game_events_wait` instead.
+
 ## Server endpoint
 
 ### `minecraft://server/status`

@@ -41,6 +41,7 @@ public final class CommonTools {
         registerSetLogLevel();
         RegistryDumpTools.register();
         PerformanceTools.register();
+        GameEventTools.register();
 
         ServerWorldTools.register();
         ServerBuildTools.register();

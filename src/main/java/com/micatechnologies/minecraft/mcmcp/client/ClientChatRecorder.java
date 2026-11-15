@@ -244,6 +244,8 @@ public final class ClientChatRecorder {
         // Wakes up any MCP client subscribed to the chat resource. Fires on the client thread
         // inside the chat handler, so it does nothing but append to per-session queues.
         McpRegistry.notifyResourceUpdated(RESOURCE_URI);
+        // And anyone waiting for chat with game_events_wait (#201).
+        ClientEventHooks.onChatRecorded(entry);
     }
 
     public static class Events {
