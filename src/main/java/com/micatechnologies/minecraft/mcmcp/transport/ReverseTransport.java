@@ -117,6 +117,13 @@ public class ReverseTransport implements McpTransport {
     @Nullable
     private ExecutorService workers;
 
+    /**
+     * Threads for passive waits ({@code game_events_wait}) only. Each watcher of the orchestrator's
+     * events stream holds one open in every game, and on {@link #workers} four of them would have left
+     * no thread for any other call. Bounded by the dispatcher's cap on open waits.
+     */
+    private ExecutorService waiters;
+
     public ReverseTransport(LinkSettings settings,
                             McmcpIdentity identity,
                             McmcpSide side,
@@ -202,6 +209,7 @@ public class ReverseTransport implements McpTransport {
         connector = Executors.newSingleThreadScheduledExecutor(daemonFactory("link", new AtomicInteger(1)));
         workers = Executors.newFixedThreadPool(settings.getWorkerThreads(),
             daemonFactory("link-worker", new AtomicInteger(1)));
+        waiters = Executors.newCachedThreadPool(daemonFactory("link-wait", new AtomicInteger(1)));
 
         scheduleAttempt(0L);
     }
@@ -227,6 +235,11 @@ public class ReverseTransport implements McpTransport {
         workers = null;
         if (workerPool != null) {
             workerPool.shutdownNow();
+        }
+        ExecutorService waitPool = waiters;
+        waiters = null;
+        if (waitPool != null) {
+            waitPool.shutdownNow();
         }
     }
 
@@ -477,7 +490,7 @@ public class ReverseTransport implements McpTransport {
             handleMessage(message, out, session);
             return;
         }
-        ExecutorService pool = workers;
+        ExecutorService pool = isPassiveCall(message) && waiters != null ? waiters : workers;
         if (pool == null) {
             return;
         }
@@ -493,6 +506,17 @@ public class ReverseTransport implements McpTransport {
             // Shutting down. The orchestrator sees the link close, which is a better signal than a
             // half-answered request.
         }
+    }
+
+    /** Whether a message calls a passive tool, which waits on its own pool. */
+    private boolean isPassiveCall(JsonObject message) {
+        if (!com.micatechnologies.minecraft.mcmcp.protocol.McpProtocol.METHOD_TOOLS_CALL.equals(JsonRpc.getMethod(message))) {
+            return false;
+        }
+        String name = Json.getString(Json.getObjectOrEmpty(message, "params"), "name", null);
+        com.micatechnologies.minecraft.mcmcp.mcp.McpTool tool = name == null ? null
+            : com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry.tool(name, side);
+        return tool != null && tool.isPassive();
     }
 
     private void handleMessage(JsonObject message, OutputStream out, McpSession session) {

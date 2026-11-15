@@ -401,13 +401,15 @@ public class HttpMcpTransport implements McpTransport {
         applyCorsHeaders(exchange);
         exchange.sendResponseHeaders(200, 0);
 
-        Long since = Json.has(arguments, "since") ? Json.getLong(arguments, "since", 0L) : null;
+        // Read once and waited from: an event landing between the hello and the first wait is then
+        // still after the cursor, not skipped.
+        long since = Json.has(arguments, "since") ? Json.getLong(arguments, "since", 0L) : log.lastSeq();
         String stream = Json.getString(arguments, "stream", null);
         try (OutputStream out = exchange.getResponseBody()) {
             JsonObject hello = new JsonObject();
             hello.addProperty("type", "hello");
             hello.addProperty("stream", log.getStream());
-            hello.addProperty("next", since == null ? log.lastSeq() : since);
+            hello.addProperty("next", since);
             writeEventLine(out, hello, sse);
             while (isRunning()) {
                 com.micatechnologies.minecraft.mcmcp.events.EventLog.Batch batch =

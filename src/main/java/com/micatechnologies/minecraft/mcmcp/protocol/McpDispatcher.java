@@ -389,10 +389,40 @@ public class McpDispatcher {
 
         // A passive wait (game_events_wait) is not an agent driving: noted, it would hold the client's
         // frame rate up and its activity banner on for as long as anyone was subscribed.
-        if (!tool.isPassive()) {
+        final boolean passive = tool.isPassive();
+        if (!passive) {
             ToolActivity.noteCall(side);
         }
+        // Each open wait holds a worker for minutes; past the cap, a new one is told to retry rather
+        // than taking threads that ordinary calls need.
+        if (passive && !passiveWaits.tryAcquire()) {
+            JsonObject busy = new JsonObject();
+            busy.addProperty("reason", "waits");
+            busy.addProperty("limit", MAX_PASSIVE_WAITS);
+            busy.addProperty("retryAfterMs", 5000);
+            return ToolResult.error(MAX_PASSIVE_WAITS + " waits are already open on this endpoint. Nothing "
+                + "was done; retry after busy.retryAfterMs, or share one subscription (the orchestrator's "
+                + "events stream serves any number of watchers).")
+                .withStructured(Json.obj("busy", busy)).toJson(session.getProtocolVersion());
+        }
+        try {
+            return callTool(session, tool, name, arguments, params, caller, cancellation);
+        }
+        finally {
+            if (passive) {
+                passiveWaits.release();
+            }
+        }
+    }
 
+    /** How many passive waits ({@code game_events_wait}) one endpoint holds open at once. */
+    public static final int MAX_PASSIVE_WAITS = 16;
+
+    private final java.util.concurrent.Semaphore passiveWaits = new java.util.concurrent.Semaphore(MAX_PASSIVE_WAITS);
+
+    private JsonObject callTool(McpSession session, McpTool tool, String name, JsonObject arguments,
+        JsonObject params, com.micatechnologies.minecraft.mcmcp.mcp.CallerId caller,
+        McpSession.CancellationToken cancellation) {
         ToolContext context = new ToolContext(
             session,
             arguments,
@@ -409,7 +439,9 @@ public class McpDispatcher {
         ToolActivity.describe(activity, session.getPrincipal().isCompanion()
             ? session.getPrincipal().getPlayerName() + " (companion)"
             : session.isOrchestratorLink() ? "orchestrator" : session.describeClient(), session.getId());
-        RequestJournal recorder = journal;
+        // Not journalled: a wait changes nothing, a subscription would write a pair of lines a minute
+        // all day, and one always in flight would be listed among a crash's unfinished calls.
+        RequestJournal recorder = tool.isPassive() ? null : journal;
         long started = System.currentTimeMillis();
         if (recorder != null) {
             recorder.start(activity, name, arguments,
