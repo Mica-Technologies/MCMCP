@@ -12,6 +12,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.regions.ChangeRing;
 import com.micatechnologies.minecraft.mcmcp.regions.ChangeTracker;
 import com.micatechnologies.minecraft.mcmcp.regions.PackedIndices;
+import com.micatechnologies.minecraft.mcmcp.regions.StateIdLayout;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -250,20 +251,47 @@ public final class ServerRegionTools {
      * A state id as a palette name: {@code mod:block} or {@code mod:block:meta}.
      *
      * <p>The meta is read out of the id, which holds exactly what {@code getMetaFromState} gave for
-     * the state in the chunk, the same meta every other read reports. It used to go through
-     * {@code getStateById} and back: for a block whose metas do not round-trip, that named a
-     * different meta than the palette path (a conveyor stair stored as 13 read as 15), and a script
-     * that wrote the packed value back turned every step sideways (#200).
+     * the state in the chunk, the same meta every other read reports. Going through
+     * {@code getStateById} and back named a different meta for a block whose metas do not round-trip
+     * (a conveyor stair stored as 13 read as 15, #200). The id is taken apart as an id extender packs
+     * it, which is vanilla's packing below block id 4096: reading every id as vanilla named other
+     * blocks for ids above that (#203, #204).
      */
     static String describe(int stateId) {
         if (stateId < 0) {
             return UNLOADED;
         }
-        Block block = Block.getBlockById(stateId & 4095);
+        Block block = blockOf(stateId);
         ResourceLocation name = block.getRegistryName();
         String id = name == null ? "unknown" : name.toString();
-        int meta = (stateId >> 12) & 15;
+        int meta = metaOf(stateId, block);
         return meta == 0 ? id : id + ":" + meta;
+    }
+
+    /** Set once a state id has failed to decode to its own block, so the warning is logged once. */
+    private static volatile boolean warnedUndecodable;
+
+    /** The block a state id names, through {@code getStateById}, which an id extender patches. */
+    static Block blockOf(int stateId) {
+        return Block.getStateById(stateId).getBlock();
+    }
+
+    /**
+     * The meta packed in a state id, checked against the block it names. An id that does not take
+     * apart into {@code block} is packed some way MCMCP does not know; the block is asked instead,
+     * which names the state it decodes to rather than the stored meta.
+     */
+    static int metaOf(int stateId, Block block) {
+        if (Block.getBlockById(StateIdLayout.blockId(stateId)) == block) {
+            return StateIdLayout.meta(stateId);
+        }
+        if (!warnedUndecodable) {
+            warnedUndecodable = true;
+            com.micatechnologies.minecraft.mcmcp.Mcmcp.LOGGER.warn("MCMCP: block state id {} does not take apart into "
+                + "{}; state ids are packed some way MCMCP does not know, so packed reads name the meta each block "
+                + "decodes to", stateId, block.getRegistryName());
+        }
+        return block.getMetaFromState(Block.getStateById(stateId));
     }
 
     /**
@@ -275,8 +303,8 @@ public final class ServerRegionTools {
         if (stateId < 0) {
             return;
         }
-        Block block = Block.getBlockById(stateId & 4095);
-        int meta = (stateId >> 12) & 15;
+        Block block = blockOf(stateId);
+        int meta = metaOf(stateId, block);
         try {
             if (block.getMetaFromState(block.getStateFromMeta(meta)) == meta) {
                 return;

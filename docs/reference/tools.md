@@ -555,6 +555,11 @@ stored as 13, but 13 written back faces east. Those palette entries carry `nonRo
 the `state` and a `writeMeta` that does produce it when that can be told. Copy `writeMeta`, not the
 stored meta, into a write.
 
+Block names in a packed palette are the server's own, with or without an id extender
+(RoughlyEnoughIDs, JustEnoughIDs) installed. Those pack a block id of 4096 or more into one number
+differently, and on 2026.11.15 and 2026.11.15+1 a packed read named another block for every such
+id.
+
 **Surface.** `mode: "surface"` scans each column down from `max(y, toY)` to `min(y, toY)` and
 returns the first block not in `ignore`. Pass `y: 255, toY: 0` for the whole column. The reply has a
 palette, packed `indices` with one entry per column (`dx + sizeX * dz`), and packed `heights`:
