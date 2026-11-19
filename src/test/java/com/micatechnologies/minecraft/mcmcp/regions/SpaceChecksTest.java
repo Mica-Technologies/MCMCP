@@ -275,6 +275,66 @@ class SpaceChecksTest {
             "a step of 0 still counts the slab's cell as a rise");
     }
 
+    /** The boxes of an upright stair whose high half is to the east: a slab, and a step on its east half. */
+    private static final List<double[]> STAIR_RISING_EAST = java.util.Arrays.asList(
+        new double[] {0, 0, 0, 1, 0.5, 1}, new double[] {0.5, 0.5, 0, 1, 1, 1});
+
+    /**
+     * Ground to y 1, then three stairs rising east at x 3, 4, 5, then a landing from x 6. With
+     * {@code landingTop} 4 the top tread meets the landing; with 5 it ends a full block below it.
+     */
+    private static VoxelGrid stairFlight(int landingTop) {
+        VoxelGrid grid = new VoxelGrid(0, 0, 0, 9, 10, 2);
+        int[] quadrants = VoxelGrid.quadrantTopsOf(STAIR_RISING_EAST);
+        for (int x = 0; x <= 9; x++) {
+            int solidTo = x < 3 ? 1 : x <= 5 ? x - 1 : landingTop;
+            for (int z = 0; z <= 2; z++) {
+                for (int y = 0; y <= 10; y++) {
+                    grid.set(x, y, z, y <= solidTo ? VoxelGrid.SOLID : VoxelGrid.OPEN);
+                }
+                if (x >= 3 && x <= 5) {
+                    grid.setQuadrantTops(x, solidTo, z, quadrants);
+                }
+            }
+        }
+        return grid;
+    }
+
+    @Test
+    void aStairIsAHalfStepOnItsLowSideAndAFullOneOnItsHighSide() {
+        assertEquals(java.util.Arrays.toString(new int[] {8, 16, 8, 16}),
+            java.util.Arrays.toString(VoxelGrid.quadrantTopsOf(STAIR_RISING_EAST)));
+        // Upside down: level at the top, so it is a full block from every side.
+        int[] upsideDown = VoxelGrid.quadrantTopsOf(java.util.Arrays.asList(
+            new double[] {0, 0.5, 0, 1, 1, 1}, new double[] {0.5, 0, 0, 1, 0.5, 1}));
+        assertEquals(java.util.Arrays.toString(new int[] {16, 16, 16, 16}), java.util.Arrays.toString(upsideDown));
+    }
+
+    @Test
+    void aHalfBlockStepClimbsAStairFlightButNotATopTreadAFullBlockUnderTheLanding() {
+        List<int[]> seed = Collections.singletonList(new int[] {1, 2, 1});
+
+        VoxelGrid good = stairFlight(4);
+        BitSet walked = SpaceChecks.walk(good, seed, 2, 0.5D, true);
+        assertTrue(walked.get(good.index(3, 3, 1)), "the first stair is half a block up from the ground (#209)");
+        assertTrue(walked.get(good.index(7, 5, 1)), "and the landing is reached from the top tread");
+
+        VoxelGrid short1 = stairFlight(5);
+        BitSet stuck = SpaceChecks.walk(short1, seed, 2, 0.5D, true);
+        assertTrue(stuck.get(short1.index(5, 5, 1)), "the flight itself still climbs");
+        assertTrue(!stuck.get(short1.index(7, 6, 1)), "a top tread a full block under the landing needs a jump");
+
+        assertTrue(SpaceChecks.walk(short1, seed, 2, 1, true).get(short1.index(7, 6, 1)),
+            "a whole step of 1 counts cells as before, and climbs it");
+    }
+
+    @Test
+    void aStairWalkedDownFromItsHighSideIsAHalfStepToo() {
+        VoxelGrid grid = stairFlight(4);
+        BitSet down = SpaceChecks.walk(grid, Collections.singletonList(new int[] {8, 5, 1}), 2, 0.5D, true);
+        assertTrue(down.get(grid.index(1, 2, 1)), "from the landing back down to the ground");
+    }
+
     @Test
     void aCollisionTopIsRoundedUpToSixteenths() {
         assertEquals(8, VoxelGrid.topOf(Collections.singletonList(new double[] {0, 0, 0, 1, 0.5, 1})));

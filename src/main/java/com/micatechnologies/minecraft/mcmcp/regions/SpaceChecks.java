@@ -235,7 +235,7 @@ public final class SpaceChecks {
                         continue;
                     }
                     if (standable(grid, x, y, z, headroom, doorsOpen)
-                        && (!measured || Math.abs(grid.floor(x, y, z) - grid.floor(cell[0], cell[1], cell[2])) <= limit)
+                        && (!measured || stepFits(grid, cell[0], cell[1], cell[2], x, y, z, d[0], d[1], limit))
                         && !edgeBlocks(grid, cell[0], cell[1], cell[2], x, y, z, d[0], d[1], headroom)) {
                         seen.set(at);
                         queue.add(new int[] {x, y, z});
@@ -246,6 +246,29 @@ public final class SpaceChecks {
         }
         return seen;
     }
+
+    /**
+     * Whether the rise from one cell's floor to its neighbour's is within {@code limit} sixteenths
+     * somewhere along the edge between them: the quadrants either side of it, side by side. A stair
+     * is half a block on its low half and a full one on its high half (#209), so a flight climbs half a
+     * block at a time from its front, and a top tread a full block under the landing does not.
+     */
+    static boolean stepFits(VoxelGrid grid, int fromX, int fromY, int fromZ, int toX, int toY, int toZ,
+                            int dx, int dz, int limit) {
+        int[][] pairs = dx > 0 ? EAST_PAIRS : dx < 0 ? WEST_PAIRS : dz > 0 ? SOUTH_PAIRS : NORTH_PAIRS;
+        for (int[] pair : pairs) {
+            if (Math.abs(grid.floor(toX, toY, toZ, pair[1]) - grid.floor(fromX, fromY, fromZ, pair[0])) <= limit) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** {leaving quadrant, entering quadrant} for a step in each direction. */
+    private static final int[][] EAST_PAIRS = {{VoxelGrid.NE, VoxelGrid.NW}, {VoxelGrid.SE, VoxelGrid.SW}};
+    private static final int[][] WEST_PAIRS = {{VoxelGrid.NW, VoxelGrid.NE}, {VoxelGrid.SW, VoxelGrid.SE}};
+    private static final int[][] SOUTH_PAIRS = {{VoxelGrid.SW, VoxelGrid.NW}, {VoxelGrid.SE, VoxelGrid.NE}};
+    private static final int[][] NORTH_PAIRS = {{VoxelGrid.NW, VoxelGrid.SW}, {VoxelGrid.NE, VoxelGrid.SE}};
 
     /** A test for one cell of a grid. */
     public interface CellTest {

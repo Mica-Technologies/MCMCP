@@ -289,8 +289,8 @@ public final class ServerWatchTools {
                 + "hold: true keeps the watched chunks loaded for the watch's span, with no player near "
                 + "(see server_keep_loaded), shed under load only after every other hold, and gives them "
                 + "back when the watch ends. If one unloads anyway, the watch stops with stopReason "
-                + "'unloaded' at that tick. The timeline is in structuredContent; content carries a "
-                + "one-line summary.")
+                + "'unloaded' at that tick. The timeline is in structuredContent, and content leads with a "
+                + "one-line summary; on a protocol before 2025-06-18 the timeline follows it as JSON text.")
             .schema(JsonSchema.object()
                 .enumeration("op", "What to do. Default 'start'.", "start", "read", "stop", "list")
                 .integer("x", "start: X of one corner of the box.")

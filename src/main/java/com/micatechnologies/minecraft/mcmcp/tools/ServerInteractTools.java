@@ -97,7 +97,11 @@ public final class ServerInteractTools {
             schema = schema.integer("slot", "Hotbar slot 0-8 holding the item. Default the selected slot.", 0, 8);
         }
         schema = schema.property("container", com.micatechnologies.minecraft.mcmcp.json.Json.obj("type", "object"))
-            .bool("load", "Load the block's chunk for this call if it is not loaded.");
+            .bool("load", "Load the block's chunk for this call if it is not loaded.")
+            .integer("settleTicks", "After the click, keep the block's chunk loaded and ticking this many "
+                + "ticks, then read the block again into 'settled': a button's release, a repeater, a door "
+                + "that finishes on a later tick. Default 0 (report at once).", 0, MAX_SETTLE_TICKS)
+            .string(ServerPlayerLeaseTools.LEASE_TOKEN, ServerPlayerLeaseTools.LEASE_TOKEN_DESCRIPTION);
         McpRegistry.registerTool(McpTool.named(name)
             .title(title)
             .description(description + " 'container': {\"read\": true} lists the slots of a container the click "
@@ -147,8 +151,14 @@ public final class ServerInteractTools {
             return player.dimension;
         });
 
+        final int settleTicks = context.getBoundedInt("settleTicks", 0, 0, MAX_SETTLE_TICKS);
+        final long[] clickedAt = {0L};
+        // A settle holds the chunk even when it is loaded already: a button pressed in a chunk nothing
+        // holds, far from every player, stayed pressed (#206). Its release is a scheduled tick, and a tick
+        // that comes due while its chunk is unloaded is dropped by the game for good.
         return ServerChunkTools.withChunks(context, dimension,
-            Collections.singleton(ChunkKeys.ofBlock(pos.getX(), pos.getZ())), outcome -> {
+            Collections.singleton(ChunkKeys.ofBlock(pos.getX(), pos.getZ())),
+            context.getBoolean("load", false) || settleTicks > 0, outcome -> {
                 final UndoPoints.Recorder recorder = ServerUndoTools.start(context, true);
                 JsonObject json = context.onGameThread(() -> {
                     EntityPlayerMP player = fake ? fakeClicker(ServerWorldTools.requireWorld(dimension), pos, face)
@@ -266,14 +276,56 @@ public final class ServerInteractTools {
                     if (opened != before && opened != player.inventoryContainer) {
                         result.add("container", container(player, opened, containerAsk));
                     }
+                    clickedAt[0] = world.getTotalWorldTime();
                     return result;
                 });
                 if (recorder != null) {
                     ServerUndoTools.finish(context, recorder, withItem ? "server_use_item_on_block" : "server_activate_block",
                         dimension, null, null, json, null);
                 }
+                if (settleTicks > 0) {
+                    json.add("settled", settle(context, dimension, pos, face, clickedAt[0], settleTicks, json));
+                }
                 return ToolResult.structured(json);
             });
+    }
+
+    /** The longest a click's settle waits, in ticks: ten seconds. */
+    static final int MAX_SETTLE_TICKS = 200;
+
+    /**
+     * Waits until world tick {@code target}, the clicked chunk still held, and reads the block and its
+     * clicked neighbour again: what a button's release or a door's last step left (#206).
+     */
+    private static JsonObject settle(ToolContext context, int dimension, BlockPos pos, EnumFacing face, long clickTick,
+                                     int ticks, JsonObject clicked) throws Exception {
+        final long target = clickTick + ticks;
+        long started = System.currentTimeMillis();
+        long deadline = started + (MAX_SETTLE_TICKS / 20 + 20) * 1000L;
+        long now;
+        while (true) {
+            now = context.onGameThread(() -> ServerWorldTools.requireWorld(dimension).getTotalWorldTime());
+            if (now >= target || System.currentTimeMillis() > deadline) {
+                break;
+            }
+            context.awaitBudget(Math.min(250L, Math.max(50L, (target - now) * 50L)), "letting the block settle");
+        }
+        final long reachedTick = now;
+        return context.onGameThread(() -> {
+            WorldServer world = ServerWorldTools.requireWorld(dimension);
+            JsonObject settled = new JsonObject();
+            settled.addProperty("ticks", Math.max(0L, reachedTick - clickTick));
+            settled.addProperty("tick", reachedTick);
+            if (reachedTick < target) {
+                settled.addProperty("warning", "The server reached tick " + reachedTick + " of " + target
+                    + " before the wait ran out: it is running slowly.");
+            }
+            settled.add("after", GameJson.block(world, pos));
+            settled.add("besideAfter", GameJson.block(world, pos.offset(face)));
+            settled.addProperty("changedSinceClick", !settled.get("after").equals(clicked.get("after"))
+                || !settled.get("besideAfter").equals(clicked.get("besideAfter")));
+            return settled;
+        });
     }
 
     /**

@@ -582,6 +582,11 @@ knows it:
 - for a column not generated yet, the world's biome provider, which is what generation will use. These
   are counted as **predicted**. `predict: false` leaves them unknown instead.
 
+With an ID extender (JustEnoughIDs or RoughlyEnoughIDs, in every Alto pack), the biomes live in the
+extender's own int array, and the saved `Biomes` tag is an int array too. Both are read. Reading the
+vanilla byte array instead had every loaded chunk read as `jeid:error_biome` and every saved one as
+unknown.
+
 `sources` counts the samples from each. `format: "summary"` (default) lists each biome with its
 `count` and `share` of the known samples, most common first, for up to 65,536 samples. `format:
 "grid"` returns `grid.palette`, a flat `grid.indexes` array (rows along X from the lowest Z, `-1` for
@@ -661,7 +666,9 @@ only after every other hold, since it is small and ends on its own. If a watched
 anyway, the watch stops at that tick with `stopReason: "unloaded"`, rather than record void
 `(unloaded)` changes for the rest of its span.
 
-The timeline is in `structuredContent`; a client that reads only `content` gets a one-line summary.
+The timeline is in `structuredContent`, and `content` leads with a one-line summary. A session on a
+protocol older than 2025-06-18 never receives `structuredContent`, so it gets the timeline as JSON
+text after the summary. Every tool whose own text is a summary does the same.
 
 At most 8 watches are kept at once. A watch stops at 20,000 changes (`truncated: true`), keeping
 the start of the timeline. A finished watch can be read for 30 minutes.
@@ -962,7 +969,11 @@ short slices with ticks between them.
   footprint a block lives, without reading every cell.
 - `byY: true` adds each block's count per layer as `byY: [[y, count], ...]`, only the layers that
   have any: counts per floor.
-- Unloaded chunks are not counted and appear in the `chunks` block. `load: true` counts them.
+- Unloaded chunks are not counted and appear in the `chunks` block. `load: true` counts them. When
+  nothing was counted and some chunks were not loaded, a top-level `note` says so, because a bare 0
+  reads as "none here".
+- `filtersMatchingNoBlock` lists the `include` and `exclude` entries that no registered block
+  matches: a typo, or a namespace no mod in this game has.
 
 ```json
 {"cells": 1048576, "counted": 214, "types": 2, "blocks": [
@@ -1158,6 +1169,12 @@ one-block rise. `step: 0.5` measures each block's real collision height instead.
 up to half a block between floors is allowed, and rises of an eighth or less (a carpet, two snow
 layers) count as level. So a ramp of half slabs reaches its deck, while the same deck behind a
 full-block ledge is reported unreached. Use it to prove wheelchair routes, ramps and kerb cuts.
+
+Heights are measured per quarter of the block, across the edge being stepped over. An upright stair
+is half a block high on its low half and a full block on its high half, so `step: 0.5` climbs a
+correct flight from its front. A flight whose top tread ends a full block below the landing is
+reported unreached, because that last step needs a jump. A whole `step` passes both. Upside-down
+stairs and slabs are level, and read as before.
 
 A block that collides only along its cell's edges (a railing, a wall handrail, a ladder: every
 collision box within 0.3 of a side) leaves its cell open to stand in, and stops only the steps across
@@ -2144,7 +2161,7 @@ Main inventory, hotbar, armour and both hands. Empty slots are omitted and repor
 
 :material-alert: Destructive · requires `permissions.allowWorldEdits`
 
-`player`, `x`, `y`, `z` required; optional `yaw`, `pitch`, `fly`.
+`player`, `x`, `y`, `z` required; optional `yaw`, `pitch`, `fly`, `leaseToken`.
 
 Goes through the player's connection so the client actually moves. A bare `setPosition` desyncs the
 player and gets them rubber-banded back by the movement check.
@@ -2166,7 +2183,7 @@ different thing.
 
 #### `server_use_item_on_block`
 
-:material-alert: Destructive · `x`, `y`, `z`, `player` required · optional `face`, `hitX`/`hitY`/`hitZ`, `slot`, `sneak`, `container`, `load`
+:material-alert: Destructive · `x`, `y`, `z`, `player` required · optional `face`, `hitX`/`hitY`/`hitZ`, `slot`, `sneak`, `container`, `load`, `settleTicks`, `leaseToken`
 
 Uses the item in a hotbar slot on a block, as that player, **from any distance**. This is the click
 that a span-wire tool (anchor A, then anchor B), a track tool or a door placement needs. It runs
@@ -2190,7 +2207,7 @@ leaves an undo point for the clicked block and the one beside it.
 
 #### `server_use_item_on_blocks`
 
-:material-alert: Destructive · `player`, `uses` required · optional `item`, `slot`, `readBack`, `readBackKeys`, `stopOnError`, `load`
+:material-alert: Destructive · `player`, `uses` required · optional `item`, `slot`, `readBack`, `readBackKeys`, `stopOnError`, `load`, `leaseToken`
 
 Many uses of an item in one call, in order: planting a street's trees, or linking a run of
 signals. Each use is the same click as [`server_use_item_on_block`](#server_use_item_on_block).
@@ -2218,7 +2235,7 @@ use's `result` and `changed`. A use outside the build limit, spawn protection or
 
 #### `server_player_lease`
 
-`player` required · optional `op` (`acquire`, `release`, `status`), `purpose`, `slots`, `leaseSeconds`, `waitSeconds`, `force`
+`player` required · optional `op` (`acquire`, `release`, `status`), `purpose`, `slots`, `leaseSeconds`, `waitSeconds`, `force`, `leaseToken`
 
 Borrows a player that several agents share, for work spanning calls, such as linking devices with
 an item held in a hotbar slot. While one agent holds the lease, other agents are refused when they
@@ -2235,6 +2252,13 @@ A lease ends on `release`, after `leaseSeconds` (default 300) without the holder
 when the player logs out, or when their companion access ends. `force` ends another agent's lease
 and restores its slots; use it only for a lease you are sure is abandoned. Through the companion, a
 player can lease only themselves.
+
+**Helper scripts.** `acquire` returns a `leaseToken`. A script the agent starts reaches the server
+on a connection of its own, so the server sees it as another caller and refuses it. To act under the
+agent's lease, the script passes `leaseToken` to the four tools above, and to `release` to end the
+lease. A token works only from the holder's own scope: the same companion player, or the direct
+endpoint, whose callers all hold its auth token. A token that reaches another player's agent does
+nothing.
 
 #### `server_activate_block`
 
@@ -2259,6 +2283,15 @@ open container changed; a button's press often changes neither. `server_use_item
 same `why` for an item use that came back `pass` or `fail`.
 
 [`server_use_item_on_block`](#server_use_item_on_block) refuses an empty slot and points here.
+
+**What happens a tick later.** `settleTicks` (up to 200; this tool and `server_use_item_on_block`)
+keeps the block's chunk held, and so ticking, for that many ticks after the click. It then reads the
+block and its clicked neighbour again into `settled` (`after`, `besideAfter`, `changedSinceClick`).
+Use it for a button's release, a repeater, or a door that finishes on a later tick. The chunk matters
+far from every player. A call with `load: true` gives the chunk back when it returns, and the game
+drops a scheduled tick that comes due while its chunk is unloaded. A button pressed there stayed
+pressed, and holding the chunk afterwards could not bring the tick back. A chunk already held by
+`server_keep_loaded` ticks normally.
 
 **With nobody online.** Omit `player` and the click is made by MCMCP's own Forge fake player,
 `[MCMCP]`, standing a block out from the clicked face in `dimension` (default 0). A headless
@@ -3977,6 +4010,33 @@ for the chunks to unload, and come back, which took about 45 seconds each time.
 It refreshes only what the client is sent. The server never unloads the chunk, so server-side state
 that a mod rebuilds on chunk unload stays as it was. Multiplayer only; a singleplayer world is left
 and loaded again with `client_world_leave` and `client_world_load`.
+
+#### `client_reload_chunks`
+
+Optional `radius` (1–6 chunks each side, default 2), `force` (default false), `resend` (default
+true), `waitSeconds` (0–30, default 10)
+
+Checks whether the chunks around the player arrived and were drawn, and fixes what didn't. This is
+F3+A for an agent, with a look first. After a long teleport the world around the player sometimes
+stays empty until somebody presses F3+A. There are two causes, and the check tells them apart:
+
+- **`chunksAbsent`**: a chunk never arrived. With `resend` the tool asks the server, through the
+  companion, to send the chunks again (`server_refresh_chunks`). Without companion access,
+  `client_rejoin` makes the server resend everything.
+- **`sectionsUnbuilt`**: a chunk arrived, but the renderer never built its mesh. These are sections
+  that hold blocks, aren't waiting to be built, and have an empty mesh. When there are enough of
+  them, the tool rebuilds every mesh with `RenderGlobal.loadRenderers()`, the call F3+A makes.
+  `force` rebuilds whatever the check finds.
+
+`sectionsQueued` counts sections marked to be built. Out-of-view sections stay queued until they
+come into view, so a non-zero count is normal. The result has the check `before`, the `actions`
+taken, the check `after` them, and `lastTeleportCheck`.
+
+The client also runs this check by itself 6 and 16 seconds after any jump of 64 blocks or more,
+whether MCMCP's teleport or anyone else's. It logs what it found, and heals it while
+[`display.healChunksAfterTeleport`](configuration.md) is on (the default). A `client_screenshot`
+whose meshes have not settled halfway through its wait also rebuilds them once, and says
+`rebuiltMeshes: true`.
 
 !!! warning "Loading returns before the world is ready"
 

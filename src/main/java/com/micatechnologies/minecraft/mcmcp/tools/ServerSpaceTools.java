@@ -411,11 +411,12 @@ public final class ServerSpaceTools {
                         }
                         for (int y = grid.minY; y <= grid.maxY; y++) {
                             pos.setPos(x[0], y, z);
-                            int[] top = {16};
+                            int[] top = {16, 16, 16, 16, 16};
                             byte kind = classify(world, pos, world.getBlockState(pos), passable, top);
                             grid.set(x[0], y, z, kind);
                             if (kind == VoxelGrid.SOLID) {
                                 grid.setTop(x[0], y, z, top[0]);
+                                grid.setQuadrantTops(x[0], y, z, new int[] {top[1], top[2], top[3], top[4]});
                             }
                         }
                     }
@@ -429,8 +430,10 @@ public final class ServerSpaceTools {
     }
 
     /**
-     * @param top set to the top of the block's collision in sixteenths when it is lower than a full
-     *            block (a slab, a carpet), for a fractional walk step; left alone otherwise
+     * @param top [0] set to the top of the block's collision in sixteenths when it is lower than a full
+     *            block (a slab, a carpet), for a fractional walk step; left alone otherwise. When it has
+     *            five entries, [1..4] get the top per quadrant (NW, NE, SW, SE), so a stair's low half
+     *            counts as half a step (#209).
      */
     static byte classify(WorldServer world, BlockPos pos, IBlockState state, Set<String> passable, int[] top) {
         Block block = state.getBlock();
@@ -466,6 +469,10 @@ public final class ServerSpaceTools {
                     Math.min(1.0D, box.maxY - pos.getY()), Math.min(1.0D, box.maxZ - pos.getZ())});
             }
             top[0] = VoxelGrid.topOf(inCell);
+            if (top.length >= 5) {
+                // Per quadrant too: a stair is a half step on its low side (#209).
+                System.arraycopy(VoxelGrid.quadrantTopsOf(inCell), 0, top, 1, 4);
+            }
             return VoxelGrid.fromCollisionBoxes(inCell);
         }
         catch (RuntimeException e) {

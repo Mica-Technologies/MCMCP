@@ -72,6 +72,34 @@ class CompanionPolicyTest {
     }
 
     @Test
+    void aReadOfOnePlaceThatLoadsNothingIsAProbeAndABoxOrALoadIsNot() {
+        JsonObject none = new JsonObject();
+        assertTrue(CompanionPolicy.isProbeCall("server_get_block", none));
+        assertTrue(CompanionPolicy.isProbeCall("server_player_state", null));
+        assertFalse(CompanionPolicy.isProbeCall("server_get_block",
+            com.micatechnologies.minecraft.mcmcp.json.Json.obj("load", new com.google.gson.JsonPrimitive(true))),
+            "a load is real work");
+        assertFalse(CompanionPolicy.isProbeCall("server_get_blocks", none));
+        assertFalse(CompanionPolicy.isProbeCall(null, none));
+
+        JsonObject two = com.micatechnologies.minecraft.mcmcp.json.Json.parse(
+            "{\"positions\":[{\"x\":1,\"y\":2,\"z\":3},{\"x\":1,\"y\":3,\"z\":3}]}").getAsJsonObject();
+        assertTrue(CompanionPolicy.isProbeCall("server_get_tile_entities", two));
+        assertFalse(CompanionPolicy.isProbeCall("server_get_tile_entities",
+            com.micatechnologies.minecraft.mcmcp.json.Json.parse("{\"x\":0,\"z\":0,\"toX\":500,\"toZ\":500}")
+                .getAsJsonObject()), "a box scan is not a probe");
+        StringBuilder many = new StringBuilder("{\"positions\":[");
+        for (int i = 0; i <= CompanionPolicy.MAX_PROBE_POSITIONS; i++) {
+            many.append(i == 0 ? "" : ",").append("{\"x\":").append(i).append(",\"y\":0,\"z\":0}");
+        }
+        assertFalse(CompanionPolicy.isProbeCall("server_get_tile_entities",
+            com.micatechnologies.minecraft.mcmcp.json.Json.parse(many.append("]}").toString()).getAsJsonObject()));
+        for (String name : new String[] {"server_get_block", "server_get_tile_entities", "server_player_state"}) {
+            assertNotNull(CompanionPolicy.classOf(name), name + " must still need a class");
+        }
+    }
+
+    @Test
     void theServerLogNeedsItsOwnNodeAndNoOtherClassReachesIt() {
         McpSession logs = session("logs");
         McpSession everythingElse = session("read", "write", "command", "load", "use", "profile", "others",

@@ -113,7 +113,8 @@ public final class ServerAreaTools {
                 + "Returns counts per block id, most first, with a few sample positions of each; 'extents' adds "
                 + "where each lives (min and max corner), 'byY' its count per layer. Air is left out unless "
                 + "includeAir. Unloaded chunks are listed and not counted; pass load: true to count them (a box over your hold cap is "
-                + "loaded and counted a piece at a time).")
+                + "loaded and counted a piece at a time). A filter no registered block matches is listed in "
+                + "filtersMatchingNoBlock.")
             .schema(boxSchema(JsonSchema.object())
                 .array("include", "Only count these blocks.", Json.obj("type", "string"))
                 .array("exclude", "Never count these blocks, e.g. the natural ones.", Json.obj("type", "string"))
@@ -221,8 +222,41 @@ public final class ServerAreaTools {
             }
             json.add("blocks", blocks);
             json.add("chunks", chunksBlock);
+            // A bare 0 read as "none here" when it meant "not looked at" or "that filter names nothing"
+            // (#208): say which.
+            JsonArray unmatched = filtersMatchingNoBlock(include);
+            unmatched.addAll(filtersMatchingNoBlock(exclude));
+            if (unmatched.size() > 0) {
+                json.add("filtersMatchingNoBlock", unmatched);
+            }
+            int unloaded = chunksBlock == null ? 0 : Json.getInt(chunksBlock, "unloaded", 0);
+            if (counted[0] == 0 && unloaded > 0) {
+                json.addProperty("note", "Nothing counted, but " + unloaded + " chunk(s) of the box are not "
+                    + "loaded and were not read. Pass load: true to count them.");
+            }
             return ToolResult.structured(json);
         });
+    }
+
+    /**
+     * The filter entries no registered block can match: a typo, or a namespace no mod here has. An id
+     * filter is checked as given; a namespace or a pattern against every block id.
+     */
+    static JsonArray filtersMatchingNoBlock(List<String> filters) {
+        JsonArray unmatched = new JsonArray();
+        for (String filter : filters) {
+            boolean found = false;
+            for (ResourceLocation id : Block.REGISTRY.getKeys()) {
+                if (NbtProjection.matches(id.toString(), java.util.Collections.singletonList(filter))) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                unmatched.add(filter);
+            }
+        }
+        return unmatched;
     }
 
     /** One block's tally: its count, and its extents and layers when they were asked for (#123). */

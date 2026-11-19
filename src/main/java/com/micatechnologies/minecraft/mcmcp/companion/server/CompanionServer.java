@@ -491,6 +491,18 @@ public final class CompanionServer {
         }
         boolean fresh = peer.existingSession(key) == null;
         final McpSession session = peer.session(key, McmcpConfig.getCompanionMaxSessionsPerPlayer());
+        if (session == null) {
+            // Every one of the player's sessions has a call running: closing one would cancel it (#211).
+            JsonObject busy = new JsonObject();
+            busy.addProperty("reason", "limit");
+            busy.addProperty("limit", "companion.maxSessionsPerPlayer");
+            busy.addProperty("retryAfterMs", 1000);
+            refuse(peer, key, message, "All " + McmcpConfig.getCompanionMaxSessionsPerPlayer() + " of your MCP "
+                + "sessions on this server (companion.maxSessionsPerPlayer) have a call running, every agent and "
+                + "script of yours counted together, so none was closed to open this one. Nothing was done; "
+                + "retry after busy.retryAfterMs, or reuse one session per script.", Json.obj("busy", busy));
+            return;
+        }
         session.touch(System.currentTimeMillis());
         if (fresh && !McpProtocol.METHOD_INITIALIZE.equals(JsonRpc.getMethod(message))) {
             // A client session this server evicted (past maxSessionsPerPlayer) and the client still
@@ -528,9 +540,13 @@ public final class CompanionServer {
                 return;
             }
         }
+        // A probe of one block or one number has an allowance of its own too, so a monitoring loop is
+        // not starved by its player's long calls (#210).
+        final boolean probe = toolCall && CompanionPolicy.isProbeCall(toolName,
+            Json.getObject(Json.getObjectOrEmpty(message, "params"), "arguments"));
         final java.util.concurrent.atomic.AtomicInteger running = wait ? peer.runningWaits
-            : toolCall && CompanionPolicy.isControlCall(toolName)
-            ? peer.runningControlCalls : peer.runningCalls;
+            : toolCall && CompanionPolicy.isControlCall(toolName) ? peer.runningControlCalls
+            : probe ? peer.runningProbeCalls : peer.runningCalls;
         if (toolCall && !wait && running.incrementAndGet() > McmcpConfig.getCompanionMaxConcurrentCalls()) {
             running.decrementAndGet();
             // Said as busy with a wait, like every other refusal that passes on its own: as bare text

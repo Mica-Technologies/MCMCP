@@ -37,6 +37,35 @@ class ToolResultTest {
     }
 
     @Test
+    void a_client_too_old_for_structured_content_still_gets_the_whole_answer_after_a_hand_written_summary() {
+        // server_watch_blocks wrote one summary line and put its timeline only in structuredContent,
+        // which a 2025-03-26 session never receives (#210).
+        JsonObject timeline = new JsonObject();
+        timeline.addProperty("changeCount", 52);
+
+        JsonObject old = ToolResult.text("52 change(s) across 20 position(s)").withStructured(timeline)
+            .toJson("2025-03-26");
+
+        JsonArray blocks = old.getAsJsonArray("content");
+        assertEquals(2, blocks.size());
+        assertEquals("52 change(s) across 20 position(s)", textOf(old));
+        assertEquals("{\"changeCount\":52}", blocks.get(1).getAsJsonObject().get("text").getAsString());
+        assertFalse(old.has("structuredContent"));
+
+        JsonObject latest = ToolResult.text("52 change(s)").withStructured(timeline).toJson(LATEST);
+        assertEquals(1, latest.getAsJsonArray("content").size(), "a current client reads structuredContent");
+        assertTrue(latest.has("structuredContent"));
+    }
+
+    @Test
+    void a_result_whose_text_is_already_its_json_is_not_repeated_for_an_old_client() {
+        JsonObject data = new JsonObject();
+        data.addProperty("n", 1);
+
+        assertEquals(1, ToolResult.structured(data).toJson("2025-03-26").getAsJsonArray("content").size());
+    }
+
+    @Test
     void a_structured_result_still_carries_the_machine_readable_copy() {
         // Compacting the text must not be mistaken for dropping structuredContent: a client on a
         // protocol that supports it may be reading that instead of the prose.

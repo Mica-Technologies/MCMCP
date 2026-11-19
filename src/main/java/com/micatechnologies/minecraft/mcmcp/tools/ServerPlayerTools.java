@@ -245,6 +245,7 @@ public final class ServerPlayerTools {
                 .bool("fly", "Start flying, so the player stays at y instead of falling. true "
                     + "needs a game mode that allows flight; false lands them. Defaults to "
                     + "unchanged.")
+                .string(ServerPlayerLeaseTools.LEASE_TOKEN, ServerPlayerLeaseTools.LEASE_TOKEN_DESCRIPTION)
                 .required("player", "x", "y", "z")
                 .build())
             .serverOnly()

@@ -40,6 +40,9 @@ final class CompanionPeer {
     /** Control calls running now ({@code CompanionPolicy.isControlCall}), against the same number. */
     final AtomicInteger runningControlCalls = new AtomicInteger();
 
+    /** Probes running now ({@code CompanionPolicy.isProbeCall}), against the same number. */
+    final AtomicInteger runningProbeCalls = new AtomicInteger();
+
     /** Event waits open now ({@code CompanionPolicy.isWaitCall}), against {@code MAX_WAITS_PER_PLAYER}. */
     final AtomicInteger runningWaits = new AtomicInteger();
 
@@ -91,17 +94,38 @@ final class CompanionPeer {
     }
 
     /**
-     * The session for a client key, created on first use. Opening one past {@code max} closes the
-     * oldest, which cancels anything it had running.
+     * The session for a client key, created on first use, or null when there is no room for a new one.
+     *
+     * <p>Opening one past {@code max} closes the session idle longest, and never one with a call
+     * running: closing the oldest cancelled whatever it was doing (#211). Several agents and their
+     * scripts each open a session on one player, and the oldest was usually the orchestrator's,
+     * mid-call, so its calls failed at random with "Session closed" or "cancelled while waiting for
+     * chunks". When every session has a call running, nothing is closed and the caller is told to
+     * retry. A client still using a closed session gets a new one on its next message.
      */
+    @Nullable
     synchronized McpSession session(String key, int max) {
         McpSession session = sessions.get(key);
         if (session != null) {
             return session;
         }
         while (sessions.size() >= max) {
-            String oldest = sessions.keySet().iterator().next();
-            sessions.remove(oldest).close();
+            String idlest = null;
+            long idleSince = Long.MAX_VALUE;
+            for (Map.Entry<String, McpSession> entry : sessions.entrySet()) {
+                McpSession candidate = entry.getValue();
+                if (!candidate.hasInflightRequests() && candidate.getLastActivityMillis() < idleSince) {
+                    idlest = entry.getKey();
+                    idleSince = candidate.getLastActivityMillis();
+                }
+            }
+            if (idlest == null) {
+                return null;
+            }
+            sessions.remove(idlest).close();
+            com.micatechnologies.minecraft.mcmcp.Mcmcp.LOGGER.info("MCMCP companion: closed " + playerName
+                + "'s session " + idlest + ", idle " + Math.max(0L, (System.currentTimeMillis() - idleSince) / 1000L)
+                + " s, to open a new one (companion.maxSessionsPerPlayer " + max + ")");
         }
         session = new McpSession(playerId + "/" + key, System.currentTimeMillis());
         session.setPrincipal(principal);

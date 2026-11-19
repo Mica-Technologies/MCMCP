@@ -28,6 +28,43 @@ class PlayerLeasesTest {
     }
 
     @Test
+    void aHelperScriptOfTheSamePlayerActsUnderTheLeaseWithItsToken() {
+        PlayerLeases leases = new PlayerLeases();
+        PlayerLeases.Lease lease = leases.acquire("MicaAlex", "player:u1~agent:c4", "agent c4", "alarm test",
+            NONE, MINUTE, 0L).granted;
+        assertNotNull(lease);
+        assertEquals(32, lease.token.length());
+        String script = "player:u1~session:u1/s9";
+
+        assertNotNull(leases.refusalFor("MicaAlex", script, null, 1_000L), "without the token it is another caller");
+        assertNotNull(leases.refusalFor("MicaAlex", script, "not-the-token", 1_000L));
+        assertNull(leases.refusalFor("MicaAlex", script, lease.token, 1_000L), "with it, it is the holder");
+        assertTrue(leases.holds("MicaAlex", script, lease.token, 1_000L));
+        assertNotNull(leases.release("MicaAlex", script, lease.token, false), "and it may end the lease");
+    }
+
+    @Test
+    void aLeaseTokenBuysNothingOnAnotherPlayersConnection() {
+        PlayerLeases leases = new PlayerLeases();
+        PlayerLeases.Lease lease = leases.acquire("MicaAlex", "player:u1~agent:c4", "agent c4", "", NONE, MINUTE,
+            0L).granted;
+
+        assertNotNull(leases.refusalFor("MicaAlex", "player:u2~agent:x", lease.token, 1_000L),
+            "access comes from the connection, not from knowing the token");
+        assertNotNull(leases.refusalFor("MicaAlex", "endpoint/session:s1", lease.token, 1_000L));
+        assertNull(leases.release("MicaAlex", "player:u2~agent:x", lease.token, false));
+    }
+
+    @Test
+    void directEndpointCallersShareOneTokenScope() {
+        PlayerLeases leases = new PlayerLeases();
+        PlayerLeases.Lease lease = leases.acquire("Builder", "endpoint/session:a", "a", "", NONE, MINUTE, 0L).granted;
+
+        assertNull(leases.refusalFor("Builder", "endpoint/session:b", lease.token, 1_000L));
+        assertNotNull(leases.refusalFor("Builder", "endpoint/session:b", null, 1_000L));
+    }
+
+    @Test
     void waitersAreGrantedInTheOrderTheyFirstAsked() {
         PlayerLeases leases = new PlayerLeases();
         leases.acquire("Builder", "a", "a", "", NONE, MINUTE, 0L);

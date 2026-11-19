@@ -1,7 +1,9 @@
 package com.micatechnologies.minecraft.mcmcp.companion;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.mcp.CallFilter;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.Principal;
@@ -117,6 +119,40 @@ public final class CompanionPolicy implements CallFilter {
     /** Whether a tool's calls are counted under the control allowance, not with the working calls. */
     public static boolean isControlCall(@Nullable String toolName) {
         return toolName != null && CONTROL_CALLS.contains(toolName);
+    }
+
+    /**
+     * Reads of one place or one number that load nothing: a block, a few tile entities by position, a
+     * player's state, the tick rate, a job's status. They are counted apart, with an allowance of the
+     * same size, so a monitoring loop polling one signal stays responsive while a player's working
+     * calls fill {@code companion.maxConcurrentCalls} (#210): with several agents busy, a poll of one
+     * tile entity got a sample every 12 s, each refusal costing a retry sleep.
+     */
+    static final Set<String> PROBE_CALLS = Collections.unmodifiableSet(new java.util.HashSet<>(
+        java.util.Arrays.asList("server_get_block", "server_get_tile_entities", "server_player_state",
+            "server_tick_stats", "server_job_status", "server_job_list", "server_list_players",
+            "mcmcp_endpoint_info")));
+
+    /** The most exact positions a {@code server_get_tile_entities} probe may name. */
+    public static final int MAX_PROBE_POSITIONS = 4;
+
+    /**
+     * Whether a call is a probe, counted under the probe allowance: a {@link #PROBE_CALLS} tool that
+     * loads no chunk, and for {@code server_get_tile_entities} only a read of at most
+     * {@link #MAX_PROBE_POSITIONS} exact positions, never a box.
+     */
+    public static boolean isProbeCall(@Nullable String toolName, @Nullable JsonObject arguments) {
+        if (toolName == null || !PROBE_CALLS.contains(toolName)) {
+            return false;
+        }
+        if (arguments != null && Json.getBoolean(arguments, "load", false)) {
+            return false;
+        }
+        if ("server_get_tile_entities".equals(toolName)) {
+            JsonArray positions = arguments == null ? null : Json.getArray(arguments, "positions");
+            return positions != null && positions.size() > 0 && positions.size() <= MAX_PROBE_POSITIONS;
+        }
+        return true;
     }
 
     /**

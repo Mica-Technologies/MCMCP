@@ -53,7 +53,9 @@ public final class ServerPlayerLeaseTools {
                 + "of them are refused with who holds it. 'slots' (0-8 hotbar, 9-35 inventory, 40 offhand) are "
                 + "recorded and put back when the lease ends, so the player's own items survive the borrowing. "
                 + "op 'acquire' with waitSeconds queues you, first come first served; using the player renews "
-                + "the lease. It ends on 'release', after leaseSeconds unused, or when the player leaves.")
+                + "the lease. It ends on 'release', after leaseSeconds unused, or when the player leaves. "
+                + "acquire returns a leaseToken: a script you start, on its own connection as the same player "
+                + "or endpoint, passes it as leaseToken to those tools (and to release) to act under your lease.")
             .schema(JsonSchema.object()
                 .enumeration("op", "acquire (default), release, or status.", "acquire", "release", "status")
                 .string("player", "Username of the player to lease.")
@@ -65,6 +67,7 @@ public final class ServerPlayerLeaseTools {
                     + "Default 0.", 0, MAX_WAIT_SECONDS)
                 .bool("force", "acquire, release: end another agent's lease (its slots are restored first). Only "
                     + "for a lease you are sure is abandoned.")
+                .string(LEASE_TOKEN, "release: end the lease a token names, from another connection of its holder.")
                 .required("player")
                 .build())
             .serverOnly()
@@ -102,13 +105,26 @@ public final class ServerPlayerLeaseTools {
             return null;
         }
         long now = System.currentTimeMillis();
-        String busy = PlayerLeases.get().refusalFor(player, context.callerKey(), now);
+        String busy = PlayerLeases.get().refusalFor(player, context.callerKey(), leaseToken(context), now);
         if (busy == null) {
             return null;
         }
         JsonObject structured = new JsonObject();
         structured.add("busy", PlayerLeases.get().busy(player, now));
         return ToolResult.error(busy).withStructured(structured);
+    }
+
+    /** The argument a tool acting as a leased player takes, so a helper script can use its agent's lease (#212). */
+    public static final String LEASE_TOKEN = "leaseToken";
+
+    /** The description of {@link #LEASE_TOKEN}, the same on every tool that takes it. */
+    public static final String LEASE_TOKEN_DESCRIPTION = "The leaseToken server_player_lease acquire returned, "
+        + "to act under that lease from another connection of the same agent, such as a script it started.";
+
+    @Nullable
+    static String leaseToken(ToolContext context) {
+        String token = context.getString(LEASE_TOKEN, null);
+        return token == null || token.trim().isEmpty() ? null : token.trim();
     }
 
     private static ToolResult lease(final ToolContext context) throws Exception {
@@ -125,7 +141,7 @@ public final class ServerPlayerLeaseTools {
         if ("release".equals(op)) {
             return ToolResult.structured(context.onGameThread(() -> {
                 sweep(ServerThreadBridge.server());
-                PlayerLeases.Lease ended = PlayerLeases.get().release(player, key, force);
+                PlayerLeases.Lease ended = PlayerLeases.get().release(player, key, leaseToken(context), force);
                 JsonObject json = new JsonObject();
                 json.addProperty("released", ended != null);
                 if (ended != null) {
@@ -181,6 +197,8 @@ public final class ServerPlayerLeaseTools {
                 json.addProperty("player", ask.granted.player);
                 json.addProperty("secondsLeft", ask.granted.secondsLeft(now));
                 json.addProperty("restoresSlots", ask.granted.slots.size());
+                // For the agent's own helper scripts, which reach the server on connections of their own.
+                json.addProperty(LEASE_TOKEN, ask.granted.token);
                 return ToolResult.structured(json);
             }
             if (now >= deadline) {

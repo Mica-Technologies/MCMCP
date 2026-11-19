@@ -105,6 +105,7 @@ public final class ServerItemUseBatch {
                     Json.obj("type", "string"))
                 .bool("stopOnError", "Stop at the first use that fails or is refused. Default false.")
                 .bool("load", "Load the chunks the uses need for this call.")
+                .string(ServerPlayerLeaseTools.LEASE_TOKEN, ServerPlayerLeaseTools.LEASE_TOKEN_DESCRIPTION)
                 .required("player", "uses")
                 .build())
             .serverOnly()

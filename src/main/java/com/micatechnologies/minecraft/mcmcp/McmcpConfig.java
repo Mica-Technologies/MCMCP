@@ -103,6 +103,7 @@ public class McmcpConfig {
     private static List<String> notPairedBlocks = Collections.emptyList();
     private static List<String> pairedBlocks = Collections.emptyList();
     private static boolean showActivityBanner = true;
+    private static boolean healChunksAfterTeleport = true;
     private static boolean undoPointsEnabled = true;
     private static boolean undoSingleBlockWrites = false;
     private static int maxUndoPoints = 50;
@@ -324,6 +325,11 @@ public class McmcpConfig {
                 + "tool it is running and how far through it is, and its current task when it keeps a "
                 + "task list in the orchestrator. It fades a few seconds after the work stops, hides "
                 + "with F1, and is left out of client_screenshot captures. Takes effect at once.");
+        healChunksAfterTeleport = configuration.getBoolean("healChunksAfterTeleport", CATEGORY_DISPLAY, true,
+            "After the player is moved a long way at once (a teleport), check a few seconds later that the "
+                + "chunks around them arrived and were drawn. Sections the renderer never built are "
+                + "rebuilt, as F3+A does; chunks that never arrived are asked of the server again through "
+                + "the companion. Each check is logged. Takes effect at once.");
 
         // Undo points
         undoPointsEnabled = configuration.getBoolean("enableUndoPoints", CATEGORY_UNDO, true,
@@ -380,15 +386,17 @@ public class McmcpConfig {
         companionMaxQueuedMb = configuration.getInt("maxQueuedMB", CATEGORY_COMPANION, 32, 1, 1024,
             "Most data waiting to be sent to one player's companion. A reply that would pass it fails "
                 + "with a tool error instead of growing the queue.");
-        companionMaxSessionsPerPlayer = configuration.getInt("maxSessionsPerPlayer", CATEGORY_COMPANION, 4,
+        companionMaxSessionsPerPlayer = configuration.getInt("maxSessionsPerPlayer", CATEGORY_COMPANION, 8,
             1, 16,
-            "MCP sessions one player's client may hold open through the companion at once. The oldest "
-                + "is closed to make room.");
+            "MCP sessions one player's client may hold open through the companion at once. The one idle "
+                + "longest is closed to make room, never one with a call running; when all have one, the "
+                + "new session is refused until one finishes.");
 
         companionMaxConcurrentCalls = configuration.getInt("maxConcurrentCalls", CATEGORY_COMPANION, 4, 1, 16,
             "Tool calls one player may have running through the companion at once, all their agents "
                 + "together. A call past it is refused with a tool error until one finishes. Teleports, "
-                + "leases, releases and stops are counted apart, up to the same number.");
+                + "leases, releases and stops are counted apart, up to the same number, and so are "
+                + "single-position reads that load nothing (a block, a few tile entities, a player's state).");
         companionNotifyOps = configuration.getBoolean("notifyOps", CATEGORY_COMPANION, true,
             "Tell online operators in chat when a player's agent changes something through the companion "
                 + "(a write, a command): at most one grey line per player every ten seconds. Every such call "
@@ -832,6 +840,10 @@ public class McmcpConfig {
 
     public static boolean isShowActivityBanner() {
         return showActivityBanner;
+    }
+
+    public static boolean isHealChunksAfterTeleport() {
+        return healChunksAfterTeleport;
     }
 
     public static boolean isAllowLogAccess() {

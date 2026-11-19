@@ -336,6 +336,17 @@ seconds and fades.
 It hides with F1, and `client_screenshot` leaves it out: a screenshot waits one frame for the line
 to clear, but only when the line was on screen. Set this `false` to never show it.
 
+### `healChunksAfterTeleport`
+
+Default `true` · read live
+
+After the player moves 64 blocks or more at once (a teleport, MCMCP's or anyone else's), the client
+checks the chunks around them 6 and 16 seconds later. Sections the renderer never built are rebuilt,
+as F3+A does. Chunks that never arrived are asked of the server again through the companion. Each
+check that finds something wrong is logged at INFO with its counts, and
+[`client_reload_chunks`](tools.md#client_reload_chunks) reports the last one. Set this `false` to
+keep the checks and log lines but leave the fixing to that tool.
+
 ## `undo`
 
 ### `enableUndoPoints`
@@ -425,6 +436,10 @@ naming this setting.
 Tool calls one player may have running at once, all their agents together. One more is refused
 with a tool error carrying `busy.retryAfterMs` until one of them finishes. Teleports, leases,
 releases, the emergency stop and a job's cancel or pause are counted apart, up to the same number.
+So are probes: `server_get_block`, `server_player_state`, `server_tick_stats`, `server_job_status`,
+`server_job_list`, `server_list_players`, `mcmcp_endpoint_info`, and `server_get_tile_entities` on
+at most four exact `positions`, none of them with `load: true`. A loop polling one signal therefore
+keeps answering while long calls fill the cap.
 
 ### `notifyOps`
 
@@ -446,10 +461,13 @@ answering agents in game.
 
 ### `maxSessionsPerPlayer`
 
-`integer` 1–16 · default `4`
+`integer` 1–16 · default `8` (`4` before 2026.11.18; a config file written earlier keeps its value)
 
-MCP sessions one player's client may keep open through the companion. The oldest is closed to make
-room.
+MCP sessions one player's client may keep open through the companion, every agent and script of
+theirs counted together. To make room, the session idle longest is closed, never one with a call
+running. When every session has a call running, the new one is refused with `busy.retryAfterMs`
+and nothing is closed. Closing the oldest session regardless used to cancel its calls ("Session
+closed").
 
 ### Region reads and change tracking (`limits`)
 
@@ -840,6 +858,7 @@ orchestrator {
 }
 
 display {
+    B:healChunksAfterTeleport=true
     B:showActivityBanner=true
 }
 

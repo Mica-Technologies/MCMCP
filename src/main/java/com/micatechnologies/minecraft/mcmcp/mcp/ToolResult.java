@@ -34,6 +34,9 @@ public final class ToolResult {
     @Nullable
     private JsonObject structuredContent;
 
+    /** Whether a text block already carries {@link #structuredContent} in full, as {@link #structured} writes it. */
+    private boolean structuredInText;
+
     private ToolResult(boolean isError) {
         this.isError = isError;
     }
@@ -80,6 +83,7 @@ public final class ToolResult {
         ToolResult result = ok();
         result.structuredContent = data;
         result.withText(Json.write(data));
+        result.structuredInText = true;
         return result;
     }
 
@@ -160,6 +164,13 @@ public final class ToolResult {
         result.addProperty("isError", isError);
         if (structuredContent != null && McpProtocol.supportsToolStructuredContent(protocolVersion)) {
             result.add("structuredContent", structuredContent);
+        }
+        else if (structuredContent != null && !structuredInText) {
+            // A client on an older protocol never sees structuredContent, so a result whose text is a
+            // one-line summary of it reached that client as the summary alone: server_watch_blocks'
+            // timeline (#210), and every other tool that writes its own text. The whole answer goes in
+            // as text, after the summary.
+            blocks.add(McpContent.text(Json.write(structuredContent)));
         }
         return result;
     }

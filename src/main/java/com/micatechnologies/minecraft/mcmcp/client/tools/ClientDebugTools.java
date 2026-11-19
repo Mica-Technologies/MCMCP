@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.McmcpConstants;
+import com.micatechnologies.minecraft.mcmcp.client.ChunkRenderHealth;
 import com.micatechnologies.minecraft.mcmcp.client.ClientActivityBanner;
 import com.micatechnologies.minecraft.mcmcp.client.ClientCamera;
 import com.micatechnologies.minecraft.mcmcp.client.TileEntityCoverage;
@@ -1097,6 +1098,7 @@ public final class ClientDebugTools {
                                           final double[] camera) throws Exception {
         long deadline = System.currentTimeMillis() + settleMillis;
         boolean settled = false;
+        boolean rebuilt = false;
         int missing = 0;
         int quietPolls = 0;
         while (true) {
@@ -1127,6 +1129,23 @@ public final class ClientDebugTools {
             missing = state[0];
             quietPolls = missing == 0 && state[1] == 1 ? quietPolls + 1 : 0;
             settled = quietPolls >= 2;
+            if (!settled && missing == 0 && !rebuilt && System.currentTimeMillis() >= deadline - settleMillis / 2) {
+                // The chunks are here and half the wait has gone: if sections round the player were never
+                // built, the renderer will not build them on its own, and the frame would be void (#207).
+                rebuilt = context.onGameThread(() -> {
+                    Minecraft mc = Minecraft.getMinecraft();
+                    if (ChunkRenderHealth.check(mc, ChunkRenderHealth.Report.DEFAULT_RADIUS).needsRebuild()) {
+                        ChunkRenderHealth.rebuild(mc);
+                        return true;
+                    }
+                    return false;
+                });
+                if (rebuilt) {
+                    view.addProperty("rebuiltMeshes", true);
+                    deadline = Math.max(deadline, System.currentTimeMillis() + Math.max(3000L, settleMillis / 2));
+                    quietPolls = 0;
+                }
+            }
             if (settled || System.currentTimeMillis() >= deadline) {
                 break;
             }

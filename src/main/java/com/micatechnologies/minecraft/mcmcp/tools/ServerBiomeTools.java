@@ -131,10 +131,10 @@ public final class ServerBiomeTools {
                         unloaded.add(key);
                         continue;
                     }
-                    byte[] array = chunk.getBiomeArray();
+                    int[] array = loadedBiomes(chunk);
                     for (int index : byChunk.get(key)) {
-                        int id = array[((survey.z(index) & 15) << 4) | (survey.x(index) & 15)] & 255;
-                        if (id != 255) {
+                        int id = array[((survey.z(index) & 15) << 4) | (survey.x(index) & 15)];
+                        if (id >= 0) {
                             survey.set(index, id, BiomeSurvey.LOADED);
                         }
                     }
@@ -150,7 +150,7 @@ public final class ServerBiomeTools {
         if (saveDir != null) {
             for (long key : unloaded) {
                 context.getCancellation().throwIfCancelled();
-                byte[] array;
+                int[] array;
                 try {
                     array = savedBiomes(saveDir, chunkX(key), chunkZ(key));
                 }
@@ -162,8 +162,8 @@ public final class ServerBiomeTools {
                     continue;
                 }
                 for (int index : byChunk.get(key)) {
-                    int id = array[((survey.z(index) & 15) << 4) | (survey.x(index) & 15)] & 255;
-                    if (id != 255) {
+                    int id = array[((survey.z(index) & 15) << 4) | (survey.x(index) & 15)];
+                    if (id >= 0) {
                         survey.set(index, id, BiomeSurvey.SAVED);
                     }
                 }
@@ -260,10 +260,64 @@ public final class ServerBiomeTools {
     }
 
     /**
-     * A generated chunk's saved biome array, or null when it was never saved. Never creates a region
-     * file: {@code getChunkInputStream} would, for a region nothing has generated in.
+     * A loaded chunk's biome ids, z-major, with -1 for a column not decided yet. Never asks the
+     * provider and never writes: {@code Chunk.getBiome} does both for an unset column.
+     *
+     * <p>An id extender (JEID, RoughlyEnoughIDs, in every Alto pack) keeps the real ids in an int
+     * array of its own and hands out a byte array filled with its error biome (#205), so every loaded
+     * chunk read as {@code jeid:error_biome}. Its array is reached by the plain name its mixin adds,
+     * which is not remapped, so this needs no compile-time dependency.
      */
-    private static byte[] savedBiomes(File saveDir, int chunkX, int chunkZ) throws IOException {
+    static int[] loadedBiomes(Chunk chunk) {
+        int[] extended = extendedBiomes(chunk);
+        if (extended != null && extended.length == 256) {
+            return extended;
+        }
+        byte[] bytes = chunk.getBiomeArray();
+        int[] ids = new int[256];
+        for (int i = 0; i < 256; i++) {
+            int id = i < bytes.length ? bytes[i] & 255 : 255;
+            ids[i] = id == 255 ? -1 : id;
+        }
+        return ids;
+    }
+
+    /** An id extender's {@code getIntBiomeArray()}, if this chunk has one. */
+    @javax.annotation.Nullable
+    private static int[] extendedBiomes(Chunk chunk) {
+        java.lang.reflect.Method method = intBiomeArray;
+        if (method == null) {
+            if (intBiomeArrayMissing) {
+                return null;
+            }
+            try {
+                method = chunk.getClass().getMethod("getIntBiomeArray");
+                intBiomeArray = method;
+            }
+            catch (NoSuchMethodException e) {
+                intBiomeArrayMissing = true;
+                return null;
+            }
+        }
+        try {
+            Object value = method.invoke(chunk);
+            return value instanceof int[] ? (int[]) value : null;
+        }
+        catch (ReflectiveOperationException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static volatile java.lang.reflect.Method intBiomeArray;
+    private static volatile boolean intBiomeArrayMissing;
+
+    /**
+     * A generated chunk's saved biome ids, -1 for an unset column, or null when it was never saved.
+     * Vanilla saves {@code Biomes} as bytes, 255 unset; an id extender saves ints, -1 unset (#205).
+     * Never creates a region file: {@code getChunkInputStream} would, for a region nothing has
+     * generated in.
+     */
+    private static int[] savedBiomes(File saveDir, int chunkX, int chunkZ) throws IOException {
         RegionFile region = RegionFileCache.getRegionFileIfExists(saveDir, chunkX, chunkZ);
         if (region == null || !region.isChunkSaved(chunkX & 31, chunkZ & 31)) {
             return null;
@@ -274,7 +328,19 @@ public final class ServerBiomeTools {
             }
             NBTTagCompound root = CompressedStreamTools.read(in);
             NBTTagCompound level = root.getCompoundTag("Level");
-            return level.hasKey("Biomes", 7) ? level.getByteArray("Biomes") : null;
+            if (level.hasKey("Biomes", 11)) {
+                return level.getIntArray("Biomes");
+            }
+            if (!level.hasKey("Biomes", 7)) {
+                return null;
+            }
+            byte[] bytes = level.getByteArray("Biomes");
+            int[] ids = new int[bytes.length];
+            for (int i = 0; i < bytes.length; i++) {
+                int id = bytes[i] & 255;
+                ids[i] = id == 255 ? -1 : id;
+            }
+            return ids;
         }
     }
 

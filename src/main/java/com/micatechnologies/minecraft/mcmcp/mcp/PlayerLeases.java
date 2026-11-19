@@ -42,6 +42,11 @@ public final class PlayerLeases {
         public final String purpose;
         /** Hotbar or inventory slot to its contents when the lease was taken, to put back on release. */
         public final Map<Integer, String> slots;
+        /**
+         * Handed to the holder only. Another connection of the same holder (a helper script the agent
+         * started, #212) passes it as {@code leaseToken} to act under this lease.
+         */
+        public final String token;
         final long leaseMillis;
         long expiresAtMillis;
 
@@ -52,6 +57,7 @@ public final class PlayerLeases {
             this.holderLabel = holderLabel;
             this.purpose = purpose;
             this.slots = Collections.unmodifiableMap(new LinkedHashMap<>(slots));
+            this.token = newToken();
             this.leaseMillis = leaseMillis;
             this.expiresAtMillis = nowMillis + leaseMillis;
         }
@@ -60,6 +66,44 @@ public final class PlayerLeases {
             long remaining = expiresAtMillis - nowMillis;
             return remaining <= 0L ? 0 : (int) ((remaining + 999L) / 1000L);
         }
+    }
+
+    private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
+
+    private static String newToken() {
+        byte[] bytes = new byte[16];
+        RANDOM.nextBytes(bytes);
+        StringBuilder hex = new StringBuilder(32);
+        for (byte b : bytes) {
+            hex.append(Character.forDigit((b >> 4) & 15, 16)).append(Character.forDigit(b & 15, 16));
+        }
+        return hex.toString();
+    }
+
+    /**
+     * Whose connections a lease token may be used from: one companion player's ({@code player:<uuid>},
+     * every agent and script of theirs), or the direct endpoint's, whose callers all hold its auth token.
+     * Access comes from the connection, so a token leaked to another player's agent buys nothing.
+     */
+    static String tokenScope(String callerKey) {
+        if (callerKey.startsWith("player:")) {
+            return HoldLedger.groupOf(callerKey);
+        }
+        return "endpoint";
+    }
+
+    /**
+     * Whether {@code callerKey} acts under the lease: it is the holder, or it passed the lease's token
+     * from a connection in the holder's scope.
+     */
+    private static boolean actsAsHolder(Lease lease, String callerKey, @Nullable String leaseToken) {
+        if (lease.holderKey.equals(callerKey)) {
+            return true;
+        }
+        return leaseToken != null && !leaseToken.isEmpty()
+            && java.security.MessageDigest.isEqual(lease.token.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                leaseToken.trim().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+            && tokenScope(lease.holderKey).equals(tokenScope(callerKey));
     }
 
     /** The outcome of asking for a lease. */
@@ -134,8 +178,13 @@ public final class PlayerLeases {
 
     /** Whether {@code holderKey} holds {@code player}'s lease now. */
     public synchronized boolean holds(String player, String holderKey, long nowMillis) {
+        return holds(player, holderKey, null, nowMillis);
+    }
+
+    /** Whether {@code callerKey} acts under {@code player}'s lease now, as its holder or with its token. */
+    public synchronized boolean holds(String player, String callerKey, @Nullable String leaseToken, long nowMillis) {
         Lease held = live(keyOf(player), nowMillis);
-        return held != null && held.holderKey.equals(holderKey);
+        return held != null && actsAsHolder(held, callerKey, leaseToken);
     }
 
     /** Leaves the queue for {@code player}: an agent that stopped waiting. */
@@ -153,9 +202,15 @@ public final class PlayerLeases {
      */
     @Nullable
     public synchronized Lease release(String player, String holderKey, boolean force) {
+        return release(player, holderKey, null, force);
+    }
+
+    /** As {@link #release(String, String, boolean)}, where the lease's token also lets a caller end it. */
+    @Nullable
+    public synchronized Lease release(String player, String callerKey, @Nullable String leaseToken, boolean force) {
         String key = keyOf(player);
         Lease held = leases.get(key);
-        if (held == null || (!force && !held.holderKey.equals(holderKey))) {
+        if (held == null || (!force && !actsAsHolder(held, callerKey, leaseToken))) {
             return null;
         }
         leases.remove(key);
@@ -206,18 +261,28 @@ public final class PlayerLeases {
      */
     @Nullable
     public synchronized String refusalFor(String player, String callerKey, long nowMillis) {
+        return refusalFor(player, callerKey, null, nowMillis);
+    }
+
+    /**
+     * As {@link #refusalFor(String, String, long)}, where a caller passing the lease's token from a
+     * connection in the holder's scope goes ahead as the holder would (#212).
+     */
+    @Nullable
+    public synchronized String refusalFor(String player, String callerKey, @Nullable String leaseToken, long nowMillis) {
         Lease held = live(keyOf(player), nowMillis);
         if (held == null) {
             return null;
         }
-        if (held.holderKey.equals(callerKey)) {
+        if (actsAsHolder(held, callerKey, leaseToken)) {
             held.expiresAtMillis = Math.max(held.expiresAtMillis, nowMillis + held.leaseMillis);
             return null;
         }
         return "Busy: " + held.holderLabel + " has leased " + held.player
             + (held.purpose.isEmpty() ? "" : " (" + held.purpose + ")") + " for another " + held.secondsLeft(nowMillis)
             + " s, so its hotbar and position are theirs. Wait with server_player_lease op 'acquire' and "
-            + "waitSeconds, which queues you, or take it over with force: true if you are sure it is abandoned.";
+            + "waitSeconds, which queues you, or take it over with force: true if you are sure it is abandoned. "
+            + "If the lease is your own agent's (a script it started), pass the leaseToken its acquire returned.";
     }
 
     /** The structured {@code busy} block a refusal carries. */

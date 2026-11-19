@@ -160,6 +160,68 @@ public final class VoxelGrid {
         return (y - 1) * 16 + top(x, y - 1, z);
     }
 
+    /** Quadrants of a cell seen from above, for {@link #setQuadrantTops}: north is -z, west is -x. */
+    public static final int NW = 0;
+    public static final int NE = 1;
+    public static final int SW = 2;
+    public static final int SE = 3;
+
+    /**
+     * Collision tops per quadrant, for the solid cells whose top is not level: a stair is 8 on its
+     * low half and 16 on its high one (#209). Read only by a fractional walk step, like {@link #tops}.
+     */
+    private java.util.Map<Integer, int[]> quadrants;
+
+    /** Records a solid cell's top per quadrant ({@link #NW}, {@link #NE}, {@link #SW}, {@link #SE}); a level one is ignored. */
+    public void setQuadrantTops(int x, int y, int z, int[] tops) {
+        if (tops == null || tops.length != 4 || !contains(x, y, z)
+            || (tops[0] == tops[1] && tops[1] == tops[2] && tops[2] == tops[3])) {
+            return;
+        }
+        if (quadrants == null) {
+            quadrants = new java.util.HashMap<>();
+        }
+        quadrants.put(index(x, y, z), tops.clone());
+    }
+
+    /** A cell's collision top in one quadrant, in sixteenths: {@link #top} unless the cell is not level. */
+    public int quadrantTop(int x, int y, int z, int quadrant) {
+        if (quadrants != null && contains(x, y, z)) {
+            int[] tops = quadrants.get(index(x, y, z));
+            if (tops != null) {
+                return tops[quadrant];
+            }
+        }
+        return top(x, y, z);
+    }
+
+    /** Where a person stands in one quadrant of a cell, in sixteenths: the top of that quadrant of the cell below. */
+    public int floor(int x, int y, int z, int quadrant) {
+        return (y - 1) * 16 + quadrantTop(x, y - 1, z, quadrant);
+    }
+
+    /**
+     * The highest top among the collision boxes over each quadrant ({@link #NW}, {@link #NE},
+     * {@link #SW}, {@link #SE}), in sixteenths rounded up. A quadrant no box covers takes the cell's
+     * overall top: nothing to stand on there is not a lower floor.
+     */
+    public static int[] quadrantTopsOf(java.util.List<double[]> boxes) {
+        int whole = topOf(boxes);
+        int[] tops = new int[4];
+        for (int q = 0; q < 4; q++) {
+            double fromX = (q & 1) == 0 ? 0.0D : 0.5D;
+            double fromZ = (q & 2) == 0 ? 0.0D : 0.5D;
+            double top = -1.0D;
+            for (double[] box : boxes) {
+                if (box[0] < fromX + 0.5D && box[3] > fromX && box[2] < fromZ + 0.5D && box[5] > fromZ) {
+                    top = Math.max(top, box[4]);
+                }
+            }
+            tops[q] = top < 0.0D ? whole : Math.max(1, Math.min(16, (int) Math.ceil(top * 16.0D - 1e-6D)));
+        }
+        return tops;
+    }
+
     /** The highest top among collision boxes in the cell's 0..1 space, in sixteenths rounded up. */
     public static int topOf(java.util.List<double[]> boxes) {
         double top = 0.0D;
