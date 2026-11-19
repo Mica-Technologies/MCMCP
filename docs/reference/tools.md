@@ -2291,7 +2291,10 @@ Use it for a button's release, a repeater, or a door that finishes on a later ti
 far from every player. A call with `load: true` gives the chunk back when it returns, and the game
 drops a scheduled tick that comes due while its chunk is unloaded. A button pressed there stayed
 pressed, and holding the chunk afterwards could not bring the tick back. A chunk already held by
-`server_keep_loaded` ticks normally.
+`server_keep_loaded` ticks normally. Without `load: true`, a settle holds the chunk only if it is
+loaded already, so it never loads one. If the wait or the read afterwards fails on a struggling
+server, `settled` carries a `warning` and the click's own result stands: read the block before
+pressing again.
 
 **With nobody online.** Omit `player` and the click is made by MCMCP's own Forge fake player,
 `[MCMCP]`, standing a block out from the clicked face in `dimension` (default 0). A headless

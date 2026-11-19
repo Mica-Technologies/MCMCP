@@ -254,6 +254,7 @@ public final class ChunkRenderHealth {
         private double jumpBlocks;
         private int checksDone;
         private boolean resentOnce;
+        private boolean rebuiltOnce;
 
         @SubscribeEvent
         public void onTick(TickEvent.ClientTickEvent event) {
@@ -276,6 +277,7 @@ public final class ChunkRenderHealth {
                     jumpBlocks = moved;
                     checksDone = 0;
                     resentOnce = false;
+                    rebuiltOnce = false;
                 }
             }
             lastX = x;
@@ -300,7 +302,9 @@ public final class ChunkRenderHealth {
             json.addProperty("secondsAfter", since / 1000L);
             json.addProperty("at", System.currentTimeMillis());
             String action = "none";
-            if (heal && report.needsRebuild()) {
+            if (heal && report.needsRebuild() && !rebuiltOnce) {
+                // Once per jump: a rebuild is a hitch, and one that did not help will not on a second go.
+                rebuiltOnce = true;
                 rebuild(mc);
                 action = "rebuilt chunk meshes (F3+A)";
             }

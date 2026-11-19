@@ -461,7 +461,7 @@ answering agents in game.
 
 ### `maxSessionsPerPlayer`
 
-`integer` 1–16 · default `8` (`4` before 2026.11.18; a config file written earlier keeps its value)
+`integer` 1–16 · default `8` (it was `4`, and a config file written then keeps that value)
 
 MCP sessions one player's client may keep open through the companion, every agent and script of
 theirs counted together. To make room, the session idle longest is closed, never one with a call

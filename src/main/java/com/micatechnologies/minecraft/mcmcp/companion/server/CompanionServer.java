@@ -103,6 +103,12 @@ public final class CompanionServer {
     /** Threads for event waits only (see {@code CompanionPolicy.WAIT_CALLS}); they block, the workers must not. */
     private static volatile ExecutorService waiters;
 
+    /**
+     * Threads for probes only (see {@code CompanionPolicy.isProbeCall}): with the four workers busy
+     * with long calls, a probe counted apart but queued behind them was no quicker (#210).
+     */
+    private static volatile ExecutorService probers;
+
     private static final Map<UUID, CompanionPeer> PEERS = new ConcurrentHashMap<>();
 
     private static int ticks;
@@ -177,6 +183,11 @@ public final class CompanionServer {
             thread.setDaemon(true);
             return thread;
         });
+        probers = Executors.newFixedThreadPool(2, runnable -> {
+            Thread thread = new Thread(runnable, "MCMCP-companion-probe-" + WORKER_COUNT.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
         resolveAllowlist(server);
     }
 
@@ -188,11 +199,16 @@ public final class CompanionServer {
         PEERS.clear();
         ExecutorService pool = workers;
         ExecutorService waiting = waiters;
+        ExecutorService probing = probers;
         workers = null;
         waiters = null;
+        probers = null;
         dispatcher = null;
         if (pool != null) {
             pool.shutdownNow();
+        }
+        if (probing != null) {
+            probing.shutdownNow();
         }
         if (waiting != null) {
             waiting.shutdownNow();
@@ -542,8 +558,14 @@ public final class CompanionServer {
         }
         // A probe of one block or one number has an allowance of its own too, so a monitoring loop is
         // not starved by its player's long calls (#210).
-        final boolean probe = toolCall && CompanionPolicy.isProbeCall(toolName,
+        final boolean probe = toolCall && !wait && CompanionPolicy.isProbeCall(toolName,
             Json.getObject(Json.getObjectOrEmpty(message, "params"), "arguments"));
+        if (probe) {
+            ExecutorService probing = probers;
+            if (probing != null) {
+                pool = probing;
+            }
+        }
         final java.util.concurrent.atomic.AtomicInteger running = wait ? peer.runningWaits
             : toolCall && CompanionPolicy.isControlCall(toolName) ? peer.runningControlCalls
             : probe ? peer.runningProbeCalls : peer.runningCalls;

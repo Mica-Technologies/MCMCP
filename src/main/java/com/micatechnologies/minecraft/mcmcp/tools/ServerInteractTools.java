@@ -153,12 +153,18 @@ public final class ServerInteractTools {
 
         final int settleTicks = context.getBoundedInt("settleTicks", 0, 0, MAX_SETTLE_TICKS);
         final long[] clickedAt = {0L};
+        final boolean load = context.getBoolean("load", false);
         // A settle holds the chunk even when it is loaded already: a button pressed in a chunk nothing
         // holds, far from every player, stayed pressed (#206). Its release is a scheduled tick, and a tick
-        // that comes due while its chunk is unloaded is dropped by the game for good.
+        // that comes due while its chunk is unloaded is dropped by the game for good. Without load: true
+        // it holds only a chunk that is loaded: holding one loads nothing, and loading is the 'load'
+        // class's to grant.
+        final boolean hold = load || (settleTicks > 0 && context.onGameThread(() -> {
+            WorldServer world = ServerWorldTools.requireWorld(dimension);
+            return world.isBlockLoaded(pos);
+        }));
         return ServerChunkTools.withChunks(context, dimension,
-            Collections.singleton(ChunkKeys.ofBlock(pos.getX(), pos.getZ())),
-            context.getBoolean("load", false) || settleTicks > 0, outcome -> {
+            Collections.singleton(ChunkKeys.ofBlock(pos.getX(), pos.getZ())), hold, outcome -> {
                 final UndoPoints.Recorder recorder = ServerUndoTools.start(context, true);
                 JsonObject json = context.onGameThread(() -> {
                     EntityPlayerMP player = fake ? fakeClicker(ServerWorldTools.requireWorld(dimension), pos, face)
@@ -284,7 +290,17 @@ public final class ServerInteractTools {
                         dimension, null, null, json, null);
                 }
                 if (settleTicks > 0) {
-                    json.add("settled", settle(context, dimension, pos, face, clickedAt[0], settleTicks, json));
+                    JsonObject settled;
+                    try {
+                        settled = settle(context, dimension, pos, face, clickedAt[0], settleTicks, json);
+                    }
+                    catch (Exception e) {
+                        settled = new JsonObject();
+                        settled.addProperty("warning", "The click is done (see 'after'), but the block could not be "
+                            + "read again after it settled: " + e.getMessage() + ". Read it with server_get_block "
+                            + "before pressing again.");
+                    }
+                    json.add("settled", settled);
                 }
                 return ToolResult.structured(json);
             });
@@ -302,16 +318,26 @@ public final class ServerInteractTools {
         final long target = clickTick + ticks;
         long started = System.currentTimeMillis();
         long deadline = started + (MAX_SETTLE_TICKS / 20 + 20) * 1000L;
-        long now;
-        while (true) {
-            now = context.onGameThread(() -> ServerWorldTools.requireWorld(dimension).getTotalWorldTime());
-            if (now >= target || System.currentTimeMillis() > deadline) {
-                break;
+        long now = clickTick;
+        try {
+            while (true) {
+                // Follow-ups: the click is done, and a busy server must not turn reading what it left
+                // into a refusal that makes the model press again.
+                now = context.onGameThreadFollowUp(() -> ServerWorldTools.requireWorld(dimension).getTotalWorldTime());
+                if (now >= target || System.currentTimeMillis() > deadline) {
+                    break;
+                }
+                context.awaitBudget(Math.min(250L, Math.max(50L, (target - now) * 50L)), "letting the block settle");
             }
-            context.awaitBudget(Math.min(250L, Math.max(50L, (target - now) * 50L)), "letting the block settle");
+        }
+        catch (Exception e) {
+            JsonObject failed = new JsonObject();
+            failed.addProperty("warning", "The click is done (see 'after'), but waiting for it to settle stopped: "
+                + e.getMessage() + ". Read the block with server_get_block before pressing again.");
+            return failed;
         }
         final long reachedTick = now;
-        return context.onGameThread(() -> {
+        return context.onGameThreadFollowUp(() -> {
             WorldServer world = ServerWorldTools.requireWorld(dimension);
             JsonObject settled = new JsonObject();
             settled.addProperty("ticks", Math.max(0L, reachedTick - clickTick));
