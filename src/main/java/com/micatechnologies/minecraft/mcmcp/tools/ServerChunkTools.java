@@ -90,11 +90,14 @@ public final class ServerChunkTools {
     }
 
     /**
-     * A read-only walk over a block box, with {@code load: true} cut into pieces that fit what the
-     * caller may hold (#167): each piece is loaded, read and given back before the next, so the hold
-     * caps pace a large read instead of refusing it. Each piece's reading still goes through the game
-     * thread in slices, so the server ticks between them. Without {@code load}, or when the whole box
-     * fits, it is one piece, as before.
+     * A read-only walk over a block box, with {@code load: true} cut into pieces of at most
+     * chunks.readTileChunks (#167, #214): each piece is loaded, read and given back before the next, so
+     * a large read never holds more than one piece, and the hold caps pace it instead of refusing it.
+     * Pieces are sized to that setting, never to the room left: sized to the room, one agent's
+     * back-to-back reads each took all of it and kept it. Each piece waits its turn in the governor's
+     * line like any call. Each piece's reading still goes through the game thread in slices, so the
+     * server ticks between them. Without {@code load}, or when the whole box fits in one piece, it is
+     * one piece, as before.
      *
      * <p>For reads only. A write must hold all it touches until its undo point is taken.
      *
@@ -114,11 +117,11 @@ public final class ServerChunkTools {
             }));
         }
         final String caller = ChunkLoadGovernor.holdCallerOf(context);
-        int room = context.onGameThread(() -> ChunkLoadGovernor.roomFor(caller));
-        List<ReadTiles.Tile> tiles = room < ReadTiles.MIN_ROOM ? null
-            : ReadTiles.plan(minX, minZ, maxX, maxZ, margin, room);
+        int room = ChunkLoadGovernor.readTileChunks(caller);
+        List<ReadTiles.Tile> tiles = ReadTiles.plan(minX, minZ, maxX, maxZ, margin, room);
         if (tiles == null || tiles.size() == 1) {
-            // It fits, or there is too little room to cut it into: one hold, and a refusal names the cap.
+            // It fits in one piece, or a piece is too small for even one chunk and its margin: one hold,
+            // and a refusal names the cap.
             return withChunks(context, dimension, allChunks, true, outcome -> {
                 if (reader.needs(whole)) {
                     reader.read(whole);
@@ -144,8 +147,8 @@ public final class ServerChunkTools {
             catch (ChunkLoadGovernor.Busy busy) {
                 ToolResult refused = busy.toResult();
                 refused.withContent(McpContent.text("This read was "
-                    + "cut into " + tiles.size() + " pieces of up to " + room + " chunks to fit your hold cap, and "
-                    + "piece " + (tile.index + 1) + " could not be loaded; nothing of the read is returned."));
+                    + "cut into " + tiles.size() + " pieces of up to " + room + " chunks (chunks.readTileChunks), "
+                    + "and piece " + (tile.index + 1) + " could not be loaded; nothing of the read is returned."));
                 return refused;
             }
             boolean more;
@@ -197,10 +200,12 @@ public final class ServerChunkTools {
                 + "holds what and when each ends, the holds of calls still running (temporary, with their "
                 + "tool; they end with their call) and why holds that ended lately did (recentlyEnded).\n\n"
                 + "Limited per caller (chunks.maxHeldChunksPerCaller, 512 by default, about 360 x 360 "
-                + "blocks; each agent and each job is its own caller) and for the server "
-                + "(chunks.maxHeldChunks). A refusal names the cap, the count held and by how many callers, "
-                + "and yours. When the server is busy the call fails with a structured 'busy' block carrying "
-                + "retryAfterMs: wait that long and retry.")
+                + "blocks; each agent and each job is its own caller, so other agents' holds never count "
+                + "toward yours), per player for every agent of a companion player together "
+                + "(chunks.maxHeldChunksPerPlayer, the server's cap unless set) and for the server "
+                + "(chunks.maxHeldChunks). op 'list' shows yourRoom, what you may take now. A load that "
+                + "other calls in progress make room for waits its turn, up to 30 s; a refusal names the "
+                + "cap, what it counts and yours, with busy.retryAfterMs: wait that long and retry.")
             .schema(JsonSchema.object()
                 .enumeration("op", "hold (default), renew or list.", "hold", "renew", "list")
                 .integer("x", "hold: X of one corner of the block box.")
@@ -237,7 +242,7 @@ public final class ServerChunkTools {
                     if (id == null) {
                         return ToolResult.error("op 'renew' needs 'id': a hold id from op 'hold' or 'list'.");
                     }
-                    String refusal = context.onGameThread(() -> ChunkLoadGovernor.renew(id, caller, maxMillis,
+                    String refusal = context.onGameThread(() -> ChunkLoadGovernor.renew(id, caller, !everyone, maxMillis,
                         context.has("idleSeconds") ? idleMillis : -1L));
                     if (refusal != null) {
                         return ToolResult.error(refusal);
@@ -258,14 +263,11 @@ public final class ServerChunkTools {
                 int x2 = context.getInt("toX", x1);
                 int z2 = context.getInt("toZ", z1);
                 long count = ChunkKeys.boxCount(x1, z1, x2, z2);
-                int perCaller = McmcpConfig.getChunkMaxHeldPerCaller();
-                boolean callerBound = perCaller > 0 && perCaller < McmcpConfig.getChunkMaxHeld();
-                int most = callerBound ? perCaller : McmcpConfig.getChunkMaxHeld();
+                int most = ChunkLoadGovernor.caps().largestHold(caller);
                 if (count > most) {
-                    return ToolResult.error("That box covers " + count + " chunks; " + (callerBound
-                        ? "one caller may hold " + most + " (chunks.maxHeldChunksPerCaller)"
-                        : "MCMCP may hold " + most + " (chunks.maxHeldChunks)") + ". Hold it in "
-                        + "pieces, releasing each when you are done with it.");
+                    return ToolResult.error("That box covers " + count + " chunks; you may hold at most " + most
+                        + " at once (the least of chunks.maxHeldChunksPerCaller, chunks.maxHeldChunksPerPlayer and "
+                        + "chunks.maxHeldChunks). Hold it in pieces, releasing each when you are done with it.");
                 }
                 int dimension = context.getInt("dimension", 0);
                 ChunkLoadGovernor.Outcome outcome;
@@ -319,9 +321,8 @@ public final class ServerChunkTools {
                     String ended = context.onGameThread(() -> ChunkLoadGovernor.endedNote(id));
                     return ToolResult.error(ended != null ? ended : "There is no hold '" + id + "'.");
                 }
-                // A player's agents may release each other's: the access, and the cap, are the player's.
-                if (context.getPrincipal().isCompanion()
-                    && !HoldLedger.groupOf(owner).equals(HoldLedger.groupOf(caller))) {
+                // A player's agents may release each other's: the access is the player's.
+                if (!HoldLedger.mayManage(context.getPrincipal().isCompanion(), caller, owner)) {
                     return ToolResult.error("Hold '" + id + "' is not yours.");
                 }
                 if (context.getPrincipal().isCompanion() && context.onGameThread(() -> ChunkLoadGovernor.isRunningCall(id))) {

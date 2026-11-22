@@ -883,6 +883,28 @@ case "$RESTORE_BODY" in
   *) mcp_failure "the level was not put back: ${RESTORE_BODY}" ;;
 esac
 
+echo "==> Reading a rolled .log.gz as text, and refusing one that is not (#213)"
+printf '[00:00:01] [Server thread/INFO]: before\n[00:00:02] [Server thread/ERROR]: Error ticking smoke_gz_marker\n[00:00:03] [Server thread/INFO]: after\n' \
+  | gzip -c > "${RUN_DIR}/logs/1999-01-01-1.log.gz"
+GZ_BODY="$(mcp_call 5611 game_read_log '{"file":"1999-01-01-1.log.gz","filter":"error ticking","lines":5}')" \
+  || mcp_failure "game_read_log of a .log.gz failed: ${GZ_BODY}"
+case "$GZ_BODY" in
+  *'1 line matching'*'smoke_gz_marker'*) echo "    the filter found the line inside the gzip" ;;
+  *) mcp_failure "the gzipped log was not read as text: ${GZ_BODY}" ;;
+esac
+head -c 2048 /dev/urandom | tr '\n' 'x' | { printf 'BIN\0'; cat; } > "${RUN_DIR}/logs/1999-01-01-2.log.gz"
+BIN_BODY="$(mcp_call 5612 game_read_log '{"file":"1999-01-01-2.log.gz","filter":"error"}')" || true
+case "$BIN_BODY" in
+  *'not a text log'*'"isError":true'*) echo "    a file that is not text is an error, not 0 matches" ;;
+  *) mcp_failure "a binary log was not refused: ${BIN_BODY}" ;;
+esac
+LIST_BODY="$(mcp_call 5613 game_read_log '{"list":true}')" || mcp_failure "game_read_log list failed: ${LIST_BODY}"
+case "$LIST_BODY" in
+  *'1999-01-01-1.log.gz'*'gzip'*) echo "    list names the rolled logs" ;;
+  *) mcp_failure "list did not name the rolled log: ${LIST_BODY}" ;;
+esac
+rm -f "${RUN_DIR}/logs/1999-01-01-1.log.gz" "${RUN_DIR}/logs/1999-01-01-2.log.gz"
+
 echo "==> Removing entities with nobody near: two summoned villagers go, nothing else"
 mcp_call 562 server_run_commands "{\"commands\":[\"summon minecraft:villager ${LX} $((LY + 1)) $((LZ + 2)) {NoAI:1b}\",\"summon minecraft:villager $((LX + 1)) $((LY + 1)) $((LZ + 2)) {NoAI:1b}\"]}" > /dev/null \
   || mcp_failure "could not summon the villagers"

@@ -203,9 +203,10 @@ public class ToolContext {
     }
 
     /**
-     * Who this call is for chunk holds, budgets and the server's task queue (#121): one key per
-     * player through the companion, whatever agents they run; one per agent on the endpoint; a
-     * background job's own {@code job:<id>}.
+     * Who this call is for chunk holds, budgets and the server's task queue (#121, #214): one key per
+     * agent, on the endpoint or of a companion player ({@code player:<uuid>~<agent>}, which the
+     * player cap groups by its prefix); a background job's own {@code job:<id>}. The caller matrix in
+     * docs/dev/architecture.md says what each key counts toward.
      */
     public String callerKey() {
         if (holdCaller != null) {

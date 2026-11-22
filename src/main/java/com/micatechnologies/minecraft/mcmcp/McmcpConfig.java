@@ -142,6 +142,8 @@ public class McmcpConfig {
     private static int chunkLoadsPerMinutePerCaller = 400;
     private static int chunkMaxHeld = 1024;
     private static int chunkMaxHeldPerCaller = 512;
+    private static int chunkMaxHeldPerPlayer = 0;
+    private static int chunkReadTileChunks = 64;
     private static int chunkHoldIdleSeconds = 120;
     private static int chunkHoldMaxSeconds = 900;
     private static int chunkHoldLongestLeaseSeconds = 14400;
@@ -421,7 +423,7 @@ public class McmcpConfig {
             "Most cells one palette-mode server_set_blocks call writes. Written in game-thread batches of "
                 + "maxBlockVolume.");
         writeCellsPerMinutePerCaller = configuration.getInt("writeCellsPerMinutePerCaller", CATEGORY_LIMITS,
-            1_000_000, 1024, 100_000_000, "Most cells one caller (one player's agent, or the endpoint) writes "
+            1_000_000, 1024, 100_000_000, "Most cells one caller (one agent, on the endpoint or of a companion player, or one job) writes "
                 + "with palette-mode server_set_blocks in any minute.");
 
         // Chunk loading
@@ -435,14 +437,26 @@ public class McmcpConfig {
         chunkLoadsPerMinute = configuration.getInt("loadsPerMinute", CATEGORY_CHUNKS, 600, 20, 100000,
             "Most chunk loads MCMCP causes in any minute, for everyone together.");
         chunkLoadsPerMinutePerCaller = configuration.getInt("loadsPerMinutePerCaller", CATEGORY_CHUNKS, 400, 20,
-            100000, "Most chunk loads one caller (one player, one agent on the endpoint, or one job) causes in any minute.");
+            100000, "Most chunk loads one caller (one agent, on the endpoint or of a companion player, or one\n"
+                + "job) causes in any minute.");
         chunkMaxHeld = configuration.getInt("maxHeldChunks", CATEGORY_CHUNKS, 1024, 1, 65536,
             "Most chunks MCMCP keeps loaded at once, for everyone together: the bound on its memory.");
         chunkMaxHeldPerCaller = configuration.getInt("maxHeldChunksPerCaller", CATEGORY_CHUNKS, 512, 0, 65536,
             "Most chunks one caller keeps loaded at once, so one agent cannot take the whole of\n"
-                + "maxHeldChunks. A caller is one player, one agent on the endpoint (each agent through the\n"
-                + "orchestrator counts apart), or one background job. 512 chunks is about 360 x 360 blocks.\n"
-                + "0 for no per-caller limit.");
+                + "maxHeldChunks. A caller is one agent (on the endpoint, or of a companion player; each agent\n"
+                + "through the orchestrator counts apart) or one background job. Other callers' holds never\n"
+                + "count toward it. 512 chunks is about 360 x 360 blocks. 0 for no per-caller limit.");
+        // A new key rather than a change to maxHeldChunksPerCaller's meaning alone: Forge writes every
+        // default into the file, so 0 here must mean "the server's", not a number an install keeps (#214).
+        chunkMaxHeldPerPlayer = configuration.getInt("maxHeldChunksPerPlayer", CATEGORY_CHUNKS, 0, 0, 65536,
+            "Most chunks every agent of one companion player keeps loaded at once, together, so one\n"
+                + "player's agents cannot take the whole of maxHeldChunks from other players. 0 (the default)\n"
+                + "for no cap but maxHeldChunks. Each agent is still held to maxHeldChunksPerCaller.");
+        chunkReadTileChunks = configuration.getInt("readTileChunks", CATEGORY_CHUNKS, 64, 16, 4096,
+            "A load: true read over a large box (server_plan_view, server_count_blocks, server_find_blocks,\n"
+                + "server_get_blocks surface and packed) loads, reads and gives back a piece of at most this\n"
+                + "many chunks at a time, so a long survey never holds more than one piece. 64 chunks is\n"
+                + "about 128 x 128 blocks.");
         chunkHoldIdleSeconds = configuration.getInt("holdIdleSeconds", CATEGORY_CHUNKS, 120, 10, 3600,
             "A hold nothing has read from or written to for this long is released.");
         chunkHoldMaxSeconds = configuration.getInt("holdMaxSeconds", CATEGORY_CHUNKS, 900, 60, 3600,
@@ -995,6 +1009,15 @@ public class McmcpConfig {
 
     public static int getChunkMaxHeldPerCaller() {
         return chunkMaxHeldPerCaller;
+    }
+
+    /** 0 for the server's cap: see HoldLedger.Caps#playerLimit. */
+    public static int getChunkMaxHeldPerPlayer() {
+        return chunkMaxHeldPerPlayer;
+    }
+
+    public static int getChunkReadTileChunks() {
+        return chunkReadTileChunks;
     }
 
     public static int getChunkHoldIdleSeconds() {

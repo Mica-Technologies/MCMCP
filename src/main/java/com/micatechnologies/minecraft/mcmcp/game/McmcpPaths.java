@@ -82,6 +82,18 @@ public final class McmcpPaths {
             ? null
             : filter.toLowerCase(java.util.Locale.ROOT);
 
+        // A rolled log (logs/2026-11-19-1.log.gz) is gzip, and read as bytes it is noise a filter never
+        // matches: "0 lines matching" for text that was there (#213). Told apart by its magic bytes, not
+        // its name, and a file that is neither is refused rather than reported empty.
+        switch (kindOf(file)) {
+            case GZIP:
+                return tailGzip(file, lineCount, needle, rewrite);
+            case BINARY:
+                throw new NotTextException(file.getName());
+            default:
+                break;
+        }
+
         // Filtering has to look at more of the file than it returns — a filter matching one line in
         // a hundred would otherwise return almost nothing. The cap keeps the worst case bounded.
         int scanBudget = needle == null ? lineCount : Math.min(lineCount * 200, 200_000);
@@ -92,6 +104,9 @@ public final class McmcpPaths {
             byte[] buffer = new byte[8192];
             ByteAccumulator pending = new ByteAccumulator();
             int scanned = 0;
+            // The newline that ends the file's last line ends no line after it: read as one, every
+            // unfiltered tail's newest line was empty.
+            boolean atFileEnd = true;
 
             while (pointer > 0 && collected.size() < lineCount && scanned < scanBudget) {
                 int chunkSize = (int) Math.min(buffer.length, pointer);
@@ -101,6 +116,13 @@ public final class McmcpPaths {
 
                 for (int i = chunkSize - 1; i >= 0; i--) {
                     byte current = buffer[i];
+                    if (current == '\n' && atFileEnd) {
+                        atFileEnd = false;
+                        continue;
+                    }
+                    if (current != '\r') {
+                        atFileEnd = false;
+                    }
                     if (current == '\n') {
                         String line = pending.drainReversed();
                         if (rewrite != null) {
@@ -139,6 +161,154 @@ public final class McmcpPaths {
 
     private static boolean accept(String line, @Nullable String needle) {
         return needle == null || line.toLowerCase(java.util.Locale.ROOT).contains(needle);
+    }
+
+    /** What a log file holds, by its first bytes. */
+    public enum LogKind {
+        TEXT,
+        GZIP,
+        /** Not text: a NUL in its first 8 KB, which no log line has. */
+        BINARY
+    }
+
+    /** A log file that is not text, gzipped or plain: read, it would only be noise. */
+    public static final class NotTextException extends IOException {
+
+        private static final long serialVersionUID = 1L;
+
+        public NotTextException(String name) {
+            super("'" + name + "' is not a text log (nor a gzipped one), so it cannot be read or filtered as lines.");
+        }
+    }
+
+    /**
+     * How far a gzipped log is decompressed at most. A rolled log of a busy modded server runs to
+     * hundreds of megabytes of text; this stops a file that inflates without end, not a real log.
+     */
+    static final long MAX_GZIP_TEXT_BYTES = 2L * 1024L * 1024L * 1024L;
+
+    public static LogKind kindOf(File file) throws IOException {
+        byte[] head = new byte[8192];
+        int read;
+        try (java.io.InputStream in = Files.newInputStream(file.toPath())) {
+            read = in.read(head);
+        }
+        if (read >= 2 && (head[0] & 0xFF) == 0x1F && (head[1] & 0xFF) == 0x8B) {
+            return LogKind.GZIP;
+        }
+        for (int i = 0; i < read; i++) {
+            if (head[i] == 0) {
+                return LogKind.BINARY;
+            }
+        }
+        return LogKind.TEXT;
+    }
+
+    /**
+     * The tail of a gzipped log. Gzip cannot be read backwards, so it is read forwards once, keeping only
+     * the last {@code lineCount} matching lines: memory stays bounded by what is returned, whatever the
+     * file inflates to. A filter then searches the whole file, not only its end.
+     */
+    private static List<String> tailGzip(File file, int lineCount, @Nullable String needle,
+                                         @Nullable java.util.function.UnaryOperator<String> rewrite) throws IOException {
+        Deque<String> kept = new ArrayDeque<>();
+        CountingStream counted = new CountingStream(new java.util.zip.GZIPInputStream(
+            Files.newInputStream(file.toPath()), 65536));
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(counted, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (counted.count > MAX_GZIP_TEXT_BYTES) {
+                    throw new IOException("'" + file.getName() + "' inflates to more than "
+                        + MAX_GZIP_TEXT_BYTES / (1024L * 1024L) + " MB of text; it is not read past that.");
+                }
+                if (line.indexOf('\u0000') >= 0) {
+                    throw new NotTextException(file.getName());
+                }
+                if (rewrite != null) {
+                    line = rewrite.apply(line);
+                }
+                if (accept(line, needle)) {
+                    kept.addLast(line);
+                    if (kept.size() > lineCount) {
+                        kept.removeFirst();
+                    }
+                }
+            }
+        }
+        catch (java.util.zip.ZipException corrupt) {
+            throw new IOException("'" + file.getName() + "' starts as gzip but could not be decompressed: "
+                + corrupt.getMessage() + ".", corrupt);
+        }
+        catch (java.io.EOFException truncated) {
+            throw new IOException("'" + file.getName() + "' is a gzipped log cut off before its end (still "
+                + "being written, or damaged).", truncated);
+        }
+        return new ArrayList<>(kept);
+    }
+
+    /** Counts the bytes read through it: how far a gzipped log has inflated. */
+    private static final class CountingStream extends java.io.FilterInputStream {
+
+        long count;
+
+        CountingStream(java.io.InputStream in) {
+            super(in);
+        }
+
+        @Override
+        public int read() throws IOException {
+            int value = super.read();
+            if (value >= 0) {
+                count++;
+            }
+            return value;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            int read = super.read(buffer, offset, length);
+            if (read > 0) {
+                count += read;
+            }
+            return read;
+        }
+    }
+
+    /** One file in the logs directory, for a caller choosing which rolled log covers a time. */
+    public static final class LogFile {
+
+        public final String name;
+        public final long bytes;
+        public final long modifiedMillis;
+        public final boolean gzip;
+
+        LogFile(String name, long bytes, long modifiedMillis, boolean gzip) {
+            this.name = name;
+            this.bytes = bytes;
+            this.modifiedMillis = modifiedMillis;
+            this.gzip = gzip;
+        }
+    }
+
+    /** The files in {@code directory}, newest first, at most {@code limit}. Subdirectories are left out. */
+    public static List<LogFile> listLogs(File directory, int limit) {
+        List<LogFile> files = new ArrayList<>();
+        File[] found = directory.listFiles(File::isFile);
+        if (found == null) {
+            return files;
+        }
+        java.util.Arrays.sort(found, (a, b) -> {
+            int byTime = Long.compare(b.lastModified(), a.lastModified());
+            return byTime != 0 ? byTime : a.getName().compareTo(b.getName());
+        });
+        for (File file : found) {
+            if (files.size() >= limit) {
+                break;
+            }
+            files.add(new LogFile(file.getName(), file.length(), file.lastModified(),
+                file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".gz")));
+        }
+        return files;
     }
 
     /**

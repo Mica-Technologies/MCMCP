@@ -152,24 +152,89 @@ public final class ChunkLoadGovernor {
         MinecraftForge.EVENT_BUS.register(new Events());
     }
 
-    /** Who a caller is, for budgets and ownership: one key per player, one for the endpoint. */
+    /**
+     * Who submitted a job, for its owner and its slots: one key per player, one for the endpoint. Not
+     * what holds are keyed by; that is {@link #holdCallerOf}.
+     */
     public static String callerOf(Principal principal) {
         return principal.isCompanion() ? "player:" + principal.getPlayerId() : "endpoint";
     }
 
     /**
-     * Who a call's chunk holds belong to, for the per-caller cap and ownership (#121). A player is
-     * one caller however many agents they run, since their access is theirs. On the endpoint each
-     * agent is its own — through the orchestrator every agent shares one link session, and keyed on
-     * the endpoint alone five agents shared one caller's cap and starved each other. A background
-     * job holds under {@code job:<id>}, a caller of its own.
+     * Who a call's chunk holds belong to, for the caps and ownership (#121, #142, #214): one agent, on
+     * the endpoint or of a companion player, or one background job. See {@link HoldLedger}'s scopes
+     * for what each counts toward.
      */
     public static String holdCallerOf(ToolContext context) {
         return context.callerKey();
     }
 
-    /** How long a call refused by a hold cap waits for calls in progress to give chunks back. */
-    private static final long CAP_WAIT_MILLIS = 10_000L;
+    /**
+     * How long a call refused by a hold cap that calls in progress fill waits in {@link #LINE} for them to
+     * give chunks back. Bounded well inside the orchestrator's per-call limit, since a tiled read may
+     * wait this long for each of its pieces.
+     */
+    static final long CAP_WAIT_MILLIS = 30_000L;
+
+    /** The calls waiting for room under a hold cap, in the order they asked (#214). Server thread. */
+    private static final AdmissionLine<Waiting> LINE = new AdmissionLine<>();
+
+    /** Server thread: the ledger version and time the line was last walked at. */
+    private static long lineWalkedAtVersion = -1L;
+    private static long lineWalkedAtMillis;
+
+    /** The caps as configured now: read live, per admission. */
+    public static HoldLedger.Caps caps() {
+        return new HoldLedger.Caps(McmcpConfig.getChunkMaxHeld(), McmcpConfig.getChunkMaxHeldPerPlayer(),
+            McmcpConfig.getChunkMaxHeldPerCaller());
+    }
+
+    /** A call waiting in {@link #LINE}; its future gets the {@link Request} once admitted, or a {@link Busy}. */
+    private static final class Waiting {
+
+        final String caller;
+        @Nullable
+        final String label;
+        @Nullable
+        final String tool;
+        final int dimension;
+        final Set<Long> chunks;
+        final boolean temporary;
+        final long idleMillis;
+        final long maxMillis;
+        final AtomicLong callEnded;
+        final CompletableFuture<Object> admitted = new CompletableFuture<>();
+        volatile AdmissionLine.Entry<Waiting> entry;
+
+        Waiting(String caller, @Nullable String label, @Nullable String tool, int dimension, Set<Long> chunks,
+                boolean temporary, long idleMillis, long maxMillis, AtomicLong callEnded) {
+            this.caller = caller;
+            this.label = label;
+            this.tool = tool;
+            this.dimension = dimension;
+            this.chunks = chunks;
+            this.temporary = temporary;
+            this.idleMillis = idleMillis;
+            this.maxMillis = maxMillis;
+            this.callEnded = callEnded;
+        }
+
+        /**
+         * The call stops waiting: the next walk drops it, and if it was admitted meanwhile, its hold is
+         * given straight back. From any thread.
+         */
+        void abandon(String why) {
+            AdmissionLine.Entry<Waiting> mine = entry;
+            if (mine != null) {
+                mine.abandon();
+            }
+            admitted.thenAccept(result -> {
+                if (result instanceof Request) {
+                    release(((Request) result).hold.id, why);
+                }
+            });
+        }
+    }
 
     /** How long a call that gave up waiting for loads waits for the server thread to hear of it. */
     private static final long GIVE_UP_MILLIS = 15_000L;
@@ -184,9 +249,6 @@ public final class ChunkLoadGovernor {
         private static final long serialVersionUID = 1L;
 
         private final transient JsonObject busy;
-
-        /** A hold cap that calls in progress count against: it may clear in a moment. */
-        private boolean capMayClear;
 
         Busy(String message, JsonObject busy) {
             super(message);
@@ -293,8 +355,8 @@ public final class ChunkLoadGovernor {
             json.addProperty("tiles", tiles);
             json.addProperty("tilesRead", done);
             json.addProperty("tileChunks", tileChunks);
-            json.addProperty("tiledBecause", "the box needs more chunks than you may hold at once "
-                + "(chunks.maxHeldChunksPerCaller / chunks.maxHeldChunks), so it was read a piece at a time");
+            json.addProperty("tiledBecause", "a load: true read holds at most chunks.readTileChunks chunks at "
+                + "a time, so it was read a piece at a time, each given back before the next");
             return json;
         }
     }
@@ -370,31 +432,20 @@ public final class ChunkLoadGovernor {
                                    @Nullable final String tool, final int dimension, final Set<Long> chunks, final boolean temporary,
                                    final long idleMillis, final long maxMillis, final long started,
                                    final AtomicLong callEnded) throws Busy {
-        Object admitted;
-        while (true) {
-            // If this call stops waiting while admit runs, the hold admit takes is nobody's: give it back
-            // as soon as admit ends (#132). If it stops waiting before admit starts, admit never runs.
-            admitted = context.onGameThreadWithCleanup(() -> admit(caller, label, tool, dimension, chunks, temporary,
-                idleMillis, maxMillis, System.currentTimeMillis(), callEnded), orphan -> {
-                    endCall(callEnded);
-                    if (orphan instanceof Request) {
-                        releaseNow(((Request) orphan).hold.id, "its call stopped waiting for the server thread");
-                    }
-                });
-            // A cap that calls in progress count against clears when they end, usually within seconds:
-            // a short wait then saves the caller a retry round. A lasting hold does not end that soon,
-            // so a cap made of those is refused at once.
-            if (!(admitted instanceof Busy) || !((Busy) admitted).capMayClear
-                || System.currentTimeMillis() - started >= CAP_WAIT_MILLIS || context.getCancellation().isCancelled()) {
-                break;
-            }
-            try {
-                Thread.sleep(250L);
-            }
-            catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                break;
-            }
+        // If this call stops waiting while admit runs, the hold admit takes is nobody's: give it back as
+        // soon as admit ends (#132). If it stops waiting before admit starts, admit never runs.
+        Object admitted = context.onGameThreadWithCleanup(() -> admit(caller, label, tool, dimension, chunks,
+            temporary, idleMillis, maxMillis, System.currentTimeMillis(), callEnded), orphan -> {
+                endCall(callEnded);
+                if (orphan instanceof Request) {
+                    releaseNow(((Request) orphan).hold.id, "its call stopped waiting for the server thread");
+                }
+                else if (orphan instanceof Waiting) {
+                    ((Waiting) orphan).abandon("its call stopped waiting for the server thread");
+                }
+            });
+        if (admitted instanceof Waiting) {
+            admitted = awaitRoom(context, (Waiting) admitted);
         }
         if (admitted instanceof Busy) {
             throw (Busy) admitted;
@@ -472,6 +523,53 @@ public final class ChunkLoadGovernor {
         }
     }
 
+    /**
+     * Waits, on the worker, for a call in the line to be admitted: a {@link Request} once it is, or the
+     * {@link Busy} it was turned away with. A cancel leaves the line at once.
+     */
+    private static Object awaitRoom(ToolContext context, Waiting waiting) {
+        // The line's own deadline ends the wait; this one is for a server thread that never walks it.
+        long giveUpAt = System.currentTimeMillis() + CAP_WAIT_MILLIS + GIVE_UP_MILLIS;
+        boolean wasInterrupted = false;
+        try {
+            while (true) {
+                if (context.getCancellation().isCancelled() || wasInterrupted) {
+                    waiting.abandon("its call was cancelled while waiting for room");
+                    return new Busy("The call was cancelled while waiting for room under a hold cap.",
+                        busy("released", null, 0L));
+                }
+                if (System.currentTimeMillis() > giveUpAt) {
+                    waiting.abandon("the server thread did not admit it");
+                    return new Busy("The server thread did not respond while this call waited for room under a "
+                        + "hold cap; it is " + ServerLoad.describe() + ". Retry after busy.retryAfterMs.",
+                        ServerLoad.busy("server_overloaded"));
+                }
+                try {
+                    return waiting.admitted.get(250L, TimeUnit.MILLISECONDS);
+                }
+                catch (TimeoutException stillWaiting) {
+                    AdmissionLine.Entry<Waiting> entry = waiting.entry;
+                    HoldLedger.CapRefusal refusal = entry == null ? null : entry.refusal();
+                    context.reportProgress(0, 1, refusal != null
+                        ? "Waiting for room under " + refusal.limit + " (" + refusal.scopeHeldChunks + " of "
+                        + refusal.cap + " held, " + refusal.adding + " needed)"
+                        : "Waiting behind another call for room under a hold cap");
+                }
+                catch (InterruptedException interrupted) {
+                    wasInterrupted = true;
+                }
+                catch (ExecutionException failed) {
+                    throw new IllegalStateException(failed.getCause());
+                }
+            }
+        }
+        finally {
+            if (wasInterrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
     /** Fails a request still waiting, from its worker; the server thread releases its hold. */
     private static void giveUp(final Request request, @Nullable final String why) {
         MinecraftServer server = ServerThreadBridge.server();
@@ -509,11 +607,91 @@ public final class ChunkLoadGovernor {
         if (world == null) {
             return new Busy("Dimension " + dimension + " is not loaded.", busy("limit", "dimension", 0L));
         }
-        HoldLedger.CapRefusal cap = LEDGER.checkCaps(caller, dimension, chunks, McmcpConfig.getChunkMaxHeld(),
-            McmcpConfig.getChunkMaxHeldPerCaller());
-        if (cap != null) {
-            return capBusy(cap);
+        HoldLedger.Caps caps = caps();
+        HoldLedger.CapRefusal cap = LEDGER.checkCaps(caller, dimension, chunks, caps);
+        if (cap != null && !cap.mayClear) {
+            // Only lasting holds stand in its way: nothing ends soon enough to wait for.
+            return capBusy(cap, nowMillis, 0L);
         }
+        // Room that has come free for a waiter is theirs first, or a tiled read giving a piece back would
+        // take it straight back and the waiter never get in (#214). A waiter it does not fit yet reserves
+        // nothing, so a small call is never stalled behind a big one.
+        if (cap != null || LINE.mustYield(LEDGER, caps, caller, dimension, chunks)) {
+            if (LINE.size() >= MAX_QUEUED_REQUESTS) {
+                return new Busy("MCMCP chunk loading is saturated: " + LINE.size() + " calls are waiting for room "
+                    + "under a hold cap.", busy("saturated", null, retryAfter(caller)));
+            }
+            Waiting waiting = new Waiting(caller, label, tool, dimension, chunks, temporary, idleMillis, maxMillis,
+                callEnded);
+            // Only its own refusal, never the waiter's it yields to: told as its own, another caller's
+            // counts read as "you hold 510" again (#192).
+            waiting.entry = LINE.join(caller, dimension, chunks, nowMillis, CAP_WAIT_MILLIS, waiting, cap);
+            return waiting;
+        }
+        return take(world, caller, label, tool, dimension, chunks, temporary, idleMillis, maxMillis, nowMillis,
+            callEnded);
+    }
+
+    /** Server thread: ends the waits of every call {@code key} covers, for a logout or lost access. */
+    private static void leaveLine(String key, String why) {
+        for (AdmissionLine.Entry<Waiting> entry : LINE.removeCovered(key)) {
+            entry.payload.admitted.complete(new Busy("The call stopped waiting for room: " + why + ".",
+                busy("released", null, 0L)));
+        }
+    }
+
+    /** Server thread: walks the line, admitting the calls that now fit, in order (#214). */
+    private static void admitWaiting(final long nowMillis) {
+        if (LINE.size() == 0) {
+            return;
+        }
+        // Each walk counts every waiter's caps. Only a change to what is held can let anyone in, so walk
+        // then, and twice a second besides for deadlines, cancels and a cap changed by /mcmcp reload.
+        long version = LEDGER.version();
+        if (version == lineWalkedAtVersion && nowMillis - lineWalkedAtMillis < 500L) {
+            return;
+        }
+        lineWalkedAtVersion = version;
+        lineWalkedAtMillis = nowMillis;
+        LINE.walk(LEDGER, caps(), nowMillis, new AdmissionLine.Outcomes<Waiting>() {
+            @Override
+            public void admit(AdmissionLine.Entry<Waiting> entry) {
+                Waiting waiting = entry.payload;
+                Object result;
+                if (waiting.callEnded.get() != 0L) {
+                    result = new Busy("The call ended before its chunks were admitted.", busy("released", null, 0L));
+                }
+                else {
+                    WorldServer world = DimensionManager.getWorld(waiting.dimension);
+                    result = world == null
+                        ? new Busy("Dimension " + waiting.dimension + " is not loaded.", busy("limit", "dimension", 0L))
+                        : take(world, waiting.caller, waiting.label, waiting.tool, waiting.dimension, waiting.chunks,
+                            waiting.temporary, waiting.idleMillis, waiting.maxMillis, nowMillis, waiting.callEnded);
+                }
+                waiting.admitted.complete(result);
+            }
+
+            @Override
+            public void turnAway(AdmissionLine.Entry<Waiting> entry, @Nullable HoldLedger.CapRefusal refusal,
+                                 boolean timedOut) {
+                long waited = nowMillis - entry.joinedMillis;
+                Busy busy;
+                if (refusal != null) {
+                    busy = capBusy(refusal, nowMillis, timedOut ? waited : 0L);
+                }
+                else {
+                    busy = new Busy("Waited " + waited / 1000L + " s behind other calls for room under a hold cap "
+                        + "and did not get in. Retry after busy.retryAfterMs.", busy("limit", null, 2_000L));
+                }
+                entry.payload.admitted.complete(busy);
+            }
+        });
+    }
+
+    /** Server thread: takes the hold, forces what is in memory, and queues what must load. */
+    private static Object take(WorldServer world, String caller, @Nullable String label, @Nullable String tool,
+                               int dimension, Set<Long> chunks, boolean temporary, long idleMillis, long maxMillis,
+                               long nowMillis, AtomicLong callEnded) {
         if (QUEUE.size() >= MAX_QUEUED_REQUESTS) {
             return new Busy("MCMCP chunk loading is saturated: " + QUEUE.size() + " requests are waiting.",
                 busy("saturated", null, retryAfter(caller)));
@@ -585,6 +763,9 @@ public final class ChunkLoadGovernor {
         MinecraftServer server = ServerThreadBridge.server();
         if (server != null) {
             ServerTaskPump.runLater(TaskCaller.MCMCP, () -> {
+                if (callsToo) {
+                    leaveLine(caller, why);
+                }
                 for (String id : LEDGER.ownedBy(caller, callsToo)) {
                     releaseNow(id, why);
                 }
@@ -621,17 +802,18 @@ public final class ChunkLoadGovernor {
         return hold == null ? null : hold.caller;
     }
 
-    /**
-     * How many more chunks {@code caller} may hold now under both caps, overlaps not counted: the size
-     * a tiled read cuts its pieces to (#167). Server thread.
-     */
+    /** How many more chunks nobody holds yet {@code caller} may hold now, under every cap. Server thread. */
     public static int roomFor(String caller) {
-        int room = McmcpConfig.getChunkMaxHeld() - LEDGER.heldChunks();
-        int perCaller = McmcpConfig.getChunkMaxHeldPerCaller();
-        if (perCaller > 0) {
-            room = Math.min(room, perCaller - LEDGER.heldChunksOfGroup(caller));
-        }
-        return Math.max(0, room);
+        return LEDGER.room(caller, caps());
+    }
+
+    /**
+     * The size a tiled read cuts its pieces to (#167, #214): chunks.readTileChunks, or less where a cap
+     * would never let this caller hold that many. Never the room left now: sized to that, one agent's
+     * back-to-back reads each took the whole of what remained and kept it.
+     */
+    public static int readTileChunks(String caller) {
+        return Math.max(1, Math.min(McmcpConfig.getChunkReadTileChunks(), caps().largestHold(caller)));
     }
 
     /**
@@ -717,6 +899,10 @@ public final class ChunkLoadGovernor {
 
     /** Ends every hold and returns every ticket. Server stopping. */
     public static void releaseAll(String why) {
+        for (AdmissionLine.Entry<Waiting> entry : LINE.entries()) {
+            LINE.remove(entry);
+            entry.payload.admitted.complete(new Busy("The server stopped.", busy("stopped", null, 0L)));
+        }
         for (HoldLedger.Hold hold : LEDGER.holds()) {
             releaseNow(hold.id, why);
         }
@@ -737,16 +923,13 @@ public final class ChunkLoadGovernor {
      * @return null, or why it could not
      */
     @Nullable
-    public static String renew(String holdId, String caller, long maxMillis, long idleMillis) {
+    public static String renew(String holdId, String caller, boolean companion, long maxMillis, long idleMillis) {
         HoldLedger.Hold hold = LEDGER.get(holdId);
         if (hold == null || hold.temporary) {
             String ended = endedNote(holdId);
             return ended != null ? ended + " Take a new one with op 'hold'." : "There is no hold '" + holdId + "'.";
         }
-        // The endpoint's agents may renew any hold, as before each had its own (#121); a player only
-        // theirs, any agent of theirs included.
-        if (!hold.caller.equals(caller) && !caller.startsWith("endpoint")
-            && !HoldLedger.groupOf(hold.caller).equals(HoldLedger.groupOf(caller))) {
+        if (!HoldLedger.mayManage(companion, caller, hold.caller)) {
             return "Hold '" + holdId + "' is not yours.";
         }
         long now = System.currentTimeMillis();
@@ -852,6 +1035,8 @@ public final class ChunkLoadGovernor {
             lastMeasuredMillis = now;
             measure(server, now);
         }
+        // Before loading: a call admitted now gets its chunks in memory forced this tick.
+        admitWaiting(now);
         int perTick = ServerHealth.perTick(HEALTH.state(), McmcpConfig.getChunkLoadsPerTick());
         // Round robin: each waiting call gets one load in turn until the tick's share is spent, so a
         // call that asked first cannot starve the ones behind it (#77). A chunk already in memory
@@ -1063,19 +1248,33 @@ public final class ChunkLoadGovernor {
     }
 
     /** A hold cap's refusal: which cap, who holds what, and the caller's own share. */
-    private static Busy capBusy(HoldLedger.CapRefusal cap) {
-        JsonObject json = busy("limit", cap.limit, cap.callsInProgress ? 2_000L : 0L);
+    private static Busy capBusy(HoldLedger.CapRefusal cap, long nowMillis, long waitedMillis) {
+        // When to try again: soon, if calls still running fill the cap; otherwise when the first lasting
+        // hold it counts would idle out, which is the soonest room can appear on its own. None at all
+        // when only the asker's own running calls stand in the way: retrying cannot help that call.
+        long retry = 0L;
+        if (cap.mayClear) {
+            retry = 2_000L;
+        }
+        else if (cap.soonestLastingEndMillis != Long.MAX_VALUE) {
+            retry = Math.max(1_000L, Math.min(600_000L, cap.soonestLastingEndMillis - nowMillis));
+        }
+        JsonObject json = busy("limit", cap.limit, retry);
         json.addProperty("cap", cap.cap);
         json.addProperty("adding", cap.adding);
+        json.addProperty("capHeldChunks", cap.scopeHeldChunks);
         json.addProperty("heldChunks", cap.heldChunks);
         json.addProperty("callers", cap.callers);
         json.addProperty("yourHeldChunks", cap.callerHeldChunks);
         if (cap.groupHeldChunks != cap.callerHeldChunks) {
             json.addProperty("playerHeldChunks", cap.groupHeldChunks);
         }
-        Busy busy = new Busy(cap.message(), json);
-        busy.capMayClear = cap.callsInProgress;
-        return busy;
+        String message = cap.message();
+        if (waitedMillis > 0L) {
+            json.addProperty("waitedMs", waitedMillis);
+            message = "Waited " + waitedMillis / 1000L + " s in line for room and did not get in. " + message;
+        }
+        return new Busy(message, json);
     }
 
     private static JsonObject busy(String reason, @Nullable String limit, long retryAfterMillis) {
@@ -1191,19 +1390,25 @@ public final class ChunkLoadGovernor {
         json.addProperty("heapPercentAfterGc", Math.round(HEALTH.lastHeapPercent()));
         json.addProperty("heldChunks", LEDGER.heldChunks());
         json.addProperty("maxHeldChunks", McmcpConfig.getChunkMaxHeld());
+        HoldLedger.Caps caps = caps();
+        // The player cap as it applies: 0 when it is the server's own.
+        json.addProperty("maxHeldChunksPerPlayer", caps.playerLimit());
         json.addProperty("maxHeldChunksPerCaller", McmcpConfig.getChunkMaxHeldPerCaller());
+        json.addProperty("readTileChunks", McmcpConfig.getChunkReadTileChunks());
         json.addProperty("callers", LEDGER.callers());
         if (you != null) {
             json.addProperty("you", you);
             json.addProperty("yourHeldChunks", LEDGER.heldChunks(you));
-            int group = LEDGER.heldChunksOfGroup(you);
-            if (group != LEDGER.heldChunks(you)) {
-                // What the per-caller cap counts: every agent of the player (#192).
-                json.addProperty("playerHeldChunks", group);
+            if (HoldLedger.isPlayerAgent(you)) {
+                // What the player cap counts: every agent of the player (#192).
+                json.addProperty("playerHeldChunks", LEDGER.heldChunksOfGroup(you));
             }
+            // What a fresh hold of yours may take now, under every cap: the number to plan by.
+            json.addProperty("yourRoom", LEDGER.room(you, caps));
         }
         json.addProperty("loadsLastMinute", BUDGET.lastMinute(now));
         json.addProperty("waitingRequests", QUEUE.size());
+        json.addProperty("waitingForRoom", LINE.size());
         Map<String, String> labels = new HashMap<>();
         JsonArray holds = new JsonArray();
         for (HoldLedger.Hold hold : LEDGER.holds()) {
@@ -1318,6 +1523,7 @@ public final class ChunkLoadGovernor {
         @SubscribeEvent
         public void onLogout(PlayerEvent.PlayerLoggedOutEvent event) {
             String caller = "player:" + event.player.getUniqueID();
+            leaveLine(caller, "its player logged out");
             for (String id : LEDGER.ownedBy(caller, true)) {
                 releaseNow(id, "its player logged out");
             }

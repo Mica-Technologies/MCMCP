@@ -94,6 +94,19 @@ class ReadTilesTest {
     }
 
     @Test
+    void theSmallestPieceSizeAllowedStillTilesAWideBoxWithTheLargestNearMargin() {
+        // chunks.readTileChunks may go down to 16; find_blocks' near is at most NearQuery.MAX_RADIUS (8).
+        for (int room : new int[] {16, 64}) {
+            List<ReadTiles.Tile> tiles = ReadTiles.plan(0, 0, 16 * 200 - 1, 16 * 30 - 1,
+                com.micatechnologies.minecraft.mcmcp.regions.NearQuery.MAX_RADIUS, room);
+            assertTrue(tiles != null && tiles.size() > 1, "room " + room);
+            for (ReadTiles.Tile tile : tiles) {
+                assertTrue(tile.holdChunks().size() <= room, "room " + room + ": a piece holds " + tile.holdChunks().size());
+            }
+        }
+    }
+
+    @Test
     void noRoomForEvenOneChunkWithItsMarginGivesNoPlan() {
         assertNull(ReadTiles.plan(0, 0, 1000, 1000, 40, 8));
     }

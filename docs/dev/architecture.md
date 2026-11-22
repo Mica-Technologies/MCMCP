@@ -333,8 +333,51 @@ Every chunk MCMCP causes to load goes through `chunkload/ChunkLoadGovernor`, on 
 - it calls `queueUnload` on release, unless a player can see the chunk or something else forces it.
 
 Writes check `isBlockLoaded` and never load. `setBlockState` on an unloaded position would load the
-chunk, or generate it. The pure parts (`LoadBudget`, `ServerHealth`, `HoldLedger`, `ChunkKeys`) are
-unit-tested.
+chunk, or generate it. The pure parts (`LoadBudget`, `ServerHealth`, `HoldLedger`, `AdmissionLine`,
+`ReadTiles`, `ChunkKeys`) are unit-tested.
+
+### Hold caps: one model
+
+The caps broke five times (#121, #142, #167, #192, #214), each time because a count, a room
+calculation and a message disagreed about who a cap covers. They now share one definition in
+`HoldLedger.Scope`, and `checkCaps`, `room` and the admission line all use it:
+
+| Scope | Config key | Counts the holds of |
+| --- | --- | --- |
+| caller | `chunks.maxHeldChunksPerCaller` (512) | one caller key |
+| player | `chunks.maxHeldChunksPerPlayer` (0 = the server's) | every agent of one companion player |
+| server | `chunks.maxHeldChunks` (1024) | everyone |
+
+A new hold fits a scope when the chunks already held there plus the chunks it adds to that scope
+stay within the cap. The narrowest scope that does not fit is the one reported.
+`roomIsExactlyTheLargestFreshHoldTheCapsAdmit` pins `room` to `checkCaps`.
+
+Who a caller is (`ToolContext.callerKey`), and what follows from it:
+
+| Caller | Key | Caps it counts toward | Who may renew or release its holds | Ended by |
+| --- | --- | --- | --- | --- |
+| Endpoint agent | `endpoint/<caller id>` | caller, server | any endpoint caller | release, idle, lease |
+| Companion agent | `player:<uuid>~<caller id>` | caller, player, server | any agent of that player, or the endpoint | as above, and its player's logout or lost access |
+| Background job | `job:<id>` | caller, server | the endpoint | the job's end; never its owner's logout or release-all |
+| `server_run_test` step | its test's key | as its test | as its test | as its test |
+
+`<caller id>` separates agents on one connection: the orchestrator's stamp, or the call's `agent`
+argument. `everyKindOfCallerCountsTowardExactlyTheCapsTheCallerMatrixSays` is this table as a test.
+The per-minute load budget (`loadsPerMinutePerCaller`) is keyed the same way.
+
+**Freed room is reserved.** A call refused by a cap that would fit once other callers' running calls
+end joins `AdmissionLine` (30 s), and the server tick admits, oldest first, every waiter that fits.
+Room that has come free is reserved for the waiters it fits (`reservations`), and a fresh call that
+fits the caps still waits if it would take that room (`mustYield`). Without this rule a tiled read
+that gave a piece back took the room straight back, and the waiter never got in. A waiter that does
+not fit yet reserves nothing, deliberately: strict first-come-first-served would stall every small
+load behind one big load waiting on a long write. A caller with a call in progress never yields: it
+may be a `server_run_test` step whose own test's hold is the room reserved (#132). A cap filled only
+by lasting holds is refused at once. A waiter is only ever told its own counts, never those of the
+waiter it yielded to (#192).
+
+**Tiled reads use fixed pieces** of `chunks.readTileChunks`. Sizing them to the room left, as
+before, let one agent's back-to-back reads take a whole cap and keep it for forty minutes.
 
 ## Change tracking
 

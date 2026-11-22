@@ -128,12 +128,16 @@ SHA-256 and block count.
 | --- | --- | --- |
 | `lines` | integer 1–5000 | Default 100. Capped by `limits.maxLogLines`. |
 | `filter` | string | Case-insensitive substring. |
-| `file` | string | File name inside `logs/`. Default `latest.log`. No path separators. |
+| `file` | string | File name inside `logs/`, gzipped or not. Default `latest.log`. No path separators. |
+| `list` | boolean | List the files in `logs/` instead, newest first: `{directory, files: [{name, bytes, modified, gzip?}]}`, at most 200. |
 | `logger` | string | Read what [`game_set_log_level`](#game_set_log_level) captured from this logger instead of a file. |
 | `since` | integer | With `logger`: the `next` from a previous read, for only the lines after it, oldest first. |
 
 Reads the tail of a log file, seeking backwards from the end. A filtered read scans up to 200,000
-lines back; an unfiltered one stops as soon as it has enough.
+lines back; an unfiltered one stops as soon as it has enough. A rolled log (`2026-11-19-1.log.gz`),
+recognised by its gzip bytes rather than its name, is decompressed and read forwards once, so a
+filter searches the whole of it. A file that is not text, or a gzip that is damaged or cut off, is a
+tool error naming the file, never `(no lines match)`.
 
 Returns text only: a header line — `# <path> — N lines matching "<filter>"` — and then the lines.
 There is deliberately no structured form. A client may show `structuredContent` in place of the text
@@ -701,21 +705,30 @@ call needs chunks that aren't loaded, ask for them:
 Both go through one governor:
 - **Pacing.** Loads are paced (`chunks.loadsPerTick`) and budgeted per minute, server-wide and per
   caller. Chunks that are already loaded never count against either.
-- **Hold caps.** At most `chunks.maxHeldChunks` chunks are held at once, and at most
-  `chunks.maxHeldChunksPerCaller` by any one caller, so one agent cannot take them all. A caller is
-  one player through the companion, one agent on the endpoint (each agent through the orchestrator
-  counts apart), or one background job. A request that another caller's running call's chunks
-  stand in the way of waits up to 10 seconds for them before it is refused. One that only the
-  caller's own running calls stand in the way of is refused at once, since it may be running inside
-  one of them (a [`server_run_test`](#server_run_test) step).
-- **Large reads go a piece at a time.** A read-only `load: true` over more chunks than the caller
-  may hold now (`server_count_blocks`, `server_find_blocks` box mode, `server_get_blocks` packed or
-  `surface`, `server_plan_view`) is not refused: it is cut into bands of whole chunk rows that each
-  fit, and each piece is loaded, read and given back before the next. The result is the same one
-  stitched result, and its `chunks` block adds `tiles`, `tilesRead` and `tileChunks`. The caps pace
-  such a read rather than block it; loads still go at the per-minute budget, so a very large one
-  takes minutes. Too little room for even a small piece (under 16 chunks) is still refused, naming
-  the cap. Writes are never cut up: they hold all they touch until their undo point is taken.
+- **Hold caps.** Three caps, each counting the distinct chunks held in its own scope:
+  `chunks.maxHeldChunksPerCaller` (512) for one **caller**, `chunks.maxHeldChunksPerPlayer` for every
+  agent of one companion **player** together (0, the default, leaves that to the server cap), and
+  `chunks.maxHeldChunks` (1024) for the **server**. A caller is one agent: on the endpoint, or one of
+  the agents driving a companion player (each agent through the orchestrator, or each `agent` name,
+  counts apart), or one background job. Other callers' holds never count toward your own cap.
+  [`server_keep_loaded`](#server_keep_loaded) `list` shows `yourRoom`, what you may take now.
+- **Waiting your turn.** A load that other callers' running calls stand in the way of, and that
+  would fit once they end, waits in line for up to 30 seconds instead of failing. Room that comes
+  free goes to the oldest waiters it fits: a new call may not take it from them, so a long run of
+  reads by one agent cannot shut another out. A waiter that does not fit yet holds nobody up, so a
+  small load is never stalled behind a big one. A load that only
+  lasting holds stand in the way of is refused at once, with `retryAfterMs` set to when the first of
+  them idles out. One that only the caller's own running calls stand in the way of is refused at
+  once, since it may be running inside one of them (a [`server_run_test`](#server_run_test) step),
+  and such a caller never waits behind anyone.
+- **Large reads go a piece at a time.** A read-only `load: true` over more than
+  `chunks.readTileChunks` (64, about 128 × 128 blocks) chunks (`server_count_blocks`,
+  `server_find_blocks` box mode, `server_get_blocks` packed or `surface`, `server_plan_view`) is cut
+  into pieces of at most that many, and each piece is loaded, read and given back before the next,
+  waiting its turn in the line like any call. One read never holds more than one piece. The result
+  is the same one stitched result, and its `chunks` block adds `tiles`, `tilesRead` and
+  `tileChunks`. Loads still go at the per-minute budget, so a very large read takes minutes. Writes
+  are never cut up: they hold all they touch until their undo point is taken.
 - **A call's own hold.** `load: true` holds its chunks only while its call runs. If the call stops
   waiting before the server thread admits it, nothing is held; if it stops waiting while the
   admission runs, the hold is given back as soon as the admission ends. A hold whose call is over
@@ -750,17 +763,17 @@ who holds what:
 
 ```json
 {"busy": {"reason": "limit", "limit": "chunks.maxHeldChunks", "cap": 1024, "adding": 200,
- "heldChunks": 900, "callers": 3, "yourHeldChunks": 100, "mspt": 21.4, "heapPercent": 38}}
+ "capHeldChunks": 900, "heldChunks": 900, "callers": 3, "yourHeldChunks": 100, "retryAfterMs": 84000,
+ "mspt": 21.4, "heapPercent": 38}}
 ```
 
-It carries `retryAfterMs` only when calls still running hold some of those chunks; otherwise a hold
-has to be released first ([`server_keep_loaded`](#server_keep_loaded) `list` shows them).
-
-`yourHeldChunks` is what the calling agent holds itself, the number its own `list` shows. Through
-the companion the per-caller cap is the **player's**, shared by every agent driving that player, so
-the refusal also carries `playerHeldChunks` and says `they hold 510 chunk(s) between them, 0 of them
-yours`. When another of those agents has a call still running, the call first waits up to ten
-seconds for it to end, and only then returns `busy` with `retryAfterMs`.
+`limit` names the cap refused (the narrowest, when several are full), `capHeldChunks` what that cap
+counts now, and `yourHeldChunks` what the calling agent holds itself, the number its own `list`
+shows. A refusal by `chunks.maxHeldChunksPerPlayer` also carries `playerHeldChunks` and says `they
+hold 510 chunk(s) between them, 0 of them yours`. A call that waited its 30 seconds in line and did
+not get in says so and carries `waitedMs`. `retryAfterMs` is 2 seconds when calls still running will
+make room, otherwise when the first lasting hold that cap counts idles out; it is absent only when
+nothing but your own running calls stands in the way.
 
 #### `server_keep_loaded`
 
@@ -782,12 +795,14 @@ when its owner leaves the server. Reading or writing inside it renews the idle t
 lease; `renew` renews both. A read inside a hold whose lease ends within two minutes carries
 `holdLeaseEndsInSeconds` in its `chunks` block, so a long test hears of it before its region
 unloads. For a test that reads nothing for minutes at a time, pass a long `idleSeconds`. `list`
-shows the governor's state, both caps, `yourHeldChunks`, and each hold with its `owner` (and
+shows the governor's state, the caps (`maxHeldChunksPerPlayer` is 0 when it is the server's),
+`readTileChunks`, `yourHeldChunks`, `yourRoom` (what a fresh hold of yours may take now, under every
+cap), `waitingForRoom` (calls in line), and each hold with its `owner` (and
 `ownerLabel`, the agent's name), `chunks`, `expiresInSeconds` and `leaseEndsInSeconds`. On the
 endpoint it also lists every caller's share in `byCaller` (`caller`, `label`, `chunks`, `holds`,
 `calls` in progress, `nextExpiresInSeconds`), biggest first, so a stale hold in the way can be found
 and released by id. A player through the companion sees the holds of every agent driving that
-player, and `playerHeldChunks`, the count their shared cap is checked against.
+player, and `playerHeldChunks`, the count `chunks.maxHeldChunksPerPlayer` is checked against.
 
 A hold with `temporary: true` belongs to a call that is loading or using chunks right now. It
 carries the `tool`, `call` (`running`, or `ended, being released`) and `heldForSeconds`, and it ends
@@ -797,9 +812,10 @@ clean up. `recentlyEnded` lists the lasting holds that ended in the last ten min
 `server_release_loaded all, by <agent>`, `the server has been struggling and shed it`), so a hold
 that is gone is explained.
 
-Limited to `chunks.maxHeldChunksPerCaller` (512, about 360 × 360 blocks) per caller and
-`chunks.maxHeldChunks` server-wide. Each agent and each job is its own caller. Work a larger area in
-pieces.
+Limited to `chunks.maxHeldChunksPerCaller` (512, about 360 × 360 blocks) per caller,
+`chunks.maxHeldChunksPerPlayer` for a companion player's agents together, and `chunks.maxHeldChunks`
+server-wide. Each agent and each job is its own caller. A box bigger than the least of those is
+refused at once; work a larger area in pieces.
 
 #### `server_release_loaded`
 
@@ -810,8 +826,9 @@ another hold still needs them. Returns `{released: [ids], heldChunks}`, `heldChu
 still hold.
 
 `all: true` ends your `server_keep_loaded` holds only. "Yours" means this agent's, both on the
-endpoint and through the companion: several agents driving one player each own their holds, though
-the player's `chunks.maxHeldChunksPerCaller` counts them all together. A read or write still loading chunks for another
+endpoint and through the companion: several agents driving one player each own their holds (and
+each has its own `chunks.maxHeldChunksPerCaller`), though a player's agents may release each other's
+holds by id. A read or write still loading chunks for another
 of your calls keeps its own, so one script cleaning up cannot fail another running on the same account.
 A call whose hold is ended while it waits fails with a message naming what ended it.
 

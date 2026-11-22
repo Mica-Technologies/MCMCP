@@ -112,6 +112,16 @@ load, because `setBlockState` on an unloaded position loads or generates the chu
 MCMCP generates is `ChunkPregen` (`server_pregen_chunks`, #138). It is paced per tick by its caller,
 and it gives back only the chunks it loaded. Never save or unload the world as a whole from it.
 
+**The hold caps have one definition: `HoldLedger.Scope`** (caller, player, server). Every count, room
+calculation, refusal message and admission decision goes through it, and the caller matrix in
+`docs/dev/architecture.md` says what each caller key counts toward. Five past bugs (#121, #142,
+#167, #192, #214) were all one piece of code disagreeing with another about who a cap covers. So:
+- never count holds by hand or parse a caller key outside `HoldLedger`;
+- a new kind of caller gets a row in the matrix and in its table-driven test;
+- a tool that loads goes through `acquire`, which waits its turn in `AdmissionLine`;
+- a large read is tiled with `ServerChunkTools.walk`, which uses fixed `chunks.readTileChunks`
+  pieces and is never sized to the room left.
+
 ### The threading rule
 
 Minecraft's world state is owned by one thread per side and guarded by nothing. Touching it from an

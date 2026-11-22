@@ -7,12 +7,12 @@ import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
- * Cuts a read-only box into pieces that each fit the chunks a caller may still hold (#167).
+ * Cuts a read-only box into pieces of at most a given number of chunks (#167, #214).
  *
- * <p>A read with {@code load: true} over a box bigger than {@code chunks.maxHeldChunksPerCaller} (or
- * the server's {@code chunks.maxHeldChunks}) was refused outright, though a read needs no chunk to stay
- * resident across the whole box: it can load a piece, read it, give it back and move on. This works out
- * the pieces. The caps then pace a large read rather than block it.
+ * <p>A read with {@code load: true} over a box bigger than a hold cap was refused outright, though a read
+ * needs no chunk to stay resident across the whole box: it can load a piece, read it, give it back and
+ * move on. This works out the pieces, of {@code chunks.readTileChunks} each. The caps then pace a large
+ * read rather than block it, and one read never holds more than a piece.
  *
  * <p>Every tile is a contiguous run of the box's chunks in {@link ChunkKeys#box} row order (z outer, x
  * inner): a band of whole rows when a row fits, otherwise a piece of one row. So a read that walks the
@@ -22,9 +22,6 @@ import javax.annotation.Nullable;
  * <p>Pure: no Minecraft class, so the arithmetic is unit-tested.
  */
 public final class ReadTiles {
-
-    /** Below this many chunks of room, tiling would take more round trips than it saves; refuse instead. */
-    public static final int MIN_ROOM = 16;
 
     private ReadTiles() {
     }

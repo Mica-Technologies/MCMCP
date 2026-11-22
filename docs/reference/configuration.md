@@ -477,7 +477,7 @@ closed").
 | `maxSurfaceColumns` | 262,144 | Columns one `mode: "surface"` call reads (512 × 512). |
 | `changeLogEntries` | 262,144 | Block changes `server_changes_since` remembers, about 50 bytes each. Takes effect when the server starts. |
 | `maxWriteCells` | 1,048,576 | Cells one palette-mode `server_set_blocks` call writes. |
-| `writeCellsPerMinutePerCaller` | 1,000,000 | Cells one caller writes in palette mode in any minute. A caller is one agent on the endpoint, one player through the companion, or one background job. An interactive call past it is refused as busy; a job waits for it. |
+| `writeCellsPerMinutePerCaller` | 1,000,000 | Cells one caller writes in palette mode in any minute. A caller is one agent (on the endpoint, or of a companion player) or one background job. An interactive call past it is refused as busy; a job waits for it. |
 
 ## `chunks`
 
@@ -489,9 +489,11 @@ read live.
 | --- | --- | --- | --- |
 | `loadsPerTick` | 8 | 1–64 | Chunks loaded from disk in one tick (about 0.5 ms each for vanilla; at most 2 while throttled). |
 | `loadsPerMinute` | 600 | 20+ | Loads in any minute, everyone together. |
-| `loadsPerMinutePerCaller` | 400 | 20+ | Loads in any minute by one caller: one player, one agent on the endpoint, or one job. |
+| `loadsPerMinutePerCaller` | 400 | 20+ | Loads in any minute by one caller: one agent (on the endpoint, or of a companion player), or one job. |
 | `maxHeldChunks` | 1024 | 1–65536 | Chunks MCMCP keeps loaded at once: the bound on its memory. Raise it on a server with memory to spare. |
-| `maxHeldChunksPerCaller` | 512 | 0–65536 | Chunks one caller keeps loaded (512 is about 360 × 360 blocks), so one agent cannot take all of `maxHeldChunks`. Each agent through the orchestrator, and each background job, is its own caller. 0 for no per-caller limit. |
+| `maxHeldChunksPerCaller` | 512 | 0–65536 | Chunks one caller keeps loaded (512 is about 360 × 360 blocks), so one agent cannot take all of `maxHeldChunks`. A caller is one agent, on the endpoint or of a companion player (each agent through the orchestrator counts apart), or one background job; other callers' holds never count toward it. 0 for no per-caller limit. |
+| `maxHeldChunksPerPlayer` | 0 | 0–65536 | Chunks every agent of one companion player keeps loaded together, so one player's agents cannot take all of `maxHeldChunks` from other players. 0 for none but `maxHeldChunks`. |
+| `readTileChunks` | 64 | 16–4096 | The most a `load: true` read over a large box holds at once: it loads, reads and gives back a piece of this many chunks at a time. |
 | `holdIdleSeconds` | 120 | 10–3600 | A hold unused for this long is released. |
 | `holdMaxSeconds` | 900 | 60–3600 | The lease a hold gets when it asks for none. |
 | `holdLongestLeaseSeconds` | 14400 | 60–86400 | The longest lease a hold may ask for with `maxSeconds`. The idle release still applies. |

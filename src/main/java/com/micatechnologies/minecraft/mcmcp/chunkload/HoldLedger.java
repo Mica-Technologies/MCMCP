@@ -119,6 +119,13 @@ public final class HoldLedger {
     private final Set<Place> loadedByUs = new HashSet<>();
     private final java.util.ArrayDeque<Ended> ended = new java.util.ArrayDeque<>();
     private int nextId = 1;
+    /** Bumped by every hold added or removed: the only thing that can make room under a cap. */
+    private long version;
+
+    /** Changes whenever what the caps count may have changed. */
+    public long version() {
+        return version;
+    }
 
     /** How many ended holds are remembered, newest last. */
     public static final int ENDED_KEPT = 32;
@@ -186,6 +193,7 @@ public final class HoldLedger {
      */
     public List<Place> add(Hold hold) {
         holds.put(hold.id, hold);
+        version++;
         List<Place> fresh = new ArrayList<>();
         for (long chunk : hold.chunks) {
             Place place = new Place(hold.dimension, chunk);
@@ -214,6 +222,7 @@ public final class HoldLedger {
         if (hold == null) {
             return Collections.emptyList();
         }
+        version++;
         List<Released> released = new ArrayList<>();
         for (long chunk : hold.chunks) {
             Place place = new Place(hold.dimension, chunk);
@@ -259,22 +268,9 @@ public final class HoldLedger {
         return references.size();
     }
 
-    /** Distinct chunks held by every caller of one group: a player's agents, for the player's cap. */
-    private Set<Place> placesOfGroup(String group) {
-        Set<Place> places = new HashSet<>();
-        for (Hold hold : holds.values()) {
-            if (groupOf(hold.caller).equals(group)) {
-                for (long chunk : hold.chunks) {
-                    places.add(new Place(hold.dimension, chunk));
-                }
-            }
-        }
-        return places;
-    }
-
-    /** Distinct chunks held by a caller's group: what its per-caller cap counts (#167). */
+    /** Distinct chunks held by every agent of a caller's player (or by the caller alone, if it has none). */
     public int heldChunksOfGroup(String caller) {
-        return placesOfGroup(groupOf(caller)).size();
+        return placesIn(Scope.PLAYER, caller, false).size();
     }
 
     /** Distinct chunks held by one caller. */
@@ -322,84 +318,237 @@ public final class HoldLedger {
         return callers.size();
     }
 
+    // ------------------------------------------------------------------
+    // Hold caps
+    //
+    // Three caps, one model. Each bounds the distinct chunks held by the holds in one scope:
+    //
+    //   caller  (chunks.maxHeldChunksPerCaller) the holds taken under one caller key: one agent on the
+    //           endpoint, one agent of a companion player, or one background job;
+    //   player  (chunks.maxHeldChunksPerPlayer) every agent of one companion player together; a caller
+    //           that is not a player's agent has no player scope;
+    //   server  (chunks.maxHeldChunks)          everyone.
+    //
+    // A new hold is checked against each scope the asker is in, counting what it would add to that
+    // scope: the chunks no hold in the scope has yet. That one rule is what checkCaps, room and the
+    // admission line all use, so the three can never disagree about whether something fits (#214).
+    // ------------------------------------------------------------------
+
     public static final String LIMIT_TOTAL = "chunks.maxHeldChunks";
+    public static final String LIMIT_PER_PLAYER = "chunks.maxHeldChunksPerPlayer";
     public static final String LIMIT_PER_CALLER = "chunks.maxHeldChunksPerCaller";
+
+    /** The caps as configured. */
+    public static final class Caps {
+
+        public final int total;
+        /** 0, or anything at or above {@link #total}: no player cap but the server's. */
+        public final int perPlayer;
+        /** 0 for none. */
+        public final int perCaller;
+
+        public Caps(int total, int perPlayer, int perCaller) {
+            this.total = total;
+            this.perPlayer = perPlayer;
+            this.perCaller = perCaller;
+        }
+
+        /** The player cap that binds before the server's, or 0 when none does. */
+        public int playerLimit() {
+            return perPlayer > 0 && perPlayer < total ? perPlayer : 0;
+        }
+
+        /** The most chunks one caller could ever hold at once, with nobody else holding anything. */
+        public int largestHold(String caller) {
+            int most = total;
+            if (perCaller > 0) {
+                most = Math.min(most, perCaller);
+            }
+            if (isPlayerAgent(caller) && playerLimit() > 0) {
+                most = Math.min(most, playerLimit());
+            }
+            return most;
+        }
+    }
+
+    /** What one cap counts, narrowest first: the order caps are checked and reported in. */
+    enum Scope {
+        CALLER(LIMIT_PER_CALLER),
+        PLAYER(LIMIT_PER_PLAYER),
+        SERVER(LIMIT_TOTAL);
+
+        final String limit;
+
+        Scope(String limit) {
+            this.limit = limit;
+        }
+
+        /** Whether holds taken under {@code holder} count toward {@code asker}'s cap of this scope. */
+        boolean contains(String asker, String holder) {
+            switch (this) {
+                case CALLER:
+                    return holder.equals(asker);
+                case PLAYER:
+                    return groupOf(holder).equals(groupOf(asker));
+                default:
+                    return true;
+            }
+        }
+
+        /** This scope's cap for {@code asker}, or 0 when it has none. */
+        int limitFor(String asker, Caps caps) {
+            switch (this) {
+                case CALLER:
+                    return caps.perCaller;
+                case PLAYER:
+                    // A caller that is nobody's agent is a group of one: its player scope is its caller scope.
+                    return isPlayerAgent(asker) ? caps.playerLimit() : 0;
+                default:
+                    return caps.total;
+            }
+        }
+    }
+
+    /** Whether {@code caller} is one agent of a companion player ({@code player:<uuid>~<agent>}). */
+    public static boolean isPlayerAgent(String caller) {
+        return caller.indexOf('~') >= 0;
+    }
+
+    /**
+     * The distinct chunks held in one of {@code asker}'s scopes.
+     *
+     * @param afterRunningCalls leave out what only other callers' calls in progress hold: what the scope
+     *                          holds once those calls end, which they do on their own and soon. The asker's
+     *                          own calls are never left out — a {@code server_run_test} step runs inside one,
+     *                          which cannot end until the step does (#132).
+     */
+    private Set<Place> placesIn(Scope scope, String asker, boolean afterRunningCalls) {
+        Set<Place> places = new HashSet<>();
+        for (Hold hold : holds.values()) {
+            if (!scope.contains(asker, hold.caller)) {
+                continue;
+            }
+            if (afterRunningCalls && hold.temporary && !hold.caller.equals(asker)) {
+                continue;
+            }
+            for (long chunk : hold.chunks) {
+                places.add(new Place(hold.dimension, chunk));
+            }
+        }
+        return places;
+    }
+
+    private static int adding(Set<Place> held, int dimension, Set<Long> chunks) {
+        int adding = 0;
+        for (long chunk : chunks) {
+            if (!held.contains(new Place(dimension, chunk))) {
+                adding++;
+            }
+        }
+        return adding;
+    }
+
+    /** When the first lasting hold in one of {@code asker}'s scopes ends if untouched, or Long.MAX_VALUE. */
+    private long soonestLastingEnd(Scope scope, String asker) {
+        long soonest = Long.MAX_VALUE;
+        for (Hold hold : holds.values()) {
+            if (!hold.temporary && scope.contains(asker, hold.caller)) {
+                soonest = Math.min(soonest, hold.expiresAtMillis());
+            }
+        }
+        return soonest;
+    }
 
     /** Why a new hold would pass a cap: which one, and who holds what. */
     public static final class CapRefusal {
 
-        /** The config key of the cap: {@link #LIMIT_TOTAL} or {@link #LIMIT_PER_CALLER}. */
+        /** The config key of the cap: {@link #LIMIT_PER_CALLER}, {@link #LIMIT_PER_PLAYER} or {@link #LIMIT_TOTAL}. */
         public final String limit;
         public final int cap;
         /** What the hold would add to the count that cap bounds. */
         public final int adding;
+        /** What that cap counts now. */
+        public final int scopeHeldChunks;
+        /** Every chunk held, all callers. */
         public final int heldChunks;
         public final int callers;
         /** What the asker holds under its own key: the count its own listing shows. */
         public final int callerHeldChunks;
         /**
-         * What the asker's group holds: a player's agents together, which is what the per-caller cap
-         * counts. The same as {@link #callerHeldChunks} for a caller that is a group of one.
+         * What the asker's player holds, every agent together. The same as {@link #callerHeldChunks}
+         * for a caller that is nobody's agent.
          */
         public final int groupHeldChunks;
         /**
-         * Whether another caller's call in progress holds chunks that count against this cap. Those end
-         * with their call, so a moment's wait may make room; a lasting hold never frees up that soon.
+         * Whether the hold would fit once other callers' calls in progress, counted against this cap,
+         * give their chunks back. Those end with their call, so it is worth waiting in line for; a cap
+         * filled by lasting holds is not, since they end minutes away, if at all.
          */
-        public final boolean callsInProgress;
+        public final boolean mayClear;
         /**
-         * Whether the asker's own calls in progress hold some of these. Not worth waiting for: the
-         * asking call may be running inside one of them — a {@code server_run_test} step — and that one
-         * cannot end until this one does (#132).
+         * Whether the asker's own calls in progress hold some of what this cap counts. Never waited
+         * for: the asking call may be running inside one of them — a {@code server_run_test} step — and
+         * that one cannot end until this one does (#132).
          */
         public final boolean ownCallsInProgress;
+        /** When the first lasting hold this cap counts ends if untouched, or Long.MAX_VALUE. */
+        public final long soonestLastingEndMillis;
+        final Scope scope;
 
-        CapRefusal(String limit, int cap, int adding, int heldChunks, int callers, int callerHeldChunks,
-                   int groupHeldChunks, boolean callsInProgress, boolean ownCallsInProgress) {
-            this.limit = limit;
+        CapRefusal(Scope scope, int cap, int adding, int scopeHeldChunks, int heldChunks, int callers,
+                   int callerHeldChunks, int groupHeldChunks, boolean mayClear, boolean ownCallsInProgress,
+                   long soonestLastingEndMillis) {
+            this.scope = scope;
+            this.limit = scope.limit;
             this.cap = cap;
             this.adding = adding;
+            this.scopeHeldChunks = scopeHeldChunks;
             this.heldChunks = heldChunks;
             this.callers = callers;
             this.callerHeldChunks = callerHeldChunks;
             this.groupHeldChunks = groupHeldChunks;
-            this.callsInProgress = callsInProgress;
+            this.mayClear = mayClear;
             this.ownCallsInProgress = ownCallsInProgress;
+            this.soonestLastingEndMillis = soonestLastingEndMillis;
         }
 
         public boolean perCaller() {
-            return LIMIT_PER_CALLER.equals(limit);
+            return scope == Scope.CALLER;
         }
 
-        /** The refusal as a caller reads it: which cap, the server's count and callers, and their own. */
+        public boolean perPlayer() {
+            return scope == Scope.PLAYER;
+        }
+
+        /** The refusal as a caller reads it: which cap, what it counts, and the caller's own share. */
         public String message() {
             StringBuilder text = new StringBuilder();
-            if (perCaller() && groupHeldChunks != callerHeldChunks) {
-                // The cap is the player's, and other agents on the same connection hold most of it. Said
-                // as "you hold 510" it sent an agent holding nothing to look for holds to release (#192).
-                text.append("Hold cap reached for your player (").append(limit).append(" = ").append(cap)
-                    .append(", shared by every agent on your connection): they hold ").append(groupHeldChunks)
-                    .append(" chunk(s) between them, ").append(callerHeldChunks).append(" of them yours, and this ")
-                    .append("needs ").append(adding).append(" more. The server holds ").append(heldChunks)
-                    .append(" for ").append(callers).append(" caller(s). server_keep_loaded op 'list' shows which ")
-                    .append("agent holds what; work in smaller pieces, or wait for the others.");
+            switch (scope) {
+                case CALLER:
+                    text.append("Hold cap reached for you (").append(limit).append(" = ").append(cap)
+                        .append(", your own: other agents' holds do not count toward it): you hold ")
+                        .append(callerHeldChunks).append(" chunk(s) and this needs ").append(adding)
+                        .append(" more. Release a hold of yours (server_release_loaded) or work in smaller pieces.");
+                    break;
+                case PLAYER:
+                    // Said as "you hold 510", a refusal sent an agent holding nothing to look for holds to
+                    // release (#192): the count is every agent of the player's.
+                    text.append("Hold cap reached for your player (").append(limit).append(" = ").append(cap)
+                        .append(", shared by every agent on your connection): they hold ").append(groupHeldChunks)
+                        .append(" chunk(s) between them, ").append(callerHeldChunks).append(" of them yours, and ")
+                        .append("this needs ").append(adding).append(" more. server_keep_loaded op 'list' shows ")
+                        .append("which agent holds what.");
+                    break;
+                default:
+                    text.append("Server hold cap reached (").append(limit).append(" = ").append(cap).append("): ")
+                        .append(heldChunks).append(" chunk(s) held by ").append(callers).append(" caller(s), ")
+                        .append(callerHeldChunks).append(" of them yours, and this needs ").append(adding)
+                        .append(" more. server_keep_loaded op 'list' shows who holds what.");
+                    break;
             }
-            else if (perCaller()) {
-                text.append("Hold cap reached for you (").append(limit).append(" = ").append(cap)
-                    .append("): you hold ").append(callerHeldChunks).append(" chunk(s) and this needs ")
-                    .append(adding).append(" more. The server holds ").append(heldChunks).append(" for ")
-                    .append(callers).append(" caller(s). Release a hold of yours (server_release_loaded) or ")
-                    .append("work in smaller pieces.");
-            }
-            else {
-                text.append("Server hold cap reached (").append(limit).append(" = ").append(cap).append("): ")
-                    .append(heldChunks).append(" chunk(s) held by ").append(callers).append(" caller(s), ")
-                    .append(callerHeldChunks).append(" of them yours, and this needs ").append(adding)
-                    .append(" more. server_keep_loaded op 'list' shows who holds what.");
-            }
-            if (callsInProgress) {
-                text.append(" Calls still running hold some of these and give them back when they end: retry ")
-                    .append("after busy.retryAfterMs.");
+            if (mayClear) {
+                text.append(" Calls still running hold enough of these to make room when they end: retry after ")
+                    .append("busy.retryAfterMs.");
             }
             else if (ownCallsInProgress) {
                 text.append(" Calls of yours still running hold some of these and give them back when they end; ")
@@ -411,60 +560,101 @@ public final class HoldLedger {
     }
 
     /**
-     * Whether {@code caller} may take a hold over {@code chunks} under both caps. The server-wide cap
-     * counts the chunks nobody holds yet; the caller's own counts the chunks this caller does not hold
-     * yet, so overlapping another caller's hold is free for the server but not for the caller. A
-     * background job's holds are taken under {@code job:<id>}, so a job is a caller of its own.
+     * Whether {@code caller} may take a hold over {@code chunks} under every cap it is under. Each cap
+     * counts what the hold would add to its own scope, so overlapping another caller's hold is free for
+     * the server's cap but not for the caller's own. The narrowest cap passed is the one reported.
      *
-     * @param maxPerCaller 0 for no per-caller cap
      * @return null when it fits
      */
     @Nullable
-    public CapRefusal checkCaps(String caller, int dimension, Set<Long> chunks, int maxTotal, int maxPerCaller) {
-        int held = heldChunks();
-        Set<Place> mine = placesOfGroup(groupOf(caller));
-        int addingTotal = added(dimension, chunks);
-        int own = heldChunks(caller);
-        if (held + addingTotal > maxTotal) {
-            return new CapRefusal(LIMIT_TOTAL, maxTotal, addingTotal, held, callers(), own, mine.size(),
-                hasCallInProgress(caller, false), hasCallInProgress(caller, true));
+    public CapRefusal checkCaps(String caller, int dimension, Set<Long> chunks, Caps caps) {
+        return checkCaps(caller, dimension, chunks, caps, Collections.<Pending>emptyList());
+    }
+
+    /** A hold not taken yet but promised: room the admission line has reserved for a waiter. */
+    public static final class Pending {
+
+        final String caller;
+        final int dimension;
+        final Set<Long> chunks;
+
+        public Pending(String caller, int dimension, Set<Long> chunks) {
+            this.caller = caller;
+            this.dimension = dimension;
+            this.chunks = chunks;
         }
-        if (maxPerCaller > 0) {
-            int addingMine = 0;
-            for (long chunk : chunks) {
-                if (!mine.contains(new Place(dimension, chunk))) {
-                    addingMine++;
+    }
+
+    /**
+     * As above, counting {@code reserved} as if their holds were already taken: whether this fits beside
+     * the room the line has promised to others. A reservation is a call that will run and end, so it is
+     * left out of what may clear like any other caller's call in progress.
+     */
+    @Nullable
+    public CapRefusal checkCaps(String caller, int dimension, Set<Long> chunks, Caps caps, List<Pending> reserved) {
+        for (Scope scope : Scope.values()) {
+            int limit = scope.limitFor(caller, caps);
+            if (limit <= 0) {
+                continue;
+            }
+            Set<Place> held = placesIn(scope, caller, false);
+            for (Pending pending : reserved) {
+                if (scope.contains(caller, pending.caller)) {
+                    for (long chunk : pending.chunks) {
+                        held.add(new Place(pending.dimension, chunk));
+                    }
                 }
             }
-            if (mine.size() + addingMine > maxPerCaller) {
-                // Only the group's chunks count here, so only its calls could make room: another agent
-                // of the same player's, which is worth a moment's wait, or the asker's own, which is not.
-                return new CapRefusal(LIMIT_PER_CALLER, maxPerCaller, addingMine, held, callers(), own, mine.size(),
-                    hasGroupCallInProgress(caller), hasCallInProgress(caller, true));
+            int adding = adding(held, dimension, chunks);
+            if (held.size() + adding <= limit) {
+                continue;
             }
+            Set<Place> after = placesIn(scope, caller, true);
+            boolean mayClear = after.size() < held.size() && after.size() + adding(after, dimension, chunks) <= limit;
+            return new CapRefusal(scope, limit, adding, held.size(), heldChunks(), callers(), heldChunks(caller),
+                heldChunksOfGroup(caller), mayClear, hasCallInProgress(caller), soonestLastingEnd(scope, caller));
         }
         return null;
     }
 
-    /** Whether a temporary hold is held by {@code caller} (own) or by anyone else (not own). */
-    private boolean hasCallInProgress(String caller, boolean own) {
+    /** As above, with the per-player cap left to the server's. For tests of the two-cap cases. */
+    @Nullable
+    public CapRefusal checkCaps(String caller, int dimension, Set<Long> chunks, int maxTotal, int maxPerCaller) {
+        return checkCaps(caller, dimension, chunks, new Caps(maxTotal, 0, maxPerCaller));
+    }
+
+    /**
+     * How many chunks nobody in any of its scopes holds yet {@code caller} may take now: the largest
+     * fresh hold {@link #checkCaps} admits. Never negative.
+     */
+    public int room(String caller, Caps caps) {
+        int room = Integer.MAX_VALUE;
+        for (Scope scope : Scope.values()) {
+            int limit = scope.limitFor(caller, caps);
+            if (limit > 0) {
+                room = Math.min(room, limit - placesIn(scope, caller, false).size());
+            }
+        }
+        return Math.max(0, room);
+    }
+
+    /** Whether {@code caller} has a call in progress holding chunks. */
+    public boolean hasCallInProgress(String caller) {
         for (Hold hold : holds.values()) {
-            if (hold.temporary && hold.caller.equals(caller) == own) {
+            if (hold.temporary && hold.caller.equals(caller)) {
                 return true;
             }
         }
         return false;
     }
 
-    /** Whether another caller of {@code caller}'s group (another agent of the same player) has a call's hold. */
-    private boolean hasGroupCallInProgress(String caller) {
-        String group = groupOf(caller);
-        for (Hold hold : holds.values()) {
-            if (hold.temporary && !hold.caller.equals(caller) && groupOf(hold.caller).equals(group)) {
-                return true;
-            }
-        }
-        return false;
+    /**
+     * Whether {@code asker} may renew or release a hold taken under {@code holder}. The endpoint is the
+     * server's own operator, and its agents may manage any hold; a companion player only theirs, any
+     * agent of theirs included, since the access is the player's.
+     */
+    public static boolean mayManage(boolean companion, String asker, String holder) {
+        return !companion || groupOf(holder).equals(groupOf(asker));
     }
 
     /** One caller's share of what is held. */

@@ -215,13 +215,16 @@ public final class CommonTools {
             .description("Read the tail of the game's log file (logs/latest.log). Use this to diagnose "
                 + "errors, confirm that an action had an effect, or read output that never reached the "
                 + "chat window. Supports a case-insensitive substring filter, which searches further "
-                + "back through the file than an unfiltered read. With 'logger', reads instead what "
-                + "game_set_log_level captured from that logger, DEBUG lines included.")
+                + "back through the file than an unfiltered read. Rolled logs (logs/2026-11-19-1.log.gz) "
+                + "are decompressed, and a filter searches the whole of one; list: true names the files "
+                + "in logs/ with their sizes and times, to find the one covering a time. With 'logger', "
+                + "reads instead what game_set_log_level captured from that logger, DEBUG lines included.")
             .schema(JsonSchema.object()
                 .integer("lines", "How many log lines to return, newest last.", 1, 5000)
                 .string("filter", "Case-insensitive substring; only matching lines are returned.")
-                .string("file", "Log file name inside the logs/ directory. Defaults to latest.log. "
-                    + "Path separators are rejected.")
+                .string("file", "Log file name inside the logs/ directory, gzipped or not. Defaults to "
+                    + "latest.log. Path separators are rejected.")
+                .bool("list", "List the files in logs/ instead, newest first: name, bytes, modified time.")
                 .string("logger", "A logger game_set_log_level is capturing (or captured): read its lines "
                     + "from memory, not a file.")
                 .integer("since", "With 'logger': the 'next' value a previous read returned, for only the "
@@ -251,6 +254,9 @@ public final class CommonTools {
                     return readCaptured(logger.trim(), context.has("since") ? (long) context.getInt("since", 0) : null,
                         lineCount, filter);
                 }
+                if (context.getBoolean("list", false)) {
+                    return listLogs(masked);
+                }
                 String fileName = context.getString("file", "latest.log");
 
                 // Reject any path syntax outright rather than trying to sanitise it. This tool takes
@@ -265,11 +271,20 @@ public final class CommonTools {
                 File logFile = new File(McmcpPaths.logsDirectory(), fileName);
                 if (!logFile.isFile()) {
                     return ToolResult.error("No log file named '" + fileName + "' exists in "
-                        + (masked ? "the server's logs directory." : McmcpPaths.logsDirectory().getAbsolutePath()));
+                        + (masked ? "the server's logs directory." : McmcpPaths.logsDirectory().getAbsolutePath())
+                        + " list: true names the files there.");
                 }
 
-                List<String> lines = McmcpPaths.tail(logFile, lineCount, filter,
-                    masked ? LogRedaction::maskAddresses : null);
+                List<String> lines;
+                try {
+                    lines = McmcpPaths.tail(logFile, lineCount, filter, masked ? LogRedaction::maskAddresses : null);
+                }
+                catch (java.io.IOException unreadable) {
+                    // Never "0 lines matching" for a file that could not be read: that reads as "it is not
+                    // there" when the truth is "it could not be looked at" (#213).
+                    return ToolResult.error("Could not read logs/" + logFile.getName() + " as text: "
+                        + unreadable.getMessage());
+                }
 
                 // Text and nothing else, with the metadata as a header line rather than as structured
                 // content. It was once both — the lines as text, and {file, returnedLines, filter}
@@ -299,6 +314,37 @@ public final class CommonTools {
                 return ToolResult.text(text.toString());
             })
             .build());
+    }
+
+    /** At most this many files are listed by game_read_log {list: true}; a server keeps months of logs. */
+    private static final int MAX_LISTED_LOGS = 200;
+
+    /** game_read_log {list: true}: the logs directory, newest first. */
+    private static ToolResult listLogs(boolean masked) {
+        File directory = McmcpPaths.logsDirectory();
+        List<McmcpPaths.LogFile> files = McmcpPaths.listLogs(directory, MAX_LISTED_LOGS + 1);
+        JsonObject result = new JsonObject();
+        result.addProperty("directory", masked ? "logs/" : directory.getAbsolutePath());
+        JsonArray list = new JsonArray();
+        java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", java.util.Locale.ROOT);
+        for (int i = 0; i < Math.min(files.size(), MAX_LISTED_LOGS); i++) {
+            McmcpPaths.LogFile file = files.get(i);
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", file.name);
+            entry.addProperty("bytes", file.bytes);
+            entry.addProperty("modified", iso.format(new java.util.Date(file.modifiedMillis)));
+            if (file.gzip) {
+                entry.addProperty("gzip", true);
+            }
+            list.add(entry);
+        }
+        result.add("files", list);
+        if (files.size() > MAX_LISTED_LOGS) {
+            result.addProperty("truncated", "Only the newest " + MAX_LISTED_LOGS + " are listed.");
+        }
+        result.addProperty("note", "A rolled log (name-N.log.gz) holds what was written up to its modified time, "
+            + "after the previous one's. Read one with file: '<name>'.");
+        return ToolResult.structured(result);
     }
 
     /** game_read_log's 'logger' read: a capture's ring, as text, with the cursor in the header. */
