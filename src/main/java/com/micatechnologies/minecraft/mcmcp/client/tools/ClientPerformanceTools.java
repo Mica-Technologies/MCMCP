@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.client.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.client.ClientCamera;
 import com.micatechnologies.minecraft.mcmcp.client.ClientFrameClock;
 import com.micatechnologies.minecraft.mcmcp.client.ClientFrameRecorder;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -217,11 +218,13 @@ public final class ClientPerformanceTools {
                             GameSettings game = Minecraft.getMinecraft().gameSettings;
                             savedShowDebugInfo = game.showDebugInfo;
                             savedShowProfilerChart = game.showDebugProfilerChart;
-                            savedHideGui = game.hideGUI;
+                            // Through the camera, which saves and restores hideGUI too for a
+                            // screenshot's view: see ClientCamera.underlyingHideGui.
+                            savedHideGui = ClientCamera.underlyingHideGui();
                             flagsOverridden = true;
                             game.showDebugInfo = true;
                             game.showDebugProfilerChart = true;
-                            game.hideGUI = false;
+                            ClientCamera.setUnderlyingHideGui(false);
                             return null;
                         }
                     });
@@ -289,7 +292,7 @@ public final class ClientPerformanceTools {
         GameSettings game = Minecraft.getMinecraft().gameSettings;
         game.showDebugInfo = savedShowDebugInfo;
         game.showDebugProfilerChart = savedShowProfilerChart;
-        game.hideGUI = savedHideGui;
+        ClientCamera.setUnderlyingHideGui(savedHideGui);
         flagsOverridden = false;
     }
 

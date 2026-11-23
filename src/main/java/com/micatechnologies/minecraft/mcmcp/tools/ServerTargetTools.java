@@ -57,6 +57,13 @@ public final class ServerTargetTools {
     /** Most differing cells one verify returns inline; the rest are paged with detailOffset. */
     static final int MAX_INLINE_LINES = 2_000;
 
+    /**
+     * Most cells one repair writes: two of server_apply_ops' largest calls. The fixes are held as text
+     * until they are written, and a target of millions of cells checked against a flattened site was
+     * every one of them in the heap at once (#219). The rest are counted, and the next call takes them.
+     */
+    static final int MAX_REPAIR_FIXES = 100_000;
+
     private ServerTargetTools() {
     }
 
@@ -345,7 +352,8 @@ public final class ServerTargetTools {
             .description("Rewrite the cells that differ from a build target (see server_target) to what the "
                 + "target wants, through server_apply_ops: undo points, the write budget and two-part pairing as "
                 + "for any write. Protected cells are never written; neither are cells matching after the "
-                + "ignore rules (an open door stays open). dryRun counts what it would write. Needs "
+                + "ignore rules (an open door stays open). dryRun counts what it would write. At most "
+                + MAX_REPAIR_FIXES + " cells a call: when repair.truncated is set, call again. Needs "
                 + "permissions.allowWorldEdits.")
             .schema(checkArguments(JsonSchema.object())
                 .bool("dryRun", "Count what would be written; write nothing.")
@@ -439,15 +447,27 @@ public final class ServerTargetTools {
      * Whether a cell the target wants as air holds the second half of a two-part block whose first half
      * the target does want: furniture whose top the block placed itself, so it was never in the ops a
      * target was saved from (#150). Repair would otherwise break it in half. Game thread.
+     *
+     * @return null when the first half's chunk is not loaded, so it cannot be told
      */
-    private static boolean upperHalfOfWanted(WorldServer world, BlockPos pos, IBlockState live, String want,
+    @Nullable
+    private static Boolean upperHalfOfWanted(WorldServer world, BlockPos pos, IBlockState live, String want,
                                              BuildTarget target) {
         if (!want.startsWith("minecraft:air") || !TwoPartBlocks.isTwoPart(live) || !TwoPartBlocks.isSecondHalf(live)) {
             return false;
         }
         BlockPos base = TwoPartBlocks.partnerPos(live, pos);
         String baseWant = target.get(base.getX(), base.getY(), base.getZ());
-        if (baseWant == null || world.getBlockState(base).getBlock() != live.getBlock()) {
+        if (baseWant == null) {
+            return false;
+        }
+        // A bed's other half can be over a chunk border, in a chunk that is not loaded, and reading it
+        // there loads or generates the chunk (#219). Not known, then, rather than "no": as "no" a
+        // repair would write air over half a bed whose foot it could not see.
+        if (!world.isBlockLoaded(base)) {
+            return null;
+        }
+        if (world.getBlockState(base).getBlock() != live.getBlock()) {
             return false;
         }
         int open = baseWant.indexOf('[');
@@ -516,6 +536,8 @@ public final class ServerTargetTools {
         final Map<String, String> wanted = new HashMap<>();
         final int dimension = target.dimension();
         final List<String> fixes = new ArrayList<>();
+        // Every cell a repair would write, of which 'fixes' keeps the first MAX_REPAIR_FIXES.
+        final long[] fixable = {0L};
         final List<String> detail = new ArrayList<>();
 
         Set<Long> chunks = new LinkedHashSet<>();
@@ -540,15 +562,25 @@ public final class ServerTargetTools {
                             if (live != null && grassTurnedToDirt(world, pos, want, live)) {
                                 live = want;
                             }
-                            if (live != null && upperHalfOfWanted(world, pos, liveState, want, target)) {
-                                live = want;
+                            if (live != null) {
+                                Boolean upper = upperHalfOfWanted(world, pos, liveState, want, target);
+                                if (upper == null) {
+                                    // Counted as unloaded, which a repair leaves alone.
+                                    live = null;
+                                }
+                                else if (upper) {
+                                    live = want;
+                                }
                             }
                             TargetDiff.Kind kind = diff.add(x, y, z, want, protect, live);
                             if (kind == null || kind == TargetDiff.Kind.MATCH || kind == TargetDiff.Kind.UNLOADED) {
                                 return;
                             }
                             if (repair && kind != TargetDiff.Kind.PROTECTED_CHANGED) {
-                                fixes.add(setblock(x, y, z, rawWant));
+                                fixable[0]++;
+                                if (fixes.size() < MAX_REPAIR_FIXES) {
+                                    fixes.add(setblock(x, y, z, rawWant));
+                                }
                             }
                             long index = differing[0]++;
                             if (toFile && detail.size() < MAX_DETAIL_LINES) {
@@ -584,7 +616,7 @@ public final class ServerTargetTools {
                 }
             }
             if (repair) {
-                json.add("repair", repairCells(context, dimension, fixes));
+                json.add("repair", repairCells(context, dimension, fixes, fixable[0]));
             }
             return ToolResult.structured(json);
         });
@@ -600,11 +632,24 @@ public final class ServerTargetTools {
             + state.substring(open + 1, state.length() - 1);
     }
 
-    /** Writes the fixes through server_apply_ops, in calls it accepts. */
-    private static JsonObject repairCells(ToolContext context, int dimension, List<String> fixes) throws Exception {
+    /**
+     * Writes the fixes through server_apply_ops, in calls it accepts.
+     *
+     * @param fixable every cell that differs and may be written, which is more than {@code fixes} when
+     *                the call's share of them ({@link #MAX_REPAIR_FIXES}) was reached
+     */
+    private static JsonObject repairCells(ToolContext context, int dimension, List<String> fixes, long fixable)
+        throws Exception {
         JsonObject totals = new JsonObject();
         boolean dryRun = context.getBoolean("dryRun", false);
-        totals.addProperty("cells", fixes.size());
+        totals.addProperty("cells", fixable);
+        if (fixable > fixes.size()) {
+            totals.addProperty("truncated", true);
+            totals.addProperty("notAttempted", fixable - fixes.size());
+            totals.addProperty("note", "One call repairs at most " + MAX_REPAIR_FIXES + " cells: this one took the "
+                + "first " + fixes.size() + " of " + fixable + ". Call again for the rest; cells already right "
+                + "are not written twice.");
+        }
         if (fixes.isEmpty()) {
             return totals;
         }

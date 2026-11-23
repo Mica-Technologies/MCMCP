@@ -3,9 +3,11 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.Mcmcp;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
+import com.micatechnologies.minecraft.mcmcp.game.ServerLoad;
 import com.micatechnologies.minecraft.mcmcp.game.ServerTickRecorder;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -83,7 +85,16 @@ public final class ServerWatchTools {
     /** How long a finished watch is kept for reading. */
     private static final long KEEP_FINISHED_MILLIS = 30 * 60_000L;
 
+    /** The most of one tick every watch's sampling may take together. */
+    private static final long TICK_BUDGET_NANOS = 4_000_000L;
+
     private static final String UNLOADED = "(unloaded)";
+
+    /** Which running watch samples first this tick: a short budget is not short for the same one each time. */
+    private static int firstTurn;
+
+    /** When the tick handler last logged a failure. Server thread. */
+    private static long lastTickFailureLogged;
 
     private static final AtomicLong LAST_ID = new AtomicLong();
 
@@ -106,6 +117,10 @@ public final class ServerWatchTools {
         @Nullable
         final Set<String> properties;
         final boolean actual;
+        /** The position the next tick's sample starts at. Server thread only. */
+        int cursor;
+        /** Ticks at which not every position was read: out of budget, or the server refusing writes. */
+        volatile long ticksSkipped;
         volatile long finishedAtMillis;
         /** The hold over the watched chunks when the watch took one, released when it ends. */
         @Nullable
@@ -152,35 +167,96 @@ public final class ServerWatchTools {
             if (event.phase != TickEvent.Phase.END) {
                 return;
             }
-            List<Watch> running = new ArrayList<>();
-            synchronized (WATCHES) {
-                for (Watch watch : WATCHES.values()) {
-                    if (!watch.log.isDone()) {
-                        running.add(watch);
-                    }
-                }
+            // Nothing may leave this handler (#219): an exception out of a Forge tick handler is a
+            // crashed server, and all it would have cost here is one tick of one agent's timeline. The
+            // waiters are woken whatever the sampling did.
+            try {
+                sampleWatches();
             }
-            for (Watch watch : running) {
-                sample(watch);
+            catch (Throwable t) {
+                logTickFailure("sampling its block watches", t);
             }
-            List<TickWaiter> waiting;
-            synchronized (WAITERS) {
-                waiting = new ArrayList<>(WAITERS);
+            try {
+                wakeWaiters();
             }
-            for (TickWaiter waiter : waiting) {
-                WorldServer world = DimensionManager.getWorld(waiter.dimension);
-                if (world != null && world.getTotalWorldTime() >= waiter.target) {
-                    waiter.reached.complete(world.getTotalWorldTime());
-                    synchronized (WAITERS) {
-                        WAITERS.remove(waiter);
-                    }
+            catch (Throwable t) {
+                logTickFailure("waking server_wait_tick calls", t);
+            }
+        }
+    }
+
+    /** Once every ten seconds at most: a handler that fails every tick would write 20 stack traces a second. */
+    private static void logTickFailure(String doing, Throwable t) {
+        long now = System.currentTimeMillis();
+        if (now - lastTickFailureLogged >= 10_000L) {
+            lastTickFailureLogged = now;
+            Mcmcp.LOGGER.error("MCMCP failed " + doing + " this tick", t);
+        }
+    }
+
+    /** Wakes the calls whose tick has come. Server thread. */
+    private static void wakeWaiters() {
+        List<TickWaiter> waiting;
+        synchronized (WAITERS) {
+            waiting = new ArrayList<>(WAITERS);
+        }
+        for (TickWaiter waiter : waiting) {
+            WorldServer world = DimensionManager.getWorld(waiter.dimension);
+            if (world != null && world.getTotalWorldTime() >= waiter.target) {
+                waiter.reached.complete(world.getTotalWorldTime());
+                synchronized (WAITERS) {
+                    WAITERS.remove(waiter);
                 }
             }
         }
     }
 
-    /** One tick's sample of one watch. Server thread. */
-    private static void sample(Watch watch) {
+    /**
+     * One tick's sample of every running watch, within {@link #TICK_BUDGET_NANOS} for all of them
+     * together (#219): eight watches of 4096 positions were 32,768 state reads on every tick, each
+     * possibly a mod's getActualState, with nothing to stop them however long they took and whatever
+     * state the server was in. A watch that runs out of budget carries on next tick from the position
+     * it stopped at, and the watches take turns going first, so no position is starved. Nothing is read
+     * while the server refuses writes for its health; a watch still ends on time. Server thread.
+     */
+    private static void sampleWatches() {
+        List<Watch> running = new ArrayList<>();
+        synchronized (WATCHES) {
+            for (Watch watch : WATCHES.values()) {
+                if (!watch.log.isDone()) {
+                    running.add(watch);
+                }
+            }
+        }
+        if (running.isEmpty()) {
+            return;
+        }
+        boolean resting = ServerLoad.refusesWrites();
+        long started = System.nanoTime();
+        int first = Math.floorMod(firstTurn++, running.size());
+        for (int turn = 0; turn < running.size(); turn++) {
+            Watch watch = running.get((first + turn) % running.size());
+            try {
+                sample(watch, resting, started);
+            }
+            catch (Throwable t) {
+                // Stopped, not tried again: what threw this tick throws the next one too.
+                Mcmcp.LOGGER.error("MCMCP watch " + watch.log.id() + " failed while sampling and was stopped", t);
+                watch.log.stop(0, "failed: " + t);
+                watch.finishedAtMillis = System.currentTimeMillis();
+                releaseHold(watch, true);
+            }
+        }
+    }
+
+    /**
+     * One tick's sample of one watch: every position, or as many as the tick's budget has left, from
+     * where the last tick stopped. Server thread.
+     *
+     * @param resting true to read nothing this tick
+     * @param started when this tick's sampling began, in {@link System#nanoTime}
+     */
+    private static void sample(Watch watch, boolean resting, long started) {
         WorldServer world = DimensionManager.getWorld(watch.log.dimension());
         WorldServer clock = world != null ? world : DimensionManager.getWorld(0);
         if (clock == null) {
@@ -188,15 +264,33 @@ public final class ServerWatchTools {
         }
         long tick = clock.getTotalWorldTime();
         boolean lost = false;
-        for (int i = 0; i < watch.positions.length; i++) {
-            IBlockState state = read(world, watch.positions[i], watch.actual);
-            if (state != watch.last[i]) {
-                lost |= state == null && watch.holdId != null;
-                watch.last[i] = state;
-                watch.log.sample(tick, i, key(state, watch.properties));
+        int length = watch.positions.length;
+        int seen = 0;
+        if (!resting) {
+            int i = watch.cursor;
+            while (seen < length) {
+                if ((seen & 63) == 0 && System.nanoTime() - started >= TICK_BUDGET_NANOS) {
+                    break;
+                }
+                IBlockState state = read(world, watch.positions[i], watch.actual);
+                if (state != watch.last[i]) {
+                    lost |= state == null && watch.holdId != null;
+                    watch.last[i] = state;
+                    watch.log.sample(tick, i, key(state, watch.properties));
+                }
+                i = i + 1 == length ? 0 : i + 1;
+                seen++;
             }
+            watch.cursor = i;
         }
-        watch.log.sampled(tick);
+        if (seen == length) {
+            watch.log.sampled(tick);
+        }
+        else {
+            // Said in the result: a change at a position not read this tick is recorded at the tick
+            // it was next read, so the timeline is late there by that much.
+            watch.ticksSkipped++;
+        }
         if (lost) {
             // A held watch whose chunk unloaded anyway (its hold shed under load, most likely): what
             // follows would be void, so it says so and stops rather than recording '(unloaded)' (#98).
@@ -415,35 +509,49 @@ public final class ServerWatchTools {
             catch (ChunkLoadGovernor.Busy busy) {
                 return busy.toResult();
             }
-            final String holdId = held.holdId;
-            context.onGameThread(() -> {
-                ChunkLoadGovernor.pin(holdId);
-                return null;
-            });
         }
         final ChunkLoadGovernor.Outcome hold = held;
 
         final String id = "w" + LAST_ID.updateAndGet(last -> Math.max(last + 1, System.currentTimeMillis()));
-        Watch watch = context.onGameThread(new Callable<Watch>() {
-            @Override
-            public Watch call() {
-                WorldServer world = ServerWorldTools.requireWorld(dimension);
-                long now = world.getTotalWorldTime();
-                BlockPos[] at = positions.toArray(new BlockPos[0]);
-                IBlockState[] states = new IBlockState[at.length];
-                String[] keys = new String[at.length];
-                int[] flat = new int[at.length * 3];
-                for (int i = 0; i < at.length; i++) {
-                    states[i] = read(world, at[i], actual);
-                    keys[i] = key(states[i], properties);
-                    flat[i * 3] = at[i].getX();
-                    flat[i * 3 + 1] = at[i].getY();
-                    flat[i * 3 + 2] = at[i].getZ();
-                }
-                BlockWatchLog log = new BlockWatchLog(id, dimension, flat, keys, now, now + ticks, MAX_CHANGES);
-                return new Watch(log, at, states, properties, actual);
+        Watch watch;
+        try {
+            if (hold != null) {
+                final String holdId = hold.holdId;
+                context.onGameThread(() -> {
+                    ChunkLoadGovernor.pin(holdId);
+                    return null;
+                });
             }
-        });
+            watch = context.onGameThread(new Callable<Watch>() {
+                @Override
+                public Watch call() {
+                    WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    long now = world.getTotalWorldTime();
+                    BlockPos[] at = positions.toArray(new BlockPos[0]);
+                    IBlockState[] states = new IBlockState[at.length];
+                    String[] keys = new String[at.length];
+                    int[] flat = new int[at.length * 3];
+                    for (int i = 0; i < at.length; i++) {
+                        states[i] = read(world, at[i], actual);
+                        keys[i] = key(states[i], properties);
+                        flat[i * 3] = at[i].getX();
+                        flat[i * 3 + 1] = at[i].getY();
+                        flat[i * 3 + 2] = at[i].getZ();
+                    }
+                    BlockWatchLog log = new BlockWatchLog(id, dimension, flat, keys, now, now + ticks, MAX_CHANGES);
+                    return new Watch(log, at, states, properties, actual);
+                }
+            });
+        }
+        catch (RuntimeException | Error e) {
+            // No watch owns the hold yet, so nothing else would give it back (#219): a cancel or a
+            // busy server between taking it and the first sample left the chunks pinned, last to be
+            // shed, for the whole lease.
+            if (hold != null) {
+                ChunkLoadGovernor.release(hold, "its watch could not start");
+            }
+            throw e;
+        }
         if (hold != null) {
             watch.holdId = hold.holdId;
         }
@@ -518,6 +626,13 @@ public final class ServerWatchTools {
 
     private static ToolResult result(Watch watch, int fromChange) {
         JsonObject json = watch.log.toJson(fromChange, watch.log.size() <= MAX_INITIAL_LISTED);
+        long skipped = watch.ticksSkipped;
+        if (skipped > 0L) {
+            json.addProperty("ticksSkipped", skipped);
+            json.addProperty("ticksSkippedNote", "At that many ticks not every position was read (the sampling "
+                + "budget ran out, or the server was paused for its health): a change there shows at the tick "
+                + "it was next read.");
+        }
         String summary = json.get("changeCount").getAsInt() + " change(s) across " + watch.log.size()
             + " position(s), ticks " + json.get("startTick").getAsLong() + " to "
             + json.get("sampledTo").getAsLong()

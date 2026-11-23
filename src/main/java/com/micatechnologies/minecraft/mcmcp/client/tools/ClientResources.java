@@ -142,13 +142,21 @@ public final class ClientResources {
                     throw new IllegalArgumentException("Screenshot URIs look like "
                         + ClientDebugTools.SCREENSHOT_URI_TEMPLATE);
                 }
-                // The template cannot match a '/', so path traversal via separators is already
-                // impossible — but ".." contains none, and would still escape the directory.
-                if (name.contains("..")) {
-                    throw new IllegalArgumentException("Screenshot names may not contain '..'.");
+                // The template cannot match a '/', but on Windows '\' separates too and ':' names a
+                // drive or an NTFS stream, and ".." needs no separator at all. A name-only rule is
+                // the version of the check that cannot be subtly wrong.
+                if (name.contains("..") || name.contains("/") || name.contains("\\") || name.contains(":")) {
+                    throw new IllegalArgumentException("Screenshot names are plain file names: no '..', "
+                        + "'/', '\\' or ':'.");
                 }
 
                 File file = new File(McmcpPaths.screenshotsDirectory(), name);
+                // And checked on what the name resolved to, for whatever the rule above did not think of.
+                File folder = McmcpPaths.screenshotsDirectory().getCanonicalFile();
+                if (!folder.equals(file.getCanonicalFile().getParentFile())) {
+                    throw new IllegalArgumentException("'" + name + "' is not a file in the screenshots "
+                        + "directory.");
+                }
                 if (!file.isFile()) {
                     throw new IllegalStateException("No screenshot named '" + name + "' exists in "
                         + McmcpPaths.screenshotsDirectory().getAbsolutePath());

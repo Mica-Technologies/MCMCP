@@ -165,7 +165,7 @@ public final class ServerCopyTools {
         final boolean expectAir = "air".equals(context.getString("expect", "any"));
         final int flags = context.getBoolean("neighbourUpdates", false) ? 3 : 2 | 16;
         if (!dryRun) {
-            ToolResult overBudget = ServerBulkTools.chargeWrites(context, box.cells());
+            ToolResult overBudget = ServerBulkTools.chargeWritesBeforeHold(context, box.cells());
             if (overBudget != null) {
                 return overBudget;
             }
@@ -174,6 +174,12 @@ public final class ServerCopyTools {
         chunks.addAll(ChunkKeys.box(destination[0], destination[2], destination[3], destination[5]));
 
         return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
+            if (!dryRun) {
+                ToolResult overBudgetNow = ServerBulkTools.chargeWritesInHold(context, box.cells());
+                if (overBudgetNow != null) {
+                    return overBudgetNow;
+                }
+            }
             final CellOverlay overlay = new CellOverlay();
             final ServerApplyOps.StatePalette palette = new ServerApplyOps.StatePalette();
             final Map<Long, NBTTagCompound> tags = new LinkedHashMap<>();
@@ -199,6 +205,10 @@ public final class ServerCopyTools {
             final int[] area = recorder == null ? null
                 : UndoPoints.imageArea(destination[0], destination[2], destination[3], destination[5]);
             final BufferedImage beforeImage = recorder == null ? null : ServerUndoTools.drawImage(context, dimension, area);
+            // A cancel, a timeout or a throw between two slices leaves the earlier ones in the world;
+            // what they changed still gets its undo point on the way out (#219).
+            boolean undoSaved = false;
+            try {
             TwoPartBlocks.Writer pairs = ServerApplyOps.write(context, dimension, overlay, palette,
                 Collections.<Long>emptySet(), flags, dryRun, tally, recorder, null);
             final int[] hooks = {0, 0};
@@ -287,16 +297,20 @@ public final class ServerCopyTools {
             if (entities > 0) {
                 json.addProperty("entitiesNotCopied", entities);
             }
-            json.add("chunks", context.onGameThreadFollowUp(() -> {
-                ChunkLoadGovernor.touch(dimension, chunks);
-                return outcome != null ? outcome.toJson()
-                    : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
-            }));
+            json.add("chunks", ServerChunkTools.describeChunks(context, dimension, chunks, outcome, true));
+            undoSaved = true;
             if (recorder != null) {
                 ServerUndoTools.finish(context, recorder, "server_copy_structure", dimension, area, beforeImage, json,
                     null);
             }
             return ToolResult.structured(json);
+            }
+            finally {
+                if (!undoSaved) {
+                    ServerUndoTools.finishInterrupted(context, recorder, "server_copy_structure", dimension, area,
+                        beforeImage);
+                }
+            }
         });
     }
 

@@ -60,12 +60,14 @@ import javax.annotation.Nullable;
  *
  * <h2>Threading</h2>
  *
- * The pool is sized {@code workerThreads + maxSessions}. That is not arbitrary: {@link HttpServer}
+ * The pool is sized {@code workerThreads + maxSessions}, plus one thread per permitted
+ * {@code /events} stream. That is not arbitrary: {@link HttpServer}
  * dispatches each exchange to the executor and holds the thread for the exchange's lifetime, and an
  * SSE stream is an exchange that stays open for as long as the client is connected. Sizing the pool
  * for POSTs alone means the first few clients to open streams consume every thread and all
  * subsequent requests hang — with no error, which makes it a genuinely nasty thing to diagnose.
- * Reserving one thread per permitted session removes the interaction entirely.
+ * Reserving one thread per permitted session removes the interaction entirely, so long as streams
+ * are held to that number: see {@code claimSseStream}.
  */
 public class HttpMcpTransport implements McpTransport {
 
@@ -153,7 +155,7 @@ public class HttpMcpTransport implements McpTransport {
         final String sideId = dispatcher.getSide().id();
         final AtomicInteger threadCounter = new AtomicInteger(1);
         ExecutorService pool = Executors.newFixedThreadPool(
-            settings.getWorkerThreads() + settings.getMaxSessions(),
+            settings.getWorkerThreads() + settings.getMaxSessions() + MAX_EVENT_STREAMS,
             new ThreadFactory() {
                 @Override
                 public Thread newThread(Runnable runnable) {
@@ -571,6 +573,68 @@ public class HttpMcpTransport implements McpTransport {
             return;
         }
 
+        // Each stream holds a pool thread for its life, and the pool reserves one per permitted
+        // session. Uncounted, one session opening streams in a loop took every thread and each POST
+        // after that hung with no error.
+        String refusal = claimSseStream(session.getId());
+        if (refusal != null) {
+            boolean perSession = refusal.startsWith("This session");
+            exchange.getResponseHeaders().set("Retry-After", "15");
+            applyCorsHeaders(exchange);
+            sendText(exchange, perSession ? 429 : 503, "text/plain; charset=utf-8", refusal);
+            return;
+        }
+        try {
+            streamSse(exchange, session);
+        }
+        finally {
+            releaseSseStream(session.getId());
+        }
+    }
+
+    /** Event streams one session may hold open: one, and its replacement while a dead one is noticed. */
+    static final int MAX_SSE_STREAMS_PER_SESSION = 2;
+
+    /** Open server-to-client streams by session id. Guarded by itself. */
+    private final java.util.Map<String, Integer> sseStreams = new java.util.HashMap<>();
+
+    /** @return null when the stream may open, or what to tell the client */
+    @Nullable
+    private String claimSseStream(String sessionId) {
+        synchronized (sseStreams) {
+            Integer mine = sseStreams.get(sessionId);
+            int open = mine == null ? 0 : mine;
+            if (open >= MAX_SSE_STREAMS_PER_SESSION) {
+                return "This session already has " + open + " event streams open. Close one before opening "
+                    + "another; a stream whose client has gone is noticed within " + SSE_POLL_MILLIS / 1000L + " s.";
+            }
+            int total = 0;
+            for (int count : sseStreams.values()) {
+                total += count;
+            }
+            // As many in all as the pool has threads set aside for them.
+            if (total >= settings.getMaxSessions()) {
+                return total + " event streams are already open on this endpoint (limits.maxSessions). "
+                    + "Close one, or retry shortly.";
+            }
+            sseStreams.put(sessionId, open + 1);
+            return null;
+        }
+    }
+
+    private void releaseSseStream(String sessionId) {
+        synchronized (sseStreams) {
+            Integer mine = sseStreams.get(sessionId);
+            if (mine == null || mine <= 1) {
+                sseStreams.remove(sessionId);
+            }
+            else {
+                sseStreams.put(sessionId, mine - 1);
+            }
+        }
+    }
+
+    private void streamSse(HttpExchange exchange, McpSession session) throws IOException {
         Headers headers = exchange.getResponseHeaders();
         headers.set("Content-Type", "text/event-stream; charset=utf-8");
         // No buffering anywhere in the path: an SSE stream that is buffered is an SSE stream that

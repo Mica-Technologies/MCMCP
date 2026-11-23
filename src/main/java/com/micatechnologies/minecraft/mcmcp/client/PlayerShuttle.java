@@ -161,8 +161,10 @@ public final class PlayerShuttle {
         try {
             waitUntilAt(context, to[0], to[1], to[2]);
         }
-        catch (IllegalStateException e) {
+        catch (RuntimeException e) {
             // The teleport was accepted, so the player may be anywhere between: put them back first.
+            // Whatever ended the wait, a cancellation included, which is not an IllegalStateException
+            // and used to leave them at the camera with nothing said.
             back(context, trip, to);
             throw e;
         }
@@ -211,7 +213,18 @@ public final class PlayerShuttle {
             }
             try {
                 teleport(context, trip.x, trip.y, trip.z, trip.yaw, trip.pitch, trip.flying, RETURN_SLOT_WAIT_MILLIS);
-                waitUntilAt(context, trip.x, trip.y, trip.z);
+                try {
+                    waitUntilAt(context, trip.x, trip.y, trip.z);
+                }
+                catch (RuntimeException e) {
+                    // A cancelled call cannot look at the client any more, so every wait throws at
+                    // once. The teleport above was accepted all the same: counted as a failure, the
+                    // move was sent five times over and a player who was home was recorded as
+                    // stranded at the camera, for the next trip to "return" from the wrong place.
+                    if (!context.getCancellation().isCancelled()) {
+                        throw e;
+                    }
+                }
                 stranded = null;
                 strandedAt = null;
                 return;

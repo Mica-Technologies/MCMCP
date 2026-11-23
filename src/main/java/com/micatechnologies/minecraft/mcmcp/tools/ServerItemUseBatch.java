@@ -243,6 +243,10 @@ public final class ServerItemUseBatch {
             final JsonArray results = new JsonArray();
             final int[] counts = new int[4];  // succeeded, changed, failed, refused
             final boolean[] stopped = {false};
+            // A cancel, a timeout or a throw between two tasks leaves the earlier clicks in the world;
+            // what they changed still gets its undo point on the way out (#219).
+            boolean undoSaved = false;
+            try {
             for (int from = 0; from < uses.size() && !stopped[0]; from += USES_PER_TASK) {
                 final int start = from;
                 final int end = Math.min(uses.size(), from + USES_PER_TASK);
@@ -299,10 +303,18 @@ public final class ServerItemUseBatch {
                 }
                 json.add("lentAfter", after);
             }
+            undoSaved = true;
             if (recorder != null) {
                 ServerUndoTools.finish(context, recorder, "server_use_item_on_blocks", dimension, null, null, json, null);
             }
             return ToolResult.structured(json);
+            }
+            finally {
+                if (!undoSaved) {
+                    ServerUndoTools.finishInterrupted(context, recorder, "server_use_item_on_blocks", dimension,
+                        null, null);
+                }
+            }
         });
     }
 
@@ -318,10 +330,15 @@ public final class ServerItemUseBatch {
             return result;
         }
         BlockPos beside = use.pos.offset(use.face);
+        // The cell on the clicked face can be over a chunk border, in a chunk nothing holds, and reading
+        // an unloaded position loads or generates its chunk (#219). Asked once, before the click: a
+        // neighbour that was not loaded then is not read at all, so nothing there counts towards
+        // 'changed' or the undo point, and the read-back names it as unloaded.
+        boolean besideLoaded = world.isBlockLoaded(beside);
         UndoPoints.Before wasAt = recorder == null ? null : recorder.capture(world, use.pos);
-        UndoPoints.Before wasBeside = recorder == null ? null : recorder.capture(world, beside);
+        UndoPoints.Before wasBeside = recorder == null || !besideLoaded ? null : recorder.capture(world, beside);
         net.minecraft.block.state.IBlockState before = world.getBlockState(use.pos);
-        net.minecraft.block.state.IBlockState beforeBeside = world.getBlockState(beside);
+        net.minecraft.block.state.IBlockState beforeBeside = besideLoaded ? world.getBlockState(beside) : null;
 
         int previousSlot = player.inventory.currentItem;
         boolean previousSneak = player.isSneaking();
@@ -362,7 +379,8 @@ public final class ServerItemUseBatch {
             player.setSneaking(previousSneak);
         }
         result.addProperty("result", outcome.name().toLowerCase(Locale.ROOT));
-        boolean changed = world.getBlockState(use.pos) != before || world.getBlockState(beside) != beforeBeside;
+        boolean changed = world.getBlockState(use.pos) != before
+            || besideLoaded && world.getBlockState(beside) != beforeBeside;
         result.addProperty("changed", changed);
         if (recorder != null && wasAt != null && world.getBlockState(use.pos) != wasAt.state) {
             recorder.record(use.pos, wasAt, world.getBlockState(use.pos));
@@ -374,8 +392,8 @@ public final class ServerItemUseBatch {
             result.addProperty("after", ServerRegionTools.describe(net.minecraft.block.Block.getStateId(
                 world.getBlockState(use.pos))));
             // Where a placement lands: the block on the clicked face.
-            result.addProperty("beside", ServerRegionTools.describe(net.minecraft.block.Block.getStateId(
-                world.getBlockState(beside))));
+            result.addProperty("beside", besideLoaded ? ServerRegionTools.describe(
+                net.minecraft.block.Block.getStateId(world.getBlockState(beside))) : "mcmcp:unloaded");
             if (!readBackKeys.isEmpty()) {
                 TileEntity tile = world.getTileEntity(use.pos);
                 if (tile != null) {

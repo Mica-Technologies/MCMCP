@@ -60,6 +60,27 @@ public class McpDispatcher {
         "game_set_log_level", "server_player_lease"));
 
     /**
+     * Whether a call only lets go of what its caller holds on the client: {@code client_key} with
+     * {@code release}, and {@code client_input_lock} giving the lock back. These run during an
+     * emergency stop though the tools' other forms do not: refused, the stop left an agent's keys held
+     * down and the person's keyboard locked out, with the one call that ends either turned away.
+     *
+     * <p>Read as each handler reads its arguments, so what passes here is what the handler then does.
+     * {@code force: true} is left out: it releases a lock another agent holds, which is not the
+     * caller's own to let go of.
+     */
+    static boolean isRelease(String name, JsonObject arguments) {
+        if ("client_key".equals(name)) {
+            return Json.getBoolean(arguments, "release", false);
+        }
+        if ("client_input_lock".equals(name)) {
+            return "set".equals(Json.getString(arguments, "op", "set")) && Json.has(arguments, "locked")
+                && !Json.getBoolean(arguments, "locked", false) && !Json.getBoolean(arguments, "force", false);
+        }
+        return false;
+    }
+
+    /**
      * Tools that are not read-only but still run while the server is paused or stalled, beside
      * {@link #ESTOP_EXEMPT} and every {@code server_job_*}: what someone needs to see what the server
      * is doing and to make MCMCP stop or let go.
@@ -364,7 +385,7 @@ public class McpDispatcher {
         }
 
         if (!tool.isReadOnly() && com.micatechnologies.minecraft.mcmcp.game.Estop.active()
-            && !ESTOP_EXEMPT.contains(name)) {
+            && !ESTOP_EXEMPT.contains(name) && !isRelease(name, arguments)) {
             return ToolResult.error(com.micatechnologies.minecraft.mcmcp.game.Estop.refusal())
                 .toJson(session.getProtocolVersion());
         }
@@ -441,7 +462,7 @@ public class McpDispatcher {
         context.setToolName(name);
         long activity = tool.isPassive() ? 0L : ToolActivity.callStarted(side, name);
         context.trackActivity(activity);
-        context.setMutating(!tool.isReadOnly() && !ESTOP_EXEMPT.contains(name));
+        context.setMutating(!tool.isReadOnly() && !ESTOP_EXEMPT.contains(name) && !isRelease(name, arguments));
         ToolActivity.describe(activity, session.getPrincipal().isCompanion()
             ? session.getPrincipal().getPlayerName() + " (companion)"
             : session.isOrchestratorLink() ? "orchestrator" : session.describeClient(), session.getId());

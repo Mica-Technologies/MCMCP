@@ -130,50 +130,93 @@ public final class ServerTileEntityTools {
                         return ToolResult.structured(grouped(context, dimension, chunks, minX, minY, minZ, maxX, maxY,
                             maxZ, blocks, groupBy, samples, limit, outcome));
                     }
-                    JsonObject json = context.onGameThread(() -> {
-                        WorldServer world = ServerWorldTools.requireWorld(dimension);
-                        List<TileEntity> found = new ArrayList<>();
-                        for (long key : chunks) {
-                            Chunk chunk = world.getChunkProvider().getLoadedChunk(ChunkKeys.x(key), ChunkKeys.z(key));
-                            if (chunk == null) {
-                                continue;
-                            }
-                            for (TileEntity tile : chunk.getTileEntityMap().values()) {
-                                BlockPos pos = tile.getPos();
-                                if (pos.getX() < minX || pos.getX() > maxX || pos.getZ() < minZ || pos.getZ() > maxZ
-                                    || pos.getY() < minY || pos.getY() > maxY || tile.isInvalid()) {
-                                    continue;
-                                }
-                                ResourceLocation name = world.getBlockState(pos).getBlock().getRegistryName();
-                                if (NbtProjection.matches(name == null ? "unknown" : name.toString(), blocks)) {
-                                    found.add(tile);
-                                }
-                            }
-                        }
-                        // A fixed order, so a cursor means the same thing on the next page.
-                        found.sort(Comparator.<TileEntity>comparingInt(t -> t.getPos().getX())
-                            .thenComparingInt(t -> t.getPos().getZ()).thenComparingInt(t -> t.getPos().getY()));
-                        JsonArray entities = new JsonArray();
-                        int end = Math.min(found.size(), cursor + limit);
-                        for (int i = cursor; i < end; i++) {
-                            entities.add(describe(world, found.get(i), keys, maxChars, summary));
-                        }
-                        JsonObject result = new JsonObject();
-                        result.addProperty("dimension", dimension);
-                        result.addProperty("matched", found.size());
-                        result.addProperty("returned", entities.size());
-                        if (end < found.size()) {
-                            result.addProperty("next", end);
-                        }
-                        result.add("tileEntities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(entities));
-                        ChunkLoadGovernor.touch(dimension, chunks);
-                        result.add("chunks", chunksBlock(world, chunks, outcome));
-                        return result;
-                    });
-                    return ToolResult.structured(json);
+                    return ToolResult.structured(boxed(context, dimension, chunks, minX, minY, minZ, maxX, maxY, maxZ,
+                        blocks, keys, maxChars, summary, cursor, limit, outcome));
                 });
             })
             .build());
+    }
+
+    /**
+     * Box mode: one page of the matching entities, read in game-thread slices of about
+     * {@link #SLICE_NANOS} (#219). Finding them is a walk of up to 4096 chunks' tile entities and a page
+     * is up to 2000 tags serialised, and both in one task held the server thread for all of it. Only
+     * positions cross between tasks, never a tile entity: each is looked up again where it is described,
+     * and one that went in between is listed as gone rather than read from an object the world dropped.
+     */
+    private static JsonObject boxed(ToolContext context, final int dimension, Set<Long> chunks, final int minX,
+                                    final int minY, final int minZ, final int maxX, final int maxY, final int maxZ,
+                                    final List<String> blocks, final List<String> keys, final int maxChars,
+                                    final boolean summary, int cursor, int limit,
+                                    @Nullable ChunkLoadGovernor.Outcome outcome) {
+        final List<Long> pending = new ArrayList<>(chunks);
+        // Written by the game thread one task at a time, read here after the last.
+        final List<BlockPos> found = new ArrayList<>();
+        int done = 0;
+        while (done < pending.size()) {
+            final int from = done;
+            done = context.onGameThread(() -> {
+                WorldServer world = ServerWorldTools.requireWorld(dimension);
+                long started = System.nanoTime();
+                int at = from;
+                while (at < pending.size() && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
+                    long key = pending.get(at++);
+                    Chunk chunk = world.getChunkProvider().getLoadedChunk(ChunkKeys.x(key), ChunkKeys.z(key));
+                    if (chunk == null) {
+                        continue;
+                    }
+                    for (TileEntity tile : chunk.getTileEntityMap().values()) {
+                        BlockPos pos = tile.getPos();
+                        if (pos.getX() < minX || pos.getX() > maxX || pos.getZ() < minZ || pos.getZ() > maxZ
+                            || pos.getY() < minY || pos.getY() > maxY || tile.isInvalid()) {
+                            continue;
+                        }
+                        ResourceLocation name = world.getBlockState(pos).getBlock().getRegistryName();
+                        if (NbtProjection.matches(name == null ? "unknown" : name.toString(), blocks)) {
+                            found.add(pos.toImmutable());
+                        }
+                    }
+                }
+                return at;
+            });
+        }
+        // A fixed order, so a cursor means the same thing on the next page.
+        found.sort(Comparator.<BlockPos>comparingInt(pos -> pos.getX())
+            .thenComparingInt(pos -> pos.getZ()).thenComparingInt(pos -> pos.getY()));
+        final JsonArray entities = new JsonArray();
+        final int end = (int) Math.min((long) found.size(), (long) cursor + limit);
+        int next = cursor;
+        while (next < end) {
+            final int first = next;
+            next = context.onGameThread(() -> {
+                WorldServer world = ServerWorldTools.requireWorld(dimension);
+                long started = System.nanoTime();
+                int at = first;
+                while (at < end && (at == first || System.nanoTime() - started < SLICE_NANOS)) {
+                    BlockPos pos = found.get(at++);
+                    // Its chunk may have unloaded since it was found, and asking would load it again.
+                    TileEntity tile = world.isBlockLoaded(pos) ? world.getTileEntity(pos) : null;
+                    if (tile == null || tile.isInvalid()) {
+                        JsonObject gone = GameJson.blockPos(pos);
+                        gone.addProperty("error", "The tile entity here went while this page was being read.");
+                        entities.add(gone);
+                        continue;
+                    }
+                    entities.add(describe(world, tile, keys, maxChars, summary));
+                }
+                return at;
+            });
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("dimension", dimension);
+        result.addProperty("matched", found.size());
+        result.addProperty("returned", entities.size());
+        if (end < found.size()) {
+            result.addProperty("next", end);
+        }
+        result.add("tileEntities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(entities));
+        result.add("chunks", chunksBlock(context, dimension, chunks, outcome));
+        return result;
     }
 
     /**
@@ -265,10 +308,7 @@ public final class ServerTileEntityTools {
             result.addProperty("unreadable", counts[1]);
         }
         result.add("groups", groups.toJson(limit));
-        result.add("chunks", context.onGameThread(() -> {
-            ChunkLoadGovernor.touch(dimension, chunks);
-            return chunksBlock(ServerWorldTools.requireWorld(dimension), chunks, outcome);
-        }));
+        result.add("chunks", chunksBlock(context, dimension, chunks, outcome));
         return result;
     }
 
@@ -335,7 +375,20 @@ public final class ServerTileEntityTools {
         if (outcome == null) {
             return ChunkLoadGovernor.describeUnloaded(world, chunks);
         }
-        JsonObject json = outcome.toJson();
+        return loadedNote(outcome.toJson());
+    }
+
+    /**
+     * As above from the worker thread, for a box: its chunks are counted across several game-thread
+     * tasks ({@link ServerChunkTools#describeChunks}), where 4096 in one held the server thread (#219).
+     */
+    private static JsonObject chunksBlock(ToolContext context, int dimension, Set<Long> chunks,
+                                          @Nullable ChunkLoadGovernor.Outcome outcome) {
+        JsonObject json = ServerChunkTools.describeChunks(context, dimension, chunks, outcome, false);
+        return outcome == null ? json : loadedNote(json);
+    }
+
+    private static JsonObject loadedNote(JsonObject json) {
         if (json.get("loaded").getAsInt() > 0) {
             json.addProperty("note", "Some chunks were loaded only for this read and are unloaded after it: their "
                 + "tile entities do not tick in between, so time-driven state (a controller's cycle) will not "

@@ -285,8 +285,18 @@ public final class ServerTestTools {
                 stopped = context.getCancellation().isCancelled() ? "cancelled"
                     : e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             }
-            // However it ended: put back what was marked, then the script's own finally.
-            restoreAll(run);
+            catch (Error e) {
+                // A StackOverflowError from an expression or include nested too deep, an OutOfMemoryError
+                // (#219): not a RuntimeException, so it went straight past the restores, the script's
+                // finally and the verdict, and left a live system as the test had set it. It ends the
+                // run like any other failure instead, and is in the log with its stack.
+                stopped = "failed with " + e;
+                Mcmcp.LOGGER.error("MCMCP server_run_test for " + context.getCaller() + " failed", e);
+            }
+            finally {
+                // However it ended: put back what was marked, then the script's own finally.
+                restoreAtEnd(run);
+            }
             String finallyStopped = null;
             if (finallySteps != null && finallySteps.size() > 0) {
                 Run after = new Run(cleanContext(context), false, System.currentTimeMillis() + 120_000L);
@@ -303,8 +313,14 @@ public final class ServerTestTools {
                     finallyStopped = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                     run.warnings.add("finally stopped: " + finallyStopped);
                 }
+                catch (Error e) {
+                    // As for the run itself: what the finally marked is still put back below.
+                    finallyStopped = "failed with " + e;
+                    run.warnings.add("finally stopped: " + finallyStopped);
+                    Mcmcp.LOGGER.error("MCMCP server_run_test for " + context.getCaller() + ": its finally failed", e);
+                }
                 run.warnings.addAll(after.warnings);
-                restoreAll(after);
+                restoreAtEnd(after);
                 run.failures.addAll(after.failures);
                 run.failed += after.failed;
                 run.passed += after.passed;
@@ -889,6 +905,24 @@ public final class ServerTestTools {
     private static void restoreAll(Run run) {
         while (!run.restores.isEmpty()) {
             run.restores.pop().run();
+        }
+    }
+
+    /**
+     * The restores at the end of a run: every one is tried, whatever the ones before it did (#219).
+     * Each catches its own exceptions, but not an Error, and one that threw skipped all the restores
+     * still waiting behind it. Never throws, so what ended the run is what the verdict reports.
+     */
+    private static void restoreAtEnd(Run run) {
+        while (!run.restores.isEmpty()) {
+            Runnable restore = run.restores.pop();
+            try {
+                restore.run();
+            }
+            catch (Throwable t) {
+                run.restoreFailures.add("a restore step failed with " + t);
+                Mcmcp.LOGGER.error("MCMCP server_run_test: a restore step failed; the rest are still tried", t);
+            }
         }
     }
 

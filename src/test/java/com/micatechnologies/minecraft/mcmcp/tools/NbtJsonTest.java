@@ -93,4 +93,23 @@ class NbtJsonTest {
         assertEquals(-140182632268417L, json.get(0).getAsLong());
         assertEquals(-140182632268476L, json.get(59).getAsLong());
     }
+
+    @Test
+    void aTagFarOverTheBudgetIsMarkedTruncatedAndStaysSmall() {
+        NBTTagCompound tag = new NBTTagCompound();
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 20_000; i++) {
+            big.append('x');
+        }
+        for (int i = 0; i < 200; i++) {
+            tag.setString("key" + i, big.toString());
+        }
+        JsonObject json = NbtJson.toJson(tag, 64 * 1024).getAsJsonObject();
+        assertTrue(json.has(NbtJson.TRUNCATED_KEY));
+        assertTrue(Json.write(json).length() < 200 * 1024, "wrote " + Json.write(json).length());
+        // An ordinary tag is untouched.
+        NBTTagCompound small = new NBTTagCompound();
+        small.setString("id", "minecraft:chest");
+        assertEquals("{\"id\":\"minecraft:chest\"}", Json.write(NbtJson.toJson(small)));
+    }
 }

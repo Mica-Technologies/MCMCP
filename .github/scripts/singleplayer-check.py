@@ -70,8 +70,15 @@ def main():
         _, text, error = orch.call("client_world_create", {"instance": client["instance"], "name": "mcmcp-sp-check",
                                                            "worldType": "flat", "gameMode": "creative"})
         check("the world is created", not error, text)
-        _, text, error = orch.call("client_wait", {"instance": client["instance"], "waitFor": "worldLoaded"})
-        check("the world loads", not error, text)
+        # client_wait answers when its ticks run out whether or not the world is in, so ask until it is.
+        loaded = False
+        for _ in range(60):
+            state, text, error = orch.call("client_wait", {"instance": client["instance"], "waitFor": "worldLoaded",
+                                                           "ticks": 200})
+            if error or (state.get("conditionMet") and state.get("playerPresent")):
+                loaded = not error
+                break
+        check("the world loads", loaded, text)
 
         server = wait_for(orch, lambda es: next((e for e in es if e.get("side") == "server"), None), 60,
                           "the world's server endpoint appears")

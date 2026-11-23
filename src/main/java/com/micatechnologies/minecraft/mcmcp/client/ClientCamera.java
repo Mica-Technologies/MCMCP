@@ -202,6 +202,33 @@ public final class ClientCamera {
     }
 
     /**
+     * {@code hideGUI} as it stands apart from any override here: what {@link #restore} will put back
+     * while one is applied, the setting itself otherwise. Client thread only.
+     *
+     * <p>For the one other thing that saves, forces and restores {@code hideGUI}: the section profiler.
+     * Each saving the live setting, whichever restored second put back what the first had forced: a
+     * profile started under a detached view ended with the HUD hidden for good, and a view taken
+     * during a profile restored the profiler's forced value over the player's own. Read and written
+     * through here, the two save the same thing and their restores can come in either order.
+     */
+    public static boolean underlyingHideGui() {
+        Saved current = saved;
+        return current != null ? current.hideGui : Minecraft.getMinecraft().gameSettings.hideGUI;
+    }
+
+    /** Sets what {@link #underlyingHideGui} reads, leaving a HUD this is hiding hidden. Client thread only. */
+    public static void setUnderlyingHideGui(boolean hidden) {
+        Saved current = saved;
+        if (current != null) {
+            current.hideGui = hidden;
+            if (current.hidingHud) {
+                return;
+            }
+        }
+        Minecraft.getMinecraft().gameSettings.hideGUI = hidden;
+    }
+
+    /**
      * The override standing now, as an identity to compare: the same object from {@link #apply} until
      * it is restored or replaced, null when none stands. Client thread only.
      */

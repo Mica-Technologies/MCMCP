@@ -31,7 +31,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
@@ -65,7 +67,8 @@ import javax.annotation.Nullable;
  *       where two connections exist at once.</li>
  *   <li><b>The writer</b> — one daemon thread per connection, draining the session's outbound queue.
  *       Separate because the reader blocks; a single thread could not do both without polling.</li>
- *   <li><b>The workers</b> — a small fixed pool running tool calls. The read loop must not run them
+ *   <li><b>The workers</b> — a small pool running tool calls, which grows while long calls hold its
+ *       threads and answers "busy" at its ceiling. The read loop must not run them
  *       itself: {@code client_wait} blocks until its condition comes true, and a reader that stops
  *       reading cannot receive the cancellation that would end it.</li>
  * </ul>
@@ -80,6 +83,18 @@ public class ReverseTransport implements McpTransport {
      * finds nothing to do costs nothing.
      */
     private static final long WRITER_POLL_MILLIS = 1_000L;
+
+    /** The fewest calls the worker pool runs at once before it answers "busy", whatever workerThreads is. */
+    private static final int MIN_WORKER_CEILING = 16;
+
+    /**
+     * How long the answer to the hello is waited for. Not short: the orchestrator app holds its
+     * answer while its approval dialog is open, so this is also how long a person has to click before
+     * the game knocks again. It exists for whatever else may be on the port: something that accepts
+     * the connection and never answers held the connector in its read for good, and the link never
+     * retried.
+     */
+    private static final int HANDSHAKE_TIMEOUT_MILLIS = 300_000;
 
     private final LinkSettings settings;
     private final McmcpIdentity identity;
@@ -207,7 +222,14 @@ public class ReverseTransport implements McpTransport {
         }
 
         connector = Executors.newSingleThreadScheduledExecutor(daemonFactory("link", new AtomicInteger(1)));
-        workers = Executors.newFixedThreadPool(settings.getWorkerThreads(),
+        // Grows under load and shrinks back. A fixed pool of workerThreads (four) was filled by four
+        // long waits (client_wait, client_sequence, an input-lock wait), and every call behind them
+        // queued for minutes, the release and read-only ones included. No queue: a call either gets a
+        // thread now or, at the ceiling, is answered "busy" at once (see submit), which an agent can
+        // act on and a silent wait it cannot.
+        int core = settings.getWorkerThreads();
+        workers = new ThreadPoolExecutor(core, Math.max(core * 4, MIN_WORKER_CEILING),
+            60L, TimeUnit.SECONDS, new SynchronousQueue<Runnable>(),
             daemonFactory("link-worker", new AtomicInteger(1)));
         waiters = Executors.newCachedThreadPool(daemonFactory("link-wait", new AtomicInteger(1)));
 
@@ -285,6 +307,9 @@ public class ReverseTransport implements McpTransport {
         // state of the world and gets one quiet line. After it, somebody closed a link that was
         // working, and saying "found no orchestrator listening" would describe the wrong event.
         boolean reachedConnected = false;
+        // Whether the hello went out: a timeout after it is a peer that took the connection and said
+        // nothing, which is not "no orchestrator listening".
+        boolean helloSent = false;
 
         try {
             setState(LinkState.CONNECTING, "");
@@ -301,8 +326,12 @@ public class ReverseTransport implements McpTransport {
             LinkFraming.writeFrame(out, LinkHandshake.hello(identity, side.id(),
                 helloDetails.getGameDirectory(), helloDetails.getModVersion(),
                 helloDetails.getMinecraftVersion(), helloDetails.getEndpointUrl(), helloDetails.getVia()));
+            helloSent = true;
 
+            // For the handshake only. The read loop waits on an idle link for as long as it is idle.
+            connected.setSoTimeout(HANDSHAKE_TIMEOUT_MILLIS);
             LinkHandshake.Result result = LinkHandshake.parseResponse(LinkFraming.readFrame(in));
+            connected.setSoTimeout(0);
             if (!result.isAccepted()) {
                 retry = handleRejection(result);
                 return;
@@ -326,6 +355,17 @@ public class ReverseTransport implements McpTransport {
         catch (IOException e) {
             if (reachedConnected) {
                 noteLinkClosed(e.getMessage());
+            }
+            else if (helloSent && e instanceof java.net.SocketTimeoutException) {
+                // An ordinary failed attempt from here on: the socket is closed and the next one is
+                // scheduled with backoff, below. Said every time, as a wrong protocol is: something
+                // is there, so this is not the resting state "no orchestrator" is.
+                String detail = "the connection was accepted and the hello not answered within "
+                    + HANDSHAKE_TIMEOUT_MILLIS / 1000 + " s";
+                Mcmcp.LOGGER.warn("MCMCP orchestrator link to " + settings.describeTarget() + " failed: "
+                    + detail + ". Either an approval is waiting in the orchestrator app, or something "
+                    + "else has that port. Trying again.");
+                setState(LinkState.RETRYING, detail);
             }
             else {
                 noteOffline(e.getMessage());
@@ -503,8 +543,46 @@ public class ReverseTransport implements McpTransport {
             });
         }
         catch (RejectedExecutionException e) {
-            // Shutting down. The orchestrator sees the link close, which is a better signal than a
-            // half-answered request.
+            if (pool.isShutdown()) {
+                // Shutting down. The orchestrator sees the link close, which is a better signal than a
+                // half-answered request.
+                return;
+            }
+            // Every worker is in a call. Answered here, on the reader: dropped, the request waited
+            // until the orchestrator gave up on it, and queued, it waited behind the longest call.
+            answerBusy(message, out, session);
+        }
+    }
+
+    /** How long a caller turned away for want of a worker is told to wait. */
+    private static final long BUSY_RETRY_MILLIS = 2_000L;
+
+    /**
+     * Answers a request no worker was free for. A tool call gets a tool error with a {@code busy}
+     * block, which a model reads and waits out; anything else can only get a JSON-RPC error.
+     */
+    private void answerBusy(JsonObject message, OutputStream out, McpSession session) {
+        JsonElement id = JsonRpc.getId(message);
+        String text = "This game is already running as many MCMCP calls at once as it allows, which takes "
+            + "several long waits. Nothing was done; retry after busy.retryAfterMs, or cancel a wait you "
+            + "no longer need.";
+        JsonObject answer;
+        if (com.micatechnologies.minecraft.mcmcp.protocol.McpProtocol.METHOD_TOOLS_CALL.equals(JsonRpc.getMethod(message))) {
+            JsonObject busy = new JsonObject();
+            busy.addProperty("reason", "workers");
+            busy.addProperty("retryAfterMs", BUSY_RETRY_MILLIS);
+            answer = JsonRpc.result(id, com.micatechnologies.minecraft.mcmcp.mcp.ToolResult.error(text)
+                .withStructured(Json.obj("busy", busy)).toJson(session.getProtocolVersion()));
+        }
+        else {
+            answer = JsonRpc.error(id, JsonRpcException.INTERNAL_ERROR, text);
+        }
+        try {
+            LinkFraming.writeFrame(out, answer);
+        }
+        catch (IOException e) {
+            // The link died under us; the reader notices on its next read.
+            Mcmcp.LOGGER.debug("MCMCP orchestrator link write failed: " + e.getMessage());
         }
     }
 

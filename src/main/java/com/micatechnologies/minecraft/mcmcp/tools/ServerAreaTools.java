@@ -765,11 +765,7 @@ public final class ServerAreaTools {
                     + "are not loaded. Pass load: true, or hold the area with server_keep_loaded, and run it again.");
             }
             json.addProperty("millis", (System.nanoTime() - startedAt) / 1_000_000L);
-            json.add("chunks", context.onGameThread(() -> {
-                ChunkLoadGovernor.touch(dimension, chunks);
-                return outcome != null ? outcome.toJson()
-                    : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
-            }));
+            json.add("chunks", ServerChunkTools.describeChunks(context, dimension, chunks, outcome, false));
             return ToolResult.structured(json);
         });
     }

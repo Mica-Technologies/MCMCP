@@ -86,6 +86,10 @@ public final class Job {
     private final JsonArray lists = new JsonArray();
     private final List<Page> pages = new ArrayList<>();
     private long pageBytes;
+    /** How many pages there were before they were dropped to free memory, and why; 0 while they are kept. */
+    private int pagesDropped;
+    @Nullable
+    private String pagesDroppedWhy;
     /** For an op replay: the last op of the last finished part. -1 before any. */
     private int lastOp = -1;
     /** Bumped on every change, so listeners can skip what they have seen. */
@@ -267,12 +271,16 @@ public final class Job {
                     page.add("region", part.region);
                 }
                 page.add("result", result);
-                pageBytes += page.toString().length();
-                pages.add(new Page(pages.size(), page));
-                if (pageBytes > maxPageBytes) {
-                    throw new IllegalStateException("This read has produced over " + (maxPageBytes >> 20)
-                        + " MB of pages; read it in smaller jobs, or fetch and drop pages as they come.");
+                long bytes = page.toString().length();
+                if (pageBytes + bytes > maxPageBytes) {
+                    // Refused before it is kept: the pages stay in the heap for as long as the job is
+                    // listed, so the cap is on what is held, not on what was once produced.
+                    throw new IllegalStateException("This read's pages have reached " + (maxPageBytes >> 20)
+                        + " MB, the most one job keeps in the server's memory; the " + pages.size() + " page(s) "
+                        + "before this part can still be read. Read the rest in smaller jobs.");
                 }
+                pageBytes += bytes;
+                pages.add(new Page(pages.size(), page));
             }
         }
         changed();
@@ -300,11 +308,43 @@ public final class Job {
 
     @Nullable
     public synchronized Page page(int index) {
+        if (index >= 0 && index < pagesDropped) {
+            // Said in the page's place: "not one of its pages" would read as a wrong index.
+            JsonObject gone = new JsonObject();
+            gone.addProperty("dropped", true);
+            gone.addProperty("note", pagesDroppedWhy);
+            return new Page(index, gone);
+        }
         return index >= 0 && index < pages.size() ? pages.get(index) : null;
     }
 
     public synchronized int pageCount() {
-        return pages.size();
+        return pagesDropped > 0 ? pagesDropped : pages.size();
+    }
+
+    /** The characters of JSON this job's pages hold: what its cap and the server's budget count. */
+    synchronized long pageBytes() {
+        return pageBytes;
+    }
+
+    /**
+     * Lets go of a finished job's pages, keeping how many there were (#219). A read job's pages are
+     * whole results held in the heap, and every job listed kept its own for as long as it was listed;
+     * the manager drops the oldest once finished jobs hold more than the server's budget between them.
+     *
+     * @param why what a caller asking for one of the pages is told
+     * @return false if the job is still running, or holds none
+     */
+    synchronized boolean dropPages(String why) {
+        if (!state.settled() || pages.isEmpty()) {
+            return false;
+        }
+        pagesDropped = pages.size();
+        pagesDroppedWhy = why;
+        pages.clear();
+        pageBytes = 0L;
+        changed();
+        return true;
     }
 
     /** The status a caller sees. {@code full} adds the lists of refusals and the like. */
@@ -358,6 +398,9 @@ public final class Job {
         if (!pages.isEmpty()) {
             json.addProperty("pages", pages.size());
         }
+        else if (pagesDropped > 0) {
+            json.addProperty("pagesDropped", pagesDropped);
+        }
         if (error != null) {
             json.addProperty(state == State.DONE ? "note" : "error", error);
         }
@@ -370,6 +413,7 @@ public final class Job {
         json.remove("percent");
         json.remove("etaMs");
         json.remove("pages");
+        json.remove("pagesDropped");
         json.addProperty("tool", tool);
         json.addProperty("ownerKey", ownerKey);
         json.addProperty("created", createdMillis);

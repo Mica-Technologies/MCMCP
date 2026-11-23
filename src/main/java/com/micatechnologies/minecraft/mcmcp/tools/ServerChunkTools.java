@@ -17,6 +17,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import javax.annotation.Nullable;
+import net.minecraft.world.WorldServer;
 
 /**
  * Keeping a region loaded without a player in it (#54), and the shared {@code load: true} path for
@@ -111,10 +112,7 @@ public final class ServerChunkTools {
             if (reader.needs(whole)) {
                 reader.read(whole);
             }
-            return finish.finish(context.onGameThread(() -> {
-                ChunkLoadGovernor.touch(dimension, allChunks);
-                return ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), allChunks);
-            }));
+            return finish.finish(describeChunks(context, dimension, allChunks, null, false));
         }
         final String caller = ChunkLoadGovernor.holdCallerOf(context);
         int room = ChunkLoadGovernor.readTileChunks(caller);
@@ -175,6 +173,62 @@ public final class ServerChunkTools {
             ChunkLoadGovernor.touch(dimension, chunks);
             return null;
         });
+    }
+
+    /** Chunks one server-thread task of {@link #describeChunks} looks at. */
+    private static final int DESCRIBE_SLICE_CHUNKS = 4096;
+
+    /**
+     * A call's {@code chunks} block, with the idle timer of any lasting hold over them renewed: the
+     * outcome's own when the call loaded, otherwise what {@link ChunkLoadGovernor#describeUnloaded}
+     * says, counted in tasks of at most {@link #DESCRIBE_SLICE_CHUNKS} chunks (#219). A fill a million
+     * blocks long and one block wide is within every cell limit and covers 65,536 chunks, and whether
+     * each was ever generated can be a read of a region file's header; in one task that was the server
+     * thread held for the whole walk.
+     *
+     * <p>Called from the worker thread, never from inside a game-thread task: there every task of this
+     * would run in place, and it would be one walk again.
+     *
+     * @param followUp true after a write this call has made, so a cancel or a busy queue does not lose
+     *                 the result of a write that happened ({@link ToolContext#onGameThreadFollowUp})
+     */
+    public static JsonObject describeChunks(ToolContext context, final int dimension, final Set<Long> chunks,
+                                            @Nullable ChunkLoadGovernor.Outcome outcome, boolean followUp) {
+        if (outcome != null) {
+            hop(context, followUp, () -> {
+                ChunkLoadGovernor.touch(dimension, chunks);
+                return null;
+            });
+            return outcome.toJson();
+        }
+        // In the set's own order: the chunks a result lists are the first few met.
+        final long[] keys = new long[chunks.size()];
+        int count = 0;
+        for (long chunk : chunks) {
+            keys[count++] = chunk;
+        }
+        final ChunkLoadGovernor.Unloaded counted = new ChunkLoadGovernor.Unloaded();
+        int from = 0;
+        while (true) {
+            final int start = from;
+            final int end = Math.min(keys.length, start + DESCRIBE_SLICE_CHUNKS);
+            JsonObject json = hop(context, followUp, () -> {
+                WorldServer world = ServerWorldTools.requireWorld(dimension);
+                if (start == 0) {
+                    ChunkLoadGovernor.touch(dimension, chunks);
+                }
+                counted.add(world, keys, start, end);
+                return end < keys.length ? null : counted.toJson(world, chunks);
+            });
+            if (json != null) {
+                return json;
+            }
+            from = end;
+        }
+    }
+
+    private static <T> T hop(ToolContext context, boolean followUp, java.util.concurrent.Callable<T> task) {
+        return followUp ? context.onGameThreadFollowUp(task) : context.onGameThread(task);
     }
 
     /** The argument every read and write that can load takes. */

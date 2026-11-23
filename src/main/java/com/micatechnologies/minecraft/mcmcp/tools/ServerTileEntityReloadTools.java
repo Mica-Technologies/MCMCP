@@ -36,6 +36,9 @@ public final class ServerTileEntityReloadTools {
     static final int MAX_TILE_ENTITIES = 4096;
     static final long MAX_CELLS = 4_000_000L;
 
+    /** About how long one game-thread slice of the reloads runs, as in {@code ServerAreaTools}. */
+    private static final long SLICE_NANOS = 25_000_000L;
+
     private ServerTileEntityReloadTools() {
     }
 
@@ -93,11 +96,15 @@ public final class ServerTileEntityReloadTools {
         final boolean dryRun = context.getBoolean("dryRun", false);
         final BlockPatterns blocks = BlockPatterns.of(Json.getStringList(context.getArguments(), "blocks"));
 
-        return ServerChunkTools.withChunks(context, dimension, ChunkKeys.box(minX, minZ, maxX, maxZ), outcome ->
+        return ServerChunkTools.withChunks(context, dimension, ChunkKeys.box(minX, minZ, maxX, maxZ), outcome -> {
+            // Collected first: re-adding changes the loaded list being walked. And in a task of its
+            // own (#219): the reloads that follow are up to 4096 tile entities saved, re-created and
+            // resent, and with the walk they were one task on the server thread. Positions and block ids
+            // are what cross to the reloading tasks; each tile entity is looked up again there.
+            final List<BlockPos> found = new ArrayList<>();
+            final List<String> ids = new ArrayList<>();
             context.onGameThread(() -> {
                 WorldServer world = ServerWorldTools.requireWorld(dimension);
-                // Collected first: re-adding changes the loaded list being walked.
-                List<BlockPos> found = new ArrayList<>();
                 for (TileEntity tile : new ArrayList<>(world.loadedTileEntityList)) {
                     if (tile == null || tile.isInvalid()) {
                         continue;
@@ -107,49 +114,68 @@ public final class ServerTileEntityReloadTools {
                         || pos.getZ() < minZ || pos.getZ() > maxZ) {
                         continue;
                     }
-                    if (!blocks.isEmpty() && !blocks.matches(idOf(world.getBlockState(pos)))) {
-                        continue;
-                    }
-                    found.add(pos);
-                }
-                JsonObject json = new JsonObject();
-                if (found.size() > MAX_TILE_ENTITIES) {
-                    json.addProperty("error", found.size() + " tile entities in the box; at most "
-                        + MAX_TILE_ENTITIES + " a call. Give a smaller box or 'blocks'.");
-                    return ToolResult.error(json.get("error").getAsString());
-                }
-                Map<String, Integer> byBlock = new TreeMap<>();
-                JsonArray failed = new JsonArray();
-                int reloaded = 0;
-                for (BlockPos pos : found) {
                     String id = idOf(world.getBlockState(pos));
-                    if (dryRun) {
-                        byBlock.merge(id, 1, Integer::sum);
+                    if (!blocks.isEmpty() && !blocks.matches(id)) {
                         continue;
                     }
-                    String problem = reloadOne(world, pos);
-                    if (problem == null) {
-                        reloaded++;
-                        byBlock.merge(id, 1, Integer::sum);
+                    found.add(pos.toImmutable());
+                    ids.add(id);
+                }
+                return null;
+            });
+            if (found.size() > MAX_TILE_ENTITIES) {
+                return ToolResult.error(found.size() + " tile entities in the box; at most "
+                    + MAX_TILE_ENTITIES + " a call. Give a smaller box or 'blocks'.");
+            }
+            final Map<String, Integer> byBlock = new TreeMap<>();
+            final JsonArray failed = new JsonArray();
+            // Written by the game thread one task at a time, read here after the last.
+            final int[] reloaded = {0};
+            int done = dryRun ? found.size() : 0;
+            if (dryRun) {
+                for (String id : ids) {
+                    byBlock.merge(id, 1, Integer::sum);
+                }
+            }
+            while (done < found.size()) {
+                final int from = done;
+                done = context.onGameThread(() -> {
+                    WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    long started = System.nanoTime();
+                    int at = from;
+                    while (at < found.size() && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
+                        BlockPos pos = found.get(at);
+                        String id = ids.get(at++);
+                        // Without load: true nothing keeps its chunk, and asking for the tile entity
+                        // of one that has gone would load it.
+                        String problem = world.isBlockLoaded(pos) ? reloadOne(world, pos)
+                            : "its chunk unloaded before it was reached";
+                        if (problem == null) {
+                            reloaded[0]++;
+                            byBlock.merge(id, 1, Integer::sum);
+                        }
+                        else if (failed.size() < 20) {
+                            JsonObject row = GameJson.blockPos(pos);
+                            row.addProperty("block", id);
+                            row.addProperty("why", problem);
+                            failed.add(row);
+                        }
                     }
-                    else if (failed.size() < 20) {
-                        JsonObject row = GameJson.blockPos(pos);
-                        row.addProperty("block", id);
-                        row.addProperty("why", problem);
-                        failed.add(row);
-                    }
-                }
-                json.addProperty(dryRun ? "wouldReload" : "reloaded", dryRun ? found.size() : reloaded);
-                JsonObject kinds = new JsonObject();
-                for (Map.Entry<String, Integer> entry : byBlock.entrySet()) {
-                    kinds.addProperty(entry.getKey(), entry.getValue());
-                }
-                json.add("byBlock", kinds);
-                if (failed.size() > 0) {
-                    json.add("failed", failed);
-                }
-                return ToolResult.structured(json);
-            }));
+                    return at;
+                });
+            }
+            JsonObject json = new JsonObject();
+            json.addProperty(dryRun ? "wouldReload" : "reloaded", dryRun ? found.size() : reloaded[0]);
+            JsonObject kinds = new JsonObject();
+            for (Map.Entry<String, Integer> entry : byBlock.entrySet()) {
+                kinds.addProperty(entry.getKey(), entry.getValue());
+            }
+            json.add("byBlock", kinds);
+            if (failed.size() > 0) {
+                json.add("failed", failed);
+            }
+            return ToolResult.structured(json);
+        });
     }
 
     /**

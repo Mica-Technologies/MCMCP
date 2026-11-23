@@ -493,11 +493,15 @@ public final class UndoPoints {
     /** The area a before/after map covers, or null when the write is too spread out to draw. */
     @Nullable
     public static int[] imageArea(int minX, int minZ, int maxX, int maxZ) {
-        int width = maxX - minX + 1;
-        int depth = maxZ - minZ + 1;
-        if (width > MAX_IMAGE_COLUMNS || depth > MAX_IMAGE_COLUMNS) {
+        // In long (#219): in int a box across most of the range wraps to a small or negative span,
+        // which passed the check below and went on to be drawn. An empty or inverted box draws nothing.
+        long spanX = (long) maxX - minX + 1L;
+        long spanZ = (long) maxZ - minZ + 1L;
+        if (spanX < 1L || spanZ < 1L || spanX > MAX_IMAGE_COLUMNS || spanZ > MAX_IMAGE_COLUMNS) {
             return null;
         }
+        int width = (int) spanX;
+        int depth = (int) spanZ;
         // A margin of a few blocks, so a small build is seen in its surroundings.
         int margin = Math.max(2, Math.max(width, depth) / 8);
         return new int[] {minX - margin, minZ - margin, maxX + margin, maxZ + margin};

@@ -156,6 +156,12 @@ public final class ServerBuildTools {
                 final int sizeZ = maxZ - minZ + 1;
                 final long volume = (long) sizeX * sizeY * sizeZ;
 
+                // Before the volume is compared or a chunk set built (#219): with both y above 255 or
+                // both below 0 the clamped height is zero or less, the volume passes every limit, and
+                // the chunks of the whole footprint would be held to read no cell at all.
+                if (maxY < minY) {
+                    return ToolResult.error("That region is wholly outside y 0-255, so there is nothing to read.");
+                }
                 if (volume > McmcpConfig.getMaxBlockVolume()) {
                     return ToolResult.error("That region is " + volume + " blocks, over the limit of "
                         + McmcpConfig.getMaxBlockVolume() + " set by limits.maxBlockVolume. Read it in "
@@ -611,6 +617,10 @@ public final class ServerBuildTools {
                     // before any of its cells hears of a neighbour (#85).
                     final DeferredNeighbours deferred = (flags & 1) != 0 ? new DeferredNeighbours() : null;
                     pairs.deferred = deferred;
+                    // A cancel, a timeout or a throw between two batches leaves the earlier ones in the
+                    // world; what they changed still gets its undo point on the way out (#219).
+                    boolean undoSaved = false;
+                    try {
                     runInBatches(context, placements.size(), batchLimit, new Batch() {
                         @Override
                         public void run(int from, int to) {
@@ -658,11 +668,19 @@ public final class ServerBuildTools {
                         deferred.report(json);
                     }
                     json.add("chunks", chunksBlock(context, dimension, listChunks, outcome));
+                    undoSaved = true;
                     if (recorder != null) {
                         ServerUndoTools.finish(context, recorder, "server_set_blocks", dimension, area,
                             beforeImage, json, null);
                     }
                     return ToolResult.structured(json);
+                    }
+                    finally {
+                        if (!undoSaved) {
+                            ServerUndoTools.finishInterrupted(context, recorder, "server_set_blocks", dimension,
+                                area, beforeImage);
+                        }
+                    }
                     });
                 }
 
@@ -725,6 +743,10 @@ public final class ServerBuildTools {
                 final BufferedImage beforeImage = ServerUndoTools.drawImage(context, dimension, area);
                 final Tally tally = new Tally();
                 tally.drops = new WriteDrops.Tally(keepDrops);
+                // As in list mode: the batches written before a cancel or a timeout keep their undo
+                // point (#219).
+                boolean undoSaved = false;
+                try {
                 runInBatches(context, (int) volume, batchLimit, new Batch() {
                     @Override
                     public void run(int from, int to) {
@@ -751,11 +773,19 @@ public final class ServerBuildTools {
                 json.add("from", GameJson.blockPos(new BlockPos(minX, minY, minZ)));
                 json.add("to", GameJson.blockPos(new BlockPos(maxX, maxY, maxZ)));
                 json.add("chunks", chunksBlock(context, dimension, fillChunks, outcome));
+                undoSaved = true;
                 if (recorder != null) {
                     ServerUndoTools.finish(context, recorder, "server_set_blocks", dimension, area,
                         beforeImage, json, null);
                 }
                 return ToolResult.structured(json);
+                }
+                finally {
+                    if (!undoSaved) {
+                        ServerUndoTools.finishInterrupted(context, recorder, "server_set_blocks", dimension, area,
+                            beforeImage);
+                    }
+                }
                 });
             })
             .build());
@@ -768,11 +798,7 @@ public final class ServerBuildTools {
     private static JsonObject chunksBlock(com.micatechnologies.minecraft.mcmcp.mcp.ToolContext context,
                                           final int dimension, final Set<Long> chunks,
                                           @Nullable final ChunkLoadGovernor.Outcome outcome) {
-        return context.onGameThreadFollowUp(() -> {
-            ChunkLoadGovernor.touch(dimension, chunks);
-            return outcome != null ? outcome.toJson()
-                : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
-        });
+        return ServerChunkTools.describeChunks(context, dimension, chunks, outcome, true);
     }
 
     /** The palette of a palette-mode write: block ids, or objects with block, metadata and nbt. */

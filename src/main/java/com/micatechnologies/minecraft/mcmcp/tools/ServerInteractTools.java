@@ -188,8 +188,15 @@ public final class ServerInteractTools {
                     result.addProperty("distance", Math.round(Math.sqrt(player.getDistanceSq(pos)) * 10.0D) / 10.0D);
                     result.add("before", GameJson.block(world, pos));
                     BlockPos beside = pos.offset(face);
+                    // The cell on the clicked face can be over a chunk border, in a chunk nothing holds, and
+                    // reading an unloaded position loads or generates its chunk (#219). Asked once, before
+                    // the click: a neighbour that was not loaded then is not read here at all, so nothing
+                    // there counts towards 'changed' or the undo point. 'besideAfter' says loaded: false
+                    // by itself.
+                    boolean besideLoaded = world.isBlockLoaded(beside);
                     UndoPoints.Before wasAt = recorder == null ? null : recorder.capture(world, pos);
-                    UndoPoints.Before wasBeside = recorder == null ? null : recorder.capture(world, beside);
+                    UndoPoints.Before wasBeside = recorder == null || !besideLoaded ? null
+                        : recorder.capture(world, beside);
                     Container before = player.openContainer;
 
                     int previousSlot = player.inventory.currentItem;

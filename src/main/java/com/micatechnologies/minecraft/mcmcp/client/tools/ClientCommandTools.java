@@ -63,6 +63,15 @@ public final class ClientCommandTools {
 
     private static final long POLL_MILLIS = 5L;
 
+    /** How far past its reply timeout a command's replies are still collected before it is left. */
+    private static final long REPLY_OVERRUN_MILLIS = 2_000L;
+
+    /**
+     * Most reply lines kept for one command; the rest are counted in 'repliesDropped'. A server
+     * broadcasting through a command's window would otherwise grow its list without end.
+     */
+    private static final int MAX_REPLIES = 50;
+
     private ClientCommandTools() {
     }
 
@@ -228,7 +237,7 @@ public final class ClientCommandTools {
                     outcome.replies.add(sent);
                 } else {
                     lastSent = outcome;
-                    collectReplies(chat, outcome, replyTimeout);
+                    collectReplies(context, chat, outcome, replyTimeout);
                 }
                 // Per command word, for the request journal: "/tp" and "/fill" are different costs.
                 context.noteTiming("cmd:" + commandWord(command), System.currentTimeMillis() - commandStart);
@@ -265,6 +274,9 @@ public final class ClientCommandTools {
             }
             if (!outcome.replies.isEmpty()) {
                 entry.add("replies", Json.arrayOfStrings(outcome.replies));
+            }
+            if (outcome.repliesDropped > 0) {
+                entry.addProperty("repliesDropped", outcome.repliesDropped);
             }
             results.add(entry);
         }
@@ -306,9 +318,12 @@ public final class ClientCommandTools {
         return space < 0 ? command : command.substring(0, space);
     }
 
-    private static void collectReplies(ClientChatRecorder.Capture chat, Outcome outcome,
-        long timeout) throws InterruptedException {
+    private static void collectReplies(ToolContext context, ClientChatRecorder.Capture chat,
+        Outcome outcome, long timeout) throws InterruptedException {
         long start = System.currentTimeMillis();
+        // The quiet rule alone never ends on a server that prints a system line every tick: the
+        // worker stayed in here for good. Past this the command is taken as answered.
+        long giveUp = start + timeout + REPLY_OVERRUN_MILLIS;
         long lastLine = -1L;
         while (true) {
             if (drain(chat, outcome)) {
@@ -316,6 +331,11 @@ public final class ClientCommandTools {
             }
             long now = System.currentTimeMillis();
             if (lastLine < 0 ? now - start >= timeout : now - lastLine >= QUIET_MILLIS) {
+                break;
+            }
+            // A cancel ends the wait, not the call: run() sees it before the next command and
+            // reports where it stopped.
+            if (now >= giveUp || context.getCancellation().isCancelled()) {
                 break;
             }
             Thread.sleep(POLL_MILLIS);
@@ -337,7 +357,12 @@ public final class ClientCommandTools {
                 continue;
             }
             any = true;
-            outcome.replies.add(entry.getText());
+            // Still read past the cap, for the red line that makes the command a failure.
+            if (outcome.replies.size() < MAX_REPLIES) {
+                outcome.replies.add(entry.getText());
+            } else {
+                outcome.repliesDropped++;
+            }
             if (entry.isError()) {
                 outcome.status = "error";
             } else if (outcome.status == null || "no_reply".equals(outcome.status)) {
@@ -368,6 +393,8 @@ public final class ClientCommandTools {
         final int index;
         final String command;
         final List<String> replies = new ArrayList<>();
+        /** Lines that arrived after {@link #MAX_REPLIES} were kept. */
+        int repliesDropped;
         String status;
 
         Outcome(int index, String command) {
@@ -382,6 +409,34 @@ public final class ClientCommandTools {
 
     /** How long to wait for /blockdata's answer. */
     private static final long BLOCKDATA_TIMEOUT_MILLIS = 3000L;
+
+    /** Most of a tag the server sent that would not parse is handed back as 'raw'. */
+    private static final int MAX_RAW_TAG_CHARS = 64 * 1024;
+
+    /**
+     * Why a read-only tool may not read the server's copy now, or null when it may. The read is a
+     * command sent as the player, so it is held to what every tool that sends one is: not during an
+     * emergency stop, and not while another agent holds the input exclusively.
+     */
+    @javax.annotation.Nullable
+    static ToolResult serverReadRefusal(ToolContext context) {
+        if (com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
+            return ToolResult.error("nbt_source 'server' sends a /blockdata command as the player, which "
+                + "an emergency stop refuses. nbt_source 'client' still reads. "
+                + com.micatechnologies.minecraft.mcmcp.game.Estop.refusal());
+        }
+        long now = System.currentTimeMillis();
+        com.micatechnologies.minecraft.mcmcp.mcp.InputClaim claim =
+            com.micatechnologies.minecraft.mcmcp.mcp.InputClaim.get();
+        String busy = claim.refusalFor(context.getCaller(), now);
+        if (busy != null) {
+            JsonObject structured = new JsonObject();
+            structured.add("busy", claim.busy(now));
+            return ToolResult.error("nbt_source 'server' sends a /blockdata command as the player. " + busy)
+                .withStructured(structured);
+        }
+        return null;
+    }
 
     /**
      * The tile entity's tag as the <em>server</em> holds it, read by running
@@ -462,7 +517,9 @@ public final class ClientCommandTools {
                             result.tag = JsonToNBT.getTagFromJson(args[0]);
                         } catch (NBTException e) {
                             result.error = "The server's tag could not be parsed: " + e.getMessage();
-                            result.raw = args[0];
+                            result.raw = args[0].length() <= MAX_RAW_TAG_CHARS ? args[0]
+                                : args[0].substring(0, MAX_RAW_TAG_CHARS) + "…(+"
+                                    + (args[0].length() - MAX_RAW_TAG_CHARS) + " chars)";
                         }
                         return result;
                     }

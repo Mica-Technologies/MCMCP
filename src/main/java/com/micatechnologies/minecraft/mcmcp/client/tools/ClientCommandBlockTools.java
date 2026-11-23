@@ -412,6 +412,8 @@ public final class ClientCommandBlockTools {
             return reply;
         }
         long start = System.currentTimeMillis();
+        // The quiet rule alone never ends on a server that prints a system line every tick.
+        long giveUp = start + CHAT_REPLY_MILLIS + 2_000L;
         long lastLine = -1L;
         while (true) {
             for (ClientChatRecorder.Entry entry; (entry = chat.poll()) != null; ) {
@@ -425,6 +427,11 @@ public final class ClientCommandBlockTools {
             }
             long now = System.currentTimeMillis();
             if (lastLine < 0 ? now - start >= CHAT_REPLY_MILLIS : now - lastLine >= QUIET_MILLIS) {
+                return reply;
+            }
+            // Returned, not thrown, on a cancel: this also runs to take the command block back out,
+            // and the command was sent either way.
+            if (now >= giveUp || context.getCancellation().isCancelled()) {
                 return reply;
             }
             Thread.sleep(5L);

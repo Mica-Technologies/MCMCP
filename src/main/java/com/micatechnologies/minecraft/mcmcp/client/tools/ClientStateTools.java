@@ -273,7 +273,8 @@ public final class ClientStateTools {
                 .enumeration("nbt_source", "With nbt: 'client' (default) reads the copy this "
                         + "client holds. 'server' runs /blockdata x y z {} as the player, which "
                         + "changes nothing and answers with the server's whole tag; needs operator "
-                        + "permission on the server.",
+                        + "permission on the server. As it sends a command, it is refused during an "
+                        + "emergency stop and while another agent holds the input exclusively.",
                     "client", "server")
                 .bool("chisel_grid", "With nbt, on a Chisels & Bits block: also return chisel.grid, every bit as "
                     + "16 layers (y 0 up) of 16 rows (z 0 = north first) of 16 characters (x 0 = "
@@ -291,6 +292,15 @@ public final class ClientStateTools {
                 final boolean nbt = context.getBoolean("nbt", false);
                 final boolean fromServer = "server".equals(context.getString("nbt_source", "client"));
                 final boolean chiselGrid = context.getBoolean("chisel_grid", false);
+                // The server read sends a command as the player, and this tool is read-only: the
+                // dispatcher lets it through an emergency stop and another agent's exclusive lock
+                // without looking. So that one form is held to both here.
+                if (nbt && fromServer) {
+                    ToolResult refused = ClientCommandTools.serverReadRefusal(context);
+                    if (refused != null) {
+                        return refused;
+                    }
+                }
 
                 JsonObject result = context.onGameThread(new Callable<JsonObject>() {
                     @Override

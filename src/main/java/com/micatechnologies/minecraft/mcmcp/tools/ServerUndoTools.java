@@ -201,6 +201,13 @@ public final class ServerUndoTools {
                 IBlockState[] states = UndoPoints.resolveStates(record);
                 for (int i = start; i < end; i++) {
                     BlockPos pos = new BlockPos(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+                    // Asked again here, not only in the check above (#219): the server has ticked since,
+                    // and a chunk that unloaded in between would be loaded, or generated, by the read
+                    // and the write below.
+                    if (!world.isBlockLoaded(pos)) {
+                        unloaded[0]++;
+                        continue;
+                    }
                     UndoPoints.Before was = recorder == null ? null : recorder.capture(world, pos);
                     boolean wrote;
                     try {
@@ -238,6 +245,12 @@ public final class ServerUndoTools {
         json.addProperty("blocks", total);
         json.addProperty("changedSince", changed[0]);
         json.addProperty("forced", force && changed[0] > 0);
+        if (unloaded[0] > 0) {
+            json.addProperty("unloaded", unloaded[0]);
+            json.addProperty("unloadedNote", unloaded[0] + " of the blocks were not put back: their chunks "
+                + "unloaded while the restore ran. Hold the area with server_keep_loaded and restore again "
+                + "with force: true, since the blocks that were put back now count as changed.");
+        }
         if (failed[0] > 0) {
             json.addProperty("failed", failed[0]);
             json.add("failedAt", failedAt);
@@ -363,6 +376,47 @@ public final class ServerUndoTools {
             Mcmcp.LOGGER.warn("MCMCP could not save an undo point for " + tool, e);
             result.addProperty("undoPointError", String.valueOf(e.getMessage()));
             return null;
+        }
+    }
+
+    /**
+     * Saves what {@code recorder} holds when a write stopped part way: a cancel, a timeout or a throw
+     * between two of its batches, or in a step after the last (#219). The batches before it are in the
+     * world, and without this they had no undo point. Never throws: the caller is already on its way
+     * out with the failure that stopped the write, and that is the one to report.
+     *
+     * <p>The count is read on the game thread, as a follow-up. After a timeout the batch that timed out
+     * may still be running and recording; the follow-up queues behind it, so the point holds all of it.
+     *
+     * @param recorder the write's recorder, or null when it leaves no undo point
+     */
+    static void finishInterrupted(ToolContext context, @Nullable UndoPoints.Recorder recorder, String tool,
+                                  int dimension, @Nullable int[] area, @Nullable BufferedImage beforeImage) {
+        if (recorder == null) {
+            return;
+        }
+        // A write stopped by an interrupt leaves the thread's flag set, and a wait on the game thread
+        // with it set ends at once: cleared for the save, and put back for whoever looks next.
+        boolean interrupted = Thread.interrupted();
+        try {
+            int recorded = context.onGameThreadFollowUp(recorder::count);
+            if (recorded == 0) {
+                return;
+            }
+            JsonObject result = new JsonObject();
+            String id = finish(context, recorder, tool, dimension, area, beforeImage, result, null);
+            if (id != null) {
+                Mcmcp.LOGGER.warn("MCMCP: " + tool + " stopped part way; the " + recorded
+                    + " block(s) it had changed are in undo point " + id);
+            }
+        }
+        catch (RuntimeException e) {
+            Mcmcp.LOGGER.warn("MCMCP could not save an undo point for the part of " + tool + " that was written", e);
+        }
+        finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

@@ -81,6 +81,9 @@ public final class ClientWorldTools {
      */
     private static final long PAUSED_SERVER_STOP_WAIT_MILLIS = 1_000L;
 
+    /** The longest save folder name made from a display name, before any collision suffix. */
+    private static final int MAX_FOLDER_NAME_CHARS = 64;
+
     /** How often to re-check whether the integrated server has stopped. */
     private static final long SERVER_STOP_POLL_MILLIS = 10L;
 
@@ -271,7 +274,19 @@ public final class ClientWorldTools {
      * loop appends a dash rather than a counter for the same reason: that is vanilla's behaviour.
      */
     private static String uncollidingFolderName(String displayName) {
-        String folder = displayName.replaceAll("[\\./\"]", "_");
+        // Both halves of what the vanilla screen does: calcSaveDirName's illegal file characters, then
+        // getUncollidingSaveDirName's. Only the second was here, which left '\' and ':' in a name that
+        // becomes a directory: a path into another folder, or a drive or stream name on Windows.
+        String folder = displayName.trim();
+        for (char illegal : net.minecraft.util.ChatAllowedCharacters.ILLEGAL_FILE_CHARACTERS) {
+            folder = folder.replace(illegal, '_');
+        }
+        folder = folder.replaceAll("[\\./\"\\p{Cntrl}]", "_");
+        // A display name has no limit and a path component does. Cut before the collision loop, so
+        // the suffix it adds is never what gets cut off.
+        if (folder.length() > MAX_FOLDER_NAME_CHARS) {
+            folder = folder.substring(0, MAX_FOLDER_NAME_CHARS).trim();
+        }
         // Windows reserves these regardless of the platform the save was made on, and a pack that
         // syncs saves between machines would break on one it could not create.
         for (String reserved : new String[]{"CON", "COM", "PRN", "AUX", "CLOCK$", "NUL",
@@ -366,6 +381,9 @@ public final class ClientWorldTools {
                 .required("folderName")
                 .build())
             .clientOnly()
+            // Leaves the world that is loaded, and 'continue' loads a save with blocks and items of
+            // absent mods dropped from it: neither is undone by another call.
+            .destructive()
             .handler(context -> {
                 if (!McmcpConfig.isAllowPlayerControl()) {
                     return ToolResult.error("World control is disabled by "
@@ -373,6 +391,16 @@ public final class ClientWorldTools {
                 }
 
                 final String folderName = context.requireString("folderName").trim();
+                // A name, not a path: the save loader resolves it against saves/ as given, so a
+                // separator or '..' would open a level.dat anywhere on the disk.
+                // '\' and ':' only where they mean something to the file system: elsewhere they are
+                // ordinary characters a listed save's folder may have.
+                boolean windows = java.io.File.separatorChar == '\\';
+                if (folderName.contains("/") || folderName.equals("..") || folderName.equals(".")
+                    || windows && (folderName.contains("\\") || folderName.contains(":"))) {
+                    return ToolResult.error("'folderName' is a save folder's name as client_world_list gives "
+                        + "it, not a path.");
+                }
                 final String onModMismatch = context.getString("onModMismatch", "report");
                 if (!"report".equals(onModMismatch) && !"continue".equals(onModMismatch)
                     && !"cancel".equals(onModMismatch)) {

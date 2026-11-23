@@ -276,8 +276,18 @@ public final class CommonTools {
                 }
 
                 List<String> lines;
+                boolean cutToSize;
                 try {
-                    lines = McmcpPaths.tail(logFile, lineCount, filter, masked ? LogRedaction::maskAddresses : null);
+                    // Bounded per line and in all: a log line can be a megabyte of stack trace or packet
+                    // dump, and 5,000 of them were returned whole.
+                    McmcpPaths.Tail tail = McmcpPaths.tail(logFile, lineCount, filter,
+                        masked ? LogRedaction::maskAddresses : null, MAX_LOG_LINE_CHARS, MAX_LOG_TEXT_CHARS,
+                        context.getCancellation()::isCancelled);
+                    // Thrown here, outside the read: as an IOException it would be reported as a file
+                    // that could not be read.
+                    context.getCancellation().throwIfCancelled();
+                    lines = tail.lines;
+                    cutToSize = tail.cutToSize;
                 }
                 catch (java.io.IOException unreadable) {
                     // Never "0 lines matching" for a file that could not be read: that reads as "it is not
@@ -305,6 +315,10 @@ public final class CommonTools {
                 if (masked) {
                     text.append(" · network addresses masked");
                 }
+                if (cutToSize) {
+                    text.append(" · cut to the newest ").append(MAX_LOG_TEXT_CHARS / 1024)
+                        .append(" KB: older lines were left out; narrow it with 'filter' or fewer 'lines'");
+                }
                 if (lines.isEmpty()) {
                     text.append(filtered ? "\n(no lines match)" : "\n(the file is empty)");
                 }
@@ -315,6 +329,12 @@ public final class CommonTools {
             })
             .build());
     }
+
+    /** The most of one log line game_read_log returns; the rest is counted in a note on the line. */
+    private static final int MAX_LOG_LINE_CHARS = 4096;
+
+    /** The most text one game_read_log call returns; older lines are left out past it. */
+    private static final int MAX_LOG_TEXT_CHARS = 256 * 1024;
 
     /** At most this many files are listed by game_read_log {list: true}; a server keeps months of logs. */
     private static final int MAX_LISTED_LOGS = 200;
@@ -374,7 +394,9 @@ public final class CommonTools {
             text.append(filtered ? "\n(no lines match)" : "\n(no lines yet)");
         }
         for (LogRing.Entry entry : page.entries) {
-            text.append('\n').append(entry.format());
+            String line = entry.format();
+            text.append('\n').append(line.length() <= MAX_LOG_LINE_CHARS ? line
+                : line.substring(0, MAX_LOG_LINE_CHARS) + "…(+" + (line.length() - MAX_LOG_LINE_CHARS) + " chars)");
         }
         return ToolResult.text(text.toString());
     }

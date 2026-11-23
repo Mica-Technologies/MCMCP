@@ -1578,6 +1578,12 @@ public final class ClientGuiTools {
                 }
 
                 final String text = context.requireString("text");
+                // The longest a command block's field holds; more than this is no text field's value,
+                // and the reply echoes the text back.
+                if (text.length() > 32_767) {
+                    return ToolResult.error("'text' is " + text.length() + " characters; a field holds at most "
+                        + "32767. Nothing was changed.");
+                }
                 final int index = context.getInt("index", 0);
                 final boolean clear = context.getBoolean("clear", true);
                 final boolean submit = context.getBoolean("submit", false);

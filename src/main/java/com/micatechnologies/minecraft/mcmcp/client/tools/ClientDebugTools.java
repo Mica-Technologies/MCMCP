@@ -1561,6 +1561,13 @@ public final class ClientDebugTools {
     // Resource reload
     // ------------------------------------------------------------------
 
+    /** The least time between two resource reloads. */
+    private static final long RESOURCE_RELOAD_COOLDOWN_MILLIS = 30_000L;
+
+    /** When the last resource reload was asked for; 0 before the first. */
+    private static final java.util.concurrent.atomic.AtomicLong LAST_RESOURCE_RELOAD_MILLIS =
+        new java.util.concurrent.atomic.AtomicLong();
+
     private static void registerReloadResources() {
         McpRegistry.registerTool(McpTool.named("client_reload_resources")
             .title("Reload client resources")
@@ -1576,6 +1583,26 @@ public final class ClientDebugTools {
             .schema(JsonSchema.noArguments())
             .clientOnly()
             .handler(context -> {
+                // Each reload holds the client thread for its whole length, and they queue: called
+                // in a loop, the game drew nothing and answered nothing for minutes. One at a time,
+                // with room after it for the calls that were waiting.
+                long now = System.currentTimeMillis();
+                long last = LAST_RESOURCE_RELOAD_MILLIS.get();
+                long sinceLast = now - last;
+                if (last != 0L && sinceLast >= 0L && sinceLast < RESOURCE_RELOAD_COOLDOWN_MILLIS
+                    || !LAST_RESOURCE_RELOAD_MILLIS.compareAndSet(last, now)) {
+                    JsonObject busy = new JsonObject();
+                    busy.addProperty("reason", "cooldown");
+                    busy.addProperty("retryAfterMs", last != 0L && sinceLast >= 0L
+                        ? Math.max(1_000L, RESOURCE_RELOAD_COOLDOWN_MILLIS - sinceLast)
+                        : RESOURCE_RELOAD_COOLDOWN_MILLIS);
+                    JsonObject structured = new JsonObject();
+                    structured.add("busy", busy);
+                    return ToolResult.error("Client resources were reloaded less than "
+                        + RESOURCE_RELOAD_COOLDOWN_MILLIS / 1000L + " s ago, and a reload freezes the game "
+                        + "for its whole length. Nothing was done; retry after busy.retryAfterMs.")
+                        .withStructured(structured);
+                }
                 // Fire-and-forget for the same reason client_world_create is: refreshResources
                 // re-reads every pack on the client thread and blocks it for far longer than a
                 // scheduled task is allowed to take.

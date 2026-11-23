@@ -35,6 +35,13 @@ import net.minecraft.util.text.TextComponentString;
  */
 public final class ServerCommandTools {
 
+    /** Output lines server_run_command returns unless asked for more, and the most it can be asked for. */
+    private static final int DEFAULT_OUTPUT_LINES = 200;
+    private static final int MAX_OUTPUT_LINES = 2000;
+
+    /** Characters of output server_run_command returns, whatever the line count. */
+    private static final int MAX_OUTPUT_CHARS = 64 * 1024;
+
     private ServerCommandTools() {
     }
 
@@ -75,6 +82,9 @@ public final class ServerCommandTools {
                 .object("profile", CommandProfiling.DESCRIPTION, CommandProfiling.schema())
                 .property("at", ServerBulkTools.atSchema("With asPlayer: run the command with the player "
                     + "moved here, and put them back after it."))
+                .integer("maxOutputLines", "Output lines returned. Default " + DEFAULT_OUTPUT_LINES + ", and at "
+                    + "most " + MAX_OUTPUT_CHARS / 1024 + " KB in all; outputTruncated says how many lines were "
+                    + "dropped.", 1, MAX_OUTPUT_LINES)
                 .required("command")
                 .build())
             .serverOnly()
@@ -278,11 +288,39 @@ public final class ServerCommandTools {
             if (!result.has("cancelled") && !sender.getErrors().isEmpty()) {
                 result.addProperty("error", String.join("\n", sender.getErrors()));
             }
+            // Capped, as server_run_commands caps each command's (#219): one command can print megabytes
+            // (a mod's dump, /help on a large pack), and all of it went into a context window twice,
+            // as text and as structured content.
+            java.util.List<String> printed = sender.getOutput();
+            int maxLines = context.getBoundedInt("maxOutputLines", DEFAULT_OUTPUT_LINES, 1, MAX_OUTPUT_LINES);
             JsonArray lines = new JsonArray();
-            for (String line : sender.getOutput()) {
+            int chars = 0;
+            boolean cut = false;
+            for (String line : printed) {
+                if (lines.size() >= maxLines) {
+                    break;
+                }
+                int room = MAX_OUTPUT_CHARS - chars;
+                if (line.length() > room) {
+                    // The line that crosses the limit is cut, not dropped: a single huge line must not
+                    // come back as no output at all.
+                    if (room > 0) {
+                        lines.add(line.substring(0, room) + " ...(line cut)");
+                        cut = true;
+                    }
+                    break;
+                }
                 lines.add(line);
+                chars += line.length();
             }
             result.add("output", lines);
+            int dropped = printed.size() - lines.size();
+            if (dropped > 0) {
+                result.addProperty("outputTruncated", dropped);
+            }
+            if (cut) {
+                result.addProperty("outputCut", true);
+            }
 
             if (recorder != null && undo[0] != null) {
                 ServerUndoTools.finish(context, recorder, "server_run_command", (Integer) undo[0],
@@ -295,6 +333,11 @@ public final class ServerCommandTools {
                 ? "(the command produced no output)"
                 : String.join("\n", com.micatechnologies.minecraft.mcmcp.json.Json
                     .getStringList(result, "output"));
+            if (dropped > 0 || cut) {
+                output += "\n(" + (dropped > 0 ? dropped + " more line(s) not shown; " : "the last line was cut; ")
+                    + "at most " + maxLines + " lines (maxOutputLines) and " + MAX_OUTPUT_CHARS / 1024
+                    + " KB of output are returned)";
+            }
             if (profiling != null) {
                 profiling.finish(context, result);
                 output += "\n\n" + CommandProfiling.summaryLine(result);

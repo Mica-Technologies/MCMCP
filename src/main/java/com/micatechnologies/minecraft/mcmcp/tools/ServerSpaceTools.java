@@ -396,31 +396,39 @@ public final class ServerSpaceTools {
     /** Reads the box into the grid, a slice of x columns at a time. Returns cells left unknown. */
     private static long read(ToolContext context, int dimension, VoxelGrid grid, Set<String> passable) {
         final int[] x = {grid.minX};
+        // Where in the x slab the next task starts. The clock is read after every column, not every
+        // slab (#219): a slab of a deep, tall box is tens of thousands of cells, each asking a block for
+        // its collision boxes, and one slab was one task however long it ran.
+        final int[] z = {grid.minZ};
         final long[] unloaded = {0L};
         while (x[0] <= grid.maxX) {
             context.onGameThread(() -> {
                 WorldServer world = ServerWorldTools.requireWorld(dimension);
                 BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
                 long started = System.nanoTime();
-                while (x[0] <= grid.maxX && System.nanoTime() - started < SLICE_NANOS) {
-                    for (int z = grid.minZ; z <= grid.maxZ; z++) {
-                        pos.setPos(x[0], 0, z);
-                        if (!world.isBlockLoaded(pos)) {
-                            unloaded[0] += grid.maxY - grid.minY + 1;
-                            continue;  // already SOLID (0)
-                        }
+                boolean first = true;
+                while (x[0] <= grid.maxX && (first || System.nanoTime() - started < SLICE_NANOS)) {
+                    first = false;
+                    pos.setPos(x[0], 0, z[0]);
+                    if (!world.isBlockLoaded(pos)) {
+                        unloaded[0] += grid.maxY - grid.minY + 1;  // already SOLID (0)
+                    }
+                    else {
                         for (int y = grid.minY; y <= grid.maxY; y++) {
-                            pos.setPos(x[0], y, z);
+                            pos.setPos(x[0], y, z[0]);
                             int[] top = {16, 16, 16, 16, 16};
                             byte kind = classify(world, pos, world.getBlockState(pos), passable, top);
-                            grid.set(x[0], y, z, kind);
+                            grid.set(x[0], y, z[0], kind);
                             if (kind == VoxelGrid.SOLID) {
-                                grid.setTop(x[0], y, z, top[0]);
-                                grid.setQuadrantTops(x[0], y, z, new int[] {top[1], top[2], top[3], top[4]});
+                                grid.setTop(x[0], y, z[0], top[0]);
+                                grid.setQuadrantTops(x[0], y, z[0], new int[] {top[1], top[2], top[3], top[4]});
                             }
                         }
                     }
-                    x[0]++;
+                    if (++z[0] > grid.maxZ) {
+                        z[0] = grid.minZ;
+                        x[0]++;
+                    }
                 }
                 return null;
             });

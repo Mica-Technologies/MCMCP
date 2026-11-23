@@ -73,9 +73,41 @@ public final class McmcpPaths {
      */
     public static List<String> tail(File file, int lineCount, @Nullable String filter,
                                     @Nullable java.util.function.UnaryOperator<String> rewrite) throws IOException {
-        List<String> lines = new ArrayList<>();
+        return tail(file, lineCount, filter, rewrite, Integer.MAX_VALUE, Integer.MAX_VALUE, null).lines;
+    }
+
+    /**
+     * The most of one line that is held while a file is scanned. A file with no newline in it is one
+     * line as long as the file: buffered whole, a 2 GB log was 2 GB of heap in the game. The scan keeps
+     * this much of a longer line (its end, read backwards; its start, in a gzipped log) and says how
+     * much it left out.
+     */
+    static final int MAX_SCANNED_LINE_BYTES = 1024 * 1024;
+
+    /** What a bounded {@link #tail} read, and how it was cut short. */
+    public static final class Tail {
+
+        public final List<String> lines = new ArrayList<>();
+        /** Older matching lines were left out to stay within the total size asked for. */
+        public boolean cutToSize;
+        /** The caller's cancel check came true mid-read; {@link #lines} is not the answer. */
+        public boolean cancelled;
+    }
+
+    /**
+     * As {@link #tail(File, int, String, java.util.function.UnaryOperator)}, bounded for a caller that
+     * returns the lines to a model: each line is cut to {@code maxLineChars} with how much was cut,
+     * the newest lines are kept up to {@code maxTotalChars} in all, and {@code cancelled} is asked as
+     * the file is read, so a filter searching a large log stops when its caller has gone.
+     */
+    public static Tail tail(File file, int lineCount, @Nullable String filter,
+                            @Nullable java.util.function.UnaryOperator<String> rewrite, int maxLineChars,
+                            int maxTotalChars, @Nullable java.util.function.BooleanSupplier cancelled)
+        throws IOException {
+        Tail tail = new Tail();
+        List<String> lines = tail.lines;
         if (!file.isFile()) {
-            return lines;
+            return tail;
         }
 
         String needle = filter == null || filter.isEmpty()
@@ -87,7 +119,8 @@ public final class McmcpPaths {
         // its name, and a file that is neither is refused rather than reported empty.
         switch (kindOf(file)) {
             case GZIP:
-                return tailGzip(file, lineCount, needle, rewrite);
+                tailGzip(file, lineCount, needle, rewrite, maxLineChars, maxTotalChars, cancelled, tail);
+                return tail;
             case BINARY:
                 throw new NotTextException(file.getName());
             default:
@@ -104,11 +137,16 @@ public final class McmcpPaths {
             byte[] buffer = new byte[8192];
             ByteAccumulator pending = new ByteAccumulator();
             int scanned = 0;
+            long total = 0L;
             // The newline that ends the file's last line ends no line after it: read as one, every
             // unfiltered tail's newest line was empty.
             boolean atFileEnd = true;
 
-            while (pointer > 0 && collected.size() < lineCount && scanned < scanBudget) {
+            while (pointer > 0 && collected.size() < lineCount && scanned < scanBudget && !tail.cutToSize) {
+                if (cancelled != null && cancelled.getAsBoolean()) {
+                    tail.cancelled = true;
+                    return tail;
+                }
                 int chunkSize = (int) Math.min(buffer.length, pointer);
                 pointer -= chunkSize;
                 random.seek(pointer);
@@ -130,33 +168,59 @@ public final class McmcpPaths {
                         }
                         scanned++;
                         if (accept(line, needle)) {
+                            line = clip(line, maxLineChars);
+                            // Newest first, so what does not fit is the oldest: left out, and said.
+                            if (total + line.length() > maxTotalChars && !collected.isEmpty()) {
+                                tail.cutToSize = true;
+                                break;
+                            }
+                            total += line.length() + 1;
                             collected.addFirst(line);
                             if (collected.size() >= lineCount) {
                                 break;
                             }
                         }
                     }
-                    else if (current != '\r') {
-                        pending.push(current);
+                    else if (current != '\r' && !pending.push(current)
+                        && pending.dropped % MAX_SCANNED_LINE_BYTES == 0) {
+                        // A line with no end in sight is charged to the scan as it goes, or a file
+                        // with no newline at all was read to its first byte whatever the budget.
+                        scanned++;
                     }
                 }
             }
 
             // Whatever is left when we reach the start of the file is the first line, which has no
             // preceding newline to terminate it.
-            if (collected.size() < lineCount && pointer == 0) {
+            if (collected.size() < lineCount && pointer == 0 && !tail.cutToSize) {
                 String line = pending.drainReversed();
                 if (rewrite != null) {
                     line = rewrite.apply(line);
                 }
                 if (!line.isEmpty() && accept(line, needle)) {
-                    collected.addFirst(line);
+                    line = clip(line, maxLineChars);
+                    if (total + line.length() > maxTotalChars && !collected.isEmpty()) {
+                        tail.cutToSize = true;
+                    }
+                    else {
+                        collected.addFirst(line);
+                    }
                 }
             }
         }
 
         lines.addAll(collected);
-        return lines;
+        return tail;
+    }
+
+    /** {@code line} cut to {@code maxChars}, saying how much more there was. */
+    private static String clip(String line, int maxChars) {
+        if (line.length() <= maxChars) {
+            return line;
+        }
+        // Not between the halves of a surrogate pair, which would leave half a character.
+        int keep = maxChars > 0 && Character.isHighSurrogate(line.charAt(maxChars - 1)) ? maxChars - 1 : maxChars;
+        return line.substring(0, keep) + "…(+" + (line.length() - keep) + " chars)";
     }
 
     private static boolean accept(String line, @Nullable String needle) {
@@ -209,17 +273,27 @@ public final class McmcpPaths {
      * the last {@code lineCount} matching lines: memory stays bounded by what is returned, whatever the
      * file inflates to. A filter then searches the whole file, not only its end.
      */
-    private static List<String> tailGzip(File file, int lineCount, @Nullable String needle,
-                                         @Nullable java.util.function.UnaryOperator<String> rewrite) throws IOException {
+    private static void tailGzip(File file, int lineCount, @Nullable String needle,
+                                 @Nullable java.util.function.UnaryOperator<String> rewrite, int maxLineChars,
+                                 int maxTotalChars, @Nullable java.util.function.BooleanSupplier cancelled,
+                                 Tail tail) throws IOException {
         Deque<String> kept = new ArrayDeque<>();
+        long total = 0L;
+        long read = 0L;
+        // The limit is enforced where the bytes are read, not after each line: a file that inflates
+        // without end and without a newline never finishes its first line.
         CountingStream counted = new CountingStream(new java.util.zip.GZIPInputStream(
-            Files.newInputStream(file.toPath()), 65536));
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(counted, StandardCharsets.UTF_8))) {
+            Files.newInputStream(file.toPath()), 65536), MAX_GZIP_TEXT_BYTES, "'" + file.getName()
+            + "' inflates to more than " + MAX_GZIP_TEXT_BYTES / (1024L * 1024L)
+            + " MB of text; it is not read past that.");
+        try (BufferedReader source = new BufferedReader(new InputStreamReader(counted, StandardCharsets.UTF_8))) {
+            LineReader reader = new LineReader(source);
             String line;
-            while ((line = reader.readLine()) != null) {
-                if (counted.count > MAX_GZIP_TEXT_BYTES) {
-                    throw new IOException("'" + file.getName() + "' inflates to more than "
-                        + MAX_GZIP_TEXT_BYTES / (1024L * 1024L) + " MB of text; it is not read past that.");
+            // Not BufferedReader.readLine, which holds a whole line however long it is.
+            while ((line = reader.next(MAX_SCANNED_LINE_BYTES)) != null) {
+                if ((++read & 0xFFF) == 0 && cancelled != null && cancelled.getAsBoolean()) {
+                    tail.cancelled = true;
+                    return;
                 }
                 if (line.indexOf('\u0000') >= 0) {
                     throw new NotTextException(file.getName());
@@ -228,9 +302,16 @@ public final class McmcpPaths {
                     line = rewrite.apply(line);
                 }
                 if (accept(line, needle)) {
+                    line = clip(line, maxLineChars);
                     kept.addLast(line);
+                    total += line.length() + 1;
                     if (kept.size() > lineCount) {
-                        kept.removeFirst();
+                        total -= kept.removeFirst().length() + 1;
+                    }
+                    // Oldest out first, as from the end of a plain log; the newest line always stays.
+                    while (total > maxTotalChars && kept.size() > 1) {
+                        total -= kept.removeFirst().length() + 1;
+                        tail.cutToSize = true;
                     }
                 }
             }
@@ -243,23 +324,96 @@ public final class McmcpPaths {
             throw new IOException("'" + file.getName() + "' is a gzipped log cut off before its end (still "
                 + "being written, or damaged).", truncated);
         }
-        return new ArrayList<>(kept);
+        tail.lines.addAll(kept);
     }
 
-    /** Counts the bytes read through it: how far a gzipped log has inflated. */
+    /**
+     * Lines from a reader, each held only up to a length: the rest of a longer line is read past and
+     * counted, not kept. Splits on {@code \n} and drops a {@code \r} before it, as the backwards scan
+     * of a plain log does.
+     */
+    private static final class LineReader {
+
+        private final java.io.Reader in;
+        private final char[] buffer = new char[8192];
+        private int position;
+        private int end;
+        private boolean finished;
+
+        LineReader(java.io.Reader in) {
+            this.in = in;
+        }
+
+        /** The next line without its line break, cut to {@code maxChars} and saying so; null at the end. */
+        @Nullable
+        String next(int maxChars) throws IOException {
+            StringBuilder line = new StringBuilder();
+            long cut = 0L;
+            boolean any = false;
+            while (true) {
+                if (position >= end) {
+                    if (finished) {
+                        break;
+                    }
+                    int read = in.read(buffer, 0, buffer.length);
+                    if (read < 0) {
+                        finished = true;
+                        break;
+                    }
+                    position = 0;
+                    end = read;
+                    continue;
+                }
+                any = true;
+                int start = position;
+                while (position < end && buffer[position] != '\n') {
+                    position++;
+                }
+                int length = position - start;
+                int room = maxChars - line.length();
+                if (length > room) {
+                    cut += length - room;
+                    length = room;
+                }
+                line.append(buffer, start, length);
+                if (position < end) {
+                    position++;
+                    return finish(line, cut);
+                }
+            }
+            return any ? finish(line, cut) : null;
+        }
+
+        private static String finish(StringBuilder line, long cut) {
+            if (cut > 0) {
+                return line.append("…(+").append(cut).append(" chars left out)").toString();
+            }
+            int length = line.length();
+            if (length > 0 && line.charAt(length - 1) == '\r') {
+                line.setLength(length - 1);
+            }
+            return line.toString();
+        }
+    }
+
+    /** Counts the bytes read through it, and stops at a limit: how far a gzipped log may inflate. */
     private static final class CountingStream extends java.io.FilterInputStream {
 
         long count;
+        private final long limit;
+        private final String overLimit;
 
-        CountingStream(java.io.InputStream in) {
+        CountingStream(java.io.InputStream in, long limit, String overLimit) {
             super(in);
+            this.limit = limit;
+            this.overLimit = overLimit;
         }
 
         @Override
         public int read() throws IOException {
             int value = super.read();
-            if (value >= 0) {
-                count++;
+            if (value >= 0 && ++count > limit) {
+                throw new IOException(overLimit);
             }
             return value;
         }
@@ -269,6 +423,9 @@ public final class McmcpPaths {
             int read = super.read(buffer, offset, length);
             if (read > 0) {
                 count += read;
+                if (count > limit) {
+                    throw new IOException(overLimit);
+                }
             }
             return read;
         }
@@ -343,24 +500,42 @@ public final class McmcpPaths {
 
         private byte[] data = new byte[256];
         private int size;
+        /** Bytes of the line being read that were not kept, past {@link #MAX_SCANNED_LINE_BYTES}. */
+        long dropped;
 
-        void push(byte value) {
+        /** @return false when the line is already as long as is kept, and the byte was dropped */
+        boolean push(byte value) {
+            if (size >= MAX_SCANNED_LINE_BYTES) {
+                dropped++;
+                return false;
+            }
             if (size == data.length) {
-                byte[] grown = new byte[data.length * 2];
+                byte[] grown = new byte[Math.min(data.length * 2, MAX_SCANNED_LINE_BYTES)];
                 System.arraycopy(data, 0, grown, 0, size);
                 data = grown;
             }
             data[size++] = value;
+            return true;
         }
 
-        /** Returns the accumulated bytes in forward order, decoded as UTF-8, and resets. */
+        /**
+         * Returns the accumulated bytes in forward order, decoded as UTF-8, and resets. Filled from
+         * the line's end, so what a too-long line lost is its start, and the text says so there.
+         */
         String drainReversed() {
             byte[] forward = new byte[size];
             for (int i = 0; i < size; i++) {
                 forward[i] = data[size - 1 - i];
             }
             size = 0;
-            return new String(forward, StandardCharsets.UTF_8);
+            String text = new String(forward, StandardCharsets.UTF_8);
+            if (dropped > 0) {
+                text = "…(" + dropped + " bytes before this left out)" + text;
+                dropped = 0L;
+                // One long line should not leave a megabyte held for the rest of the scan.
+                data = new byte[256];
+            }
+            return text;
         }
     }
 }

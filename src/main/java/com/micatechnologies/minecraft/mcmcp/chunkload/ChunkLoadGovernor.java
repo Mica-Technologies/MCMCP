@@ -1365,15 +1365,41 @@ public final class ChunkLoadGovernor {
      * Server thread. An empty read over chunks that are not loaded must never look like empty ground.
      */
     public static JsonObject describeUnloaded(WorldServer world, Set<Long> chunks) {
+        Unloaded counted = new Unloaded();
         ChunkProviderServer provider = world.getChunkProvider();
-        int loaded = 0;
-        int held = 0;
-        int unloaded = 0;
-        int ungenerated = 0;
-        List<Long> missing = new ArrayList<>();
-        List<Long> neverGenerated = new ArrayList<>();
         int dimension = world.provider.getDimension();
         for (long chunk : chunks) {
+            counted.add(provider, dimension, chunk);
+        }
+        return counted.toJson(world, chunks);
+    }
+
+    /**
+     * {@link #describeUnloaded}'s counts, kept apart from the walk that fills them so the walk can be
+     * cut across several server-thread tasks (#219): a thin box a million blocks long is 65,536
+     * chunks, and asking whether each was ever generated can read a region file's header, which in
+     * one task held the server thread for as long as that took. Filled in the set's own order, so
+     * the chunks listed are the ones a single walk lists. Every method is for the server thread.
+     */
+    public static final class Unloaded {
+
+        private int loaded;
+        private int held;
+        private int unloaded;
+        private int ungenerated;
+        private final List<Long> missing = new ArrayList<>();
+        private final List<Long> neverGenerated = new ArrayList<>();
+
+        /** Counts {@code chunks[from..to)}. */
+        public void add(WorldServer world, long[] chunks, int from, int to) {
+            ChunkProviderServer provider = world.getChunkProvider();
+            int dimension = world.provider.getDimension();
+            for (int i = from; i < to; i++) {
+                add(provider, dimension, chunks[i]);
+            }
+        }
+
+        void add(ChunkProviderServer provider, int dimension, long chunk) {
             int cx = ChunkKeys.x(chunk);
             int cz = ChunkKeys.z(chunk);
             if (provider.chunkExists(cx, cz)) {
@@ -1395,32 +1421,37 @@ public final class ChunkLoadGovernor {
                 }
             }
         }
-        JsonObject json = new JsonObject();
-        json.addProperty("inBox", chunks.size());
-        json.addProperty("loaded", 0);
-        json.addProperty("alreadyLoaded", loaded);
-        json.addProperty("held", held);
-        json.addProperty("unloaded", unloaded);
-        json.addProperty("ungenerated", ungenerated);
-        if (!missing.isEmpty()) {
-            json.add("unloadedChunks", chunkList(missing));
+
+        /** The {@code chunks} block, once every chunk of {@code chunks} has been counted. */
+        public JsonObject toJson(WorldServer world, Set<Long> chunks) {
+            int dimension = world.provider.getDimension();
+            JsonObject json = new JsonObject();
+            json.addProperty("inBox", chunks.size());
+            json.addProperty("loaded", 0);
+            json.addProperty("alreadyLoaded", loaded);
+            json.addProperty("held", held);
+            json.addProperty("unloaded", unloaded);
+            json.addProperty("ungenerated", ungenerated);
+            if (!missing.isEmpty()) {
+                json.add("unloadedChunks", chunkList(missing));
+            }
+            if (!neverGenerated.isEmpty()) {
+                json.add("ungeneratedChunks", chunkList(neverGenerated));
+            }
+            if (unloaded > 0) {
+                json.addProperty("note", "Cells in unloaded chunks were not read. Pass load: true, or hold the "
+                    + "region with server_keep_loaded, to read them.");
+            }
+            // Reading in a hold renews its idle timer, never its lease, so a long test is told before its
+            // region unloads under it rather than after (#91).
+            long leaseLeft = LEDGER.leaseEndsAtMillis(dimension, chunks) - System.currentTimeMillis();
+            if (leaseLeft < LEASE_WARNING_MILLIS) {
+                json.addProperty("holdLeaseEndsInSeconds", Math.max(0L, leaseLeft / 1000L));
+                json.addProperty("holdNote", "A hold over these chunks ends soon. Extend it with server_keep_loaded "
+                    + "op 'renew' if you still need them.");
+            }
+            return json;
         }
-        if (!neverGenerated.isEmpty()) {
-            json.add("ungeneratedChunks", chunkList(neverGenerated));
-        }
-        if (unloaded > 0) {
-            json.addProperty("note", "Cells in unloaded chunks were not read. Pass load: true, or hold the "
-                + "region with server_keep_loaded, to read them.");
-        }
-        // Reading in a hold renews its idle timer, never its lease, so a long test is told before its
-        // region unloads under it rather than after (#91).
-        long leaseLeft = LEDGER.leaseEndsAtMillis(dimension, chunks) - System.currentTimeMillis();
-        if (leaseLeft < LEASE_WARNING_MILLIS) {
-            json.addProperty("holdLeaseEndsInSeconds", Math.max(0L, leaseLeft / 1000L));
-            json.addProperty("holdNote", "A hold over these chunks ends soon. Extend it with server_keep_loaded "
-                + "op 'renew' if you still need them.");
-        }
-        return json;
     }
 
     /** For {@code /mcmcp chunks}, {@code server_tick_stats} and {@code game_health}. Server thread. */

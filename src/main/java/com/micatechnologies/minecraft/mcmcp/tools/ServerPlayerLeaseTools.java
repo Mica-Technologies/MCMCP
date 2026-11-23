@@ -83,7 +83,16 @@ public final class ServerPlayerLeaseTools {
         @SubscribeEvent
         public void onTick(TickEvent.ServerTickEvent event) {
             if (event.phase == TickEvent.Phase.END && ++ticks % 20 == 0) {
-                sweep(ServerThreadBridge.server());
+                // Nothing may leave this handler (#219): an exception out of a Forge tick handler is a
+                // crashed server, here over one slot that would not go back. It runs once a second, so
+                // a failure that repeats is logged once a second.
+                try {
+                    sweep(ServerThreadBridge.server());
+                }
+                catch (Throwable t) {
+                    com.micatechnologies.minecraft.mcmcp.Mcmcp.LOGGER.error(
+                        "MCMCP failed putting back the slots of a player lease that ran out", t);
+                }
             }
         }
 
@@ -306,9 +315,11 @@ public final class ServerPlayerLeaseTools {
         if (raw == null) {
             return new int[0];
         }
-        int[] slots = new int[raw.size()];
-        for (int i = 0; i < raw.size(); i++) {
-            JsonElement element = raw.get(i);
+        // Each slot once, in the order first named (#219): the list is the caller's, and a million
+        // entries naming one slot were a million stacks written to NBT in one server-thread task. There
+        // are 37 slots to name, so that is the most this returns.
+        java.util.Set<Integer> named = new java.util.LinkedHashSet<>();
+        for (JsonElement element : raw) {
             int slot;
             try {
                 slot = element.getAsInt();
@@ -319,7 +330,12 @@ public final class ServerPlayerLeaseTools {
             if ((slot < 0 || slot > 35) && slot != 40) {
                 return null;
             }
-            slots[i] = slot;
+            named.add(slot);
+        }
+        int[] slots = new int[named.size()];
+        int count = 0;
+        for (int slot : named) {
+            slots[count++] = slot;
         }
         return slots;
     }

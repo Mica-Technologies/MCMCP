@@ -119,4 +119,40 @@ class LogTailTest {
         assertTrue(files.get(1).gzip);
         assertEquals(1, McmcpPaths.listLogs(dir.toFile(), 1).size());
     }
+
+    @Test
+    void aBoundedReadCutsLongLinesAndKeepsTheNewestWithinItsTotal(@TempDir File folder) throws IOException {
+        File log = new File(folder, "long.log");
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < 200; i++) {
+            text.append("line ").append(i).append(' ');
+            for (int k = 0; k < 300; k++) {
+                text.append('x');
+            }
+            text.append('\n');
+        }
+        Files.write(log.toPath(), text.toString().getBytes(StandardCharsets.UTF_8));
+        McmcpPaths.Tail tail = McmcpPaths.tail(log, 200, null, null, 100, 2_000, null);
+        assertTrue(tail.cutToSize);
+        assertTrue(!tail.lines.isEmpty() && tail.lines.size() < 200);
+        int total = 0;
+        for (String line : tail.lines) {
+            assertTrue(line.length() < 140, line);
+            total += line.length();
+        }
+        assertTrue(total <= 2_400, "kept " + total);
+        assertTrue(tail.lines.get(tail.lines.size() - 1).startsWith("line 199 "), "the newest line is kept");
+    }
+
+    @Test
+    void aFileThatIsOneEndlessLineIsNotBufferedWhole(@TempDir File folder) throws IOException {
+        File log = new File(folder, "endless.log");
+        byte[] bytes = new byte[3 * 1024 * 1024];
+        java.util.Arrays.fill(bytes, (byte) 'a');
+        Files.write(log.toPath(), bytes);
+        McmcpPaths.Tail tail = McmcpPaths.tail(log, 5, null, null, 4_096, 256 * 1024, null);
+        for (String line : tail.lines) {
+            assertTrue(line.length() <= 4_096 + 64, "a line of " + line.length());
+        }
+    }
 }

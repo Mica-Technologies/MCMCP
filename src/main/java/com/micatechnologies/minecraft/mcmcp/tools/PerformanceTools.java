@@ -610,6 +610,13 @@ public final class PerformanceTools {
     // Heap histogram
     // ------------------------------------------------------------------
 
+    /** The least time between two heap histograms in this JVM, whichever endpoint asks. */
+    private static final long HEAP_HISTOGRAM_COOLDOWN_MILLIS = 30_000L;
+
+    /** When the last heap histogram was started; 0 before the first. */
+    private static final java.util.concurrent.atomic.AtomicLong LAST_HEAP_HISTOGRAM_MILLIS =
+        new java.util.concurrent.atomic.AtomicLong();
+
     private static void registerHeapHistogram() {
         McpRegistry.registerTool(McpTool.named("game_heap_histogram")
             .title("Heap class histogram")
@@ -618,10 +625,12 @@ public final class PerformanceTools {
                 + "the suspect, take another, and compare — or to see what a mod's objects cost. "
                 + "'filter' narrows the class list to one mod's package.\n\n"
                 + "By default counts everything on the heap including garbage not yet collected, "
-                + "which costs no pause but makes two readings only roughly comparable. live_only "
+                + "which stops the whole JVM briefly while the heap is walked and makes two readings "
+                + "only roughly comparable. live_only "
                 + "counts reachable objects only, which is what a leak hunt needs, and forces a "
                 + "full garbage collection first: the whole game pauses, typically 100-300 ms. The "
-                + "full table is written to a file whose path is returned.")
+                + "full table is written to a file whose path is returned. One run per 30 s, and "
+                + "none on a server that is paused, stalled or idle.")
             .schema(JsonSchema.object()
                 .integer("top", "Rows per list. Default 20.", 1, 50)
                 .string("filter", "Only classes whose name contains this, e.g. 'com.mymod'.")
@@ -635,10 +644,37 @@ public final class PerformanceTools {
                 String filter = context.getString("filter", null);
                 boolean liveOnly = context.getBoolean("live_only", false);
 
+                // Read-only, so nothing else holds it back, yet every run stops every thread in the
+                // JVM while the heap is walked. A server already failing to tick is not stopped again
+                // to be measured, and nobody gets to do it in a loop.
+                if (!context.getSide().isClient() && ServerLoad.refusesWrites()) {
+                    return ToolResult.error("Refused before it ran: the server is " + ServerLoad.describe()
+                        + ", and a heap histogram stops every thread in the JVM while it walks the heap. "
+                        + "Retry after busy.retryAfterMs; game_health shows the server's state.")
+                        .withStructured(Json.obj("busy", ServerLoad.busy("server_overloaded")));
+                }
+                long now = System.currentTimeMillis();
+                long last = LAST_HEAP_HISTOGRAM_MILLIS.get();
+                long sinceLast = now - last;
+                if (last != 0L && sinceLast >= 0L && sinceLast < HEAP_HISTOGRAM_COOLDOWN_MILLIS
+                    || !LAST_HEAP_HISTOGRAM_MILLIS.compareAndSet(last, now)) {
+                    JsonObject busy = new JsonObject();
+                    busy.addProperty("reason", "cooldown");
+                    busy.addProperty("retryAfterMs", last != 0L && sinceLast >= 0L
+                        ? Math.max(1_000L, HEAP_HISTOGRAM_COOLDOWN_MILLIS - sinceLast)
+                        : HEAP_HISTOGRAM_COOLDOWN_MILLIS);
+                    return ToolResult.error("A heap histogram was taken less than "
+                        + HEAP_HISTOGRAM_COOLDOWN_MILLIS / 1000L + " s ago, and each one stops the whole "
+                        + "JVM. Nothing was done; retry after busy.retryAfterMs, or read the file the last "
+                        + "one wrote.").withStructured(Json.obj("busy", busy));
+                }
+
                 String raw;
                 try {
                     raw = HeapHistogram.capture(liveOnly);
                 } catch (Exception | LinkageError e) {
+                    // Nothing was paused, so nothing to space the next try from.
+                    LAST_HEAP_HISTOGRAM_MILLIS.compareAndSet(now, last);
                     return ToolResult.error("This JVM does not offer a class histogram (it needs HotSpot's "
                         + "DiagnosticCommand MBean): " + e);
                 }

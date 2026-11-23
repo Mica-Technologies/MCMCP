@@ -4,7 +4,6 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
-import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
 import com.micatechnologies.minecraft.mcmcp.mcp.Capability;
@@ -45,6 +44,10 @@ public final class ServerEntityTools {
 
     /** Most entities one call removes. */
     private static final int MAX_REMOVED = 10_000;
+
+    /** Most entities one game-thread task removes, and about how long it runs, as in {@code ServerAreaTools}. */
+    private static final int REMOVE_SLICE = 500;
+    private static final long SLICE_NANOS = 25_000_000L;
 
     /** Positions listed in a result. */
     private static final int MAX_LISTED = 20;
@@ -117,66 +120,87 @@ public final class ServerEntityTools {
                     Math.max(x1, x2) + 1, Math.max(y1, y2) + 1, Math.max(z1, z2) + 1);
 
                 return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
-                    JsonObject json = context.onGameThread(() -> {
+                    // Chosen in one task, then taken out in slices (#219): 10,000 removals, each unlinking
+                    // an entity from its chunk and telling the tracker, were one task on the server
+                    // thread. Only entity ids cross between tasks; each is looked up again where it goes.
+                    final List<Integer> ids = new ArrayList<>();
+                    // keptNamed, capped (0 or 1), removed: written by the game thread one task at a time.
+                    final int[] counts = {0, 0, 0};
+                    context.onGameThread(() -> {
                         WorldServer world = ServerWorldTools.requireWorld(dimension);
-                        Map<String, Integer> byType = new TreeMap<>();
-                        JsonArray at = new JsonArray();
-                        int keptNamed = 0;
-                        int removed = 0;
-                        boolean capped = false;
                         for (Entity entity : world.getEntitiesWithinAABB(Entity.class, box)) {
                             if (entity instanceof EntityPlayer || entity.isDead) {
                                 continue;
                             }
-                            String type = typeOf(entity);
-                            if (!matches(type, types)) {
+                            if (!matches(typeOf(entity), types)) {
                                 continue;
                             }
                             if (!includeNamed && entity.hasCustomName()) {
-                                keptNamed++;
+                                counts[0]++;
                                 continue;
                             }
-                            if (removed >= MAX_REMOVED) {
-                                capped = true;
+                            if (ids.size() >= MAX_REMOVED) {
+                                counts[1] = 1;
                                 break;
                             }
-                            if (!dryRun) {
-                                // Riders first, or they are left floating on nothing.
-                                entity.removePassengers();
-                                entity.dismountRidingEntity();
-                                world.removeEntityDangerously(entity);
-                            }
-                            removed++;
-                            byType.merge(type, 1, Integer::sum);
-                            if (at.size() < MAX_LISTED) {
-                                JsonObject item = GameJson.blockPos(GameJson.blockPosOf(entity));
-                                item.addProperty("type", type);
-                                at.add(item);
-                            }
+                            ids.add(entity.getEntityId());
                         }
-                        JsonObject result = new JsonObject();
-                        result.addProperty("dimension", dimension);
-                        result.addProperty(dryRun ? "wouldRemove" : "removed", removed);
-                        JsonObject counts = new JsonObject();
-                        for (Map.Entry<String, Integer> entry : byType.entrySet()) {
-                            counts.addProperty(entry.getKey(), entry.getValue());
-                        }
-                        result.add("byType", counts);
-                        if (at.size() > 0) {
-                            result.add("at", at);
-                        }
-                        if (keptNamed > 0) {
-                            result.addProperty("keptNamed", keptNamed);
-                        }
-                        if (capped) {
-                            result.addProperty("capped", "Stopped at " + MAX_REMOVED + "; call again for the rest.");
-                        }
-                        ChunkLoadGovernor.touch(dimension, chunks);
-                        result.add("chunks", outcome != null ? outcome.toJson()
-                            : ChunkLoadGovernor.describeUnloaded(world, chunks));
-                        return result;
+                        return null;
                     });
-                    return ToolResult.structured(json);
+                    final Map<String, Integer> byType = new TreeMap<>();
+                    final JsonArray at = new JsonArray();
+                    int done = 0;
+                    while (done < ids.size()) {
+                        final int from = done;
+                        done = context.onGameThread(() -> {
+                            WorldServer world = ServerWorldTools.requireWorld(dimension);
+                            long started = System.nanoTime();
+                            int next = from;
+                            while (next < ids.size() && next - from < REMOVE_SLICE
+                                && (next == from || System.nanoTime() - started < SLICE_NANOS)) {
+                                Entity entity = world.getEntityByID(ids.get(next++));
+                                // Gone or dead since it was chosen, a tick or two ago: nothing left to remove.
+                                if (entity == null || entity.isDead || entity instanceof EntityPlayer) {
+                                    continue;
+                                }
+                                String type = typeOf(entity);
+                                if (!dryRun) {
+                                    // Riders first, or they are left floating on nothing.
+                                    entity.removePassengers();
+                                    entity.dismountRidingEntity();
+                                    world.removeEntityDangerously(entity);
+                                }
+                                counts[2]++;
+                                byType.merge(type, 1, Integer::sum);
+                                if (at.size() < MAX_LISTED) {
+                                    JsonObject item = GameJson.blockPos(GameJson.blockPosOf(entity));
+                                    item.addProperty("type", type);
+                                    at.add(item);
+                                }
+                            }
+                            return next;
+                        });
+                    }
+                    JsonObject result = new JsonObject();
+                    result.addProperty("dimension", dimension);
+                    result.addProperty(dryRun ? "wouldRemove" : "removed", counts[2]);
+                    JsonObject kinds = new JsonObject();
+                    for (Map.Entry<String, Integer> entry : byType.entrySet()) {
+                        kinds.addProperty(entry.getKey(), entry.getValue());
+                    }
+                    result.add("byType", kinds);
+                    if (at.size() > 0) {
+                        result.add("at", at);
+                    }
+                    if (counts[0] > 0) {
+                        result.addProperty("keptNamed", counts[0]);
+                    }
+                    if (counts[1] > 0) {
+                        result.addProperty("capped", "Stopped at " + MAX_REMOVED + "; call again for the rest.");
+                    }
+                    // After the removals, so not lost to a cancel that came too late to stop them.
+                    result.add("chunks", ServerChunkTools.describeChunks(context, dimension, chunks, outcome, !dryRun));
+                    return ToolResult.structured(result);
                 });
             })
             .build());

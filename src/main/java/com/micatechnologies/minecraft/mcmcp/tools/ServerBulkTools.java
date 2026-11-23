@@ -295,7 +295,7 @@ public final class ServerBulkTools {
             }
         }
 
-        ToolResult overBudget = chargeWrites(context, count);
+        ToolResult overBudget = chargeWritesBeforeHold(context, count);
         if (overBudget != null) {
             return overBudget;
         }
@@ -345,6 +345,10 @@ public final class ServerBulkTools {
         final int batch = McmcpConfig.getMaxBlockVolume();
 
         return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
+            ToolResult overBudgetNow = chargeWritesInHold(context, count);
+            if (overBudgetNow != null) {
+                return overBudgetNow;
+            }
             final PaletteTally tally = new PaletteTally();
             if (abortOnConflict && (expectAll != null || expects != null)) {
                 for (int from = 0; from < count; from += batch) {
@@ -406,26 +410,38 @@ public final class ServerBulkTools {
             // cooler's old upper half was otherwise a conflict and left as air (#85).
             final java.util.Set<Integer> pairConflicts = new java.util.HashSet<>();
             if (anyTwoPart && (expectAll != null || expects != null)) {
-                context.onGameThread(() -> {
-                    WorldServer world = ServerWorldTools.requireWorld(dimension);
-                    for (int i = 0; i < count; i++) {
-                        if (!twoPartEntry[values[i]]) {
-                            continue;
+                // In slices like the write below (#219): as one task this walked every cell of the call,
+                // up to limits.maxWriteCells of them, in a single visit to the server thread.
+                for (int from = 0; from < count; from += batch) {
+                    final int start = from;
+                    final int end = Math.min(count, from + batch);
+                    context.onGameThread(() -> {
+                        WorldServer world = ServerWorldTools.requireWorld(dimension);
+                        for (int i = start; i < end; i++) {
+                            if (!twoPartEntry[values[i]]) {
+                                continue;
+                            }
+                            Expected expected = expectedFor(i, expectAll, expects, expectPalette);
+                            BlockPos pos = new BlockPos(xs[i], ys[i], zs[i]);
+                            if (expected != null && world.isBlockLoaded(pos)
+                                && !expected.matches(world.getBlockState(pos))) {
+                                pairConflicts.add(i);
+                            }
                         }
-                        Expected expected = expectedFor(i, expectAll, expects, expectPalette);
-                        BlockPos pos = new BlockPos(xs[i], ys[i], zs[i]);
-                        if (expected != null && world.isBlockLoaded(pos) && !expected.matches(world.getBlockState(pos))) {
-                            pairConflicts.add(i);
-                        }
-                    }
-                    return null;
-                });
+                        return null;
+                    });
+                }
             }
             final DeferredNeighbours deferred = (flags & 1) != 0 ? new DeferredNeighbours() : null;
             pairs.deferred = deferred;
             final java.util.Set<Integer> itemsBefore = DeferredNeighbours.itemsIn(context, dimension, dropChunks, false);
             final PhysicsHold hold = holdPhysics ? new PhysicsHold(extent, deferred != null) : null;
             JsonObject physics = null;
+            // A cancel, a timeout or a throw between two batches leaves the earlier ones in the world;
+            // what they changed still gets its undo point on the way out, after the held physics is
+            // handed back (#219).
+            boolean undoSaved = false;
+            try {
             try {
             for (int from = 0; from < count; from += batch) {
                 final int start = from;
@@ -560,16 +576,45 @@ public final class ServerBulkTools {
             // work would fail the call before its undo point is saved (#133).
             int dropped = DeferredNeighbours.itemsDropped(context, dimension, dropChunks, itemsBefore);
             WriteDrops.add(json, drops, dropped);
-            json.add("chunks", context.onGameThreadFollowUp(() -> {
-                ChunkLoadGovernor.touch(dimension, chunks);
-                return outcome != null ? outcome.toJson()
-                    : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), chunks);
-            }));
+            json.add("chunks", ServerChunkTools.describeChunks(context, dimension, chunks, outcome, true));
+            undoSaved = true;
             if (recorder != null) {
                 ServerUndoTools.finish(context, recorder, "server_set_blocks", dimension, area, beforeImage, json, null);
             }
             return ToolResult.structured(json);
+            }
+            finally {
+                if (!undoSaved) {
+                    ServerUndoTools.finishInterrupted(context, recorder, "server_set_blocks", dimension, area,
+                        beforeImage);
+                }
+            }
         });
+    }
+
+    /**
+     * The budget step a write takes before it asks for its chunks to be held; its other half is
+     * {@link #chargeWritesInHold}, the first thing inside the hold.
+     *
+     * <p>An interactive call is only looked at here, and charged once the hold is admitted: charged
+     * here, a call whose hold the governor then refused had written nothing and kept its cells spent
+     * for a minute, so the retry it was told to make was refused by the budget instead (#219). The look
+     * still refuses a call that is over the budget before any chunk is loaded for it. A job part is
+     * charged here as before: it waits for the budget, for up to a minute, and must not sit on held
+     * chunks while it does. A refused hold still costs a job its cells; the budget has no way to give
+     * them back.
+     *
+     * @return null to go on, or the refusal to return
+     */
+    @Nullable
+    static ToolResult chargeWritesBeforeHold(ToolContext context, long count) {
+        return charge(context, count, context.pacesToBudgets());
+    }
+
+    /** See {@link #chargeWritesBeforeHold}. Null to go on, or the refusal to return; nothing was written. */
+    @Nullable
+    static ToolResult chargeWritesInHold(ToolContext context, long count) {
+        return context.pacesToBudgets() ? null : charge(context, count, true);
     }
 
     /**
@@ -582,6 +627,12 @@ public final class ServerBulkTools {
      */
     @Nullable
     static ToolResult chargeWrites(ToolContext context, long count) {
+        return charge(context, count, true);
+    }
+
+    /** @param record false to answer whether the cells fit now without spending them */
+    @Nullable
+    private static ToolResult charge(ToolContext context, long count, boolean record) {
         // Per agent, as chunk holds are (#121): keyed on the endpoint alone, every agent behind the
         // orchestrator shared one budget, and one bulk write starved the rest.
         final String caller = ChunkLoadGovernor.holdCallerOf(context);
@@ -594,7 +645,9 @@ public final class ServerBulkTools {
             synchronized (WRITE_BUDGET) {
                 long used = WRITE_BUDGET.lastMinute(caller, now);
                 if (WritePacing.fits(used, cells, perMinute, paced)) {
-                    WRITE_BUDGET.record(caller, cells, now);
+                    if (record) {
+                        WRITE_BUDGET.record(caller, cells, now);
+                    }
                     return null;
                 }
                 if (!paced) {

@@ -265,15 +265,22 @@ public final class ServerApplyOps {
                 + " (4 x limits.maxWriteCells). Split the list, or submit it as a job with server_job_submit.");
         }
         if (!dryRun) {
-            ToolResult overBudget = ServerBulkTools.chargeWrites(context, reach);
+            ToolResult overBudget = ServerBulkTools.chargeWritesBeforeHold(context, reach);
             if (overBudget != null) {
                 return overBudget;
             }
         }
         final int[] box = {minX, minY, minZ, maxX, maxY, maxZ};
         final Set<Long> touchedChunks = chunks;
+        final long charged = reach;
 
         return ServerChunkTools.withChunks(context, dimension, touchedChunks, outcome -> {
+            if (!dryRun) {
+                ToolResult overBudgetNow = ServerBulkTools.chargeWritesInHold(context, charged);
+                if (overBudgetNow != null) {
+                    return overBudgetNow;
+                }
+            }
             final CellOverlay overlay = new CellOverlay();
             final StatePalette palette = new StatePalette();
             final Map<Long, NBTTagCompound> tags = new LinkedHashMap<>();
@@ -309,6 +316,11 @@ public final class ServerApplyOps {
             final PhysicsHold hold = holdPhysics && !dryRun ? new PhysicsHold(box, (flags & 1) != 0) : null;
             JsonObject physics = null;
             TwoPartBlocks.Writer pairs;
+            // A cancel, a timeout or a throw between two slices leaves the earlier ones in the world;
+            // what they changed still gets its undo point on the way out, after the held physics is
+            // handed back (#219).
+            boolean undoSaved = false;
+            try {
             try {
                 pairs = write(context, dimension, overlay, palette, protectedCells, flags, dryRun, tally, recorder,
                     hold);
@@ -376,15 +388,19 @@ public final class ServerApplyOps {
             }
             // A follow-up: the write has happened, and dropping this would fail the call before its undo
             // point is saved (#133).
-            json.add("chunks", context.onGameThreadFollowUp(() -> {
-                ChunkLoadGovernor.touch(dimension, touchedChunks);
-                return outcome != null ? outcome.toJson()
-                    : ChunkLoadGovernor.describeUnloaded(ServerWorldTools.requireWorld(dimension), touchedChunks);
-            }));
+            json.add("chunks", ServerChunkTools.describeChunks(context, dimension, touchedChunks, outcome, true));
+            undoSaved = true;
             if (recorder != null) {
                 ServerUndoTools.finish(context, recorder, "server_apply_ops", dimension, area, beforeImage, json, null);
             }
             return ToolResult.structured(json);
+            }
+            finally {
+                if (!undoSaved) {
+                    ServerUndoTools.finishInterrupted(context, recorder, "server_apply_ops", dimension, area,
+                        beforeImage);
+                }
+            }
         });
     }
 

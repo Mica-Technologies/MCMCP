@@ -124,6 +124,8 @@ SHA-256 and block count.
 
 :material-eye: Read-only
 
+A returned line is cut at 4,096 characters, with how much was cut, and the whole reply at 256 KB: past that the oldest lines are left out and the header says so; narrow it with `filter` or fewer `lines`.
+
 | Argument | Type | Notes |
 | --- | --- | --- |
 | `lines` | integer 1–5000 | Default 100. Capped by `limits.maxLogLines`. |
@@ -274,6 +276,8 @@ reporting an empty list that would look like an all-clear.
 ### `game_heap_histogram`
 
 :material-eye: Read-only
+
+Both forms stop the whole JVM while the heap is walked, `live_only` for a full collection first. One run per 30 s (a second call is refused with `busy.retryAfterMs`), and none on a server that is paused, stalled or idle.
 
 | Argument | Type | Notes |
 | --- | --- | --- |
@@ -630,6 +634,8 @@ stored, so an agent's big build can't push a person's edits out of the record.
 #### `server_watch_blocks`
 
 :material-eye: Read-only · `op` (`start` default, `read`, `stop`, `list`)
+
+Sampling takes at most 4 ms of a tick across every watch and rests while the server refuses writes; a tick on which a watch could not read all its cells is counted in `ticksSkipped`. A watch whose sampling fails stops with `stopReason: "failed: ..."`.
 
 A timeline of block changes at tick resolution. Use it to time something that animates or cycles,
 such as signals, machines, redstone or doors, instead of polling with `server_get_blocks`, which
@@ -1139,6 +1145,8 @@ block that stops light, where vanilla turns it, so a design's missing sod is sti
 
 :material-alert: Destructive · requires `permissions.allowWorldEdits` · `target` required · same options as `server_verify`, plus `dryRun`
 
+One call repairs at most 100,000 cells; past that `repair.truncated`, `repair.notAttempted` and `repair.note` say to call again.
+
 Rewrites the cells that differ from the target through `server_apply_ops`, with undo points, the
 write budget and two-part pairing as for any write. Protected cells are never written, and neither
 are cells that match after the ignore rules (an open door stays open). The reply's `repair` has the
@@ -1466,6 +1474,8 @@ three. A refusal names the jobs holding the slots, and its `busy` block has `ret
 #### `server_job_status`
 
 :material-eye: Read-only · `id` required · optional `page`, `wait`
+
+A job keeps at most 64 MB of pages, and finished jobs 128 MB between them: past that the job that ended longest ago gives its pages up, and its status shows `pagesDropped` in place of `pages`.
 
 `wait: 60` holds the call until the job's state changes (it finishes, fails, is paused or cancelled)
 or 60 seconds pass, at most 120. Progress alone does not end the wait. One waiting call replaces a
@@ -2110,6 +2120,8 @@ right and only took new tile-entity data is not in the undo point, as with `serv
 
 :material-alert: Destructive · `op`, optional `id`, `force`, `limit`, `by`, `since`, `x`/`z`/`toX`/`toZ`
 
+A write that is cancelled or times out part way still leaves an undo point for what it had written. A restore skips cells whose chunks unloaded while it ran and counts them in `unloaded`, with `unloadedNote` saying how to finish.
+
 Lists the undo points block writes left, or puts one back.
 
 Each `server_set_blocks` call records what every block it changed was before: the block and its
@@ -2228,6 +2240,8 @@ leaves an undo point for the clicked block and the one beside it.
 
 :material-alert: Destructive · `player`, `uses` required · optional `item`, `slot`, `readBack`, `readBackKeys`, `stopOnError`, `load`, `leaseToken`
 
+Where the cell beside a click is in a chunk that is not loaded it is not read, and reads back as `mcmcp:unloaded`.
+
 Many uses of an item in one call, in order: planting a street's trees, or linking a run of
 signals. Each use is the same click as [`server_use_item_on_block`](#server_use_item_on_block).
 `uses` is up to 1,000 `{x, y, z, face, hitX, hitY, hitZ, sneak, item}` objects.
@@ -2336,6 +2350,8 @@ Text fields in modded GUIs are not reachable this way; use the client's GUI tool
 #### `server_run_command`
 
 :material-alert: Destructive · requires `permissions.allowCommands`
+
+`maxOutputLines` (1-2000, default 200) limits the output returned, and the whole output is cut at 64 KB: `outputTruncated` counts the lines left out and `outputCut` marks a line cut short.
 
 | Argument | Notes |
 | --- | --- |
@@ -2595,6 +2611,8 @@ adjust, check again — and a full state response each time is wasteful.
 :material-eye: Read-only · `x`, `y`, `z` required · optional `relative`, `nbt`, `nbt_source`,
 `chisel_grid`
 
+`nbt_source: "server"` runs `/blockdata x y z {}` as the player to read the server's whole tag. As it sends a command, it is refused during an emergency stop and while another agent holds the input exclusively. A tag over 256 KB comes back with `~truncated: true` and a marker in place of what did not fit.
+
 `relative: true` treats the coordinates as offsets from the player's block position.
 
 `nbt: true` adds `blockEntity`, in the shape [`server_get_block`](#server_get_block) describes — but
@@ -2780,6 +2798,8 @@ window.
 :material-alert: Destructive · Requires `permissions.allowChat` and `permissions.allowCommands` ·
 `commands` required · optional `delay_ms`, `reply_timeout_ms`, `stop_on_error`, `check_loaded`,
 `all_results`
+
+At most 50 reply lines are kept per command; `repliesDropped` on an entry counts the rest. Collecting replies ends at the reply timeout plus two seconds, however much the server goes on printing.
 
 Up to 1,000 commands in order, each sent the way `client_send_chat` sends one, with the server's
 replies returned per command. Use it for scripted building instead of `client_send_chat` in a loop.
@@ -3428,6 +3448,8 @@ Also `process`, with this game's `pid`, `startedAt` and `uptimeSeconds`:
 
 No arguments
 
+One reload per 30 s; a second call inside that is refused with `busy.retryAfterMs`.
+
 Reloads every client resource from disk — textures, models, sounds, language files and shaders —
 exactly as F3+T does. The only way to re-run a mod's resource-reload listeners without restarting
 the game, which is what makes it useful for iterating on shaders.
@@ -3976,6 +3998,8 @@ Saved worlds, newest first, with game mode, cheats and last-played. `folderName`
 :material-alert: Destructive · Requires `permissions.allowPlayerControl` · `name` required · optional
 `worldType`, `gameMode`, `seed`, `generateStructures`, `allowCheats`, `hardcore`
 
+The folder name is made from `name` the way the game's own screen makes it: characters a file name cannot hold are replaced, and it is cut to 64.
+
 Create a world and load it. Marked destructive because it writes a save directory that leaving the
 world does not undo. An existing save is never overwritten — the folder gets a suffix, and the reply
 says which was used.
@@ -3986,6 +4010,8 @@ somebody's survival save, and the recovery is nothing.
 #### `client_world_load`
 
 Requires `permissions.allowPlayerControl` · `folderName` required · optional `onModMismatch`
+
+Marked destructive: it leaves the current world, and `onModMismatch: "continue"` can lose blocks and items. A `folderName` that is a path rather than a save's folder is refused.
 
 Load an existing world, leaving any current one first.
 

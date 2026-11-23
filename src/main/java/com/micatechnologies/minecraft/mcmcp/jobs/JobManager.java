@@ -56,7 +56,14 @@ public final class JobManager {
     private static final int BUSY_RETRIES = 8;
     private static final long KEEP_SETTLED_MILLIS = 30L * 60L * 1000L;
     private static final long KEEP_RESTORED_MILLIS = 24L * 60L * 60L * 1000L;
-    private static final long MAX_PAGE_BYTES = 256L << 20;
+    /**
+     * The most one read job's pages may hold, and the most finished jobs' pages may hold between them
+     * (#219). Pages are whole results kept in the heap, counted by their length as JSON, which is less
+     * than they take there. At 256 MB a job, kept for as long as the job was listed, a few large reads
+     * inside half an hour were a server's heap; now it is two running jobs' worth and this budget.
+     */
+    private static final long MAX_PAGE_BYTES = 64L << 20;
+    private static final long MAX_SETTLED_PAGE_BYTES = 128L << 20;
     private static final String FILE = "mcmcp-jobs.json";
 
     private static final Map<String, Job> JOBS = new LinkedHashMap<>();
@@ -327,6 +334,16 @@ public final class JobManager {
             Mcmcp.LOGGER.error("MCMCP job " + job.id + " failed", e);
             job.finish(Job.State.FAILED, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+        catch (Throwable t) {
+            // An Error (a StackOverflowError from a test's nested expression, an OutOfMemoryError from a
+            // read's pages) is not an Exception (#219): it ended the runner's task without a word, since
+            // the executor keeps what a task throws for a Future nobody reads, and the job stayed
+            // "running" with its slot until the server restarted. Not rethrown, for the same reason:
+            // there is nobody to throw it to.
+            Mcmcp.LOGGER.error("MCMCP job " + job.id + " failed", t);
+            job.finish(Job.State.FAILED, "The job failed with " + t + "; the server log has the stack. Parts "
+                + "already done are done.");
+        }
         finally {
             dirty = true;
         }
@@ -381,6 +398,7 @@ public final class JobManager {
                         dirty = true;
                     }
                 }
+                trimSettledPages();
             }
             for (Job job : changed) {
                 for (Consumer<Job> listener : LISTENERS) {
@@ -395,6 +413,38 @@ public final class JobManager {
             if (!changed.isEmpty() || dirty) {
                 dirty = false;
                 save();
+            }
+        }
+    }
+
+    /**
+     * Keeps finished jobs' pages within {@link #MAX_SETTLED_PAGE_BYTES} between them, dropping those of
+     * the job that ended longest ago first. One job's pages always fit, so the job that has just
+     * finished is never the one that loses them before they are read. Holding this class's lock.
+     */
+    private static void trimSettledPages() {
+        long total = 0L;
+        List<Job> holding = new ArrayList<>();
+        for (Job job : JOBS.values()) {
+            if (job.state().settled() && job.pageBytes() > 0L) {
+                total += job.pageBytes();
+                holding.add(job);
+            }
+        }
+        if (total <= MAX_SETTLED_PAGE_BYTES) {
+            return;
+        }
+        holding.sort(java.util.Comparator.comparingLong(Job::endedMillis));
+        for (Job job : holding) {
+            if (total <= MAX_SETTLED_PAGE_BYTES) {
+                break;
+            }
+            long bytes = job.pageBytes();
+            if (job.dropPages("This job's pages were dropped to free the server's memory: finished read jobs keep "
+                + (MAX_SETTLED_PAGE_BYTES >> 20) + " MB of pages between them, and newer jobs needed the room. Run "
+                + "the read again to get it back, and read a job's pages before starting many more.")) {
+                total -= bytes;
+                dirty = true;
             }
         }
     }
