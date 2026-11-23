@@ -985,6 +985,7 @@ public final class ServerBulkTools {
         final int[] unloadedSucceeded = {0};
         final List<String> unloadedLines = new ArrayList<>();
         final boolean[] stopped = {false};
+        try {
         while (next[0] < commands.size() && !stopped[0]) {
             if (System.currentTimeMillis() > deadline || context.getCancellation().isCancelled()) {
                 break;
@@ -1175,6 +1176,15 @@ public final class ServerBulkTools {
             }
             pending.clear();
             context.reportProgress(next[0], commands.size(), "Ran " + next[0] + " of " + commands.size());
+        }
+        }
+        catch (RuntimeException interrupted) {
+            // The commands already run are in the world: their undo point is saved before this goes on.
+            if (undo[0] != null) {
+                ServerUndoTools.finishInterrupted(context, recorder, "server_run_commands", (Integer) undo[0],
+                    (int[]) undo[1], (BufferedImage) undo[2]);
+            }
+            throw interrupted;
         }
         JsonObject json = new JsonObject();
         json.addProperty("commands", commands.size());

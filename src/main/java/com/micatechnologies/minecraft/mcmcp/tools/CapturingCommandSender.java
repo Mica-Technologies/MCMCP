@@ -36,6 +36,9 @@ public class CapturingCommandSender implements ICommandSender {
     static final int LINE_LIMIT = 8000;
 
     private final ICommandSender delegate;
+    /** The most lines one command's output is kept to. */
+    static final int MAX_LINES = 5_000;
+
     private final List<String> output = new ArrayList<>();
     private final List<String> errors = new ArrayList<>();
 
@@ -72,6 +75,11 @@ public class CapturingCommandSender implements ICommandSender {
      * the real player. Not thread-safe; a capture's messages are read only after it is detached.
      */
     public void record(ITextComponent component) {
+        // A command that prints without end is kept to its first lines: the rest would only be cut
+        // from the reply, after filling the heap on the way.
+        if (output.size() + errors.size() >= MAX_LINES) {
+            return;
+        }
         // Unformatted: the colour codes and click events that make sense in a chat window are noise
         // in a tool result. CommandText keeps a mod's untranslatable key's arguments (#67).
         // One line is cut at LINE_LIMIT: /blockdata answers with the whole tile entity, and a linked

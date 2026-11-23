@@ -228,9 +228,14 @@ public class ReverseTransport implements McpTransport {
         // thread now or, at the ceiling, is answered "busy" at once (see submit), which an agent can
         // act on and a silent wait it cannot.
         int core = settings.getWorkerThreads();
-        workers = new ThreadPoolExecutor(core, Math.max(core * 4, MIN_WORKER_CEILING),
-            60L, TimeUnit.SECONDS, new SynchronousQueue<Runnable>(),
-            daemonFactory("link-worker", new AtomicInteger(1)));
+        // Up to the ceiling at once, and past it a call waits its turn as it always did: five agents
+        // through one player's companion reach sixteen calls in flight on an ordinary day, and turning
+        // the seventeenth away would fail work that used to run.
+        int ceiling = Math.max(core * 4, MIN_WORKER_CEILING);
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(ceiling, ceiling, 60L, TimeUnit.SECONDS,
+            new java.util.concurrent.LinkedBlockingQueue<Runnable>(), daemonFactory("link-worker", new AtomicInteger(1)));
+        pool.allowCoreThreadTimeOut(true);
+        workers = pool;
         waiters = Executors.newCachedThreadPool(daemonFactory("link-wait", new AtomicInteger(1)));
 
         scheduleAttempt(0L);

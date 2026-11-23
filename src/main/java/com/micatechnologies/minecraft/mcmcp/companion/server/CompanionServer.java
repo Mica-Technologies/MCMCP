@@ -714,8 +714,28 @@ public final class CompanionServer {
     /** Sends what is queued from a thread that is not the server's: the watchdog's, during a stall. */
     public static void flushOffTick() {
         MinecraftServer server = ServerThreadBridge.server();
-        if (server != null && !PEERS.isEmpty()) {
-            flush(server);
+        // tryLock, never lock: the watchdog's thread must not wait on anything the server thread may
+        // hold, or it would stop seeing the stall end.
+        if (server != null && !PEERS.isEmpty() && FLUSHING.tryLock()) {
+            try {
+                flushLocked(server);
+            }
+            finally {
+                FLUSHING.unlock();
+            }
+        }
+    }
+
+    /** One sender at a time: the outbox's pacing is not made for two. Its own lock, not this class's. */
+    private static final java.util.concurrent.locks.ReentrantLock FLUSHING = new java.util.concurrent.locks.ReentrantLock();
+
+    private static void flush(MinecraftServer server) {
+        FLUSHING.lock();
+        try {
+            flushLocked(server);
+        }
+        finally {
+            FLUSHING.unlock();
         }
     }
 
@@ -725,7 +745,7 @@ public final class CompanionServer {
      * safe from any thread; the outbox's own pacing is what needs the one sender at a time.
      */
     /* Moves session notifications into the outbox, then sends a budget's worth to each player. */
-    private static synchronized void flush(MinecraftServer server) {
+    private static void flushLocked(MinecraftServer server) {
         int budget = McmcpConfig.getCompanionSendBudgetBytesPerTick();
         for (CompanionPeer peer : PEERS.values()) {
             for (Map.Entry<String, McpSession> entry : peer.sessionEntries()) {

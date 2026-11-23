@@ -62,8 +62,8 @@ public final class JobManager {
      * than they take there. At 256 MB a job, kept for as long as the job was listed, a few large reads
      * inside half an hour were a server's heap; now it is two running jobs' worth and this budget.
      */
-    private static final long MAX_PAGE_BYTES = 64L << 20;
-    private static final long MAX_SETTLED_PAGE_BYTES = 128L << 20;
+    private static final long MAX_PAGE_BYTES = 256L << 20;
+    private static final long MAX_SETTLED_PAGE_BYTES = 256L << 20;
     private static final String FILE = "mcmcp-jobs.json";
 
     private static final Map<String, Job> JOBS = new LinkedHashMap<>();

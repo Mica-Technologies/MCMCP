@@ -1475,7 +1475,7 @@ three. A refusal names the jobs holding the slots, and its `busy` block has `ret
 
 :material-eye: Read-only · `id` required · optional `page`, `wait`
 
-A job keeps at most 64 MB of pages, and finished jobs 128 MB between them: past that the job that ended longest ago gives its pages up, and its status shows `pagesDropped` in place of `pages`.
+A job keeps at most 256 MB of pages, and finished jobs 256 MB between them: past that the job that ended longest ago gives its pages up, and its status shows `pagesDropped` in place of `pages`.
 
 `wait: 60` holds the call until the job's state changes (it finishes, fails, is paused or cancelled)
 or 60 seconds pass, at most 120. Progress alone does not end the wait. One waiting call replaces a
