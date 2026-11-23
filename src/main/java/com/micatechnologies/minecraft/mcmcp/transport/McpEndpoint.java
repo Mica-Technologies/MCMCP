@@ -68,11 +68,22 @@ public class McpEndpoint implements McpRegistry.ChangeListener {
      * transports, sessions and orchestrator link around it are exactly an ordinary endpoint's.
      */
     public McpEndpoint(McmcpSide side, McpEndpointSettings settings, McpDispatcher dispatcher) {
+        this(side, settings, dispatcher, true);
+    }
+
+    /**
+     * As above, choosing whether the endpoint listens. With {@code listens} false it has no HTTP
+     * transport and opens no port: it is reached only through a transport added to it, which is how a
+     * singleplayer world's server tools are served over the orchestrator link (#215).
+     */
+    public McpEndpoint(McmcpSide side, McpEndpointSettings settings, McpDispatcher dispatcher, boolean listens) {
         this.side = side;
         this.settings = settings;
         this.sessions = new McpSessionManager(settings.getSessionIdleTimeoutMillis(), settings.getMaxSessions());
         this.dispatcher = dispatcher;
-        this.transports.add(new HttpMcpTransport(settings, dispatcher, sessions));
+        if (listens) {
+            this.transports.add(new HttpMcpTransport(settings, dispatcher, sessions));
+        }
     }
 
     /**

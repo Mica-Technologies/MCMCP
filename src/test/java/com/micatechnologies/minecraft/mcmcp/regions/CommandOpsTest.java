@@ -95,4 +95,13 @@ class CommandOpsTest {
         assertEquals(-300, seen.get(2)[0]);
         assertEquals(17, seen.get(2)[2], "negative and positive coordinates survive the section key");
     }
+
+    @Test
+    void anOpNamingACellOutsideTheWorldIsRefusedRatherThanWrittenSomewhereElse() {
+        // 1073741824 kept only its low bits in the cell store and was written at x 0.
+        org.junit.jupiter.api.Assertions.assertThrows(CommandOps.ParseException.class,
+            () -> CommandOps.parse("setblock 1073741824 64 0 minecraft:stone"));
+        org.junit.jupiter.api.Assertions.assertThrows(CommandOps.ParseException.class,
+            () -> CommandOps.parse("fill 0 0 0 30000001 0 0 minecraft:stone"));
+    }
 }

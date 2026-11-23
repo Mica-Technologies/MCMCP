@@ -41,6 +41,8 @@ public final class StairDesign {
     public static final String AIR = "minecraft:air";
     /** rules.MIN_WIDTH: commercial stairs at least 3 wide. */
     public static final int MIN_WIDTH = 3;
+    /** The longest side of a core's box this plans. Real cores are under 20. */
+    public static final int MAX_SIDE = 96;
     /** rules.HEADROOM: clear cells above every tread and landing. */
     public static final int HEADROOM = 3;
     /** rules.BULKHEAD_CLEAR: clear rows above the roof landing inside the rooftop bulkhead. */
@@ -316,6 +318,20 @@ public final class StairDesign {
             z0 = in.box[1];
             x1 = in.box[2];
             z1 = in.box[3];
+            // Not in design.py, which is run by hand. A plan lists every cell of its box at every level,
+            // so a box or a floor list a typo made huge is refused before it is planned (#219).
+            if ((long) x1 - x0 > MAX_SIDE || (long) z1 - z0 > MAX_SIDE || x1 < x0 || z1 < z0) {
+                throw refuse("box is %d x %d; a stair core is at most %d a side, corners low then high",
+                             (long) x1 - x0 + 1, (long) z1 - z0 + 1, MAX_SIDE);
+            }
+            if (w > MAX_SIDE) {
+                throw refuse("width %d is wider than any core (%d)", w, MAX_SIDE);
+            }
+            for (int level : in.floors) {
+                if (level < 1 || level > 255) {
+                    throw refuse("floor y%d is outside the world: floors are between y1 and y255", level);
+                }
+            }
             int nx = x1 - x0 - 1;
             int nz = z1 - z0 - 1;
             String axis = in.axis != null && !in.axis.isEmpty() ? in.axis : nz >= nx ? "z" : "x";
@@ -515,6 +531,11 @@ public final class StairDesign {
                     }
                 }
             }
+            // The rail's id without any metadata a palette spelled out, and whether it stores its edges.
+            String[] railParts = p.rail.split(":");
+            final String railId = railParts.length == 3 && railParts[2].matches("\\d+")
+                ? railParts[0] + ":" + railParts[1] : p.rail;
+            final boolean edgeRail = StairAudit.isRail(railId);
             Map<Long, Integer> highestTread = new HashMap<>();
             for (Map.Entry<Pos, Object> e : m.entrySet()) {
                 if (isTread(e.getValue())) {
@@ -541,8 +562,23 @@ public final class StairDesign {
                         }
                         Integer ty = highestTread.get(column(nb[0], nb[1]));
                         if (ty != null && ty < roof - 1) {
-                            m.put(new Pos(c[0], roof, c[1]), p.floor);
-                            m.put(new Pos(c[0], roof + 1, c[1]), p.rail);
+                            if (edgeRail) {
+                                // Not in design.py. A railing that stores its edges stands on the deck
+                                // itself, its bar on the edge over the well, with no curb under it: the
+                                // audit walks through such a railing, so one on a curb made the curb's top
+                                // a floor with every other side open (#218).
+                                Pos at = new Pos(c[0], roof, c[1]);
+                                int edge = nb[1] < c[1] ? RailEdges.NORTH : nb[0] > c[0] ? RailEdges.EAST
+                                    : nb[1] > c[1] ? RailEdges.SOUTH : RailEdges.WEST;
+                                Object had = m.get(at);
+                                int mask = had instanceof String && ((String) had).startsWith(railId + ":")
+                                    ? StairAudit.meta((String) had) : 0;
+                                m.put(at, railId + ":" + (mask | edge));
+                            }
+                            else {
+                                m.put(new Pos(c[0], roof, c[1]), p.floor);
+                                m.put(new Pos(c[0], roof + 1, c[1]), p.rail);
+                            }
                         }
                     }
                 }

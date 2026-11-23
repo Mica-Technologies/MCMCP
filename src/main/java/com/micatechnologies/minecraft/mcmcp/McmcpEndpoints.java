@@ -65,6 +65,10 @@ public final class McmcpEndpoints {
             final File file = journal.getFile();
             journal.setOnFailure(() -> Mcmcp.LOGGER.warn("MCMCP stopped writing its request journal at "
                 + file + " after repeated write failures. Tool calls are no longer being recorded."));
+            String lastRun = journal.previousRunWarning();
+            if (lastRun != null) {
+                Mcmcp.LOGGER.warn(lastRun);
+            }
             journal.open(McmcpProcess.pid(), McmcpConstants.MOD_VERSION, System.currentTimeMillis());
             JOURNALS.put(side, journal);
         }
@@ -115,6 +119,30 @@ public final class McmcpEndpoints {
     public static McpEndpoint startVirtual(McpDispatcher dispatcher, String via) {
         McpEndpointSettings settings = McmcpConfig.settingsFor(dispatcher.getSide());
         return start(new McpEndpoint(dispatcher.getSide(), settings, dispatcher), via);
+    }
+
+    /**
+     * Starts the server endpoint of a singleplayer world whose config leaves the server endpoint off:
+     * the integrated server's own tools, reached over the orchestrator link alone (#215). Nothing
+     * listens, so it opens no port and cannot collide with a second game; without the link there is no
+     * way in, and nothing is started.
+     *
+     * <p>Only the person at this client reaches it, through the orchestrator they already drive the
+     * client with. Every permission switch still applies to its calls.
+     *
+     * @return the running endpoint, or null when the link is off or could not start
+     */
+    @Nullable
+    public static McpEndpoint startSingleplayer(GameThreadBridge gameThread) {
+        if (!McmcpConfig.isOrchestratorLinkEnabled()) {
+            return null;
+        }
+        McmcpSide side = McmcpSide.SERVER;
+        McpEndpointSettings settings = McmcpConfig.settingsFor(side);
+        McpDispatcher dispatcher = new McpDispatcher(side, gameThread, settings.getGameThreadTimeoutMillis(),
+            McpEndpoint.instructionsFor(side));
+        dispatcher.setJournal(journal(side));
+        return start(new McpEndpoint(side, settings, dispatcher, false), "singleplayer");
     }
 
     @Nullable

@@ -241,4 +241,33 @@ class RequestJournalTest {
         assertEquals(1, told[0]);
         assertEquals("failed", journal.previousRun().get("journal").getAsString());
     }
+
+    @Test
+    void aCallThatTimedOutBeforeARunDiedIsNamedAsASuspect() {
+        // #219: the call's worker answered "timed out" and wrote its end line while the work it had
+        // started still held the server thread, so the dead run had no unfinished call at all.
+        List<String> lines = Arrays.asList(
+            "{\"t\":\"a\",\"ev\":\"open\",\"pid\":1,\"version\":\"v1\"}",
+            "{\"t\":\"b\",\"ev\":\"start\",\"id\":1,\"tool\":\"server_get_blocks\"}",
+            "{\"t\":\"c\",\"ev\":\"end\",\"id\":1,\"status\":\"ok\"}",
+            "{\"t\":\"d\",\"ev\":\"start\",\"id\":2,\"tool\":\"server_set_blocks\",\"args\":{\"cells\":{\"~len\":0}}}",
+            "{\"t\":\"e\",\"ev\":\"end\",\"id\":2,\"status\":\"timeout\"}");
+        JsonObject run = RequestJournal.scan(lines);
+        assertEquals(0, run.getAsJsonArray("unfinishedCalls").size());
+        assertEquals(1, run.getAsJsonArray("timedOutCalls").size());
+        JsonObject suspect = run.getAsJsonArray("timedOutCalls").get(0).getAsJsonObject();
+        assertEquals("server_set_blocks", suspect.get("tool").getAsString());
+        assertEquals(0, suspect.getAsJsonObject("args").getAsJsonObject("cells").get("~len").getAsInt());
+    }
+
+    @Test
+    void aTimeoutInARunThatClosedCleanlyIsNotASuspect() {
+        List<String> lines = Arrays.asList(
+            "{\"t\":\"a\",\"ev\":\"open\",\"pid\":1,\"version\":\"v1\"}",
+            "{\"t\":\"d\",\"ev\":\"start\",\"id\":2,\"tool\":\"server_set_blocks\"}",
+            "{\"t\":\"e\",\"ev\":\"end\",\"id\":2,\"status\":\"timeout\"}",
+            "{\"t\":\"f\",\"ev\":\"close\"}");
+        JsonObject run = RequestJournal.scan(lines);
+        assertEquals(false, run.has("timedOutCalls"));
+    }
 }

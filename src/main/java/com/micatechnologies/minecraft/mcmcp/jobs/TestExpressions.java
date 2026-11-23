@@ -34,6 +34,13 @@ import java.util.Map;
  */
 public final class TestExpressions {
 
+    /** The longest string an expression may make. */
+    static final int MAX_STRING = 65_536;
+    /** The longest list an expression may make. */
+    static final int MAX_LIST = 10_000;
+    /** How deep brackets may nest in one expression. */
+    static final int MAX_NESTING = 64;
+
     private TestExpressions() {
     }
 
@@ -345,6 +352,7 @@ public final class TestExpressions {
     private static final class Parser {
 
         final String text;
+        int nesting;
         final Map<String, JsonElement> scope;
         int at;
 
@@ -412,8 +420,19 @@ public final class TestExpressions {
             while (true) {
                 if (eat("+")) {
                     JsonElement right = term();
-                    left = isNumber(left) && isNumber(right) ? new JsonPrimitive(numeric(left) + numeric(right))
-                        : new JsonPrimitive(display(left) + display(right));
+                    if (isNumber(left) && isNumber(right)) {
+                        left = new JsonPrimitive(numeric(left) + numeric(right));
+                    }
+                    else {
+                        // A string joined to itself in a repeat doubles each pass: 8 characters are 2 GB
+                        // by the 28th, in the server's heap.
+                        String joined = display(left) + display(right);
+                        if (joined.length() > MAX_STRING) {
+                            throw new IllegalArgumentException("${" + text + "} makes a string of " + joined.length()
+                                + " characters; a test value holds at most " + MAX_STRING + ".");
+                        }
+                        left = new JsonPrimitive(joined);
+                    }
                 }
                 else if (eat("-")) {
                     left = new JsonPrimitive(numeric(left) - numeric(term()));
@@ -556,7 +575,13 @@ public final class TestExpressions {
             }
             char c = text.charAt(at);
             if (eat("(")) {
+                // Each ( is a level of this parser's own stack: thousands of them were a
+                // StackOverflowError, which is not an Exception and skipped a test's restores.
+                if (++nesting > MAX_NESTING) {
+                    throw new IllegalArgumentException("${...} is nested more than " + MAX_NESTING + " brackets deep.");
+                }
                 JsonElement inner = or();
+                nesting--;
                 if (!eat(")")) {
                     throw new IllegalArgumentException("Missing ) in ${" + text + "}.");
                 }
@@ -733,6 +758,10 @@ public final class TestExpressions {
                 case "concat": {
                     JsonArray out = new JsonArray();
                     for (JsonElement arg : args) {
+                        if (out.size() + (arg.isJsonArray() ? arg.getAsJsonArray().size() : 1) > MAX_LIST) {
+                            throw new IllegalArgumentException("concat makes a list of more than " + MAX_LIST
+                                + " values, the most a test value holds.");
+                        }
                         if (arg.isJsonArray()) {
                             arg.getAsJsonArray().forEach(out::add);
                         }

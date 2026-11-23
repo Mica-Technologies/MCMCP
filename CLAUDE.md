@@ -43,6 +43,10 @@ bash .github/scripts/orchestrator-e2e.sh     # boot a server + drive a real MCP 
 # client joined to it, its orchestrator port pointed at the check's. Local only, like the next one.
 python .github/scripts/companion-check.py <state-dir> --link-port 26580
 
+# A singleplayer world's server tools over the link (#215). Local only: a dev client with
+# enableServerEndpoint=false and its orchestrator port pointed at the check's.
+python .github/scripts/singleplayer-check.py <state-dir> --link-port 26580
+
 # Two instances at once — the configuration the orchestrator exists for, and the only place
 # aggregation, focus and fan-out are reachable. Local only: it needs a dev CLIENT, which needs a
 # display, so CI cannot run it. Start runServer and runClient, then:
@@ -155,6 +159,30 @@ server, real TPS (`TickClock.ticksPerSecond`: the mean tick leaves out the gaps 
 thread frozen 2.5 s in every 3 read 0.2 ms and 20 TPS). Jobs wait from throttled; writes are refused
 from paused (`McpDispatcher.admissionRefusal`), except diagnostics, estop, release and job control. A
 new diagnostic or control tool that must keep working on a struggling server belongs on that list.
+
+### Nothing is worked out from a position before it is checked (#219)
+
+A `server_set_blocks` with no cells drew a box round nothing, the whole integer range, and one
+vanilla `getEntitiesWithinAABB` over it held a live server's thread until the server was killed.
+A read of the tools then found the same family in a dozen places. The rules that came out of it:
+
+- **Positions are checked once, in the dispatcher** (`mcp/CoordinateBounds`): x and z within
+  30,000,000 of 0, y within 4,096, under the names positions go by (`x`, `toZ`, ...) and inside the
+  lists that hold them (`cells`, `box`, `to`, ...). A new argument that carries positions under a new
+  name goes on those lists. A step that resolves its arguments late (`server_run_test`) checks again.
+- **Never scan a box round a call's cells.** Its cost is its area, not the cells. Walk the cells'
+  own chunks (`DeferredNeighbours.dropChunks`, `getLoadedChunk`), in slices.
+- **`ChunkKeys.box` refuses over 262,144 chunks.** Check `boxCount` first to refuse in your own words.
+- **A fold over a list starts from its first element, not from `Integer.MAX_VALUE`,** and an empty
+  list returns before anything is derived from it.
+- **`for (v = min; v <= max; v++)` never ends at `Integer.MAX_VALUE`,** and `max - min + 1` wraps.
+  The dispatcher's check keeps both out of reach; do not rely on a volume limit computed in `int`.
+- **A read never touches an unloaded chunk** (`isBlockLoaded` first): the read loads or generates it.
+- **`ServerTaskPump` names the task it is running** (`TaskCaller.describing`), so a stall report can
+  say which call holds the thread after its caller timed out. An unsliced read loop of MCMCP's own
+  calls `ServerTaskPump.checkpoint()` so the watchdog can stop it; a write is never stopped half way.
+- **Every way a companion caller can make a tool run goes through `CompanionPolicy.admit`,** not only
+  the dispatcher: a nested step once reached the console's authority by checking the class alone.
 
 ### Protocol errors vs tool errors
 

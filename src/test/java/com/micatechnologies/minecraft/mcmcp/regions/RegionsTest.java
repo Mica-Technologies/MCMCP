@@ -77,4 +77,24 @@ class RegionsTest {
         assertFalse(rest.truncated);
         assertEquals(5, rest.changes.get(0).x);
     }
+
+    @Test
+    void aStreamThatAsksForAPresetDictionaryIsRefusedRatherThanSpunOn() {
+        // zlib header with FDICT set, then a dictionary id: inflate returns 0 for ever on it.
+        byte[] stream = {0x78, (byte) 0xBB, 0, 0, 0, 1, 0, 0, 0, 0};
+        String text = java.util.Base64.getEncoder().encodeToString(stream);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> PackedIndices.decode(text, 16));
+    }
+
+    @Test
+    void aStreamThatInflatesToFarMoreThanItsValuesCouldPackIntoIsRefused() {
+        java.util.zip.Deflater deflater = new java.util.zip.Deflater();
+        deflater.setInput(new byte[4_000_000]);
+        deflater.finish();
+        byte[] out = new byte[8192];
+        int n = deflater.deflate(out);
+        deflater.end();
+        String text = java.util.Base64.getEncoder().encodeToString(java.util.Arrays.copyOf(out, n));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> PackedIndices.decode(text, 16));
+    }
 }

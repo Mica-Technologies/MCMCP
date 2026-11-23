@@ -374,6 +374,9 @@ public final class ClientGuiTools {
     /** Most a caller may ask a click to wait for its screen to change. */
     private static final int MAX_WAIT_FOR_CHANGE_MILLIS = 5000;
 
+    /** The most characters client_gui_key types in one call. */
+    private static final int MAX_TYPED_CHARS = 1024;
+
     private static final String WAIT_FOR_CHANGE_DESCRIPTION = "Wait up to this many ms for the open "
         + "screen to change before replying, ending as soon as it does. For buttons that only send a "
         + "packet and change the screen when the server answers. Default 1000 on the death, "
@@ -1366,6 +1369,13 @@ public final class ClientGuiTools {
                 final String text = context.getString("text", null);
                 final String key = context.getString("key", null);
                 final int repeat = context.getBoundedInt("repeat", 1, 1, 100);
+                // Typed one character at a time in a single client-thread task, and a text field's insert
+                // is itself linear: a megabyte of text froze the window for minutes.
+                if (text != null && text.length() > MAX_TYPED_CHARS) {
+                    return ToolResult.error("'text' is " + text.length() + " characters; one call types at most "
+                        + MAX_TYPED_CHARS + ". Nothing was typed. Send it in pieces, or use client_gui_text to "
+                        + "set a field's whole value.");
+                }
                 if (text == null && key == null) {
                     return ToolResult.error("Pass either 'text' to type characters or 'key' for a "
                         + "named key.");

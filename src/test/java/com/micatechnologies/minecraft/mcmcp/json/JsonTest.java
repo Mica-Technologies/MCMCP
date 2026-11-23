@@ -118,4 +118,33 @@ class JsonTest {
     void nullSerialisesAsJsonNull() {
         assertEquals("null", Json.write(null));
     }
+
+    @Test
+    void aNumberTooLargeForAnIntIsHeldAtItsEndAndNeverWrapsIntoAnotherValue() {
+        JsonObject json = Json.parse("{\"a\":4294967301,\"b\":-3000000000,\"c\":1e300,\"d\":2147483647}")
+            .getAsJsonObject();
+        assertEquals(Integer.MAX_VALUE, Json.getInt(json, "a", 0));
+        assertEquals(Integer.MIN_VALUE, Json.getInt(json, "b", 0));
+        assertEquals(Integer.MAX_VALUE, Json.getInt(json, "c", 0));
+        assertEquals(Integer.MAX_VALUE, Json.getInt(json, "d", 0));
+    }
+
+    @Test
+    void notANumberAndInfinityAreReadAsAbsent() {
+        JsonObject json = Json.parse("{\"a\":\"NaN\",\"b\":\"Infinity\",\"c\":1e999,\"d\":\"-Infinity\"}")
+            .getAsJsonObject();
+        for (String key : new String[] {"a", "b", "c", "d"}) {
+            assertEquals(7.5D, Json.getDouble(json, key, 7.5D), 0.0D, key);
+            assertEquals(7, Json.getInt(json, key, 7), key);
+        }
+    }
+
+    @Test
+    void aDocumentNestedTooDeepToParseIsNotValidJsonRatherThanAnException() {
+        StringBuilder deep = new StringBuilder();
+        for (int i = 0; i < 200_000; i++) {
+            deep.append('[');
+        }
+        assertEquals(null, Json.parse(deep.toString()));
+    }
 }

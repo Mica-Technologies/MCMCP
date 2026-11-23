@@ -27,13 +27,20 @@ import java.util.TreeSet;
  *   <li>HEAD: three clear cells over every tread, and over every landing stand cell.</li>
  *   <li>LANDING: a landing at least the flight's width deep along travel, top and bottom of each flight,
  *       door cells not counting.</li>
- *   <li>GAP: no stand cell beside an open drop without a guard.</li>
+ *   <li>GAP: no stand cell beside an open drop without a guard. A CSM railing whose edge bits name that
+ *       edge, in either cell, is a guard; the railing's own cell is walked through, so one standing on a
+ *       curb makes the curb's top a stand cell with every other edge open (#218).</li>
  *   <li>LIGHT: a light within 6 cells, -1..+4 high, of every landing.</li>
  *   <li>DOOR: a door at every floor, with an exit sign and a floor-ID panel near it when signs are
  *       checked.</li>
  *   <li>CONT: a walker, two high and never jumping, reaches every floor's door from the lowest's.</li>
  *   <li>TWO: across several cores, every floor level has doors in at least two ({@link #twoStairs}).</li>
  * </ul>
+ *
+ * <p>The audit of record is PlanUIA's {@code audit_stairs} ({@code packages/generators/src/stairs} there,
+ * itself a port of audit.py). The two must give the same answer for the same blocks: a core this tool
+ * built and called clean failed that audit on a guard the two classified differently (#218). When that
+ * auditor's block classes or checks change, change them here.
  *
  * <p>Blocks are classified by keyword, exactly as audit.py does, because the audit has to judge modded
  * blocks it has never seen: anything named like a sconce or a sign is walked through, anything named
@@ -51,7 +58,8 @@ public final class StairAudit {
 
     static final String[] PASS_KW = {"sconce", "sign", "panel", "pull", "lightupair", "cehalo", "cesquare", "door", "torch",
         "button", "pressure_plate", "lever", "carpet", "detector", "strobe", "horn", "speaker", "eep", "standpipe",
-        "snow_layer", "thermostat"};
+        "snow_layer", "csm:ground_", "thermostat", "furenikusroads:hatch_", "furenikusroads:line_",
+        "furenikusroads:white_"};
     static final String[] LIGHT_KW = {"sconce", "lamp", "light", "glowstone", "lantern", "torch", "fluorescent", "led"};
     static final String[] GUARD_KW = {"pane", "fence", "rail", "wall", "bars", "glass"};
 
@@ -153,7 +161,7 @@ public final class StairAudit {
         boolean stand(int x, int y, int z) {
             String s = b(x, y - 1, z);
             return passable(b(x, y, z)) && passable(b(x, y + 1, z)) && !passable(s) && !UNKNOWN.equals(s)
-                   && !anyOf(s, GUARD_KW);
+                   && !anyOf(s, GUARD_KW) && !s.contains("sign");   // a wall sign is no floor
         }
     }
 
@@ -234,12 +242,38 @@ public final class StairAudit {
         return s != null && s.contains("door") && !s.contains("trapdoor");
     }
 
-    /** Walked through: air, or a thin fitting (a sconce, a sign, a door), but never a stair or a lit block. */
+    /**
+     * A CSM edge-bit railing ({@code csm:railing_*}, {@code csm:*handrail_*}): it sits in a stand cell,
+     * is walked through, and guards the edges of that cell its metadata names.
+     */
+    static boolean isRail(String s) {
+        return s != null && s.startsWith("csm:") && (s.contains("railing_") || s.contains("handrail_"));
+    }
+
+    /**
+     * Whether {@code s} is a railing guarding its cell's edge toward {@code (dx, dz)}. The edge bits are
+     * {@link RailEdges}': north 1, east 2, south 4, west 8. Metadata 0 counts as north, as the game
+     * draws it.
+     */
+    static boolean railed(String s, int dx, int dz) {
+        if (!isRail(s)) {
+            return false;
+        }
+        int bits = meta(s) & 15;
+        int edge = dz < 0 ? RailEdges.NORTH : dx > 0 ? RailEdges.EAST : dz > 0 ? RailEdges.SOUTH : RailEdges.WEST;
+        return ((bits == 0 ? RailEdges.NORTH : bits) & edge) != 0;
+    }
+
+    /**
+     * Walked through: air, an edge-bit railing, or a thin fitting (a sconce, a sign, a door), but never
+     * a stair, a lit block, or a carpet that is a whole floor block.
+     */
     static boolean passable(String s) {
-        if (isAir(s)) {
+        if (isAir(s) || isRail(s)) {
             return true;
         }
-        if (s.contains("illumin")) {
+        if (s.contains("illumin") || s.contains("floor_carpet") && s.contains("_block")
+            || s.startsWith("gymcraft:carpet")) {
             return false;
         }
         return !isStair(s) && anyOf(s, PASS_KW) && !s.contains("exit_sign") || isDoor(s);
@@ -406,6 +440,10 @@ public final class StairAudit {
                 Pos n = new Pos(q.x + dir[0], q.y, q.z + dir[1]);
                 String nb = c.b(n.x, n.y, n.z);
                 if (!c.inside(n.x, n.z) || !passable(nb) || isDoor(nb)) {
+                    continue;
+                }
+                // A railing on that edge, in this cell or the neighbour's, guards it.
+                if (railed(c.b(q.x, q.y, q.z), dir[0], dir[1]) || railed(nb, -dir[0], -dir[1])) {
                     continue;
                 }
                 int k = onStair ? 2 : 1;

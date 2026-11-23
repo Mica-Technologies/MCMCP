@@ -582,6 +582,37 @@ case "$PALETTE_BODY" in
   *) mcp_failure "compare-and-set did not skip the changed cell: ${PALETTE_BODY}" ;;
 esac
 
+# #219: a palette write with no cells drew a box round nothing, which is the whole integer range, and
+# one entity lookup over it held the server thread until the server was killed. curl gives up after
+# 60 s, so a hang fails here as a failed request rather than a hung job.
+echo "==> Palette writes: a call with no cells answers at once and writes nothing (#219)"
+EMPTY_BODY="$(mcp_call 5190 server_set_blocks "{\"mode\":\"palette\",\"palette\":[\"minecraft:wool:14\"],\"expectPalette\":[],\"onConflict\":\"abort\",\"skipIfTileEntity\":true,\"load\":true,\"origin\":{\"x\":${PX},\"y\":${PY},\"z\":${PZ}},\"cells\":[]}")" \
+  || mcp_failure "a palette write with no cells did not answer: ${EMPTY_BODY}"
+case "$EMPTY_BODY" in
+  *'"isError":true'*) mcp_failure "a palette write with no cells was an error: ${EMPTY_BODY}" ;;
+  *'"cells":0'*'"written":0'*) echo "    0 cells, 0 written" ;;
+  *) mcp_failure "a palette write with no cells did not say it wrote nothing: ${EMPTY_BODY}" ;;
+esac
+echo "==> Palette writes: two cells at opposite ends of the world cost two cells, not the box between (#219)"
+SPREAD_BODY="$(mcp_call 5191 server_set_blocks "{\"mode\":\"palette\",\"palette\":[\"minecraft:wool:14\"],\"origin\":{\"x\":0,\"y\":${PY},\"z\":0},\"cells\":[-29000000,0,-29000000,0, 29000000,0,29000000,0]}")" \
+  || mcp_failure "a palette write of two far-apart cells did not answer: ${SPREAD_BODY}"
+case "$SPREAD_BODY" in
+  *'"written":0'*'"unloaded":2'*) echo "    both cells unloaded, nothing written, the server still ticking" ;;
+  *) mcp_failure "a palette write of two far-apart cells did something else: ${SPREAD_BODY}" ;;
+esac
+echo "==> Palette writes: a cell outside the world is refused by name (#219)"
+OUTSIDE_BODY="$(mcp_call 5192 server_set_blocks "{\"mode\":\"palette\",\"palette\":[\"minecraft:wool:14\"],\"origin\":{\"x\":2147483000,\"y\":${PY},\"z\":0},\"cells\":[0,0,0,0, 5000,0,0,0]}")" \
+  || mcp_failure "a palette write outside the world did not answer: ${OUTSIDE_BODY}"
+case "$OUTSIDE_BODY" in
+  *"'origin.x' is 2147483000"*'outside the world'*'"isError":true'*) echo "    refused, naming the argument" ;;
+  *) mcp_failure "a palette cell outside the world was not refused by name: ${OUTSIDE_BODY}" ;;
+esac
+TICK_BODY="$(mcp_call 5193 server_wait_tick '{"modulo":2}')" \
+  || mcp_failure "the server did not tick after the #219 writes: ${TICK_BODY}"
+case "$TICK_BODY" in
+  *'"isError":true'*) mcp_failure "the server did not tick after the #219 writes: ${TICK_BODY}" ;;
+esac
+
 echo "==> server_run_commands: many commands, one structured reply"
 RUN_BODY="$(mcp_call 52 server_run_commands "{\"commands\":[\"setblock ${PX} $((PY + 1)) ${PZ} minecraft:glowstone\",\"setblock 0 300 0 minecraft:stone\",\"say batch done\"]}")" \
   || mcp_failure "server_run_commands failed: ${RUN_BODY}"

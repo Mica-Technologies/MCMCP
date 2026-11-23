@@ -195,6 +195,8 @@ public final class ServerBuildTools {
                         // how a builder thinks about a structure — layer by layer from the bottom.
                         for (int y = minY; y <= maxY; y++) {
                             for (int z = minZ; z <= maxZ; z++) {
+                                // A read gives up here if the watchdog asked the stalled task to stop.
+                                com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.checkpoint();
                                 for (int x = minX; x <= maxX; x++) {
                                     BlockPos pos = new BlockPos(x, y, z);
                                     String id;
@@ -570,6 +572,13 @@ public final class ServerBuildTools {
                                 + placement.pos.getY() + " at x=" + placement.pos.getX()
                                 + ", z=" + placement.pos.getZ() + ".");
                         }
+                        // Before anything is worked out from the placements (#219): what is derived from
+                        // them, a map area or a set of chunks, is as large as the farthest one.
+                        String outside = com.micatechnologies.minecraft.mcmcp.regions.WorldBounds.horizontalRefusal(
+                            "The placement at y=" + placement.pos.getY(), placement.pos.getX(), placement.pos.getZ());
+                        if (outside != null) {
+                            return ToolResult.error(outside);
+                        }
                     }
 
                     final Set<Long> listChunks = new java.util.LinkedHashSet<>();
@@ -677,6 +686,18 @@ public final class ServerBuildTools {
                 final int x1 = context.requireInt("x");
                 final int y1 = context.requireInt("y");
                 final int z1 = context.requireInt("z");
+                // Corners inside the world before any size is worked out from them (#219): the width of
+                // a box with one corner at each end of int wraps round to a small number, its volume
+                // passes the limit below, and the set of its chunks is built until memory runs out.
+                String outside = com.micatechnologies.minecraft.mcmcp.regions.WorldBounds.horizontalRefusal(
+                    "The region's corner", x1, z1);
+                if (outside == null) {
+                    outside = com.micatechnologies.minecraft.mcmcp.regions.WorldBounds.horizontalRefusal(
+                        "The region's far corner", context.getInt("toX", x1), context.getInt("toZ", z1));
+                }
+                if (outside != null) {
+                    return ToolResult.error(outside);
+                }
                 final int minX = Math.min(x1, context.getInt("toX", x1));
                 final int minY = Math.max(0, Math.min(y1, context.getInt("toY", y1)));
                 final int minZ = Math.min(z1, context.getInt("toZ", z1));
@@ -687,6 +708,9 @@ public final class ServerBuildTools {
                 final int sizeX = maxX - minX + 1;
                 final int sizeZ = maxZ - minZ + 1;
                 final long volume = (long) sizeX * (maxY - minY + 1) * sizeZ;
+                if (maxY < minY) {
+                    return ToolResult.error("That region is wholly outside y 0-255, so there is nothing to fill.");
+                }
                 if (volume > callLimit) {
                     return ToolResult.error("That region is " + volume + " blocks, over the limit of "
                         + callLimit + " for one call (" + MAX_BATCHES + " batches of "

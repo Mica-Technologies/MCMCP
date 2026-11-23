@@ -507,7 +507,10 @@ impl Router {
              was focused: a human can change focus at any time, and the result line is how you find \
              out.\n\n\
              For a job of several steps, keep a task list with `mcmcp_tasks`: the person watching \
-             sees it live, and it survives restarts.\n\n",
+             sees it live, and it survives restarts.\n\n\
+             Where a tool's description ends \"Available on:\", that is who had the tool when you \
+             fetched the list. A game that connects afterwards has it too if it is the same kind \
+             (client or server); `mcmcp_instances` is always current.\n\n",
         );
         let connected = self.registry.count();
         if connected == 0 {

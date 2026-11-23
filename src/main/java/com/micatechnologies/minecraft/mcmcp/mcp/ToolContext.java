@@ -313,6 +313,24 @@ public class ToolContext {
      * note that a tool which wants to report a *game-level* failure to the model should catch this
      * and return {@link ToolResult#error} instead of letting it propagate.
      */
+    /** The tool and a short form of its arguments, worked out once: what a stall report names (#219). */
+    private String taskSummary;
+
+    private String taskSummary() {
+        String summary = taskSummary;
+        if (summary == null) {
+            try {
+                summary = ArgumentSummary.of(toolName, arguments, 400);
+            }
+            catch (RuntimeException e) {
+                // Never the reason a call fails: it is only a label.
+                summary = toolName == null ? "a call" : toolName;
+            }
+            taskSummary = summary;
+        }
+        return summary;
+    }
+
     public <T> T onGameThread(Callable<T> task) {
         // A follow-up finishes what an earlier task of this call already did to the world, so it is not
         // dropped for a cancellation or the usual timeout, and goes to the front of the server's queue.
@@ -332,6 +350,29 @@ public class ToolContext {
                     ? "The Minecraft client is not ready to accept commands"
                     : "No Minecraft server is currently running");
         }
+        // A server thread that has stopped finishing ticks runs nothing offered to it, so a step that
+        // needs it is answered now rather than after the whole timeout: in #219 every read sent to a
+        // hung server waited two minutes to say "timed out", and said nothing about why. A follow-up
+        // still queues: it finishes a write, and is worth the wait if the thread comes back.
+        if (!followUp && !getSide().isClient() && ServerLoad.level() == ServerLoad.Level.STALLED
+            && !gameThread.isGameThread()) {
+            JsonObject busy = ServerLoad.busy("server_stalled");
+            String stuck = ServerLoad.runningTask();
+            if (stuck != null) {
+                busy.addProperty("serverThreadTask", stuck);
+            }
+            boolean earlier = ranAHop && mutating;
+            if (earlier) {
+                busy.addProperty("earlierStepsRan", true);
+            }
+            throw new ToolBusyException("The server thread has finished no tick for "
+                + ServerLoad.stalledForMillis() / 1000L + " s, so this step was not started"
+                + (earlier ? "; earlier steps of the call had already run, so look before you retry it."
+                    : ": nothing changed.")
+                + (stuck == null ? "" : " The thread is inside MCMCP's own task: " + stuck + ".")
+                + " game_health still answers and names the file with every thread's stack; retrying sooner than "
+                + "busy.retryAfterMs will get this answer again.", busy, !earlier);
+        }
         final GameTaskObserver observer = gameTaskObserver;
         final Principal principal = getPrincipal();
         Callable<T> observed = observer == null ? task : () -> {
@@ -345,7 +386,7 @@ public class ToolContext {
         };
         @SuppressWarnings("unchecked")
         java.util.function.Consumer<? super T> cleanup = (java.util.function.Consumer<? super T>) orphanCleanup;
-        TaskCaller who = new TaskCaller(callerKey(), callerLabel());
+        TaskCaller who = new TaskCaller(callerKey(), callerLabel()).describing(taskSummary());
         try {
             T value = gameThread.callOnGameThread(observed, timeoutMillis, cleanup,
                 followUp ? null : cancellation::isCancelled, followUp ? who.asFollowUp() : who);
@@ -615,6 +656,9 @@ public class ToolContext {
         // was cut to was.
         part.holdCaller = holdCaller;
         part.toolName = toolName;
+        // A part of a call that changes the world changes it too: without this the emergency stop was
+        // checked when a sequence started and never again, and its steps kept pressing keys through it.
+        part.mutating = mutating;
         return part;
     }
 

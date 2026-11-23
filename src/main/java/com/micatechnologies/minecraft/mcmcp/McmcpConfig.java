@@ -84,6 +84,7 @@ public class McmcpConfig {
     // Endpoints
     private static boolean clientEndpointEnabled = true;
     private static boolean serverEndpointEnabled = false;
+    private static boolean serveSingleplayerEnabled = true;
     private static String bindAddress = "127.0.0.1";
     private static int clientPort = 25585;
     private static int serverPort = 25586;
@@ -250,6 +251,13 @@ public class McmcpConfig {
                 + "server authority. Off by default: it is a much larger grant than the client endpoint "
                 + "and should be an explicit decision by whoever operates the server. A server that only "
                 + "wants agents reaching it through players' own MCMCP needs none: see the companion section.");
+
+        serveSingleplayerEnabled = configuration.getBoolean("serveSingleplayer", CATEGORY_ENDPOINTS, true,
+            "While enableServerEndpoint is off, serve a singleplayer world's server tools over the "
+                + "orchestrator link, as this game's server endpoint.\n"
+                + "No port is opened for them, and only the orchestrator this client already dials can reach "
+                + "them. The permissions section still decides what they may do. Has no effect on a dedicated "
+                + "server, or with the orchestrator link off.");
 
         bindAddress = configuration.getString("bindAddress", CATEGORY_ENDPOINTS, "127.0.0.1",
             "Network interface both endpoints bind to.\n"
@@ -779,6 +787,10 @@ public class McmcpConfig {
 
     public static boolean isClientEndpointEnabled() {
         return clientEndpointEnabled;
+    }
+
+    public static boolean isServeSingleplayerEnabled() {
+        return serveSingleplayerEnabled;
     }
 
     public static boolean isServerEndpointEnabled() {

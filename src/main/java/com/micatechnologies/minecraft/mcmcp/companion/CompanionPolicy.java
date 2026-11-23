@@ -203,24 +203,60 @@ public final class CompanionPolicy implements CallFilter {
     @Override
     @Nullable
     public String admit(McpSession session, McpTool tool, JsonObject arguments) {
-        Principal principal = session.getPrincipal();
-        String callClass = classOf(tool.getName());
+        return admit(session.getPrincipal(), tool.getName(), arguments);
+    }
+
+    /**
+     * The whole admission of one call by a companion caller: its class, {@code load}, and whom it may
+     * name. Every way a companion caller can make a tool run goes through this, not only the
+     * dispatcher: a step of {@code server_run_test} and a job's part once checked the class alone, so
+     * a command step with no {@code asPlayer} ran with the console's authority, and a step could name
+     * another player or load chunks, without the classes that allow those.
+     *
+     * @return the refusal, or null when the call may run; {@code arguments} may have the caller's own
+     *         name added to it
+     */
+    @Nullable
+    public static String admit(Principal principal, String toolName, JsonObject arguments) {
+        String callClass = classOf(toolName);
         if (callClass == null) {
-            return "'" + tool.getName() + "' is not available through the MCMCP companion.";
+            return "'" + toolName + "' is not available through the MCMCP companion.";
         }
         if (!principal.has(callClass)) {
             return "Your companion access on this server does not include '" + callClass + "' calls, "
-                + "which '" + tool.getName() + "' is. An operator can grant the " + NODE_PREFIX + callClass
+                + "which '" + toolName + "' is. An operator can grant the " + NODE_PREFIX + callClass
                 + " permission node.";
         }
-        JsonElement load = arguments.get("load");
-        if (load != null && load.isJsonPrimitive() && load.getAsJsonPrimitive().isBoolean() && load.getAsBoolean()
+        // Read as the tools read it: they take the string "true" for the boolean, so a check for a JSON
+        // boolean alone let that spelling load chunks without the class.
+        if (com.micatechnologies.minecraft.mcmcp.json.Json.getBoolean(arguments, "load", false)
             && !principal.has(Principal.CLASS_LOAD)) {
             return "load: true needs '" + Principal.CLASS_LOAD + "' access, which yours does not include. An "
                 + "operator can grant the " + NODE_PREFIX + Principal.CLASS_LOAD + " permission node; or leave "
                 + "load out to read and write only chunks that are already loaded.";
         }
-        return pinPlayer(principal, tool.getName(), arguments);
+        return pinPlayer(principal, toolName, arguments);
+    }
+
+    /** Whether {@code toolName} takes an argument naming the player it acts as or on. */
+    public static boolean namesPlayer(String toolName) {
+        return PLAYER_ARGUMENTS.containsKey(toolName);
+    }
+
+    /**
+     * What to tell a companion caller whose command ran as their own player because it named nobody:
+     * why, and what would make it run as the console (#217). Null for anyone else. Agents sharing one
+     * player took "ran as the player" for a fault of the tool and sent world edits through it all day.
+     */
+    @Nullable
+    public static String ranAsSelfNote(Principal principal, @Nullable String asPlayer) {
+        if (!principal.isCompanion() || principal.has(Principal.CLASS_CONSOLE) || asPlayer == null
+            || principal.getPlayerName() == null || !asPlayer.equalsIgnoreCase(principal.getPlayerName())) {
+            return null;
+        }
+        return "Through the companion a command runs as you, the connected player, unless an operator grants "
+            + NODE_PREFIX + Principal.CLASS_CONSOLE + "; with that node a command with no asPlayer runs as the "
+            + "server console.";
     }
 
     @Override

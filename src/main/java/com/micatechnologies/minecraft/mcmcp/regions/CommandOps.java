@@ -219,12 +219,20 @@ public final class CommandOps {
     }
 
     private static int integer(String word, String what) throws ParseException {
+        int value;
         try {
-            return Integer.parseInt(word);
+            value = Integer.parseInt(word);
         }
         catch (NumberFormatException e) {
             throw new ParseException("'" + word + "' is not a whole number, for " + what + ".");
         }
+        // No number in an op is a position outside the world (#219). Past this the cell store keeps only
+        // the low bits of a section's x, so x 1073741824 was written at x 0, with a reply naming the far cell.
+        if (!WorldBounds.isHorizontal(value)) {
+            throw new ParseException("'" + word + "' is outside the world, for " + what + ": at most "
+                + WorldBounds.MAX_HORIZONTAL + " from 0.");
+        }
+        return value;
     }
 
     /** A parse of many lines: the ops that parsed, and why each other line did not. */

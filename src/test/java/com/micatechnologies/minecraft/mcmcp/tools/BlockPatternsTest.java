@@ -56,6 +56,16 @@ class BlockPatternsTest {
     }
 
     @Test
+    void aPatternNamingMetadataZeroMatchesTheBareIdItIsReportedAs() {
+        BlockPatterns sown = of("minecraft:wheat:0");
+        assertTrue(sown.matches("minecraft:wheat"));
+        assertFalse(sown.matches("minecraft:wheat:3"));
+        assertFalse(sown.matches("minecraft:wheat_seeds"));
+        // Other metadata values still do not match the bare id.
+        assertFalse(of("minecraft:wheat:3").matches("minecraft:wheat"));
+    }
+
+    @Test
     void matchingIgnoresCase() {
         assertTrue(of("MINECRAFT:Stone").matches("minecraft:stone"));
     }

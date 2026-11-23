@@ -159,10 +159,28 @@ public class Mcmcp {
         com.micatechnologies.minecraft.mcmcp.game.ServerWatchdog.serverStarting(event.getServer());
         reportServerExposure(event.getServer().isDedicatedServer());
 
-        if (!McmcpConfig.isServerEndpointEnabled()) {
-            return;
+        serverEndpoint = startServerEndpoint(event.getServer().isDedicatedServer());
+    }
+
+    /**
+     * The server endpoint this config asks for: the ordinary one when it is enabled; otherwise, behind
+     * a singleplayer world, the integrated server's tools over the orchestrator link with no port of
+     * their own (#215); otherwise none.
+     */
+    @Nullable
+    private static McpEndpoint startServerEndpoint(boolean dedicated) {
+        if (McmcpConfig.isServerEndpointEnabled()) {
+            return McmcpEndpoints.start(McmcpSide.SERVER, new ServerThreadBridge());
         }
-        serverEndpoint = McmcpEndpoints.start(McmcpSide.SERVER, new ServerThreadBridge());
+        if (!dedicated && McmcpConfig.isServeSingleplayerEnabled()) {
+            McpEndpoint endpoint = McmcpEndpoints.startSingleplayer(new ServerThreadBridge());
+            if (endpoint != null) {
+                LOGGER.info("MCMCP: this singleplayer world's server tools are served over the orchestrator link "
+                    + "(endpoints.serveSingleplayer). No port was opened for them.");
+            }
+            return endpoint;
+        }
+        return null;
     }
 
     /**
@@ -330,8 +348,9 @@ public class Mcmcp {
         if (proxy != null) {
             proxy.startClientEndpoint();
         }
-        if (McmcpConfig.isServerEndpointEnabled() && ServerThreadBridge.server() != null) {
-            serverEndpoint = McmcpEndpoints.start(McmcpSide.SERVER, new ServerThreadBridge());
+        net.minecraft.server.MinecraftServer running = ServerThreadBridge.server();
+        if (running != null) {
+            serverEndpoint = startServerEndpoint(running.isDedicatedServer());
         }
     }
 }

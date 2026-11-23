@@ -193,7 +193,12 @@ public final class ClientCompanion {
     private static void connected(boolean local) {
         reassembler = newReassembler();
         if (local) {
-            set(State.ABSENT, "Playing singleplayer: the world's own server endpoint serves its tools.", null);
+            // Said as it is: with no server endpoint this used to promise one anyway (#215).
+            set(State.ABSENT, Mcmcp.getServerEndpoint() != null
+                ? "Playing singleplayer: the world's own server endpoint serves its tools."
+                : "Playing singleplayer with no server endpoint, so the server_* tools are not available: turn on "
+                    + "endpoints.serveSingleplayer (needs the orchestrator link) or endpoints.enableServerEndpoint "
+                    + "in the MCMCP config, then /mcmcp restart.", null);
             return;
         }
         if (!serverHasChannel) {

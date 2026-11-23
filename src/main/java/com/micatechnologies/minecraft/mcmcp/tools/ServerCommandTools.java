@@ -70,7 +70,8 @@ public final class ServerCommandTools {
             .schema(JsonSchema.object()
                 .string("command", "The command to run, e.g. 'time set day' or '/give Steve stone 64'.")
                 .string("asPlayer", "Username to run the command as. Omit to run with console "
-                    + "authority.")
+                    + "authority. Refused while another agent holds that player's lease (server_player_lease).")
+                .string(ServerPlayerLeaseTools.LEASE_TOKEN, ServerPlayerLeaseTools.LEASE_TOKEN_DESCRIPTION)
                 .object("profile", CommandProfiling.DESCRIPTION, CommandProfiling.schema())
                 .property("at", ServerBulkTools.atSchema("With asPlayer: run the command with the player "
                     + "moved here, and put them back after it."))
@@ -99,6 +100,13 @@ public final class ServerCommandTools {
                 }
 
                 final String asPlayer = context.getString("asPlayer", null);
+                // A command run as a player borrows that player: their position with 'at', their chat,
+                // their inventory for a mod command. Another agent's lease on them is refused here as it
+                // is for an item use (#217); a command run as the console borrows nobody.
+                ToolResult leased = ServerPlayerLeaseTools.refusal(context, asPlayer);
+                if (leased != null) {
+                    return leased;
+                }
                 final double[] at;
                 try {
                     at = CommandBatch.parseAt(context.getArguments().get("at"), "at");
@@ -236,6 +244,11 @@ public final class ServerCommandTools {
                             + "slot as replace|keep|destroy and drops a tag there while reporting success.");
                     }
                     json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
+                    String why = com.micatechnologies.minecraft.mcmcp.companion.CompanionPolicy.ranAsSelfNote(
+                        context.getPrincipal(), asPlayer);
+                    if (why != null) {
+                        json.addProperty("ranAsWhy", why);
+                    }
                     if (capture != null && CommandText.deliversToPlayer(command)) {
                         // Said, so a model does not read the output as the message having gone nowhere.
                         json.addProperty("deliveredTo", asPlayer + "'s chat as well as the output");

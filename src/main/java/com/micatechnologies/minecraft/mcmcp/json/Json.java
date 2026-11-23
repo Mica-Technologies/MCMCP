@@ -83,7 +83,10 @@ public final class Json {
             JsonElement parsed = PARSER.parse(text);
             return parsed == null || parsed.isJsonNull() ? null : parsed;
         }
-        catch (JsonSyntaxException | IllegalStateException e) {
+        catch (com.google.gson.JsonParseException | IllegalStateException e) {
+            // JsonParseException, not only its syntax subclass: Gson reports a document nested too deep
+            // for its stack as the plain one, and uncaught on the orchestrator link that dropped the
+            // link, and every agent on it, for one bad frame.
             return null;
         }
     }
@@ -186,7 +189,15 @@ public final class Json {
      */
     public static int getInt(@Nullable JsonObject parent, String key, int fallback) {
         Double value = readNumber(parent, key);
-        return value == null ? fallback : (int) Math.round(value);
+        if (value == null) {
+            return fallback;
+        }
+        // Held at the ends of int, never wrapped: cast from long, 4294967301 was 5, and a coordinate far
+        // outside the world became a real block somewhere else, written to with a success reply. At the
+        // end of int it is still outside every range a tool checks, and is refused there.
+        long rounded = Math.round(value);
+        return rounded > Integer.MAX_VALUE ? Integer.MAX_VALUE : rounded < Integer.MIN_VALUE ? Integer.MIN_VALUE
+            : (int) rounded;
     }
 
     public static long getLong(@Nullable JsonObject parent, String key, long fallback) {
@@ -209,18 +220,22 @@ public final class Json {
             return null;
         }
         JsonPrimitive primitive = element.getAsJsonPrimitive();
+        Double value = null;
         if (primitive.isNumber()) {
-            return primitive.getAsDouble();
+            value = primitive.getAsDouble();
         }
-        if (primitive.isString()) {
+        else if (primitive.isString()) {
             try {
-                return Double.valueOf(primitive.getAsString().trim());
+                value = Double.valueOf(primitive.getAsString().trim());
             }
             catch (NumberFormatException e) {
                 return null;
             }
         }
-        return null;
+        // "NaN", "Infinity" and 1e999 are not numbers a tool can act on: as an angle NaN passes every
+        // range check (each comparison with it is false) and reaches the player's rotation; as a
+        // coordinate it is a teleport to nowhere. Read as absent, like any other value that is no number.
+        return value == null || value.isNaN() || value.isInfinite() ? null : value;
     }
 
     /** Returns the boolean at {@code key}, accepting the strings {@code "true"}/{@code "false"} too. */

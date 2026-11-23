@@ -2,16 +2,20 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
+import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.item.EntityItem;
-import net.minecraft.util.math.AxisAlignedBB;
+import net.minecraft.util.ClassInheritanceMultiMap;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
+import net.minecraft.world.chunk.Chunk;
 
 /**
  * Neighbour updates held back until a slice of a bulk write is complete (#85).
@@ -108,23 +112,87 @@ final class DeferredNeighbours {
         }
     }
 
-    /** The ids of the item entities in a box, to tell afterwards which ones a write dropped. Game thread. */
-    static Set<Integer> itemsIn(World world, AxisAlignedBB box) {
-        Set<Integer> ids = new HashSet<>();
-        for (EntityItem item : world.getEntitiesWithinAABB(EntityItem.class, box)) {
-            ids.add(item.getEntityId());
+    /** Chunks looked at for items in one game-thread task: a hash lookup and a short list each. */
+    private static final int SCAN_SLICE = 2048;
+
+    /**
+     * The chunks a write's dropped items can be in: every cell's own, and its neighbour's where the cell
+     * is on a chunk's edge, since an item spawns up to a block from the cell that dropped it.
+     *
+     * <p>A set of chunks, never a box round the cells (#219). The cost of looking for entities in a box
+     * is its area in chunks, and a box round a call's cells is as large as its two farthest cells: with
+     * no cells at all it was the whole integer range, and vanilla's lookup walked it on the server
+     * thread until the server was killed. A set of chunks costs what the cells do.
+     */
+    static long[] dropChunks(int[] xs, int[] zs) {
+        Set<Long> chunks = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < xs.length; i++) {
+            int minX = (xs[i] - 1) >> 4;
+            int maxX = (xs[i] + 1) >> 4;
+            int minZ = (zs[i] - 1) >> 4;
+            int maxZ = (zs[i] + 1) >> 4;
+            for (int cz = minZ; cz <= maxZ; cz++) {
+                for (int cx = minX; cx <= maxX; cx++) {
+                    chunks.add(ChunkKeys.of(cx, cz));
+                }
+            }
+        }
+        long[] keys = new long[chunks.size()];
+        int at = 0;
+        for (Long key : chunks) {
+            keys[at++] = key;
+        }
+        return keys;
+    }
+
+    /**
+     * The ids of the item entities in {@code chunks}, to tell afterwards which ones a write dropped.
+     * From the tool's thread: the look goes through the game thread a slice of chunks at a time, so its
+     * longest task is bounded whatever the call's size. Chunks not loaded hold no items and load nothing.
+     *
+     * @param followUp after the write, when the look must not be dropped for a cancel
+     */
+    static Set<Integer> itemsIn(ToolContext context, final int dimension, final long[] chunks, boolean followUp) {
+        final Set<Integer> ids = new HashSet<>();
+        for (int from = 0; from < chunks.length; from += SCAN_SLICE) {
+            final int start = from;
+            final int end = Math.min(chunks.length, from + SCAN_SLICE);
+            java.util.concurrent.Callable<Void> slice = () -> {
+                collectItems(ServerWorldTools.requireWorld(dimension), chunks, start, end, ids);
+                return null;
+            };
+            if (followUp) {
+                context.onGameThreadFollowUp(slice);
+            }
+            else {
+                context.onGameThread(slice);
+            }
         }
         return ids;
     }
 
-    /** How many item entities in the box were not there before. Game thread. */
-    static int itemsDropped(World world, AxisAlignedBB box, Set<Integer> before) {
-        int dropped = 0;
-        for (EntityItem item : world.getEntitiesWithinAABB(EntityItem.class, box)) {
-            if (!before.contains(item.getEntityId())) {
-                dropped++;
+    /** How many item entities in {@code chunks} were not there {@code before}. From the tool's thread. */
+    static int itemsDropped(ToolContext context, int dimension, long[] chunks, Set<Integer> before) {
+        Set<Integer> now = itemsIn(context, dimension, chunks, true);
+        now.removeAll(before);
+        return now.size();
+    }
+
+    /** Game thread: adds the ids of the items in chunks {@code [from, to)} of {@code chunks}. */
+    private static void collectItems(World world, long[] chunks, int from, int to, Set<Integer> into) {
+        for (int i = from; i < to; i++) {
+            if ((i & 255) == 0) {
+                com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.checkpoint();
+            }
+            Chunk chunk = world.getChunkProvider().getLoadedChunk(ChunkKeys.x(chunks[i]), ChunkKeys.z(chunks[i]));
+            if (chunk == null) {
+                continue;
+            }
+            for (ClassInheritanceMultiMap<Entity> slice : chunk.getEntityLists()) {
+                for (EntityItem item : slice.getByClass(EntityItem.class)) {
+                    into.add(item.getEntityId());
+                }
             }
         }
-        return dropped;
     }
 }

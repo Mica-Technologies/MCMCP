@@ -150,6 +150,26 @@ public final class ChunkLoadGovernor {
             }
         });
         MinecraftForge.EVENT_BUS.register(new Events());
+        // An emergency stop gives back every hold an agent asked for (#219): whatever went wrong, the
+        // server should not go on keeping regions in memory for it. Holds of calls still running end
+        // with their calls, which the stop refuses at their next step.
+        com.micatechnologies.minecraft.mcmcp.game.Estop.addListener((now, before) -> {
+            if (now != null && before == null && now.source == com.micatechnologies.minecraft.mcmcp.game.Estop.Source.LOCAL
+                && ServerThreadBridge.server() != null) {
+                ServerTaskPump.runLater(TaskCaller.MCMCP, () -> {
+                    int released = 0;
+                    for (HoldLedger.Hold hold : new java.util.ArrayList<>(LEDGER.holds())) {
+                        if (!hold.temporary) {
+                            releaseNow(hold.id, "the emergency stop was set");
+                            released++;
+                        }
+                    }
+                    if (released > 0) {
+                        Mcmcp.LOGGER.warn("MCMCP released " + released + " chunk hold(s) for the emergency stop.");
+                    }
+                });
+            }
+        });
     }
 
     /**
@@ -368,6 +388,12 @@ public final class ChunkLoadGovernor {
         final Deque<Long> pending;
         final CompletableFuture<Outcome> done = new CompletableFuture<>();
         final long startedMillis;
+        /**
+         * Set when the call stopped waiting on a server thread that did not answer. Its caller was never
+         * given the hold's id, so whenever the thread next runs MCMCP's work the hold is given back,
+         * loaded or not: a hold nobody can name is a hold nobody can release (#219).
+         */
+        volatile boolean abandoned;
 
         Request(HoldLedger.Hold hold, Outcome outcome, Deque<Long> pending, long startedMillis) {
             this.hold = hold;
@@ -487,8 +513,14 @@ public final class ChunkLoadGovernor {
                             // The server thread has not even run the give-up: it is stalled. Stop waiting
                             // for it; the give-up still releases the hold when it runs, and if it never
                             // does, the hold reads as its call's gone and is expired (#132).
+                            request.abandoned = true;
+                            // Queued again: the first give-up does nothing if the load has finished by the
+                            // time the thread comes back, and the hold would then be left for nobody.
+                            release(request.hold.id, "its call stopped waiting on a server thread that did not answer");
                             throw new Busy("The server thread did not respond while this call waited for its "
-                                + "chunks; it is " + ServerLoad.describe() + ". Retry after busy.retryAfterMs.",
+                                + "chunks; it is " + ServerLoad.describe() + ". Nothing is left held for this call: "
+                                + "its hold (" + request.hold.id + ") is given back as soon as the thread runs again. "
+                                + "Retry after busy.retryAfterMs.",
                                 ServerLoad.busy("server_overloaded"));
                         }
                     }
@@ -704,6 +736,25 @@ public final class ChunkLoadGovernor {
             hold.callEndedAt = callEnded::get;
         }
         LEDGER.add(hold);
+        try {
+            return takeAdded(world, hold, dimension, chunks, nowMillis, callEnded);
+        }
+        catch (RuntimeException | Error failed) {
+            // Whoever was to be told the hold's id will hear an error instead, so the hold goes back now:
+            // a task that threw runs no orphan cleanup, and the hold would last out its whole lease.
+            try {
+                releaseNow(hold.id, "its admission failed");
+            }
+            catch (RuntimeException ignored) {
+                // The first failure is the one to report.
+            }
+            throw failed;
+        }
+    }
+
+    /** Server thread: the rest of {@link #take}, once the hold is in the ledger. */
+    private static Object takeAdded(WorldServer world, HoldLedger.Hold hold, int dimension, Set<Long> chunks,
+                                    long nowMillis, AtomicLong callEnded) {
         Outcome outcome = new Outcome(hold.id, chunks.size(), callEnded);
         Deque<Long> pending = new ArrayDeque<>();
         ChunkProviderServer provider = world.getChunkProvider();

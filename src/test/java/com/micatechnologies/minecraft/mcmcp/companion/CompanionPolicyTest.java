@@ -196,4 +196,38 @@ class CompanionPolicyTest {
         assertEquals("Builder", line.get("player").getAsString());
         assertEquals("companion", line.get("via").getAsString());
     }
+
+    @Test
+    void aStepOrJobPartIsAdmittedLikeACallOfItsOwn() {
+        // Through server_run_test or a job a companion caller's command once ran as the console.
+        Principal commander = Principal.companion("id", "Builder",
+            new java.util.HashSet<>(java.util.Arrays.asList("read", "command")));
+        JsonObject command = new JsonObject();
+        command.addProperty("command", "say hi");
+        assertNull(CompanionPolicy.admit(commander, "server_run_command", command));
+        assertEquals("Builder", command.get("asPlayer").getAsString());
+
+        JsonObject other = new JsonObject();
+        other.addProperty("command", "say hi");
+        other.addProperty("asPlayer", "SomeoneElse");
+        org.junit.jupiter.api.Assertions.assertNotNull(CompanionPolicy.admit(commander, "server_run_command", other));
+
+        // 'load' needs its class however it is spelled.
+        JsonObject loading = new JsonObject();
+        loading.addProperty("load", "true");
+        org.junit.jupiter.api.Assertions.assertNotNull(CompanionPolicy.admit(commander, "server_get_blocks", loading));
+        JsonObject loadingBoolean = new JsonObject();
+        loadingBoolean.addProperty("load", true);
+        org.junit.jupiter.api.Assertions.assertNotNull(
+            CompanionPolicy.admit(commander, "server_get_blocks", loadingBoolean));
+    }
+
+    @Test
+    void aCommandThatRanAsTheCallerSaysWhyAndWhatWouldMakeItTheConsole() {
+        Principal commander = Principal.companion("id", "Builder", Collections.singleton("command"));
+        String note = CompanionPolicy.ranAsSelfNote(commander, "builder");
+        org.junit.jupiter.api.Assertions.assertTrue(note.contains("mcmcp.companion.command.console"), note);
+        assertNull(CompanionPolicy.ranAsSelfNote(commander, null));
+        assertNull(CompanionPolicy.ranAsSelfNote(Principal.ENDPOINT, "Builder"));
+    }
 }

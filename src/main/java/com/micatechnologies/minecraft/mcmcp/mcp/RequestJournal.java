@@ -314,6 +314,10 @@ public final class RequestJournal {
 
         JsonObject open = parsed.get(lastOpen);
         Map<Long, JsonObject> running = new LinkedHashMap<>();
+        // Calls that answered "timed out" after their work had started on the game thread. Their end
+        // line is written, so they are not unfinished, yet the work may never have ended: the call that
+        // hung a server for good (#219) left exactly this and nothing else.
+        java.util.ArrayDeque<JsonObject> timedOut = new java.util.ArrayDeque<>();
         boolean closed = false;
         String lastSeen = Json.getString(open, "t");
         int calls = 0;
@@ -329,7 +333,13 @@ public final class RequestJournal {
                 calls++;
             }
             else if ("end".equals(event)) {
-                running.remove(Json.getLong(line, "id", -1L));
+                JsonObject start = running.remove(Json.getLong(line, "id", -1L));
+                if (start != null && "timeout".equals(Json.getString(line, "status"))) {
+                    timedOut.addLast(start);
+                    if (timedOut.size() > MAX_TIMED_OUT) {
+                        timedOut.removeFirst();
+                    }
+                }
             }
             else if ("close".equals(event)) {
                 closed = true;
@@ -345,24 +355,67 @@ public final class RequestJournal {
         json.addProperty("calls", calls);
         JsonArray unfinished = new JsonArray();
         for (JsonObject start : running.values()) {
-            JsonObject call = new JsonObject();
-            call.addProperty("tool", Json.getString(start, "tool"));
-            call.addProperty("startedAt", Json.getString(start, "t"));
-            JsonElement args = start.get("args");
-            if (args != null) {
-                call.add("args", args);
-            }
-            JsonElement principal = start.get("principal");
-            if (principal != null) {
-                call.add("principal", principal);
-            }
-            unfinished.add(call);
+            unfinished.add(describeCall(start));
         }
         json.add("unfinishedCalls", unfinished);
+        // Only for a run that did not end cleanly: after a clean stop a timeout is history, not a suspect.
+        if (!closed && !timedOut.isEmpty()) {
+            JsonArray suspects = new JsonArray();
+            for (JsonObject start : timedOut) {
+                suspects.add(describeCall(start));
+            }
+            json.add("timedOutCalls", suspects);
+        }
         if (unreadable > 0) {
             json.addProperty("unreadableLines", unreadable);
         }
         return json;
+    }
+
+    /** The most timed-out calls of a run that are kept to name afterwards: the latest ones. */
+    static final int MAX_TIMED_OUT = 8;
+
+    private static JsonObject describeCall(JsonObject start) {
+        JsonObject call = new JsonObject();
+        call.addProperty("tool", Json.getString(start, "tool"));
+        call.addProperty("startedAt", Json.getString(start, "t"));
+        JsonElement args = start.get("args");
+        if (args != null) {
+            call.add("args", args);
+        }
+        JsonElement principal = start.get("principal");
+        if (principal != null) {
+            call.add("principal", principal);
+        }
+        return call;
+    }
+
+    /**
+     * What to write in the log when this run starts after one that did not end cleanly: the calls that
+     * were in flight, and those that had timed out with their work still on the game thread. Null when
+     * the last run ended cleanly or left neither. So whoever restarts a hung server reads the likely
+     * trigger in the log, without knowing to ask game_health for it (#219).
+     */
+    @Nullable
+    public String previousRunWarning() {
+        if (!Json.getBoolean(previousRun, "found", false) || Json.getBoolean(previousRun, "endedCleanly", true)) {
+            return null;
+        }
+        JsonArray unfinished = Json.getArray(previousRun, "unfinishedCalls");
+        JsonArray suspects = Json.getArray(previousRun, "timedOutCalls");
+        if ((unfinished == null || unfinished.size() == 0) && (suspects == null || suspects.size() == 0)) {
+            return null;
+        }
+        StringBuilder text = new StringBuilder("MCMCP: the last run of this " + side + " did not end cleanly (last "
+            + "record " + Json.getString(previousRun, "lastRecordAt", "?") + ").");
+        if (unfinished != null && unfinished.size() > 0) {
+            text.append(" Calls still running when it ended: ").append(Json.write(unfinished)).append('.');
+        }
+        if (suspects != null && suspects.size() > 0) {
+            text.append(" Calls that had timed out with their work started and not seen to finish: ")
+                .append(Json.write(suspects)).append('.');
+        }
+        return text.append(" game_health's previousRun has the same.").toString();
     }
 
     @Nullable

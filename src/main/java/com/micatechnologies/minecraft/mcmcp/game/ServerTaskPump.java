@@ -66,6 +66,108 @@ public final class ServerTaskPump {
 
     private static boolean registered;
 
+    /** A task as it waits in the queue: with who offered it, so the task running now can be named. */
+    private static final class Offered implements Runnable {
+
+        final TaskCaller caller;
+        final Runnable task;
+
+        Offered(TaskCaller caller, Runnable task) {
+            this.caller = caller;
+            this.task = task;
+        }
+
+        @Override
+        public void run() {
+            task.run();
+        }
+    }
+
+    /**
+     * The task the server thread is inside now, for whoever looks from another thread (#219).
+     *
+     * <p>A call's own record ends when its caller stops waiting, which is exactly when a task that never
+     * returns is most worth naming: the report of a server hung inside {@code server_set_blocks} said
+     * "MCMCP calls running: 0". This is kept by the thread doing the work, so it lasts as long as the work.
+     */
+    public static final class Running {
+
+        public final String caller;
+        /** The tool call it is part of, with a short form of its arguments; null for housekeeping. */
+        @Nullable
+        public final String what;
+        public final boolean followUp;
+        public final long startedMillis;
+        final long startedNanos;
+        /** Set by {@link #requestAbort}: the task's own loops stop at their next {@link #checkpoint}. */
+        volatile String abort;
+
+        Running(TaskCaller caller) {
+            this.caller = caller.label;
+            this.what = caller.what;
+            this.followUp = caller.followUp;
+            this.startedMillis = System.currentTimeMillis();
+            this.startedNanos = System.nanoTime();
+        }
+
+        public long runningMillis() {
+            return (System.nanoTime() - startedNanos) / 1_000_000L;
+        }
+
+        /** "server_set_blocks {mode=palette, ...} for builder-2, running 14 s". */
+        public String describe() {
+            return (what == null ? "MCMCP housekeeping" : what) + " for " + caller + (followUp ? " (a follow-up step)" : "")
+                + ", running " + runningMillis() / 1000L + " s";
+        }
+    }
+
+    /** Thrown on the server thread by {@link #checkpoint} when the task running was asked to stop. */
+    public static final class TaskAborted extends RuntimeException {
+
+        private static final long serialVersionUID = 1L;
+
+        TaskAborted(String why) {
+            super(why);
+        }
+    }
+
+    @Nullable
+    private static volatile Running running;
+
+    /** The task the server thread is running now, or null between tasks. Any thread. */
+    @Nullable
+    public static Running running() {
+        return running;
+    }
+
+    /**
+     * Any thread: asks the task running now to stop. It stops at the next {@link #checkpoint} its own
+     * loop reaches, with {@code why} as its error; a task inside the game's own code (a vanilla lookup,
+     * another mod's hook) reaches none until that returns, and nothing can interrupt it there.
+     *
+     * @return what was asked to stop, or null when no task is running
+     */
+    @Nullable
+    public static Running requestAbort(String why) {
+        Running current = running;
+        if (current != null) {
+            current.abort = why;
+        }
+        return current;
+    }
+
+    /**
+     * Server thread, from a loop of MCMCP's own that reads the world and may run long: throws
+     * {@link TaskAborted} if the task running was asked to stop. Costs one volatile read. Never called
+     * from a loop that writes: a write stopped half way is worse than one that finishes late.
+     */
+    public static void checkpoint() {
+        Running current = running;
+        if (current != null && current.abort != null) {
+            throw new TaskAborted(current.abort);
+        }
+    }
+
     private ServerTaskPump() {
     }
 
@@ -74,6 +176,10 @@ public final class ServerTaskPump {
             registered = true;
             MinecraftForge.EVENT_BUS.register(new Events());
             ServerLoad.setQueueDepth(QUEUE::depth);
+            ServerLoad.setRunningTask(() -> {
+                Running current = running;
+                return current == null ? null : current.describe();
+            });
         }
     }
 
@@ -91,11 +197,12 @@ public final class ServerTaskPump {
             return;
         }
         LABELS.put(caller.key, caller.label);
+        Offered offered = new Offered(caller, task);
         if (caller.followUp) {
-            QUEUE.offerFirst(caller.key, task);
+            QUEUE.offerFirst(caller.key, offered);
         }
         else {
-            QUEUE.offer(caller.key, task);
+            QUEUE.offer(caller.key, offered);
         }
         kickIfPaused();
     }
@@ -153,6 +260,11 @@ public final class ServerTaskPump {
             json.addProperty("budgetMs", TaskBudget.budgetNanos(level, configured) / 1_000_000L);
         }
         json.add("byCaller", callers);
+        // Only once it has run long enough to be worth a look: most tasks are over in a millisecond.
+        Running current = running;
+        if (current != null && current.runningMillis() >= 1000L) {
+            json.addProperty("runningNow", current.describe());
+        }
         return json;
     }
 
@@ -185,7 +297,8 @@ public final class ServerTaskPump {
 
     private static void dropAll(String why) {
         int dropped = 0;
-        for (Runnable task : QUEUE.clear()) {
+        for (Runnable queued : QUEUE.clear()) {
+            Runnable task = queued instanceof Offered ? ((Offered) queued).task : queued;
             if (task instanceof BridgeTask && ((BridgeTask<?>) task).drop(why)) {
                 dropped++;
             }
@@ -200,12 +313,21 @@ public final class ServerTaskPump {
     static void drain() {
         ServerLoad.Level level = ServerLoad.level();
         QUEUE.drain(TaskBudget.budgetNanos(level, McmcpConfig.getHealthTickBudgetMs()), TaskBudget.maxTasks(level),
-            task -> {
-                if (task instanceof BridgeTask) {
-                    return ((BridgeTask<?>) task).tryRun();
+            queued -> {
+                Offered offered = (Offered) queued;
+                Runnable task = offered.task;
+                // Named for as long as it runs, whatever became of its caller (#219).
+                running = new Running(offered.caller);
+                try {
+                    if (task instanceof BridgeTask) {
+                        return ((BridgeTask<?>) task).tryRun();
+                    }
+                    task.run();
+                    return true;
                 }
-                task.run();
-                return true;
+                finally {
+                    running = null;
+                }
             });
     }
 

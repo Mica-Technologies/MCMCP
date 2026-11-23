@@ -203,6 +203,12 @@ public final class ClientDebugTools {
                         + "detached camera, so they need 'from'. Nothing was captured.");
                 }
                 final boolean bringPlayer = context.getBoolean("bringPlayer", false);
+                // A screenshot is taken through the emergency stop, but one that moves the player first
+                // is not only a screenshot: nothing moves a player while the stop is set.
+                if (bringPlayer && com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
+                    return ToolResult.error(com.micatechnologies.minecraft.mcmcp.game.Estop.refusal()
+                        + " A screenshot without bringPlayer still works.");
+                }
                 final boolean fullbright = context.getBoolean("fullbright", false);
                 final float fov = context.has("fov")
                     ? (float) Math.max(MIN_FOV, Math.min(MAX_FOV, context.getDouble("fov", 70.0D)))

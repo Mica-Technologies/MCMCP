@@ -47,6 +47,19 @@ decision by whoever operates the server.
 In a development launch `addon.gradle` passes `-Dmcmcp.dev.autostart=true`, which flips the *default*
 to true. An explicit value in the config file still wins.
 
+### `serveSingleplayer`
+
+`boolean` · default `true`
+
+While `enableServerEndpoint` is off, serve a singleplayer world's server tools over the orchestrator
+link, as this game's `.server` endpoint (`mcmcp_instances` lists it with `via: singleplayer`).
+
+No port is opened for it and nothing listens: only the orchestrator this client already dials can
+reach it, so a second game cannot collide with it. The `permissions` section still decides what its
+tools may do. It has no effect on a dedicated server, and none with `enableOrchestratorLink` off.
+Without it a mod's own dev client in a singleplayer world had the client tools only, and every world
+read went through the player's view.
+
 ### `bindAddress`
 
 `string` · default `127.0.0.1`
@@ -569,6 +582,14 @@ checks once a second, off the server thread. At the start of each stall, every t
 server thread's first, is written to `mcmcp/stalls/<yyyyMMdd-HHmmss>.txt` under the game folder,
 with the MCMCP calls running at the time, and one warning in the log names the file. When ticks
 resume, the log says so and how long it lasted.
+
+When the stalled thread is inside MCMCP's own work, the dump and an error in the log name it: the
+tool, a short form of its arguments (a long list as its length), who called it and how long it has
+run. That task is named even after its caller timed out and the call left "calls running". It is
+also asked to stop, which reaches only MCMCP's own long reads (a block read, a railing scan, a map,
+the look for dropped items): they give up at their next row. A write is never stopped half way, and a
+task inside the game's own code, or another mod's, cannot be interrupted at all: it is only named, so
+that whoever restarts the server knows which call to look at.
 
 Integrated servers are not watched this way: one stops ticking whenever its player pauses the game.
 

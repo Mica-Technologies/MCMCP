@@ -261,6 +261,8 @@ says for how long and `stalled` carries the server thread's state and top frames
 the server thread: `queued` tasks waiting, MCMCP's `msPerTick` over about the last 20 ticks, this
 tick's `budget` (`"15 ms"`, or `"one task"` while writes are refused or the server is stalled)
 with `budgetMs` when it is a time, and `byCaller`, the five callers spending most (`caller`, `label`, `msPerTick`).
+`runningNow` names a task that has been on the server thread for a second or more: its tool, a short
+form of its arguments, its caller and how long it has run, whether or not that caller is still waiting.
 Like `clientThread`, this is answered off the server thread.
 
 `previousRun` is what the [request journal](configuration.md#journal) recorded about the run before
@@ -790,8 +792,8 @@ nothing but your own running calls stands in the way.
 
 Holds the chunks under a box loaded with no player nearby, and returns once they're in memory:
 `{id, chunks, idleSeconds, leaseSeconds}`. A hold ends after its `idleSeconds` with no reads or
-writes inside it, at the end of its lease, on [`server_release_loaded`](#server_release_loaded), or
-when its owner leaves the server. Reading or writing inside it renews the idle timer but never the
+writes inside it, at the end of its lease, on [`server_release_loaded`](#server_release_loaded), when
+its owner leaves the server, or when the emergency stop is set, which gives back every hold. Reading or writing inside it renews the idle timer but never the
 lease; `renew` renews both. A read inside a hold whose lease ends within two minutes carries
 `holdLeaseEndsInSeconds` in its `chunks` block, so a long test hears of it before its region
 unloads. For a test that reads nothing for minutes at a time, pass a long `idleSeconds`. `list`
@@ -2338,7 +2340,7 @@ Text fields in modded GUIs are not reachable this way; use the client's GUI tool
 | Argument | Notes |
 | --- | --- |
 | `command` | With or without the leading slash. |
-| `asPlayer` | Run as this player, with their permission level and position. Omit for console authority. |
+| `asPlayer` | Run as this player, with their permission level and position. Omit for console authority. Refused, with a structured `busy`, while another agent holds that player's lease ([`server_player_lease`](#server_player_lease)); `leaseToken` acts under your own lease from another connection. |
 | `profile` | Measure the command. See [Profiling a command](#profiling-a-command). |
 | `at` | `{x, y, z, yaw?, pitch?}`, with `asPlayer` only: run the command with the player moved there, then put them back. See [`server_run_commands`](#server_run_commands). Its chunk is loaded for the call. |
 
@@ -2369,6 +2371,11 @@ that player, exactly as if they had typed it, so commands that act on "the sende
 `/gamemode 1` with no target, work. Its feedback is taken from the player's connection while the
 command runs and comes back in `output`, instead of appearing in their chat. It comes back whatever
 the `sendCommandFeedback` game rule says.
+
+Through the companion a command with no `asPlayer` runs as the connected player, and the result says
+so in `ranAsWhy`. To have such commands run as the server console, an operator grants that player the
+`mcmcp.companion.command.console` permission node; world edits like `/fill` then borrow nobody's
+identity. A command run as a player is refused while another agent holds that player's lease.
 
 **Nobody else is told.** Vanilla echoes a command's success to every other operator as a grey
 `[Name: ...]` chat line. A command run by a tool does not: the message goes to `output` and, cut to
@@ -2454,7 +2461,7 @@ Requires `permissions.allowChat` · `player`, `message` required
 
 #### `server_run_commands`
 
-:material-alert: Destructive · `commands` required · optional `asPlayer`, `at`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`, `loadMargin`, `profile`
+:material-alert: Destructive · `commands` required · optional `asPlayer`, `leaseToken`, `at`, `stopOnError`, `allResults`, `maxOutputLines`, `load`, `loadBoxes`, `loadMargin`, `profile`
 
 Runs up to 10,000 commands in order in one call, with nothing sent to chat in between. It replaces
 scripts that teleport a player around a region and send commands through chat in groups. The
@@ -2622,7 +2629,7 @@ the truth, since this is the side that draws the block.
 #### `client_get_blocks`
 
 :material-eye: Read-only · `x`, `y`, `z` required · optional `toX`, `toY`, `toZ`, `relative`, `mode`,
-`blocks`, `exclude`, `tile_entities`, `per_layer`, `limit`, `nbt`
+`blocks`, `exclude`, `tile_entities`, `per_layer`, `explicit_metadata`, `limit`, `nbt`
 
 A region read over the chunks the client already holds, so it works on any server, including one
 without MCMCP. Before this tool the only client-side read was `client_get_block`, one position per
@@ -2641,6 +2648,10 @@ call. Surveying one city parcel before clearing it took about 22,000 of those ca
 names one (`minecraft:wool:14`). A bare path matches it in any namespace (`barrier`). `*` asks for a
 substring (`*alarm*`). Plain substring matching was avoided on purpose, because `air` is a substring
 of `oak_stairs`. Every mode but `summary` excludes air unless `exclude` is given.
+In results a block with metadata 0 is named by its bare id (`minecraft:wheat`, never
+`minecraft:wheat:0`), though a pattern may spell the `:0` out and still match it.
+`explicit_metadata: true` names every block `id:metadata`, 0 included, which is easier to filter and
+to compare between two reads.
 `tile_entities: true` keeps only blocks the client holds a tile entity for.
 
 Chunks outside the view distance are listed in `unloadedChunks` and skipped, never counted as air;

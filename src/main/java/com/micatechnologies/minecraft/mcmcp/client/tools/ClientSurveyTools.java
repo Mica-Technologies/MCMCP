@@ -116,7 +116,8 @@ public final class ClientSurveyTools {
                 + "Filter with 'blocks' and 'exclude'. A pattern is a whole id ('minecraft:wool' "
                 + "matches every colour, 'minecraft:wool:14' one), a bare path ('barrier' in any "
                 + "namespace), or use * for a substring ('*alarm*'). Every mode but 'summary' "
-                + "excludes air unless you pass 'exclude' yourself.\n\n"
+                + "excludes air unless you pass 'exclude' yourself. In results metadata 0 is the bare id "
+                + "('minecraft:wheat', never 'minecraft:wheat:0'); explicit_metadata: true writes ':0' too.\n\n"
                 + "Only chunks inside the client's view distance can be read; the others are listed "
                 + "in 'unloadedChunks' and left out, never reported as air. A region too large for "
                 + "its mode is refused with a JSON body: error, requested, limit.")
@@ -135,6 +136,8 @@ public final class ClientSurveyTools {
                 .stringArray("exclude", "Leave out blocks matching any of these patterns.")
                 .bool("tile_entities", "Only count blocks that have a tile entity on this client.")
                 .bool("per_layer", "summary: also break the counts down by y. Default false.")
+                .bool("explicit_metadata", "Name every block 'id:metadata', metadata 0 included, so two "
+                    + "reads filter and compare the same way. Default false.")
                 .integer("limit", "positions, find: most positions returned; the counts stay exact. "
                     + "Default 256.", 1, MAX_POSITIONS)
                 .bool("nbt", "find: also return the tile-entity NBT of the first " + MAX_NBT
@@ -163,6 +166,7 @@ public final class ClientSurveyTools {
                     : "summary".equals(mode) ? Collections.<String>emptyList() : AIR);
                 final boolean tileEntitiesOnly = context.getBoolean("tile_entities", false);
                 final boolean perLayer = context.getBoolean("per_layer", false);
+                final boolean explicitMetadata = context.getBoolean("explicit_metadata", false);
                 final int limit = context.getBoundedInt("limit", 256, 1, MAX_POSITIONS);
                 if ("find".equals(mode)) {
                     if (include.isEmpty() && !tileEntitiesOnly) {
@@ -170,7 +174,7 @@ public final class ClientSurveyTools {
                             + "'tile_entities': true, or both.");
                     }
                     return find(context, new int[]{x1, y1, z1, x2, y2, z2}, relative, include,
-                        exclude, tileEntitiesOnly, limit, context.getBoolean("nbt", false));
+                        exclude, tileEntitiesOnly, limit, context.getBoolean("nbt", false), explicitMetadata);
                 }
 
                 long columns = (long) (Math.abs(x2 - x1) + 1) * (Math.abs(z2 - z1) + 1);
@@ -192,7 +196,7 @@ public final class ClientSurveyTools {
                         Region region = new Region(
                             origin.getX() + x1, origin.getY() + y1, origin.getZ() + z1,
                             origin.getX() + x2, origin.getY() + y2, origin.getZ() + z2);
-                        Survey survey = new Survey(mc.world, include, exclude, tileEntitiesOnly);
+                        Survey survey = new Survey(mc.world, include, exclude, tileEntitiesOnly, explicitMetadata);
                         if (COLUMN_MODES.contains(mode)) {
                             return survey.heightmap(region, !"heightmap".equals(mode),
                                 "underside".equals(mode));
@@ -217,7 +221,7 @@ public final class ClientSurveyTools {
      */
     private static ToolResult find(ToolContext context, int[] corners, boolean relative,
         BlockPatterns include, BlockPatterns exclude, boolean tileEntitiesOnly, int limit,
-        boolean nbt) {
+        boolean nbt, boolean explicitMetadata) {
         final FindPlan plan = context.onGameThread(() -> {
             Minecraft mc = ClientStateTools.requireInWorld();
             BlockPos origin = relative ? GameJson.blockPosOf(mc.player) : BlockPos.ORIGIN;
@@ -267,7 +271,7 @@ public final class ClientSurveyTools {
                     throw new IllegalStateException("The client changed world part way through the "
                         + "search; run it again.");
                 }
-                Survey survey = new Survey(mc.world, include, exclude, tileEntitiesOnly);
+                Survey survey = new Survey(mc.world, include, exclude, tileEntitiesOnly, explicitMetadata);
                 long deadline = System.nanoTime() + HOP_NANOS;
                 int i = start;
                 // At least one chunk per hop, so a slow chunk cannot stall the search.
@@ -456,9 +460,12 @@ public final class ClientSurveyTools {
         @SuppressWarnings("RedundantStringConstructorCall")
         private static final String NO_MATCH = new String("");
         private final JsonArray unloadedChunks = new JsonArray();
+        /** Write metadata 0 as ':0' rather than the bare id (#216). */
+        private final boolean explicitMetadata;
 
         Survey(WorldClient world, BlockPatterns include, BlockPatterns exclude,
-            boolean tileEntitiesOnly) {
+            boolean tileEntitiesOnly, boolean explicitMetadata) {
+            this.explicitMetadata = explicitMetadata;
             this.world = world;
             this.include = include;
             this.exclude = exclude;
@@ -491,7 +498,7 @@ public final class ClientSurveyTools {
                 ResourceLocation name = state.getBlock().getRegistryName();
                 id = name == null ? "unknown" : name.toString();
                 int metadata = state.getBlock().getMetaFromState(state);
-                if (metadata != 0) {
+                if (metadata != 0 || explicitMetadata) {
                     id = id + ":" + metadata;
                 }
                 ids.put(state, id);
@@ -517,7 +524,7 @@ public final class ClientSurveyTools {
                 ResourceLocation name = state.getBlock().getRegistryName();
                 String id = name == null ? "unknown" : name.toString();
                 int metadata = state.getBlock().getMetaFromState(state);
-                if (metadata != 0) {
+                if (metadata != 0 || explicitMetadata) {
                     id = id + ":" + metadata;
                 }
                 boolean passes = (include.isEmpty() || include.matches(id)) && !exclude.matches(id);

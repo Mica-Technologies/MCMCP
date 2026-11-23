@@ -32,8 +32,29 @@ public final class ChunkKeys {
         return of(blockX >> 4, blockZ >> 4);
     }
 
-    /** Every chunk a block box overlaps, in row order. Corners may be given either way round. */
+    /**
+     * The most chunks {@link #box} will list: 262,144, a square 8,192 blocks a side, or the thin strip
+     * under a fill a million blocks long four times over. Past any real call, and far short of the set
+     * that a box with a corner off the map asks for.
+     */
+    public static final long MAX_BOX_CHUNKS = 262_144L;
+
+    /**
+     * Every chunk a block box overlaps, in row order. Corners may be given either way round.
+     *
+     * @throws IllegalArgumentException for a box over {@link #MAX_BOX_CHUNKS}, before anything is
+     *     built. A caller with a limit of its own checks {@link #boxCount} first and says so in its own
+     *     words; this is the ceiling under every caller that did not (#219): a set of every chunk under
+     *     a box 60 million blocks across was built on the worker until memory ran out, ahead of the
+     *     limit that would have refused it.
+     */
     public static Set<Long> box(int x1, int z1, int x2, int z2) {
+        long count = boxCount(x1, z1, x2, z2);
+        if (count > MAX_BOX_CHUNKS) {
+            throw new IllegalArgumentException("That area covers " + count + " chunks (x " + Math.min(x1, x2) + " to "
+                + Math.max(x1, x2) + ", z " + Math.min(z1, z2) + " to " + Math.max(z1, z2) + "); one call handles "
+                + "at most " + MAX_BOX_CHUNKS + ". Nothing was done. Split it.");
+        }
         int minX = Math.min(x1, x2) >> 4;
         int maxX = Math.max(x1, x2) >> 4;
         int minZ = Math.min(z1, z2) >> 4;

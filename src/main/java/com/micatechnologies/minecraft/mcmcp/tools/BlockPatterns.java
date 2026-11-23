@@ -58,8 +58,14 @@ public final class BlockPatterns {
         String base = second < 0 ? full : full.substring(0, second);
         String path = first < 0 ? base : base.substring(first + 1);
 
+        // Metadata 0 is reported as the bare id, so a pattern that spells it out ('minecraft:wheat:0')
+        // is tried against the id with its ':0' too: without that it matched nothing, and a field of
+        // newly sown wheat read as no wheat at all (#216).
+        String zero = second < 0 && first >= 0 ? full + ":0" : null;
+
         for (Pattern pattern : withNamespace) {
-            if (pattern.matcher(full).matches() || pattern.matcher(base).matches()) {
+            if (pattern.matcher(full).matches() || pattern.matcher(base).matches()
+                || zero != null && pattern.matcher(zero).matches()) {
                 return true;
             }
         }

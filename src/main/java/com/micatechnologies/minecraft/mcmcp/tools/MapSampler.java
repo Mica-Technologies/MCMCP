@@ -60,6 +60,8 @@ public final class MapSampler {
     public void sampleRect(World world, MapImage.Columns columns, int fromColumn, int toColumn, int fromRow, int toRow) {
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         for (int pz = fromRow; pz < toRow; pz++) {
+            // On a server thread the watchdog asked to stop, a map gives up between rows.
+            com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.checkpoint();
             // The middle of the pixel's block square, so a scaled map is not biased north-west.
             int z = minZ + pz * scale + scale / 2;
             for (int px = fromColumn; px < toColumn; px++) {

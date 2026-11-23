@@ -260,8 +260,12 @@ public final class ServerComponentTools {
         final String rail = input.palette == null ? null : input.palette.rail;
         // A rail whose edges are stored (a CSM railing, not a pane) faces the drop: the plan is the world
         // it stands in, and a deck rail stands on a parapet over the stair well.
+        // The rail's id without a metadata a palette spelled out ('csm:railing_pipe_galvanized:1'): looked
+        // up with it, the id named no block, the rail was taken for one with no edges, and every rail
+        // went in as given, facing north whatever side the drop was on (#218).
+        final String railId = rail == null ? null : (String) ServerBulkTools.splitId(rail)[0];
         final java.util.Set<String> railProps = rail == null ? java.util.Collections.<String>emptySet()
-            : storedEdges(rail);
+            : storedEdges(railId);
         final RailEdges.Solid planSolid = RailEdges.ofPlan(plan.cells, rail);
         final String wall = input.palette.wall;
         final int[] ring = {input.box[0], input.box[1], input.box[2], input.box[3]};
@@ -382,7 +386,7 @@ public final class ServerComponentTools {
                                 edges.put("east", String.valueOf((mask & RailEdges.EAST) != 0));
                                 edges.put("south", String.valueOf((mask & RailEdges.SOUTH) != 0));
                                 edges.put("west", String.valueOf((mask & RailEdges.WEST) != 0));
-                                ops.add(setblock(p.x, p.y, p.z, rail, edges, railProps));
+                                ops.add(setblock(p.x, p.y, p.z, railId, edges, railProps));
                                 continue;
                             }
                         }
@@ -734,6 +738,12 @@ public final class ServerComponentTools {
         int added = 0;
         String fill = null;
         boolean walled = "walled".equals(header);
+        // A header is read from the wall beside the opening; where that is not loaded there is nothing
+        // to read, and reading it anyway would load or generate the chunk.
+        if (!world.isBlockLoaded(new BlockPos(opening.x - 2, opening.y, opening.z - 2))
+            || !world.isBlockLoaded(new BlockPos(opening.x + opening.width + 1, opening.y, opening.z + opening.width + 1))) {
+            return 0;
+        }
         if (!"auto".equals(header) && !walled) {
             fill = header;
         }
@@ -846,9 +856,15 @@ public final class ServerComponentTools {
                     targets = new ArrayList<>();
                     BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
                     for (int x = box[0]; x <= box[3]; x++) {
+                        com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump.checkpoint();
                         for (int y = box[1]; y <= box[4]; y++) {
                             for (int z = box[2]; z <= box[5]; z++) {
                                 pos.setPos(x, y, z);
+                                // Never read into a chunk that is not loaded: the read loads it, or
+                                // generates it, and a long thin box named tens of thousands of them.
+                                if (y < 0 || y > 255 || !world.isBlockLoaded(pos)) {
+                                    continue;
+                                }
                                 String id = idOf(world.getBlockState(pos));
                                 if (id != null && (id.equals(style) || matchesAny(replace, id))) {
                                     targets.add(new int[] {x, y, z});
@@ -867,7 +883,8 @@ public final class ServerComponentTools {
                         }
                         continue;
                     }
-                    String id = idOf(world.getBlockState(new BlockPos(c[0], c[1], c[2])));
+                    BlockPos railAt = new BlockPos(c[0], c[1], c[2]);
+                    String id = world.isBlockLoaded(railAt) ? idOf(world.getBlockState(railAt)) : null;
                     if (id != null && matchesAny(replace, id)) {
                         counts[1]++;
                     }

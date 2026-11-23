@@ -152,22 +152,24 @@ class StairDesignTest {
     }
 
     @Test
-    void aCsmRailOnTheRoofParapetFacesTheStairWellAndNotTheDeckBehindIt() throws Exception {
-        // The UIA builder's review fixture: a drop depth of one cell also counts the deck (its walking cell
-        // is air) and gives the rails every edge; the deck block one further down is what rules it out.
+    void aCsmRailStandsOnTheRoofDeckWithItsBarOverTheStairWellAndNoCurbUnderIt() throws Exception {
+        // The UIA builder's review fixture names each rail cell and the edge that faces the well. The
+        // fixture has them on a parapet, one cell up; since #218 an edge railing stands on the deck.
         JsonObject fixture = fixture("alto1873_N_csmrail");
         StairDesign.Input input = StairDesign.Input.fromJson(fixture.getAsJsonObject("input"));
         StairDesign.Plan plan = StairDesign.plan(input);
         String rail = input.palette.rail;
-        RailEdges.Solid solid = RailEdges.ofPlan(plan.cells, rail);
+        int roof = input.floors.get(input.floors.size() - 1);
 
         List<String> got = new ArrayList<>();
         for (Map.Entry<Pos, String> cell : plan.cells.entrySet()) {
-            if (cell.getValue().equals(rail)) {
+            if (cell.getValue().startsWith(rail + ":")) {
                 Pos p = cell.getKey();
-                got.add(p.x + " " + p.y + " " + p.z + " " + rail + ":"
-                    + RailEdges.edges(solid, p.x, p.y, p.z, RailEdges.PARAPET_DEPTH));
+                assertEquals(roof, p.y, "a rail stands at walking level");
+                assertEquals(input.palette.floor, plan.cells.get(new Pos(p.x, p.y - 1, p.z)), "on the deck");
+                got.add(p.x + " " + (p.y + 1) + " " + p.z + " " + cell.getValue());
             }
+            assertTrue(!cell.getValue().equals(rail), "no rail is left without its edge");
         }
         List<String> expected = new ArrayList<>();
         for (JsonElement item : fixture.getAsJsonObject("expected").getAsJsonArray("railCells")) {
@@ -178,5 +180,59 @@ class StairDesignTest {
         java.util.Collections.sort(got);
         java.util.Collections.sort(expected);
         assertEquals(expected, got);
+        assertEquals(java.util.Collections.emptyList(), StairAudit.selfAudit(input, plan).failures);
+    }
+
+    /** The core of #218: built, called clean by this tool, and failed by the audit of record. */
+    private static JsonObject furnitureGallery(String rail) {
+        return Json.parse("{\"box\":[2976,-5452,2984,-5441],\"floors\":[67,73,80],\"width\":3,\"start\":\"hi\","
+            + "\"doors\":{\"67\":[[2980,-5441]],\"73\":[[2984,-5443]],\"80\":[[2984,-5443]]},"
+            + "\"palette\":{\"rail\":\"" + rail + "\"}}").getAsJsonObject();
+    }
+
+    @Test
+    void aRoofLandingGuardedByACsmRailingPassesTheNoGapsAudit() throws Exception {
+        // With or without a metadata spelled out in the palette, which once lost the rail its edges.
+        for (String rail : new String[] {"csm:railing_pipe_galvanized", "csm:railing_pipe_galvanized:1"}) {
+            StairDesign.Input input = StairDesign.Input.fromJson(furnitureGallery(rail));
+            StairDesign.Plan plan = StairDesign.plan(input);
+            assertEquals(java.util.Collections.emptyList(), StairAudit.selfAudit(input, plan).failures, rail);
+            for (int x = 2981; x <= 2983; x++) {
+                // On the landing's last row, bar to the south, over the well; nothing on a curb above.
+                assertEquals("csm:railing_pipe_galvanized:4", plan.cells.get(new Pos(x, 80, -5449)), rail);
+                assertEquals("minecraft:air", plan.cells.get(new Pos(x, 81, -5449)), rail);
+            }
+        }
+    }
+
+    @Test
+    void aCsmRailingLeftOnACurbIsWhatTheAuditFails() throws Exception {
+        // The guard as it was built before #218, put back by hand: the self-audit now says what the
+        // audit of record said, where it used to say nothing.
+        StairDesign.Input input = StairDesign.Input.fromJson(furnitureGallery("csm:railing_pipe_galvanized"));
+        StairDesign.Plan plan = StairDesign.plan(input);
+        Map<Pos, String> grid = StairAudit.selfAuditGrid(input, plan);
+        for (int x = 2981; x <= 2983; x++) {
+            grid.put(new Pos(x, 80, -5449), "minecraft:concrete:8");
+            grid.put(new Pos(x, 81, -5449), "csm:railing_pipe_galvanized:1");
+        }
+        StairAudit.Core core = new StairAudit.Core("plan", 2976, -5452, 2984, -5441, 67, 82, grid);
+        List<String> gaps = new ArrayList<>();
+        for (StairAudit.Failure failure : StairAudit.audit(core, 3, input.floors, false).failures) {
+            assertEquals("GAP", failure.rule);
+            gaps.add(failure.detail.substring(0, failure.detail.indexOf(" (no floor")));
+        }
+        assertEquals(java.util.Arrays.asList("open drop/gap beside at (2980, 81, -5449)",
+            "open drop/gap beside at (2981, 81, -5448)", "open drop/gap beside at (2982, 81, -5448)",
+            "open drop/gap beside at (2983, 81, -5448)"), gaps);
+    }
+
+    @Test
+    void aPaneRailKeepsItsCurb() throws Exception {
+        StairDesign.Input input = StairDesign.Input.fromJson(furnitureGallery("minecraft:glass_pane"));
+        StairDesign.Plan plan = StairDesign.plan(input);
+        assertEquals("minecraft:concrete:8", plan.cells.get(new Pos(2982, 80, -5449)));
+        assertEquals("minecraft:glass_pane", plan.cells.get(new Pos(2982, 81, -5449)));
+        assertEquals(java.util.Collections.emptyList(), StairAudit.selfAudit(input, plan).failures);
     }
 }

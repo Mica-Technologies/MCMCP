@@ -166,6 +166,13 @@ public final class ServerJobTools {
         if (args == null) {
             return ToolResult.error("'args' is the arguments " + toolName + " would take, as an object.");
         }
+        if (principal.isCompanion()) {
+            // As the dispatcher admits a direct call: load, and whom the arguments may name.
+            String refused = CompanionPolicy.admit(principal, toolName, args);
+            if (refused != null) {
+                return ToolResult.error(refused);
+            }
+        }
         if ("build".equals(asked)) {
             // A spec needs the world's components to expand, so it is expanded here, once, and the job is
             // an ordinary op replay from then on: split, paced and resumable like any other.

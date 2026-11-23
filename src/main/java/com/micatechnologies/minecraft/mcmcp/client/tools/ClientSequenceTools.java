@@ -190,6 +190,13 @@ public final class ClientSequenceTools {
                 stopReason = "time limit for one call";
                 break;
             }
+            // Looked at before every step, not only when the sequence was admitted: a stop set at step 3
+            // of 100 used to be followed by 97 more steps.
+            if (!step.tool.isReadOnly() && com.micatechnologies.minecraft.mcmcp.game.Estop.active()) {
+                nextIndex = step.index;
+                stopReason = "emergency stop";
+                break;
+            }
             // Progress counts finished steps, so a sequence that ran every step ends at its total,
             // and the message names the step running now, then how it ended.
             context.reportProgress(step.index + STEP_START, steps.size(), step.tool.getName());
@@ -366,8 +373,10 @@ public final class ClientSequenceTools {
         ToolResult result;
         long stepStart = System.currentTimeMillis();
         try {
-            result = step.tool.call(context.forPart(step.arguments, step.index + STEP_START, total,
-                step.tool.getName()));
+            ToolContext part = context.forPart(step.arguments, step.index + STEP_START, total, step.tool.getName());
+            part.setMutating(!step.tool.isReadOnly());
+            part.setToolName(step.tool.getName());
+            result = step.tool.call(part);
         }
         catch (JsonRpcException e) {
             // The dispatcher's rule: cancellation stays a protocol error, everything else a handler

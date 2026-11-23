@@ -347,6 +347,12 @@ public class McpDispatcher {
         if (unknownArguments != null) {
             return ToolResult.error(unknownArguments).toJson(session.getProtocolVersion());
         }
+        // Positions no world has, refused once for every tool before any handler works a box, a chunk
+        // set or a loop out of them (#219).
+        String outsideWorld = com.micatechnologies.minecraft.mcmcp.mcp.CoordinateBounds.refusal(arguments);
+        if (outsideWorld != null) {
+            return ToolResult.error(outsideWorld).toJson(session.getProtocolVersion());
+        }
         // After the argument-name check, so a pinned argument the filter fills in is never mistaken
         // for one the caller misspelled.
         CallFilter current = filter;

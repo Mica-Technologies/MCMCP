@@ -169,9 +169,16 @@ public final class CompanionServer {
     public static synchronized void serverStarting(MinecraftServer server) {
         McpDispatcher built = new McpDispatcher(McmcpSide.SERVER, new ServerThreadBridge(),
             McmcpConfig.settingsFor(McmcpSide.SERVER).getGameThreadTimeoutMillis(),
-            McpEndpoint.instructionsFor(McmcpSide.SERVER));
+            // The endpoint's own text says commands run with server authority, which a companion
+            // caller's do not unless they hold the console class (#217).
+            McpEndpoint.instructionsFor(McmcpSide.SERVER) + "\n\nYou reach this server through a player's game "
+                + "connection (the MCMCP companion), with that player's access. A command with no asPlayer runs "
+                + "as that player, not the console, unless an operator has granted them "
+                + CompanionPolicy.NODE_PREFIX + Principal.CLASS_CONSOLE + ".");
         built.setJournal(McmcpEndpoints.journal(McmcpSide.SERVER));
         built.setFilter(new CompanionPolicy());
+        // Replies leave on the server's tick; while it is stalled the watchdog's thread sends them.
+        com.micatechnologies.minecraft.mcmcp.game.ServerWatchdog.setWhileStalled(CompanionServer::flushOffTick);
         dispatcher = built;
         workers = Executors.newFixedThreadPool(4, runnable -> {
             Thread thread = new Thread(runnable, "MCMCP-companion-" + WORKER_COUNT.incrementAndGet());
@@ -704,8 +711,21 @@ public final class CompanionServer {
         peer.outbox.offer(type, message, Long.MAX_VALUE);
     }
 
-    /** Moves session notifications into the outbox, then sends a budget's worth to each player. */
-    private static void flush(MinecraftServer server) {
+    /** Sends what is queued from a thread that is not the server's: the watchdog's, during a stall. */
+    public static void flushOffTick() {
+        MinecraftServer server = ServerThreadBridge.server();
+        if (server != null && !PEERS.isEmpty()) {
+            flush(server);
+        }
+    }
+
+    /**
+     * Synchronized: from the server's tick, and from the watchdog's thread while the server is stalled
+     * ({@link #flushOffTick}), which may overlap for a moment as ticks come back. Sending a packet is
+     * safe from any thread; the outbox's own pacing is what needs the one sender at a time.
+     */
+    /* Moves session notifications into the outbox, then sends a budget's worth to each player. */
+    private static synchronized void flush(MinecraftServer server) {
         int budget = McmcpConfig.getCompanionSendBudgetBytesPerTick();
         for (CompanionPeer peer : PEERS.values()) {
             for (Map.Entry<String, McpSession> entry : peer.sessionEntries()) {

@@ -321,7 +321,16 @@ public final class JobParts {
         return parts;
     }
 
+    /** The most parts one job is cut into. A job of more is a box no one meant. */
+    static final int MAX_PARTS = 50_000;
+
     private static Part boxPart(int index, JsonObject args, int x1, int y1, int z1, int x2, int y2, int z2) {
+        if (index >= MAX_PARTS) {
+            // Counted as the parts are made, inside the loops that make them: counted afterwards, a box
+            // millions of parts large was built first, under the lock every other job call waits on.
+            throw new IllegalArgumentException("That box makes more than " + MAX_PARTS + " parts, which is more "
+                + "than one job runs. Submit it as several jobs over smaller boxes.");
+        }
         JsonObject part = copy(args);
         JsonObject region = new JsonObject();
         region.addProperty("x", x1);

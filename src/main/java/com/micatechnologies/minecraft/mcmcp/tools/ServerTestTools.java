@@ -704,6 +704,12 @@ public final class ServerTestTools {
     /** One tool call as its own call: the tool's own handler, checks and limits. */
     private static JsonElement call(Run run, String name, JsonObject args, boolean restore, boolean optional) {
         McpTool tool = McpRegistry.tool(name, McmcpSide.SERVER);
+        // Again here, on the arguments as the step will see them: a position written as ${...} was a
+        // string when the script was admitted, and is a number only now.
+        String outside = com.micatechnologies.minecraft.mcmcp.mcp.CoordinateBounds.refusal(args);
+        if (outside != null) {
+            throw new IllegalArgumentException(name + ": " + outside);
+        }
         ToolContext part = nested(run.context, args, tool);
         part.setUndoRequired(restore);
         run.calls++;
@@ -1030,16 +1036,22 @@ public final class ServerTestTools {
             return;
         }
         Principal principal = context.getPrincipal();
-        if (principal.isCompanion()) {
-            String callClass = CompanionPolicy.classOf(name);
-            if (callClass == null || !principal.has(callClass)) {
-                problems.add(at + ": your companion access does not include " + name + ".");
-                return;
-            }
-        }
         if (args != null && !args.isJsonObject()) {
             problems.add(at + ": 'args' is an object.");
             return;
+        }
+        if (principal.isCompanion()) {
+            // The dispatcher's whole admission, not the class alone: a step is a call like any other.
+            // With no args object there is nothing to pin the caller's name into, so a step that names
+            // a player by default is refused rather than run as the console.
+            String refused = CompanionPolicy.admit(principal, name, args == null ? new JsonObject() : args.getAsJsonObject());
+            if (refused == null && args == null && CompanionPolicy.namesPlayer(name)) {
+                refused = name + " needs 'args' through the companion.";
+            }
+            if (refused != null) {
+                problems.add(at + ": " + refused);
+                return;
+            }
         }
         String unknown = ArgumentNames.describeUnknown(name, tool.getInputSchema(),
             args == null ? new JsonObject() : args.getAsJsonObject());

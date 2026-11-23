@@ -269,6 +269,19 @@ public final class ServerLoad {
         queueDepth = depth;
     }
 
+    private static volatile java.util.function.Supplier<String> runningTask = () -> null;
+
+    /** Wired by the task pump: the task on the server thread now, described, or null between tasks. */
+    public static void setRunningTask(java.util.function.Supplier<String> task) {
+        runningTask = task;
+    }
+
+    /** The MCMCP task the server thread is inside now, as a stall report names it, or null. Any thread. */
+    @Nullable
+    public static String runningTask() {
+        return runningTask.get();
+    }
+
     /**
      * The busy block of a step dropped because the server thread did not start it in time. On a
      * healthy server the cause is other callers' work queued ahead of it, not the server: the reason

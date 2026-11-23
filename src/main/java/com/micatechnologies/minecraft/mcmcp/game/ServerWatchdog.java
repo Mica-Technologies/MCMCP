@@ -198,9 +198,47 @@ public final class ServerWatchdog {
             Mcmcp.LOGGER.warn("MCMCP: the server thread has finished no tick in " + silent / 1000L + " s. Calls that "
                 + "change the world are refused until it does. "
                 + (file == null ? "Its stack could not be written; see the error above." : "Every thread's stack is in " + file + "."));
+            // When the stall is MCMCP's own work, say whose, and ask it to stop (#219). It stops at the
+            // next checkpoint of its own loop; inside the game's code it cannot be reached, and the line
+            // below is then what names the call to whoever has to restart the server.
+            ServerTaskPump.Running task = ServerTaskPump.requestAbort("The server thread finished no tick for "
+                + silent / 1000L + " s while this call's work was on it, so MCMCP stopped the work.");
+            if (task != null) {
+                Mcmcp.LOGGER.error("MCMCP: the stalled server thread is inside MCMCP's own task: " + task.describe()
+                    + ". It has been asked to stop, which a read of MCMCP's own heeds at its next row; a write, or a "
+                    + "task inside the game's own code, cannot be stopped and will hold the thread until it returns.");
+            }
+            runWhileStalled();
             return;
         }
         ServerLoad.stalled(true, silent);
+        runWhileStalled();
+    }
+
+    /** Run on this thread on every poll of a reported stall; see {@link #setWhileStalled}. */
+    @Nullable
+    private static volatile Runnable whileStalled;
+
+    /**
+     * Work that the server's ticks normally do and that must not stop with them. The companion sends
+     * its replies from the tick, so on a stalled server the refusal that says "the server is stalled"
+     * never left, and every agent waited out the orchestrator's two minutes to learn nothing (#219).
+     */
+    public static void setWhileStalled(@Nullable Runnable task) {
+        whileStalled = task;
+    }
+
+    private static void runWhileStalled() {
+        Runnable task = whileStalled;
+        if (task == null) {
+            return;
+        }
+        try {
+            task.run();
+        }
+        catch (Throwable t) {
+            Mcmcp.LOGGER.error("MCMCP's stalled-server work failed", t);
+        }
     }
 
     /**
@@ -233,6 +271,10 @@ public final class ServerWatchdog {
         List<ToolActivity.RunningCall> calls = ToolActivity.running();
         out.append("MCMCP server-thread tasks queued: ").append(ServerTaskPump.depth()).append("; recent share of the tick: ")
             .append(ServerTaskPump.toJson()).append('\n');
+        // The task itself, from the thread running it: a call whose caller timed out is no longer among
+        // the calls below, and that is the one a stall is most likely to be (#219).
+        ServerTaskPump.Running task = ServerTaskPump.running();
+        out.append("MCMCP task on the server thread now: ").append(task == null ? "none" : task.describe()).append('\n');
         out.append("MCMCP calls running: ").append(calls.size()).append('\n');
         long nowMillis = System.currentTimeMillis();
         for (ToolActivity.RunningCall call : calls) {

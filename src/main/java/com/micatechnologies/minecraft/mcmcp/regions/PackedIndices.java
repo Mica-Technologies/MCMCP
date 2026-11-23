@@ -72,12 +72,25 @@ public final class PackedIndices {
         try {
             inflater.setInput(deflated);
             byte[] buffer = new byte[8192];
+            // A run is a value and a length, at most five bytes each: more than this is not a packing of
+            // count values, and a few kilobytes of zeros would otherwise inflate to gigabytes.
+            long most = count * 10L + 64L;
             while (!inflater.finished()) {
                 int n = inflater.inflate(buffer);
-                if (n == 0 && inflater.needsInput()) {
-                    throw new IllegalArgumentException("truncated");
+                if (n == 0) {
+                    // Neither state ends by itself: a stream that asks for a preset dictionary returns 0
+                    // for ever, and this loop span on it.
+                    if (inflater.needsInput()) {
+                        throw new IllegalArgumentException("truncated");
+                    }
+                    if (inflater.needsDictionary()) {
+                        throw new IllegalArgumentException("the stream asks for a preset dictionary");
+                    }
                 }
                 raw.write(buffer, 0, n);
+                if (raw.size() > most) {
+                    throw new IllegalArgumentException("more data than " + count + " values pack into");
+                }
             }
         }
         catch (DataFormatException e) {

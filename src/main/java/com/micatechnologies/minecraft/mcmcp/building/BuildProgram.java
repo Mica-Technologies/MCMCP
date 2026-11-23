@@ -307,6 +307,7 @@ public final class BuildProgram {
         int x2 = origin[0] + offset[0] + s[3];
         int y2 = origin[1] + offset[1] + s[4];
         int z2 = origin[2] + offset[2] + s[5];
+        room();
         if (x1 == x2 && y1 == y2 && z1 == z2 && mode == null) {
             ops.add(setblockLine(x1, y1, z1, block));
             return;
@@ -315,7 +316,20 @@ public final class BuildProgram {
             + (mode == null ? "" : " " + mode));
     }
 
+    /**
+     * Refuses the op about to be added when the spec is already at its limit. Asked as each op is made:
+     * asked only after a part returned, one 'columns' part two thousand million cells across filled
+     * memory before the limit was ever looked at.
+     */
+    private void room() {
+        if (ops.size() >= maxOps) {
+            throw new SpecException("The spec expands past " + maxOps + " ops"
+                + (maxOps < MAX_JOB_OPS ? ": submit it as a job (server_job_submit kind 'build')." : "."));
+        }
+    }
+
     private void setblock(int[] cell, int[] offset, String block) {
+        room();
         ops.add(setblockLine(origin[0] + offset[0] + cell[0], origin[1] + offset[1] + cell[1],
             origin[2] + offset[2] + cell[2], block));
     }

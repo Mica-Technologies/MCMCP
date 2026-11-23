@@ -17,6 +17,7 @@ import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
 import com.micatechnologies.minecraft.mcmcp.perf.DurationWindow;
 import com.micatechnologies.minecraft.mcmcp.regions.PackedIndices;
+import com.micatechnologies.minecraft.mcmcp.regions.WorldBounds;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -207,6 +208,16 @@ public final class ServerBulkTools {
             catch (RuntimeException e) {
                 return ToolResult.error("'indices' is not a packed array of " + count + " values: " + e.getMessage());
             }
+            // Both corners, in long: an origin near the edge of int plus a size wraps into a position
+            // that looks real (#219).
+            String outside = WorldBounds.refusal("The box's origin", ox, oy, oz);
+            if (outside == null) {
+                outside = WorldBounds.refusal("The box's far corner", (long) ox + sizeX - 1L, (long) oy + sizeY - 1L,
+                    (long) oz + sizeZ - 1L);
+            }
+            if (outside != null) {
+                return ToolResult.error(outside);
+            }
             xs = new int[(int) count];
             ys = new int[(int) count];
             zs = new int[(int) count];
@@ -239,17 +250,38 @@ public final class ServerBulkTools {
             zs = new int[count];
             values = new int[count];
             expects = stride == 5 ? new int[count] : null;
-            for (int i = 0; i < count; i++) {
-                xs[i] = ox + cells.get(i * stride).getAsInt();
-                ys[i] = oy + cells.get(i * stride + 1).getAsInt();
-                zs[i] = oz + cells.get(i * stride + 2).getAsInt();
-                values[i] = cells.get(i * stride + 3).getAsInt();
-                if (expects != null) {
-                    expects[i] = cells.get(i * stride + 4).getAsInt();
+            try {
+                for (int i = 0; i < count; i++) {
+                    // In long: origin + offset must not wrap round into a position that looks real.
+                    long x = (long) ox + cells.get(i * stride).getAsLong();
+                    long y = (long) oy + cells.get(i * stride + 1).getAsLong();
+                    long z = (long) oz + cells.get(i * stride + 2).getAsLong();
+                    String outside = WorldBounds.refusal("Cell " + i, x, y, z);
+                    if (outside != null) {
+                        return ToolResult.error(outside);
+                    }
+                    xs[i] = (int) x;
+                    ys[i] = (int) y;
+                    zs[i] = (int) z;
+                    values[i] = cells.get(i * stride + 3).getAsInt();
+                    if (expects != null) {
+                        expects[i] = cells.get(i * stride + 4).getAsInt();
+                    }
                 }
+            }
+            catch (RuntimeException notNumbers) {
+                return ToolResult.error("'cells' must be whole numbers only: " + notNumbers.getMessage());
             }
         }
         final int count = values.length;
+        if (count == 0) {
+            // Before anything is derived from the cells (#219): a box round no cells is the whole
+            // integer range, and the look for dropped items over it never came back. A generator with
+            // nothing left to write sends this, so it is an answer and not an error.
+            JsonObject nothing = new PaletteTally().toJson(dimension, 0);
+            nothing.addProperty("note", "The call named no cells, so nothing was written.");
+            return ToolResult.structured(nothing);
+        }
         for (int i = 0; i < count; i++) {
             if (values[i] < 0 || values[i] >= palette.size()) {
                 return ToolResult.error("Cell " + i + " names palette index " + values[i] + "; the palette has "
@@ -274,17 +306,41 @@ public final class ServerBulkTools {
         final WriteDrops.Tally drops = new WriteDrops.Tally("keep".equals(context.getString("drops", "discard")));
         final boolean holdPhysics = context.getBoolean("holdPhysics", false);
         final Set<Long> chunks = new LinkedHashSet<>();
-        int minX = Integer.MAX_VALUE;
-        int minZ = Integer.MAX_VALUE;
-        int maxX = Integer.MIN_VALUE;
-        int maxZ = Integer.MIN_VALUE;
+        if (holdPhysics) {
+            // Held physics is taken from one box round the whole write, and every pending tick between
+            // its corners is pulled and put back at each slice: fine for a build, not for two cells at
+            // opposite ends of the map.
+            int[] span = {xs[0], xs[0], zs[0], zs[0]};
+            for (int i = 0; i < count; i++) {
+                span[0] = Math.min(span[0], xs[i]);
+                span[1] = Math.max(span[1], xs[i]);
+                span[2] = Math.min(span[2], zs[i]);
+                span[3] = Math.max(span[3], zs[i]);
+            }
+            String tooWide = WorldBounds.boxRefusal("A holdPhysics write", span[0], span[2], span[1], span[3]);
+            if (tooWide != null) {
+                return ToolResult.error(tooWide + " Nothing was written.");
+            }
+        }
+        // The call's extent. count > 0 here, so every one of these is a real cell's coordinate.
+        int minX = xs[0];
+        int minY = ys[0];
+        int minZ = zs[0];
+        int maxX = xs[0];
+        int maxY = ys[0];
+        int maxZ = zs[0];
         for (int i = 0; i < count; i++) {
             chunks.add(ChunkKeys.ofBlock(xs[i], zs[i]));
             minX = Math.min(minX, xs[i]);
+            minY = Math.min(minY, ys[i]);
             minZ = Math.min(minZ, zs[i]);
             maxX = Math.max(maxX, xs[i]);
+            maxY = Math.max(maxY, ys[i]);
             maxZ = Math.max(maxZ, zs[i]);
         }
+        final int[] extent = {minX, minY, minZ, maxX, maxY, maxZ};
+        // Where what the write drops is looked for: the chunks of its cells, never a box round them.
+        final long[] dropChunks = DeferredNeighbours.dropChunks(xs, zs);
         final int[] area = UndoPoints.imageArea(minX, minZ, maxX, maxZ);
         final int batch = McmcpConfig.getMaxBlockVolume();
 
@@ -367,12 +423,8 @@ public final class ServerBulkTools {
             }
             final DeferredNeighbours deferred = (flags & 1) != 0 ? new DeferredNeighbours() : null;
             pairs.deferred = deferred;
-            final net.minecraft.util.math.AxisAlignedBB written = new net.minecraft.util.math.AxisAlignedBB(
-                minOf(xs) - 1, minOf(ys) - 1, minOf(zs) - 1, maxOf(xs) + 2, maxOf(ys) + 2, maxOf(zs) + 2);
-            final java.util.Set<Integer> itemsBefore = context.onGameThread(
-                () -> DeferredNeighbours.itemsIn(ServerWorldTools.requireWorld(dimension), written));
-            final PhysicsHold hold = holdPhysics ? new PhysicsHold(new int[] {minOf(xs), minOf(ys), minOf(zs),
-                maxOf(xs), maxOf(ys), maxOf(zs)}, deferred != null) : null;
+            final java.util.Set<Integer> itemsBefore = DeferredNeighbours.itemsIn(context, dimension, dropChunks, false);
+            final PhysicsHold hold = holdPhysics ? new PhysicsHold(extent, deferred != null) : null;
             JsonObject physics = null;
             try {
             for (int from = 0; from < count; from += batch) {
@@ -506,8 +558,7 @@ public final class ServerBulkTools {
             }
             // Follow-ups from here on: the write has happened, and dropping these behind other callers'
             // work would fail the call before its undo point is saved (#133).
-            int dropped = context.onGameThreadFollowUp(
-                () -> DeferredNeighbours.itemsDropped(ServerWorldTools.requireWorld(dimension), written, itemsBefore));
+            int dropped = DeferredNeighbours.itemsDropped(context, dimension, dropChunks, itemsBefore);
             WriteDrops.add(json, drops, dropped);
             json.add("chunks", context.onGameThreadFollowUp(() -> {
                 ChunkLoadGovernor.touch(dimension, chunks);
@@ -519,22 +570,6 @@ public final class ServerBulkTools {
             }
             return ToolResult.structured(json);
         });
-    }
-
-    private static int minOf(int[] values) {
-        int min = Integer.MAX_VALUE;
-        for (int value : values) {
-            min = Math.min(min, value);
-        }
-        return min;
-    }
-
-    private static int maxOf(int[] values) {
-        int max = Integer.MIN_VALUE;
-        for (int value : values) {
-            max = Math.max(max, value);
-        }
-        return max;
     }
 
     /**
@@ -701,7 +736,9 @@ public final class ServerBulkTools {
                     + "{command, at} to run that one at its own position. At most 10,000.", commandItem())
                 .property("at", atSchema("With asPlayer: run each command with the player moved here, and "
                     + "put them back after it. A command's own at wins."))
-                .string("asPlayer", "Run as this connected player. Omit for console authority.")
+                .string("asPlayer", "Run as this connected player. Omit for console authority. Refused "
+                    + "while another agent holds that player's lease (server_player_lease).")
+                .string(ServerPlayerLeaseTools.LEASE_TOKEN, ServerPlayerLeaseTools.LEASE_TOKEN_DESCRIPTION)
                 .bool("stopOnError", "Stop at the first command that does not succeed. Default false.")
                 .bool("allResults", "List every command's result, not just the ones that failed. Default false.")
                 .integer("maxOutputLines", "Output lines kept per listed command. Default 20; a command "
@@ -781,6 +818,12 @@ public final class ServerBulkTools {
             }
         }
         final String asPlayer = context.getString("asPlayer", null);
+        // Commands run as a player borrow that player; another agent's lease on them refuses the batch
+        // before any of it runs (#217). The console borrows nobody.
+        ToolResult leased = ServerPlayerLeaseTools.refusal(context, asPlayer);
+        if (leased != null) {
+            return leased;
+        }
         final boolean stopOnError = context.getBoolean("stopOnError", false);
         final boolean allResults = context.getBoolean("allResults", false);
         final int maxOutputLines = context.getBoundedInt("maxOutputLines", 20, 1, 500);
@@ -1089,6 +1132,11 @@ public final class ServerBulkTools {
             json.addProperty("cancelled", counts[2]);
         }
         json.addProperty("ranAs", asPlayer == null ? "server console" : asPlayer);
+        String ranAsWhy = com.micatechnologies.minecraft.mcmcp.companion.CompanionPolicy.ranAsSelfNote(
+            context.getPrincipal(), asPlayer);
+        if (ranAsWhy != null) {
+            json.addProperty("ranAsWhy", ranAsWhy);
+        }
         if (movedCount[0] > 0) {
             json.addProperty("moved", movedCount[0]);
         }

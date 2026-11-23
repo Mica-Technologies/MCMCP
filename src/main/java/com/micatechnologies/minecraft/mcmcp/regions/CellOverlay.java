@@ -49,11 +49,20 @@ public final class CellOverlay {
         return section == null ? 0 : section[index(x, y, z)];
     }
 
+    /** The most sections one overlay holds: 512 MB of cells at the very worst. */
+    public static final int MAX_SECTIONS = 32_768;
+
     /** Sets a cell's value; {@code value} must not be 0. */
     public void set(int x, int y, int z, int value) {
         long key = sectionKey(x >> 4, y >> 4, z >> 4);
         int[] section = sections.get(key);
         if (section == null) {
+            // 16 KB each: a line of cells 4 million long is under any cell limit and a quarter of a
+            // million sections, 4 GB, on the thread that was asked to try it out.
+            if (sections.size() >= MAX_SECTIONS) {
+                throw new IllegalArgumentException("These ops touch more than " + MAX_SECTIONS + " 16-block "
+                    + "sections, the most one call holds. Nothing was written. Split them by area.");
+            }
             section = new int[4096];
             sections.put(key, section);
         }
