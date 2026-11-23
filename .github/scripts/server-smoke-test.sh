@@ -1111,6 +1111,36 @@ case "$AGAIN_BODY" in
   *'"generated":0,"loadedToPopulate":0,'*'"existing":9,'*) echo "    the same box again touched nothing" ;;
   *) mcp_failure "a second pass over an existing box did work: ${AGAIN_BODY}" ;;
 esac
+
+# #220: vanilla tells all six neighbours of a changed block, and telling one reads it, which loads or
+# generates its chunk. A write on a chunk's edge loaded the chunk beside it, in no hold.
+echo "==> Writes: a block written on a chunk's edge does not load the chunk beside it (#220)"
+EDGE_HOLD="$(mcp_call 6520 server_keep_loaded "{\"x\":$((GX + 32)),\"z\":$((GZ + 32)),\"toX\":$((GX + 47)),\"toZ\":$((GZ + 47))}")" \
+  || mcp_failure "holding one pregenerated chunk failed: ${EDGE_HOLD}"
+EDGE_ID="$(printf '%s' "$EDGE_HOLD" | grep -o '"id":"h[0-9]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$EDGE_ID" ] || mcp_failure "no hold id for the edge check: ${EDGE_HOLD}"
+BESIDE_BEFORE="$(mcp_call 6521 server_get_block "{\"x\":$((GX + 48)),\"y\":200,\"z\":$((GZ + 40))}")"
+EDGE_WRITE="$(mcp_call 6522 server_set_block "{\"x\":$((GX + 47)),\"y\":200,\"z\":$((GZ + 40)),\"block\":\"minecraft:redstone_block\"}")" \
+  || mcp_failure "the edge write failed: ${EDGE_WRITE}"
+case "$EDGE_WRITE" in *'"isError":true'*) mcp_failure "the edge write was refused: ${EDGE_WRITE}" ;; esac
+BESIDE_AFTER="$(mcp_call 6523 server_get_block "{\"x\":$((GX + 48)),\"y\":200,\"z\":$((GZ + 40))}")"
+case "$BESIDE_BEFORE" in
+  *'"loaded":false'*)
+    case "$BESIDE_AFTER" in
+      *'"loaded":false'*) echo "    the chunk beside the write was neither loaded nor generated" ;;
+      *) mcp_failure "a write on a chunk's edge loaded the chunk beside it: ${BESIDE_AFTER}" ;;
+    esac ;;
+  *) mcp_failure "the chunk beside the pregenerated box was loaded before the write: ${BESIDE_BEFORE}" ;;
+esac
+mcp_call 6524 server_release_loaded "{\"id\":\"${EDGE_ID}\"}" > /dev/null
+
+echo "==> Reads: a count with load over more than 512 chunks is refused before anything loads (#220)"
+WIDE_BODY="$(mcp_call 6525 server_count_blocks "{\"x\":${GX},\"y\":1,\"z\":${GZ},\"toX\":$((GX + 16000)),\"toY\":2,\"toZ\":$((GZ + 15)),\"load\":true}")" \
+  || mcp_failure "the wide count did not answer: ${WIDE_BODY}"
+case "$WIDE_BODY" in
+  *'"limit":512'*'"unit":"chunks"'*) echo "    refused, with its size and the limit" ;;
+  *) mcp_failure "a wide load count was not refused with its limit: ${WIDE_BODY}" ;;
+esac
 PJOB_BODY="$(mcp_call 652 server_job_submit "{\"kind\":\"pregen\",\"args\":{\"centerX\":$((GX + 1000)),\"centerZ\":${GZ},\"radius\":200,\"chunksPerTick\":8}}")" \
   || mcp_failure "a pregen job failed to start: ${PJOB_BODY}"
 PJOB_ID="$(printf '%s' "$PJOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"

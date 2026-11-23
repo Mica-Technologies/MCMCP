@@ -536,7 +536,7 @@ public class McpDispatcher {
      * {@code timedOut} or {@code failed} stopped it. A cancelled call's reply is a protocol error by the
      * spec and carries none of this; its undo point is in the server log.
      */
-    private static ToolResult withFailureDetails(ToolContext context, ToolResult result, String status) {
+    static ToolResult withFailureDetails(ToolContext context, ToolResult result, String status) {
         JsonObject details = context.failureDetails();
         if (details.entrySet().isEmpty()) {
             return result;

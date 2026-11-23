@@ -950,6 +950,7 @@ public final class ServerTestTools {
         };
         part.setCaller(whole.getCaller());
         part.setHoldCaller(whole.getHoldCaller());
+        part.shareFailureDetails(whole);
         part.setToolName(tool.getName());
         part.setMutating(!tool.isReadOnly());
         return part;

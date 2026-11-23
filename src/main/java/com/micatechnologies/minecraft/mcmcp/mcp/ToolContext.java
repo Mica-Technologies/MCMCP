@@ -124,6 +124,14 @@ public class ToolContext {
         }
     }
 
+    /**
+     * Makes this context note its failure details into {@code whole}'s: for a context built by hand
+     * for a step of a larger call (a test's step), which {@link #forPart} does by itself.
+     */
+    public void shareFailureDetails(ToolContext whole) {
+        this.failureDetails = whole.failureDetails;
+    }
+
     /** A copy of what {@link #noteFailureDetail} was told; empty when nothing was. */
     public JsonObject failureDetails() {
         synchronized (failureDetails) {

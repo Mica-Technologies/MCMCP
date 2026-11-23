@@ -74,6 +74,13 @@ final class SkyLight {
      * @param observers also tell observer blocks, as a placement does
      */
     static void notifyLoaded(World world, BlockPos pos, Block block, boolean observers) {
+        // As the world's own method does first: nothing in a debug world, and Forge's event, which
+        // other mods cancel to stop an update and listen to in order to hear of one.
+        if (world.getWorldInfo().getTerrainType() == net.minecraft.world.WorldType.DEBUG_ALL_BLOCK_STATES
+            || net.minecraftforge.event.ForgeEventFactory.onNeighborNotify(world, pos, world.getBlockState(pos),
+                java.util.EnumSet.allOf(EnumFacing.class), observers).isCanceled()) {
+            return;
+        }
         for (EnumFacing facing : NOTIFY_ORDER) {
             BlockPos beside = pos.offset(facing);
             if (world.isBlockLoaded(beside)) {
