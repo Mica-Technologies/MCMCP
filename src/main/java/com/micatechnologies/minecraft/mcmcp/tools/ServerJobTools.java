@@ -42,7 +42,9 @@ public final class ServerJobTools {
             .description("Start a long write or read as a background job and return its id at once: kind "
                 + "'apply_ops' (server_apply_ops' arguments; any length), 'set_blocks' (server_set_blocks' "
                 + "arguments; cells, blocks or a fill of any size), 'get_blocks' (server_get_blocks' arguments "
-                + "over a box of any size; results come back as pages), 'relight', 'test' (server_run_test's "
+                + "over a box of any size; results come back as pages), 'find_blocks' and 'count_blocks' (those "
+                + "tools' box arguments over an area of any width, with load: true; a page per 256 x 256 "
+                + "blocks), 'relight', 'test' (server_run_test's "
                 + "arguments; its verdict is in server_job_status), or 'pregen' (server_pregen_chunks' "
                 + "arguments over an area of any size; submit it again to resume), or 'build' (server_build's spec of any "
                 + "size, expanded on submit and replayed as ops). The server splits it into "
@@ -50,8 +52,8 @@ public final class ServerJobTools {
                 + "server_job_status; the job survives your script or client restarting, and its chunk holds are "
                 + "its own.")
             .schema(JsonSchema.object()
-                .enumeration("kind", "What to run.", "apply_ops", "set_blocks", "get_blocks", "relight", "test",
-                    "pregen", "build")
+                .enumeration("kind", "What to run.", "apply_ops", "set_blocks", "get_blocks", "find_blocks",
+                    "count_blocks", "relight", "test", "pregen", "build")
                 .property("args", Json.obj("type", "object"))
                 .string("label", "A name to know it by in lists and the orchestrator.")
                 .integer("waitForSlot", "Seconds to wait for a free job slot (4 per agent, 8 per player, 16 per "
@@ -69,12 +71,14 @@ public final class ServerJobTools {
             .description("A background job's state (queued, running, paused, done, failed, cancelled, "
                 + "interrupted), parts done of parts, percent, eta, totals summed over its parts, and for an "
                 + "op replay 'lastOp', the last op finished: resume an interrupted job from lastOp + 1. A "
-                + "get_blocks job's results are pages: pass 'page' to read one. 'wait' holds the call until "
+                + "get_blocks, find_blocks or count_blocks job's results are pages: pass 'page' to read one. "
+                + "budgetWaitMs is how long it has waited for the write budget, which is pacing and no "
+                + "fault. 'wait' holds the call until "
                 + "the job's state changes (it finishes, fails, pauses...) or that many seconds pass: one "
                 + "call instead of a poll per few seconds.")
             .schema(JsonSchema.object()
                 .string("id", "The job id.")
-                .integer("page", "A get_blocks job's page to return, from 0.", 0, 1_000_000)
+                .integer("page", "A page of a read job's results to return, from 0.", 0, 1_000_000)
                 .integer("wait", "Seconds to wait for the job's state to change before answering. Default 0.",
                     0, MAX_WAIT_SECONDS)
                 .required("id")

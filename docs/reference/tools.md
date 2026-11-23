@@ -1463,6 +1463,8 @@ them. Steps that each `call` a read and `save` it, then `return` them all, bring
 
 :material-alert: Destructive · `kind`, `args` required · optional `label`, `waitForSlot`
 
+Kinds `find_blocks` and `count_blocks` take those tools' box arguments over an area of any width, usually with `load: true`: the box is cut into parts 256 × 256 blocks square on the chunk grid, each loaded, read and given back in turn, and each part's result is a page with its `region`. This is where a search too wide for one call (over 512 chunks with `load: true`) goes.
+
 Starts a long write or read as a background job and returns its id at once. `kind` is `apply_ops`,
 `set_blocks`, `get_blocks`, `relight`, `test`, `pregen` or `build`. `args` are the arguments that tool takes, of any
 size: the server splits them into ordinary calls and works through them at its own pace. A `test`
@@ -1480,6 +1482,8 @@ three. A refusal names the jobs holding the slots, and its `busy` block has `ret
 #### `server_job_status`
 
 :material-eye: Read-only · `id` required · optional `page`, `wait`
+
+`budgetWaitMs` is how long the job has waited in all for the writes-per-minute budget: pacing, not a fault. A part whose chunk hold is refused gets its budget back before it is tried again.
 
 A job keeps at most 256 MB of pages, and finished jobs 256 MB between them: past that the job that ended longest ago gives its pages up, and its status shows `pagesDropped` in place of `pages`.
 
@@ -2131,7 +2135,7 @@ right and only took new tile-entity data is not in the undo point, as with `serv
 :material-alert: Destructive · `op`, optional `id`, `force`, `limit`, `by`, `since`, `x`/`z`/`toX`/`toZ`
 
 A write that is cancelled or times out part way still leaves an undo point for what it had written,
-and the error reply names it: `undoPoint`, `partial.written`, and `timedOut` or `failed`, beside the
+and the error reply names it: `undoPoint`, `partial` (`written`, and `of` and `lastIndex` for a batched write: how many cells, uses or blocks were asked for and the last one certainly done), and `timedOut` or `failed`, beside the
 `busy` block, so one `server_undo` puts a half-written batch back. (A cancelled call's reply is a
 protocol error and carries none of this; its undo point is in the server log.) A restore skips cells whose chunks unloaded while it ran and counts them in `unloaded`, with `unloadedNote` saying how to finish.
 

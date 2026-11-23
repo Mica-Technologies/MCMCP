@@ -156,7 +156,13 @@ public final class ServerTileEntityTools {
         // Written by the game thread one task at a time, read here after the last.
         final List<BlockPos> found = new ArrayList<>();
         int done = 0;
+        long lastReport = System.nanoTime();
         while (done < pending.size()) {
+            // Every two seconds, so a wide box is not taken for a call that has stopped answering.
+            if (System.nanoTime() - lastReport >= 2_000_000_000L) {
+                lastReport = System.nanoTime();
+                context.reportProgress(done, pending.size(), "Looked in " + done + " of " + pending.size() + " chunks");
+            }
             final int from = done;
             done = context.onGameThread(() -> {
                 WorldServer world = ServerWorldTools.requireWorld(dimension);
@@ -190,6 +196,11 @@ public final class ServerTileEntityTools {
         final int end = (int) Math.min((long) found.size(), (long) cursor + limit);
         int next = cursor;
         while (next < end) {
+            if (System.nanoTime() - lastReport >= 2_000_000_000L) {
+                lastReport = System.nanoTime();
+                context.reportProgress(next - cursor, end - cursor, "Read " + (next - cursor) + " of " + (end - cursor)
+                    + " tile entities");
+            }
             final int first = next;
             next = context.onGameThread(() -> {
                 WorldServer world = ServerWorldTools.requireWorld(dimension);

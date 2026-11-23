@@ -32,6 +32,9 @@ public final class JobParts {
         {"apply_ops", "server_apply_ops"},
         {"set_blocks", "server_set_blocks"},
         {"get_blocks", "server_get_blocks"},
+        // A search or a count too wide for one call with load: true, a square of chunks at a time.
+        {"find_blocks", "server_find_blocks"},
+        {"count_blocks", "server_count_blocks"},
         {"relight", "server_relight"},
         {"test", "server_run_test"},
         {"pregen", "server_pregen_chunks"},
@@ -111,6 +114,9 @@ public final class JobParts {
                 return splitBox(args, limits.readCells, 0, 255);
             case "relight":
                 return splitBox(args, limits.relightCells, 0, 255);
+            case "find_blocks":
+            case "count_blocks":
+                return splitColumns(args);
             case "test":
                 // A script is one run: its own steps are its pace, and it restores as a whole.
                 return Collections.singletonList(new Part(0, args, 0, -1, null));
@@ -119,6 +125,58 @@ public final class JobParts {
             default:
                 throw new IllegalArgumentException("'kind' is one of " + kindList() + ".");
         }
+    }
+
+    /** Whether a kind's part results are kept as pages to read back, each with its region. */
+    public static boolean keepsPages(String kind) {
+        return "get_blocks".equals(kind) || "find_blocks".equals(kind) || "count_blocks".equals(kind);
+    }
+
+    /** The side of a search part, in blocks: 256 chunks, half of what one call may load. */
+    static final int SEARCH_PART_SIDE = 256;
+
+    /**
+     * Splits a search or a count over a box into parts {@link #SEARCH_PART_SIDE} blocks square, each
+     * the whole of the box's height: its cost is its chunks, not its cells. The parts are aligned to
+     * the chunk grid, so no chunk is in two parts.
+     */
+    private static List<Part> splitColumns(JsonObject args) {
+        if (!args.has("x") || !args.has("z") || !args.has("toX") || !args.has("toZ")) {
+            throw new IllegalArgumentException("A find_blocks or count_blocks job is over a box: give x, z, toX and "
+                + "toZ, and y and toY to bound its height.");
+        }
+        int x1 = Json.getInt(args, "x", 0);
+        int z1 = Json.getInt(args, "z", 0);
+        int x2 = Json.getInt(args, "toX", x1);
+        int z2 = Json.getInt(args, "toZ", z1);
+        int minX = Math.min(x1, x2);
+        int maxX = Math.max(x1, x2);
+        int minZ = Math.min(z1, z2);
+        int maxZ = Math.max(z1, z2);
+        List<Part> parts = new ArrayList<>();
+        for (long tileZ = Math.floorDiv(minZ, SEARCH_PART_SIDE); tileZ * SEARCH_PART_SIDE <= maxZ; tileZ++) {
+            for (long tileX = Math.floorDiv(minX, SEARCH_PART_SIDE); tileX * SEARCH_PART_SIDE <= maxX; tileX++) {
+                if (parts.size() >= MAX_PARTS) {
+                    throw new IllegalArgumentException("That box makes more than " + MAX_PARTS + " parts, which is "
+                        + "more than one job runs. Submit it as several jobs over smaller boxes.");
+                }
+                int fromX = (int) Math.max(minX, tileX * SEARCH_PART_SIDE);
+                int fromZ = (int) Math.max(minZ, tileZ * SEARCH_PART_SIDE);
+                int toX = (int) Math.min(maxX, tileX * SEARCH_PART_SIDE + SEARCH_PART_SIDE - 1);
+                int toZ = (int) Math.min(maxZ, tileZ * SEARCH_PART_SIDE + SEARCH_PART_SIDE - 1);
+                JsonObject part = copy(args);
+                JsonObject region = new JsonObject();
+                region.addProperty("x", fromX);
+                region.addProperty("z", fromZ);
+                region.addProperty("toX", toX);
+                region.addProperty("toZ", toZ);
+                for (Map.Entry<String, JsonElement> entry : region.entrySet()) {
+                    part.add(entry.getKey(), entry.getValue());
+                }
+                parts.add(new Part(parts.size(), part, 0, -1, region));
+            }
+        }
+        return parts;
     }
 
     /** The kinds, for messages. */

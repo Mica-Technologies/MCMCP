@@ -135,7 +135,35 @@ public class ToolContext {
     /** A copy of what {@link #noteFailureDetail} was told; empty when nothing was. */
     public JsonObject failureDetails() {
         synchronized (failureDetails) {
-            return Json.parse(Json.write(failureDetails)).getAsJsonObject();
+            JsonObject copy = Json.parse(Json.write(failureDetails)).getAsJsonObject();
+            copy.remove(WRITE_DONE);
+            copy.remove(WRITE_OF);
+            return copy;
+        }
+    }
+
+    private static final String WRITE_DONE = "~writeDone";
+    private static final String WRITE_OF = "~writeOf";
+
+    /**
+     * Says how far a batched write has got: {@code done} of its {@code of} cells, uses or ops are
+     * finished. Kept only for the reply of a write that then stops part way, which says how much of
+     * what was asked it had done.
+     */
+    public void noteWriteProgress(long done, long of) {
+        synchronized (failureDetails) {
+            failureDetails.addProperty(WRITE_DONE, done);
+            failureDetails.addProperty(WRITE_OF, of);
+        }
+    }
+
+    /** {@code {done, of}} as last told to {@link #noteWriteProgress}, or null when it never was. */
+    @Nullable
+    public long[] writeProgress() {
+        synchronized (failureDetails) {
+            return failureDetails.has(WRITE_OF)
+                ? new long[] {failureDetails.get(WRITE_DONE).getAsLong(), failureDetails.get(WRITE_OF).getAsLong()}
+                : null;
         }
     }
 

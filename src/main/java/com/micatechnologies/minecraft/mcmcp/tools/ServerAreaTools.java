@@ -123,8 +123,10 @@ public final class ServerAreaTools {
             // Leaving load out is only a way through where the box is within the limit without it.
             refusal.addProperty("error", "That box covers " + String.format(Locale.ROOT, "%,d", chunks)
                 + " chunks; with load: true one call reads at most " + MAX_LOAD_CHUNKS + ". Split it into boxes "
-                + "of at most " + MAX_LOAD_CHUNKS + " chunks (about 360 x 360 blocks)"
-                + (chunks <= MAX_CHUNKS ? ", or leave load out to " + verb + " only the chunks already loaded."
+                + "of at most " + MAX_LOAD_CHUNKS + " chunks (about 360 x 360 blocks), or run it whole as a job, "
+                + "which loads at the server's pace: server_job_submit kind '" + verb + "_blocks' with these "
+                + "arguments"
+                + (chunks <= MAX_CHUNKS ? "; or leave load out to " + verb + " only the chunks already loaded."
                     : "."));
             refusal.addProperty("requested", chunks);
             refusal.addProperty("limit", MAX_LOAD_CHUNKS);

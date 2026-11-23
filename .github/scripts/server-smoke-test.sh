@@ -1141,6 +1141,28 @@ case "$WIDE_BODY" in
   *'"limit":512'*'"unit":"chunks"'*) echo "    refused, with its size and the limit" ;;
   *) mcp_failure "a wide load count was not refused with its limit: ${WIDE_BODY}" ;;
 esac
+case "$WIDE_BODY" in
+  *"server_job_submit kind 'count_blocks'"*) echo "    and names the job kind that takes it" ;;
+  *) mcp_failure "the refusal did not say where a wide count goes: ${WIDE_BODY}" ;;
+esac
+# The job the refusal points to: the same arguments, a page per 256 x 256 blocks, each loaded in turn.
+CJOB_BODY="$(mcp_call 6526 server_job_submit "{\"kind\":\"count_blocks\",\"args\":{\"x\":${GX},\"y\":1,\"z\":${GZ},\"toX\":$((GX + 47)),\"toY\":128,\"toZ\":$((GZ + 300)),\"include\":[\"minecraft:stone\"],\"load\":true}}")" \
+  || mcp_failure "a count_blocks job failed to start: ${CJOB_BODY}"
+CJOB_ID="$(printf '%s' "$CJOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$CJOB_ID" ] || mcp_failure "no count_blocks job id: ${CJOB_BODY}"
+for _ in $(seq 1 6); do
+  CJOB_STATE="$(mcp_call 6527 server_job_status "{\"id\":\"${CJOB_ID}\",\"wait\":30}")" || mcp_failure "status failed: ${CJOB_STATE}"
+  case "$CJOB_STATE" in *'"state":"done"'*|*'"state":"failed"'*) break ;; esac
+done
+case "$CJOB_STATE" in
+  *'"state":"done"'*'"parts":2'*'"pages":2'*) echo "    ${CJOB_ID} counted a box two parts long, a page each" ;;
+  *) mcp_failure "the count_blocks job did not finish with its pages: ${CJOB_STATE}" ;;
+esac
+CPAGE_BODY="$(mcp_call 6528 server_job_status "{\"id\":\"${CJOB_ID}\",\"page\":0}")" || mcp_failure "page failed: ${CPAGE_BODY}"
+case "$CPAGE_BODY" in
+  *'"region":'*'"minecraft:stone"'*) echo "    its first page has a region and the stone it counted" ;;
+  *) mcp_failure "the count job's page had no region or count: ${CPAGE_BODY}" ;;
+esac
 PJOB_BODY="$(mcp_call 652 server_job_submit "{\"kind\":\"pregen\",\"args\":{\"centerX\":$((GX + 1000)),\"centerZ\":${GZ},\"radius\":200,\"chunksPerTick\":8}}")" \
   || mcp_failure "a pregen job failed to start: ${PJOB_BODY}"
 PJOB_ID="$(printf '%s' "$PJOB_BODY" | grep -o '"id":"j[0-9a-z]*"' | head -1 | cut -d'"' -f4)"

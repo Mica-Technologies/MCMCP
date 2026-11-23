@@ -98,6 +98,7 @@ final class JobContext extends ToolContext {
                 throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");
             }
             reportProgress(0.0D, 1.0D, message);
+            job.budgetWaited(Math.max(0L, millis));
             Thread.sleep(Math.max(0L, millis));
             if (job.cancelRequested()) {
                 throw new JsonRpcException(JsonRpcException.REQUEST_CANCELLED, "The job was cancelled.");

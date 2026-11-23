@@ -219,6 +219,23 @@ public final class ClientCamera {
         return current != null ? current.hideGui : Minecraft.getMinecraft().gameSettings.hideGUI;
     }
 
+    /** How many times {@link #chooseHideGui} has been called: a choice made since a number was noted. */
+    private static volatile int hudChoices;
+
+    /**
+     * {@link #setUnderlyingHideGui} for a choice somebody made (client_view's hideHud), as against a
+     * tool forcing the HUD for its own run. Whoever saved the setting to put back later looks at
+     * {@link #hudChoices()} and leaves a newer choice alone.
+     */
+    public static void chooseHideGui(boolean hidden) {
+        hudChoices++;
+        setUnderlyingHideGui(hidden);
+    }
+
+    public static int hudChoices() {
+        return hudChoices;
+    }
+
     /** Sets what {@link #underlyingHideGui} reads, leaving a HUD this is hiding hidden. Client thread only. */
     public static void setUnderlyingHideGui(boolean hidden) {
         Saved current = saved;

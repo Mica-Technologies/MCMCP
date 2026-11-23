@@ -1999,7 +1999,7 @@ public final class ClientGuiTools {
                             // is applied (#220): written straight, the view's restore put back the
                             // value from before this call, or this call showed a HUD the view was
                             // hiding for its frame.
-                            ClientCamera.setUnderlyingHideGui(hideHud);
+                            ClientCamera.chooseHideGui(hideHud);
                         }
                         if (perspectiveValue >= 0) {
                             mc.gameSettings.thirdPersonView = perspectiveValue;

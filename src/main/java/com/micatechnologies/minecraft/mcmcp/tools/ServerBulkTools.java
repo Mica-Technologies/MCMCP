@@ -428,6 +428,7 @@ public final class ServerBulkTools {
                     });
                 }
             }
+            context.noteWriteProgress(0, count);
             final DeferredNeighbours deferred = (flags & 1) != 0 ? new DeferredNeighbours() : null;
             pairs.deferred = deferred;
             final java.util.Set<Integer> itemsBefore = DeferredNeighbours.itemsIn(context, dimension, dropChunks, false);
@@ -547,6 +548,7 @@ public final class ServerBulkTools {
                     }
                     return null;
                 });
+                context.noteWriteProgress(end, count);
                 if (count > batch) {
                     context.reportProgress(end, count, "Wrote " + end + " of " + count + " cells");
                 }

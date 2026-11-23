@@ -280,7 +280,7 @@ public final class JobManager {
                 }
             }
         };
-        boolean pages = "get_blocks".equals(job.kind);
+        boolean pages = JobParts.keepsPages(job.kind);
         int count = job.parts.size();
         try {
             for (JobParts.Part part : job.parts) {

@@ -166,4 +166,36 @@ class JobPartsTest {
         assertThrows(IllegalArgumentException.class,
             () -> JobParts.split("pregen", args("{\"centerX\":0,\"centerZ\":0,\"radius\":99999}"), LIMITS));
     }
+
+    @org.junit.jupiter.api.Test
+    void aWideSearchIsCutIntoChunkAlignedSquaresThatCoverItOnce() {
+        com.google.gson.JsonObject args = new com.google.gson.JsonObject();
+        args.addProperty("x", -300);
+        args.addProperty("z", 10);
+        args.addProperty("toX", 700);
+        args.addProperty("toZ", 520);
+        args.addProperty("y", 0);
+        args.addProperty("toY", 80);
+        args.addProperty("load", true);
+        java.util.List<JobParts.Part> parts = JobParts.split("find_blocks", args,
+            new JobParts.Limits(1, 1, 1, 1, 1, 1));
+        // x: -512..-257, -256..-1, 0..255, 256..511, 512..767 (5 tiles); z: 0..255, 256..511, 512..767 (3).
+        org.junit.jupiter.api.Assertions.assertEquals(15, parts.size());
+        long columns = 0;
+        for (JobParts.Part part : parts) {
+            int x = part.args.get("x").getAsInt();
+            int toX = part.args.get("toX").getAsInt();
+            int z = part.args.get("z").getAsInt();
+            int toZ = part.args.get("toZ").getAsInt();
+            org.junit.jupiter.api.Assertions.assertTrue(x >= -300 && toX <= 700 && z >= 10 && toZ <= 520);
+            org.junit.jupiter.api.Assertions.assertTrue(toX - x < 256 && toZ - z < 256);
+            org.junit.jupiter.api.Assertions.assertEquals(Math.floorDiv(x, 256), Math.floorDiv(toX, 256));
+            org.junit.jupiter.api.Assertions.assertTrue(part.args.get("load").getAsBoolean());
+            org.junit.jupiter.api.Assertions.assertEquals(80, part.args.get("toY").getAsInt());
+            columns += (long) (toX - x + 1) * (toZ - z + 1);
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(1001L * 511L, columns);
+        org.junit.jupiter.api.Assertions.assertTrue(JobParts.keepsPages("count_blocks"));
+        org.junit.jupiter.api.Assertions.assertEquals("server_count_blocks", JobParts.toolFor("count_blocks"));
+    }
 }

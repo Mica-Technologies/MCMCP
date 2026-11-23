@@ -175,6 +175,7 @@ public final class ClientPerformanceTools {
     private static boolean savedShowDebugInfo;
     private static boolean savedShowProfilerChart;
     private static boolean savedHideGui;
+    private static int savedHudChoices;
 
     private static void registerProfileSections() {
         McpRegistry.registerTool(McpTool.named("client_profile_sections")
@@ -221,6 +222,7 @@ public final class ClientPerformanceTools {
                             // Through the camera, which saves and restores hideGUI too for a
                             // screenshot's view: see ClientCamera.underlyingHideGui.
                             savedHideGui = ClientCamera.underlyingHideGui();
+                            savedHudChoices = ClientCamera.hudChoices();
                             flagsOverridden = true;
                             game.showDebugInfo = true;
                             game.showDebugProfilerChart = true;
@@ -292,7 +294,11 @@ public final class ClientPerformanceTools {
         GameSettings game = Minecraft.getMinecraft().gameSettings;
         game.showDebugInfo = savedShowDebugInfo;
         game.showDebugProfilerChart = savedShowProfilerChart;
-        ClientCamera.setUnderlyingHideGui(savedHideGui);
+        // Not when client_view chose a HUD setting while the profile ran: that choice is newer than
+        // what was saved, and putting the saved one back would undo it (#220).
+        if (ClientCamera.hudChoices() == savedHudChoices) {
+            ClientCamera.setUnderlyingHideGui(savedHideGui);
+        }
         flagsOverridden = false;
     }
 

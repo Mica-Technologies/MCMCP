@@ -79,7 +79,8 @@ public final class ServerInteractTools {
                 + "click is always yours); the result then says fakePlayer: true. With 'container', read "
                 + "the container that opens "
                 + "and press one of its buttons in the same moment — a container opened from afar closes again "
-                + "on the next tick.", false);
+                + "on the next tick. For a control with several zones on one face, pass that face and hitY "
+                + "(0 bottom to 1 top) for the zone: with no face the click lands on the block's top.", false);
     }
 
     private static void register(String name, String title, String description, final boolean withItem) {

@@ -55,4 +55,15 @@ class FailureDetailsTest {
         ToolResult result = McpDispatcher.withFailureDetails(context(), plain, "error");
         assertEquals(null, result.getStructuredContent());
     }
+
+    @Test
+    void writeProgressIsKeptForTheUndoStepAndNeverShownByItself() {
+        ToolContext context = context();
+        assertEquals(null, context.writeProgress());
+        context.noteWriteProgress(8192, 20000);
+        assertEquals(8192L, context.writeProgress()[0]);
+        assertEquals(20000L, context.writeProgress()[1]);
+        // Progress alone is not a failure detail: a call that then fails for another reason says nothing of it.
+        assertEquals(null, McpDispatcher.withFailureDetails(context, ToolResult.error("x"), "error").getStructuredContent());
+    }
 }

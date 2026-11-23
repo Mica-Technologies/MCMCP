@@ -951,6 +951,7 @@ public final class ServerBuildTools {
         for (int from = 0; from < total; from += batchSize) {
             final int start = from;
             final int end = Math.min(total, from + batchSize);
+            context.noteWriteProgress(from, total);
             context.onGameThread(new Callable<Void>() {
                 @Override
                 public Void call() {
@@ -965,6 +966,7 @@ public final class ServerBuildTools {
                 }
             });
             tally.batches++;
+            context.noteWriteProgress(end, total);
             if (total > batchSize) {
                 context.reportProgress(end, total, "Wrote " + end + " of " + total + " blocks");
             }

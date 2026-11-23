@@ -285,6 +285,7 @@ public final class ServerItemUseBatch {
                     }
                     return null;
                 });
+                context.noteWriteProgress(end, uses.size());
                 if (uses.size() > USES_PER_TASK) {
                     context.reportProgress(end, uses.size(), "Used " + end + " of " + uses.size());
                 }

@@ -1418,6 +1418,10 @@ public final class ClientDebugTools {
     private static void registerReadChat() {
         McpRegistry.registerTool(McpTool.named("client_read_chat")
             .title("Read chat")
+            // What agents guessed for 'lines'.
+            .alias("limit", "lines")
+            .alias("count", "lines")
+            .alias("tail", "lines")
             .description("Read the newest chat the client has received: command responses, "
                 + "other players' messages, death messages, and anything mods print to chat. You get "
                 + "the newest 'lines' lines (of those matching 'filter', when given), oldest of them "

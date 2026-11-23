@@ -72,6 +72,8 @@ public final class Job {
     private double partFraction;
     @Nullable
     private String message;
+    /** How long this job has waited for the writes-per-minute budget, in all. */
+    private long budgetWaitMillis;
     private long startedMillis;
     private long endedMillis;
     @Nullable
@@ -239,6 +241,11 @@ public final class Job {
         changed();
     }
 
+    /** Adds a wait for the write budget: time the job was slow for a reason that is not a fault. */
+    synchronized void budgetWaited(long millis) {
+        budgetWaitMillis += millis;
+    }
+
     synchronized void progress(double fraction, @Nullable String message) {
         this.partFraction = Math.max(0.0D, Math.min(0.999D, fraction));
         if (message != null) {
@@ -394,6 +401,9 @@ public final class Job {
         }
         if (full && lists.size() > 0) {
             json.add("refused", lists);
+        }
+        if (budgetWaitMillis > 0L) {
+            json.addProperty("budgetWaitMs", budgetWaitMillis);
         }
         if (!pages.isEmpty()) {
             json.addProperty("pages", pages.size());

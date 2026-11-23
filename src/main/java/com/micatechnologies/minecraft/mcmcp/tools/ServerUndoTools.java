@@ -414,6 +414,13 @@ public final class ServerUndoTools {
             }
             JsonObject partial = new JsonObject();
             partial.addProperty("written", recorded);
+            // How far through what was asked: the batches finished, of the cells, uses or ops there
+            // were. lastIndex is the last one certainly done; the batch after it may be done in part.
+            long[] progress = context.writeProgress();
+            if (progress != null) {
+                partial.addProperty("of", progress[1]);
+                partial.addProperty("lastIndex", progress[0] - 1L);
+            }
             context.noteFailureDetail("partial", partial);
         }
         catch (RuntimeException e) {
