@@ -310,8 +310,8 @@ final class TwoPartBlocks {
                 deferred.add(otherPos, other.getBlock(), other);
             }
             else if ((flags & 1) != 0) {
-                world.notifyNeighborsOfStateChange(pos, state.getBlock(), true);
-                world.notifyNeighborsOfStateChange(otherPos, other.getBlock(), true);
+                SkyLight.notifyLoaded(world, pos, state.getBlock(), true);
+                SkyLight.notifyLoaded(world, otherPos, other.getBlock(), true);
             }
             return firstChanged || secondChanged ? Outcome.WRITTEN : Outcome.UNCHANGED;
         }

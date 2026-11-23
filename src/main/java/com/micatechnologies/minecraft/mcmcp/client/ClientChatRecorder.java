@@ -109,6 +109,57 @@ public final class ClientChatRecorder {
     }
 
     /**
+     * The newest {@code limit} lines whose text contains {@code needle}, oldest first, with how many
+     * matched in all.
+     *
+     * @param needle lower case, or null for every line
+     */
+    public static Selection recent(int limit, @Nullable String needle) {
+        List<Entry> snapshot;
+        synchronized (ENTRIES) {
+            snapshot = new ArrayList<>(ENTRIES);
+        }
+        return select(snapshot, needle, limit);
+    }
+
+    /**
+     * Filters first and cuts second, from the newest end. Cut first, a filter looked only at the last
+     * few lines; not cut at all, as {@code client_read_chat} once did under a filter, a caller asking
+     * for five matching lines got every match from the oldest on, and its own line was last of
+     * hundreds or past where its client stopped reading.
+     */
+    static Selection select(List<Entry> oldestFirst, @Nullable String needle, int limit) {
+        List<Entry> kept = new ArrayList<>();
+        int matched = 0;
+        for (int i = oldestFirst.size() - 1; i >= 0; i--) {
+            Entry entry = oldestFirst.get(i);
+            if (needle != null && !entry.getText().toLowerCase(java.util.Locale.ROOT).contains(needle)) {
+                continue;
+            }
+            matched++;
+            if (kept.size() < limit) {
+                kept.add(entry);
+            }
+        }
+        java.util.Collections.reverse(kept);
+        return new Selection(kept, matched);
+    }
+
+    /** What {@link #recent(int, String)} chose. */
+    public static final class Selection {
+
+        /** Oldest first. */
+        public final List<Entry> lines;
+        /** How many buffered lines matched, these included. */
+        public final int matched;
+
+        Selection(List<Entry> lines, int matched) {
+            this.lines = lines;
+            this.matched = matched;
+        }
+    }
+
+    /**
      * Starts collecting every line received from now until {@link Capture#close}. Always close it:
      * an open capture keeps every line it is sent.
      */

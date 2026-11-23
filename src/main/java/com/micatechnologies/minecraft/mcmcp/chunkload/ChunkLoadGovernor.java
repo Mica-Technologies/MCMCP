@@ -441,6 +441,13 @@ public final class ChunkLoadGovernor {
         }
     }
 
+    /** A busy block that names the hold the failed call had taken, and says it is given back. */
+    private static JsonObject releasedHold(JsonObject busy, String holdId) {
+        busy.addProperty("holdId", holdId);
+        busy.addProperty("holdReleased", true);
+        return busy;
+    }
+
     /** Marks a call as done with its hold, the first time only. */
     private static void endCall(AtomicLong callEnded) {
         callEnded.compareAndSet(0L, System.currentTimeMillis());
@@ -521,7 +528,7 @@ public final class ChunkLoadGovernor {
                                 + "chunks; it is " + ServerLoad.describe() + ". Nothing is left held for this call: "
                                 + "its hold (" + request.hold.id + ") is given back as soon as the thread runs again. "
                                 + "Retry after busy.retryAfterMs.",
-                                ServerLoad.busy("server_overloaded"));
+                                releasedHold(ServerLoad.busy("server_overloaded"), request.hold.id));
                         }
                     }
                     else if (total > 0) {

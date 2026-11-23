@@ -681,7 +681,7 @@ public final class ServerTestTools {
                             }
                             net.minecraft.block.state.IBlockState state = (net.minecraft.block.state.IBlockState) before[i * 2];
                             if (world.getBlockState(pos) != state) {
-                                world.setBlockState(pos, state, 3);
+                                SkyLight.setBlockState(world, pos, state, 3);
                             }
                             String snbt = (String) before[i * 2 + 1];
                             net.minecraft.nbt.NBTTagCompound tag = snbt == null ? null : JsonToNBT.getTagFromJson(snbt);

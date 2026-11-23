@@ -104,7 +104,7 @@ final class BlockWriteFaults {
             if (changed && (flags & 1) != 0 && before != state.getBlock()) {
                 WriteDrops.begin(world, pos);
                 try {
-                    world.notifyNeighborsRespectDebug(pos, state.getBlock(), false);
+                    SkyLight.notifyLoaded(world, pos, state.getBlock(), false);
                 }
                 finally {
                     WriteDrops.end();

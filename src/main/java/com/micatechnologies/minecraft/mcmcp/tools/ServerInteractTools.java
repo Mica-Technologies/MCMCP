@@ -12,13 +12,17 @@ import com.micatechnologies.minecraft.mcmcp.mcp.McpRegistry;
 import com.micatechnologies.minecraft.mcmcp.mcp.McpTool;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolResult;
-import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.entity.player.InventoryPlayer;
 import net.minecraft.inventory.Container;
 import net.minecraft.inventory.Slot;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemBlock;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.EnumActionResult;
@@ -84,9 +88,11 @@ public final class ServerInteractTools {
             .integer("y", "Block Y.")
             .integer("z", "Block Z.")
             .enumeration("face", "The face clicked. Default 'up'.", "down", "up", "north", "south", "west", "east")
-            .number("hitX", "Where on the face, 0-1 across the block. Default the face's centre.", 0.0D, 1.0D)
-            .number("hitY", "As hitX, in Y.", 0.0D, 1.0D)
-            .number("hitZ", "As hitX, in Z.", 0.0D, 1.0D)
+            .number("hitX", "Where on the block the click lands: 0 its west side, 1 its east. Default the "
+                + "centre of the clicked face (0.5, and 0 or 1 on the face's own axis).", 0.0D, 1.0D)
+            .number("hitY", "As hitX: 0 the bottom, 1 the top. A control with zones up its face (open, stop, "
+                + "close) picks one by this; click its front face, not 'up', whose default is 1.", 0.0D, 1.0D)
+            .number("hitZ", "As hitX: 0 the north side, 1 the south.", 0.0D, 1.0D)
             .bool("sneak", "Click while sneaking. Default false.")
             .string("player", withItem ? "The player who clicks. Through the companion, always you."
                 : "The player who clicks. Through the companion, always you. Omit for MCMCP's fake player.");
@@ -97,15 +103,17 @@ public final class ServerInteractTools {
             schema = schema.integer("slot", "Hotbar slot 0-8 holding the item. Default the selected slot.", 0, 8);
         }
         schema = schema.property("container", com.micatechnologies.minecraft.mcmcp.json.Json.obj("type", "object"))
-            .bool("load", "Load the block's chunk for this call if it is not loaded.")
+            .bool("load", withItem ? "Load the block's chunk, and the one its clicked face opens onto, for this "
+                + "call if they are not loaded." : "Load the block's chunk for this call if it is not loaded.")
             .integer("settleTicks", "After the click, keep the block's chunk loaded and ticking this many "
                 + "ticks, then read the block again into 'settled': a button's release, a repeater, a door "
                 + "that finishes on a later tick. Default 0 (report at once).", 0, MAX_SETTLE_TICKS)
             .string(ServerPlayerLeaseTools.LEASE_TOKEN, ServerPlayerLeaseTools.LEASE_TOKEN_DESCRIPTION);
         McpRegistry.registerTool(McpTool.named(name)
             .title(title)
-            .description(description + " 'container': {\"read\": true} lists the slots of a container the click "
-                + "opens; {\"button\": n} presses button n as its own buttons do.")
+            .description(description + " hitX/hitY/hitZ say where on the block the click lands, for a control "
+                + "that acts by where it is hit. 'container': {\"read\": true} lists the slots of a container "
+                + "the click opens; {\"button\": n} presses button n as its own buttons do.")
             .schema(schema.required("x", "y", "z").build())
             .serverOnly()
             .destructive()
@@ -163,8 +171,16 @@ public final class ServerInteractTools {
             WorldServer world = ServerWorldTools.requireWorld(dimension);
             return world.isBlockLoaded(pos);
         }));
-        return ServerChunkTools.withChunks(context, dimension,
-            Collections.singleton(ChunkKeys.ofBlock(pos.getX(), pos.getZ())), hold, outcome -> {
+        final Set<Long> chunks = new LinkedHashSet<>();
+        chunks.add(ChunkKeys.ofBlock(pos.getX(), pos.getZ()));
+        // An item places into the cell on the clicked face, which over a chunk border is another chunk:
+        // the use loaded or generated it unheld, and the block it placed there was in neither 'changed'
+        // nor the undo point (#220). A door's upper half is in the same column. Only with load: true: a
+        // settle's hold without it must load nothing, and an empty-hand click places nothing.
+        if (withItem && load) {
+            chunks.add(ChunkKeys.ofBlock(pos.getX() + face.getXOffset(), pos.getZ() + face.getZOffset()));
+        }
+        return ServerChunkTools.withChunks(context, dimension, chunks, hold, outcome -> {
                 final UndoPoints.Recorder recorder = ServerUndoTools.start(context, true);
                 JsonObject json = context.onGameThread(() -> {
                     EntityPlayerMP player = fake ? fakeClicker(ServerWorldTools.requireWorld(dimension), pos, face)
@@ -178,6 +194,22 @@ public final class ServerInteractTools {
                     String refusal = refusalAt(server, world, player, pos, face);
                     if (refusal != null) {
                         throw new IllegalStateException(refusal);
+                    }
+                    // Before the click and before anything of the player's is touched: the use itself
+                    // would load the neighbour's chunk (#220). An empty slot is left to its own message.
+                    ItemStack toUse = withItem ? heldIn(player, slot) : ItemStack.EMPTY;
+                    if (!toUse.isEmpty() && reachesUnloaded(world, pos, face, toUse.getItem())) {
+                        BlockPos unloaded = pos.offset(face);
+                        JsonObject refused = new JsonObject();
+                        refused.addProperty("refused", "unloadedNeighbour");
+                        refused.add("chunk", chunkOf(unloaded));
+                        refused.add("beside", GameJson.blockPos(unloaded));
+                        refused.addProperty("message", "Nothing was clicked: the cell on the clicked face is in "
+                            + "chunk " + ChunkKeys.describe(ChunkKeys.ofBlock(unloaded.getX(), unloaded.getZ()))
+                            + ", which is not loaded, and an item used here could place a block there unseen. "
+                            + "Pass load: true, or hold the area with server_keep_loaded. If load: true was "
+                            + "passed, that chunk could not be loaded: it may never have been generated.");
+                        return refused;
                     }
 
                     JsonObject result = new JsonObject();
@@ -292,6 +324,9 @@ public final class ServerInteractTools {
                     clickedAt[0] = world.getTotalWorldTime();
                     return result;
                 });
+                if (json.has("refused")) {
+                    return ToolResult.error(json.get("message").getAsString()).withStructured(json);
+                }
                 if (recorder != null) {
                     ServerUndoTools.finish(context, recorder, withItem ? "server_use_item_on_block" : "server_activate_block",
                         dimension, null, null, json, null);
@@ -548,6 +583,36 @@ public final class ServerInteractTools {
             return "That block is outside the world border.";
         }
         return null;
+    }
+
+    /**
+     * Whether using {@code item} on this face would reach into a chunk that is not loaded (#220). An item
+     * places into the cell on the clicked face, and vanilla loads or generates that cell's chunk to do
+     * it, behind the governor and outside the undo point. A plain block item on a replaceable block
+     * (tall grass, a snow layer) places into the clicked cell itself, so it is let through; any other
+     * item is not asked where it would place, because some go to the neighbour whatever was clicked
+     * (flint and steel, slabs). Reads only the clicked cell, which the caller has checked is loaded.
+     * Game thread.
+     */
+    static boolean reachesUnloaded(WorldServer world, BlockPos pos, EnumFacing face, Item item) {
+        if (world.isBlockLoaded(pos.offset(face))) {
+            return false;
+        }
+        return !(item.getClass() == ItemBlock.class && world.getBlockState(pos).getBlock().isReplaceable(world, pos));
+    }
+
+    /** The stack a use from {@code slot} would hold, the selected slot when it is negative. Game thread. */
+    static ItemStack heldIn(EntityPlayerMP player, int slot) {
+        int index = slot >= 0 ? slot : player.inventory.currentItem;
+        return InventoryPlayer.isHotbar(index) ? player.inventory.getStackInSlot(index) : ItemStack.EMPTY;
+    }
+
+    /** {@code [chunkX, chunkZ]} of a block, as a refusal names it. */
+    static JsonArray chunkOf(BlockPos pos) {
+        JsonArray chunk = new JsonArray();
+        chunk.add(pos.getX() >> 4);
+        chunk.add(pos.getZ() >> 4);
+        return chunk;
     }
 
     /** Game thread: the container a click opened, read and clicked in the same moment. */

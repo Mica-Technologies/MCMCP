@@ -420,7 +420,7 @@ public class McmcpConfig {
 
         maxPackedReadCells = configuration.getInt("maxPackedReadCells", CATEGORY_LIMITS, 1_048_576, 4096,
             16_777_216, "Most cells one server_get_blocks call with encoding 'packed' reads. Read in game-thread "
-                + "batches of maxBlockVolume, so a large read never holds one tick.");
+                + "slices of about 25 ms, so a large read never holds one tick.");
         maxSurfaceColumns = configuration.getInt("maxSurfaceColumns", CATEGORY_LIMITS, 262_144, 256, 4_194_304,
             "Most columns one server_get_blocks call with mode 'surface' reads (262,144 is 512 x 512).");
         changeLogEntries = configuration.getInt("changeLogEntries", CATEGORY_LIMITS, 262_144, 1024, 4_194_304,

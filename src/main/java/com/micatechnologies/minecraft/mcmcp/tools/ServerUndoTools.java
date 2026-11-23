@@ -408,7 +408,13 @@ public final class ServerUndoTools {
             if (id != null) {
                 Mcmcp.LOGGER.warn("MCMCP: " + tool + " stopped part way; the " + recorded
                     + " block(s) it had changed are in undo point " + id);
+                // In the reply too (#220): the log is the server's, and the caller is who has to decide
+                // whether to undo. The same name a finished write gives its undo point.
+                context.noteFailureDetail("undoPoint", new com.google.gson.JsonPrimitive(id));
             }
+            JsonObject partial = new JsonObject();
+            partial.addProperty("written", recorded);
+            context.noteFailureDetail("partial", partial);
         }
         catch (RuntimeException e) {
             Mcmcp.LOGGER.warn("MCMCP could not save an undo point for the part of " + tool + " that was written", e);

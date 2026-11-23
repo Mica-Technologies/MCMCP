@@ -2,6 +2,7 @@ package com.micatechnologies.minecraft.mcmcp.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkKeys;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ChunkLoadGovernor;
 import com.micatechnologies.minecraft.mcmcp.chunkload.ReadTiles;
@@ -16,8 +17,10 @@ import com.micatechnologies.minecraft.mcmcp.regions.NearQuery;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.init.Blocks;
@@ -43,6 +46,20 @@ public final class ServerAreaTools {
 
     /** The largest box either tool takes, in chunks: about 1,000 x 1,000 blocks. */
     private static final int MAX_CHUNKS = 4096;
+
+    /**
+     * The largest box a count or a find takes with {@code load: true}, in chunks: about 360 x 360 blocks
+     * (#220). Loads are paced, so the time such a call takes is its chunks: finds over 1,000 to 2,000
+     * chunks of a live server ran 216 to 450 s each, with a hold cap's room taken throughout. 512 is the
+     * default chunks.maxHeldChunksPerCaller, and about two minutes at that pace. A constant, not the
+     * caller's cap: a box over a low cap is still read a piece at a time, and a cap raised for builds
+     * must not bring the long calls back.
+     */
+    static final int MAX_LOAD_CHUNKS = 512;
+
+    /** A long walk says how far it is this often, so the orchestrator's no-progress limit does not end it. */
+    private static final long REPORT_NANOS = 2_000_000_000L;
+
     /** Matches one page of server_find_blocks' box mode may return. */
     static final int MAX_FIND_LIMIT = 5000;
 
@@ -88,6 +105,39 @@ public final class ServerAreaTools {
         }
     }
 
+    /**
+     * The refusal for a box of too many chunks, or null when it may be read. Counted from the corners,
+     * before any set of chunks is built and before anything is loaded.
+     *
+     * <p>With {@code load: true} the limit is {@link #MAX_LOAD_CHUNKS}, and the refusal carries the
+     * numbers as structured content so a script can split the box. A job's part is not held to it: a job
+     * loads at the server's pace with nobody waiting on the call.
+     *
+     * @param verb what the tool does with a box: "count" or "search"
+     */
+    @Nullable
+    private static ToolResult sizeRefusal(ToolContext context, Box box, String verb) {
+        long chunks = ChunkKeys.boxCount(box.minX, box.minZ, box.maxX, box.maxZ);
+        if (chunks > MAX_LOAD_CHUNKS && context.getBoolean("load", false) && !context.isJob()) {
+            JsonObject refusal = new JsonObject();
+            // Leaving load out is only a way through where the box is within the limit without it.
+            refusal.addProperty("error", "That box covers " + String.format(Locale.ROOT, "%,d", chunks)
+                + " chunks; with load: true one call reads at most " + MAX_LOAD_CHUNKS + ". Split it into boxes "
+                + "of at most " + MAX_LOAD_CHUNKS + " chunks (about 360 x 360 blocks)"
+                + (chunks <= MAX_CHUNKS ? ", or leave load out to " + verb + " only the chunks already loaded."
+                    : "."));
+            refusal.addProperty("requested", chunks);
+            refusal.addProperty("limit", MAX_LOAD_CHUNKS);
+            refusal.addProperty("unit", "chunks");
+            return ToolResult.error(refusal.get("error").getAsString()).withStructured(refusal);
+        }
+        if (chunks > MAX_CHUNKS) {
+            return ToolResult.error("That box covers " + chunks + " chunks; " + verb + " at most " + MAX_CHUNKS
+                + " (about 1000 x 1000 blocks) at once.");
+        }
+        return null;
+    }
+
     private static JsonSchema boxSchema(JsonSchema schema) {
         return schema
             .integer("x", "X of one corner.")
@@ -112,8 +162,8 @@ public final class ServerAreaTools {
                 + "call. 'include' and 'exclude' take ids, namespaces ending in ':' or patterns with '*' anywhere. "
                 + "Returns counts per block id, most first, with a few sample positions of each; 'extents' adds "
                 + "where each lives (min and max corner), 'byY' its count per layer. Air is left out unless "
-                + "includeAir. Unloaded chunks are listed and not counted; pass load: true to count them (a box over your hold cap is "
-                + "loaded and counted a piece at a time). A filter no registered block matches is listed in "
+                + "includeAir. Unloaded chunks are listed and not counted; pass load: true to count them, a piece at a time, in a box of "
+                + "at most " + MAX_LOAD_CHUNKS + " chunks (about 360 x 360 blocks). A filter no registered block matches is listed in "
                 + "filtersMatchingNoBlock.")
             .schema(boxSchema(JsonSchema.object())
                 .array("include", "Only count these blocks.", Json.obj("type", "string"))
@@ -136,11 +186,11 @@ public final class ServerAreaTools {
 
     private static ToolResult count(final ToolContext context) throws Exception {
         final Box box = new Box(context, 0, 255);
-        final Set<Long> chunks = box.chunks();
-        if (chunks.size() > MAX_CHUNKS) {
-            return ToolResult.error("That box covers " + chunks.size() + " chunks; count at most " + MAX_CHUNKS
-                + " (about 1000 x 1000 blocks) at once.");
+        ToolResult refused = sizeRefusal(context, box, "count");
+        if (refused != null) {
+            return refused;
         }
+        final Set<Long> chunks = box.chunks();
         final int dimension = context.getInt("dimension", 0);
         final List<String> include = Json.getStringList(context.getArguments(), "include");
         final List<String> exclude = Json.getStringList(context.getArguments(), "exclude");
@@ -157,6 +207,9 @@ public final class ServerAreaTools {
         final Map<String, JsonArray> sampled = new HashMap<>();
         final long[] counted = {0L};
         final List<Long> pending = new ArrayList<>(chunks);
+        // Progress by the clock, not by the slice or the box's size (#220): one report a slice floods the
+        // link, and a small box of slow chunks said nothing at all.
+        final long[] lastReport = {System.nanoTime()};
         return ServerChunkTools.walk(context, dimension, box.minX, box.minZ, box.maxX, box.maxZ, 0, tile -> {
             int done = tile.firstChunk;
             int end = tile.lastChunk + 1;
@@ -176,7 +229,8 @@ public final class ServerAreaTools {
                     }
                     return at;
                 });
-                if (pending.size() > 64) {
+                if (System.nanoTime() - lastReport[0] >= REPORT_NANOS) {
+                    lastReport[0] = System.nanoTime();
                     context.reportProgress(done, pending.size(), "Counted " + done + " of " + pending.size() + " chunks");
                 }
             }
@@ -400,11 +454,11 @@ public final class ServerAreaTools {
     static ToolResult findInBox(final ToolContext context, final List<String> patterns,
                                 final List<String> nearby, final NearQuery near) throws Exception {
         final Box box = new Box(context, 0, 255);
-        final List<Long> pending = new ArrayList<>(box.chunks());
-        if (pending.size() > MAX_CHUNKS) {
-            return ToolResult.error("That box covers " + pending.size() + " chunks; search at most " + MAX_CHUNKS
-                + " (about 1000 x 1000 blocks) at once.");
+        ToolResult refused = sizeRefusal(context, box, "search");
+        if (refused != null) {
+            return refused;
         }
+        final List<Long> pending = new ArrayList<>(box.chunks());
         final int dimension = context.getInt("dimension", 0);
         final int limit = context.getBoundedInt("limit", 1000, 1, MAX_FIND_LIMIT);
         final long end = pending.size() * 256L;
@@ -420,6 +474,8 @@ public final class ServerAreaTools {
         }
         final Finder finder = new Finder(box, patterns, nearby, near);
         final long[] at = {start};
+        // Progress by the clock, as the count's.
+        final long[] lastReport = {System.nanoTime()};
         return ServerChunkTools.walk(context, dimension, box.minX, box.minZ, box.maxX, box.maxZ,
             near == null ? 0 : near.radius(), new ServerChunkTools.TileReader() {
             @Override
@@ -466,7 +522,8 @@ public final class ServerAreaTools {
                     finder.endSlice();
                     return null;
                 });
-                if (pending.size() > 64) {
+                if (System.nanoTime() - lastReport[0] >= REPORT_NANOS) {
+                    lastReport[0] = System.nanoTime();
                     context.reportProgress(at[0] >> 8, pending.size(), "Searched " + (at[0] >> 8) + " of "
                         + pending.size() + " chunks");
                 }
@@ -497,6 +554,161 @@ public final class ServerAreaTools {
             json.add("chunks", chunksBlock);
             return ToolResult.structured(json);
         });
+    }
+
+    // ------------------------------------------------------------------
+    // Finding round a point (server_find_blocks' cube mode)
+    // ------------------------------------------------------------------
+
+    /** Cells the cube search visits between looks at the clock. */
+    private static final int CUBE_CELLS_PER_CLOCK = 256;
+
+    /**
+     * Lists the cells within {@code radius} of x, y, z whose block matches {@code targets}, nearest
+     * shell first, in game-thread slices of about {@link #SLICE_NANOS} (#220). In one task it held the
+     * server thread for the whole cube, and it walked the whole cube once per shell to find that
+     * shell's surface: quartic in the radius, 554 million steps for the 17 million cells of radius 128.
+     *
+     * <p>Loaded cells only: nothing is loaded, and a chunk may unload between slices, which reads as it
+     * would have had it been unloaded from the start.
+     */
+    static ToolResult findInCube(final ToolContext context, final List<String> targets) throws Exception {
+        final String blockId = String.join(", ", targets);
+        final Map<Integer, Boolean> matching = new HashMap<>();
+        final int centreX = context.requireInt("x");
+        final int centreY = context.requireInt("y");
+        final int centreZ = context.requireInt("z");
+        final int radius = context.getBoundedInt("radius", 16, 1, McmcpConfig.getMaxScanRadius());
+        final int dimension = context.getInt("dimension", 0);
+        final int limit = context.getBoundedInt("limit", 64, 1, 500);
+
+        // Written by the game thread one task at a time, read here after each.
+        final ShellWalk walk = new ShellWalk(radius);
+        final JsonArray found = new JsonArray();
+        final int[] scanned = {0};
+        final boolean[] finished = {false};
+        long lastReport = System.nanoTime();
+        while (!finished[0]) {
+            context.onGameThread(() -> {
+                WorldServer world = ServerWorldTools.requireWorld(dimension);
+                BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+                long started = System.nanoTime();
+                int steps = 0;
+                // Expanding shells outward from the centre, so results come out nearest-first and
+                // hitting the limit early returns the closest matches rather than an arbitrary corner
+                // of the box.
+                while (found.size() < limit) {
+                    if (!walk.next()) {
+                        break;
+                    }
+                    int y = centreY + walk.dy;
+                    if (y >= 0 && y <= 255) {
+                        pos.setPos(centreX + walk.dx, y, centreZ + walk.dz);
+                        if (world.isBlockLoaded(pos)) {
+                            scanned[0]++;
+                            IBlockState state = world.getBlockState(pos);
+                            Boolean match = matching.get(Block.getStateId(state));
+                            if (match == null) {
+                                ResourceLocation name = state.getBlock().getRegistryName();
+                                match = state.getBlock() != Blocks.AIR && NbtProjection.matches(
+                                    name == null ? "unknown" : name.toString(), targets);
+                                matching.put(Block.getStateId(state), match);
+                            }
+                            if (match) {
+                                JsonObject hit = GameJson.blockPos(pos);
+                                if (targets.size() > 1 || NbtProjection.isPattern(targets.get(0))) {
+                                    ResourceLocation name = state.getBlock().getRegistryName();
+                                    hit.addProperty("block", name == null ? "unknown" : name.toString());
+                                }
+                                hit.addProperty("metadata", state.getBlock().getMetaFromState(state));
+                                hit.addProperty("distance", Math.round(Math.sqrt(walk.dx * walk.dx
+                                    + walk.dy * walk.dy + walk.dz * walk.dz) * 100.0D) / 100.0D);
+                                found.add(hit);
+                            }
+                        }
+                    }
+                    // The clock every so many cells, not every cell: reading it costs about what a cell does.
+                    if (++steps % CUBE_CELLS_PER_CLOCK == 0 && System.nanoTime() - started >= SLICE_NANOS) {
+                        break;
+                    }
+                }
+                finished[0] = walk.finished || found.size() >= limit;
+                return null;
+            });
+            // By the clock, not by the slice: a slice is 25 ms, and one report each floods the link.
+            if (!finished[0] && System.nanoTime() - lastReport >= REPORT_NANOS) {
+                lastReport = System.nanoTime();
+                context.reportProgress(walk.shell, radius + 1, "Searched " + walk.shell + " of " + (radius + 1)
+                    + " shells");
+            }
+        }
+
+        JsonObject json = new JsonObject();
+        json.addProperty("block", blockId);
+        json.addProperty("dimension", dimension);
+        json.addProperty("searchRadius", radius);
+        json.addProperty("blocksScanned", scanned[0]);
+        json.addProperty("matches", found.size());
+        json.addProperty("truncated", found.size() >= limit);
+        json.add("positions", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(found));
+        return ToolResult.structured(json);
+    }
+
+    /**
+     * The cells of a cube round a point as offsets, shell by shell outward: shell s is the cells whose
+     * largest offset on any axis is s. Within a shell x runs outermost, then y, then z, each from -s
+     * to s, which is the order the search has always listed a shell's matches in.
+     *
+     * <p>A column of a shell that is not on its x or y face has two cells, z = -s and z = s. They are
+     * stepped to directly; the walk used to pass through every cell between them, in every shell.
+     */
+    static final class ShellWalk {
+        private final int radius;
+        int shell;
+        int dx;
+        int dy;
+        int dz;
+        boolean finished;
+        private boolean started;
+
+        ShellWalk(int radius) {
+            this.radius = radius;
+        }
+
+        /** Moves to the next cell; false, and {@link #finished}, once the last shell is done. */
+        boolean next() {
+            if (finished) {
+                return false;
+            }
+            if (!started) {
+                // Shell 0 is the centre alone.
+                started = true;
+                return true;
+            }
+            boolean onFace = Math.max(Math.abs(dx), Math.abs(dy)) == shell;
+            if (onFace ? dz < shell : dz < 0) {
+                dz = onFace ? dz + 1 : shell;
+                return true;
+            }
+            if (dy < shell) {
+                dy++;
+            }
+            else if (dx < shell) {
+                dx++;
+                dy = -shell;
+            }
+            else {
+                if (shell >= radius) {
+                    finished = true;
+                    return false;
+                }
+                shell++;
+                dx = -shell;
+                dy = -shell;
+            }
+            dz = -shell;
+            return true;
+        }
     }
 
     /**

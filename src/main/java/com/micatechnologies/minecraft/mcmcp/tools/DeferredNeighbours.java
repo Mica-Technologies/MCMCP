@@ -61,9 +61,9 @@ final class DeferredNeighbours {
             // A door's other half that removes itself on hearing of this one drops here (#184).
             WriteDrops.begin(world, pos);
             try {
-                world.notifyNeighborsRespectDebug(pos, before.get(i), true);
+                SkyLight.notifyLoaded(world, pos, before.get(i), true);
                 if (now.getBlock() != before.get(i)) {
-                    world.notifyNeighborsRespectDebug(pos, now.getBlock(), false);
+                    SkyLight.notifyLoaded(world, pos, now.getBlock(), false);
                 }
                 if (now.hasComparatorInputOverride()) {
                     world.updateComparatorOutputLevel(pos, now.getBlock());

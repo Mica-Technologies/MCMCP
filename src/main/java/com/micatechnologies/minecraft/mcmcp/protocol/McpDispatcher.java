@@ -490,7 +490,7 @@ public class McpDispatcher {
             // of resending at once (#132).
             if (e instanceof ToolBusyException) {
                 status = ((ToolBusyException) e).nothingRan() ? "busy" : "timeout";
-                result = ((ToolBusyException) e).toResult();
+                result = withFailureDetails(context, ((ToolBusyException) e).toResult(), status);
                 reply = result.toJson(session.getProtocolVersion());
                 return reply;
             }
@@ -506,14 +506,15 @@ public class McpDispatcher {
                 throw e;
             }
             status = "error";
-            reply = ToolResult.error(e.getMessage()).toJson(session.getProtocolVersion());
+            result = withFailureDetails(context, ToolResult.error(e.getMessage()), status);
+            reply = result.toJson(session.getProtocolVersion());
             return reply;
         }
         catch (Exception e) {
             Mcmcp.LOGGER.error("MCMCP tool '" + name + "' threw", e);
             String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            reply = ToolResult.error("Tool '" + name + "' failed: " + detail)
-                .toJson(session.getProtocolVersion());
+            result = withFailureDetails(context, ToolResult.error("Tool '" + name + "' failed: " + detail), status);
+            reply = result.toJson(session.getProtocolVersion());
             return reply;
         }
         finally {
@@ -527,6 +528,34 @@ public class McpDispatcher {
                     result == null ? null : result.getStructuredContent(), context.timingNotes(), now);
             }
         }
+    }
+
+    /**
+     * Adds what the handler noted with {@link ToolContext#noteFailureDetail} to an error reply:
+     * {@code undoPoint} and {@code partial.written} for a write that stopped part way, and which of
+     * {@code timedOut} or {@code failed} stopped it. A cancelled call's reply is a protocol error by the
+     * spec and carries none of this; its undo point is in the server log.
+     */
+    private static ToolResult withFailureDetails(ToolContext context, ToolResult result, String status) {
+        JsonObject details = context.failureDetails();
+        if (details.entrySet().isEmpty()) {
+            return result;
+        }
+        JsonObject structured = result.getStructuredContent() == null ? new JsonObject()
+            : Json.parse(Json.write(result.getStructuredContent())).getAsJsonObject();
+        for (java.util.Map.Entry<String, JsonElement> entry : details.entrySet()) {
+            if (!structured.has(entry.getKey())) {
+                structured.add(entry.getKey(), entry.getValue());
+            }
+        }
+        structured.addProperty("timeout".equals(status) ? "timedOut" : "failed", true);
+        result.withStructured(structured);
+        if (details.has("undoPoint")) {
+            result.withContent(com.micatechnologies.minecraft.mcmcp.mcp.McpContent.text("What this call had "
+                + "written before it stopped is in undo point " + details.get("undoPoint").getAsString()
+                + ": server_undo restores it."));
+        }
+        return result;
     }
 
     /**

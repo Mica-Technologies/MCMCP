@@ -23,8 +23,9 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -60,14 +61,20 @@ import javax.annotation.Nullable;
  *
  * <h2>Threading</h2>
  *
- * The pool is sized {@code workerThreads + maxSessions}, plus one thread per permitted
- * {@code /events} stream. That is not arbitrary: {@link HttpServer}
+ * The pool grows on demand to a ceiling of {@code workerThreads + maxSessions}, plus one thread per
+ * permitted {@code /events} stream, and never less than {@link #MIN_WORKER_CEILING}. That is not
+ * arbitrary: {@link HttpServer}
  * dispatches each exchange to the executor and holds the thread for the exchange's lifetime, and an
  * SSE stream is an exchange that stays open for as long as the client is connected. Sizing the pool
  * for POSTs alone means the first few clients to open streams consume every thread and all
  * subsequent requests hang — with no error, which makes it a genuinely nasty thing to diagnose.
  * Reserving one thread per permitted session removes the interaction entirely, so long as streams
  * are held to that number: see {@code claimSseStream}.
+ *
+ * <p>A POST can hold its thread for minutes too: an input-lock wait, {@code client_wait},
+ * {@code client_sequence}, {@code game_events_wait}. The floor on the ceiling is what keeps a handful
+ * of those from queueing the release and read-only calls behind them (#220). Past the ceiling an
+ * exchange waits its turn; see {@code start} for why it is not turned away.
  */
 public class HttpMcpTransport implements McpTransport {
 
@@ -99,6 +106,12 @@ public class HttpMcpTransport implements McpTransport {
      * header finds out on its first call.
      */
     static final String HEADER_INSTANCE = "Mcmcp-Instance";
+
+    /**
+     * The fewest threads the pool may grow to, whatever the config adds up to: enough that the long
+     * waits of a few agents at once still leave threads for the calls that end them (#220).
+     */
+    static final int MIN_WORKER_CEILING = 32;
 
     private final McpEndpointSettings settings;
     private final McpDispatcher dispatcher;
@@ -154,8 +167,18 @@ public class HttpMcpTransport implements McpTransport {
 
         final String sideId = dispatcher.getSide().id();
         final AtomicInteger threadCounter = new AtomicInteger(1);
-        ExecutorService pool = Executors.newFixedThreadPool(
-            settings.getWorkerThreads() + settings.getMaxSessions() + MAX_EVENT_STREAMS,
+        // Grows under load and shrinks back (#220). The fixed pool this was could be filled by long
+        // waits (an input-lock wait of up to ten minutes, client_wait, client_sequence,
+        // game_events_wait), and every request behind them queued for as long, the release and
+        // read-only ones included. Past the ceiling an exchange queues, without bound: HttpServer
+        // hands each one to execute() from its one dispatcher thread, so an executor that rejects
+        // makes it drop the connection with nothing said, and one that blocks stops every accept.
+        // Core equal to max, with core threads allowed to time out, is what makes a
+        // ThreadPoolExecutor start a thread before it queues.
+        int ceiling = Math.max(settings.getWorkerThreads() + settings.getMaxSessions() + MAX_EVENT_STREAMS,
+            MIN_WORKER_CEILING);
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(ceiling, ceiling, 60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<Runnable>(),
             new ThreadFactory() {
                 @Override
                 public Thread newThread(Runnable runnable) {
@@ -167,6 +190,7 @@ public class HttpMcpTransport implements McpTransport {
                     return thread;
                 }
             });
+        pool.allowCoreThreadTimeOut(true);
 
         HttpServer created;
         try {

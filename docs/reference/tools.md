@@ -556,8 +556,9 @@ plan. A 60 × 40 floor is about 2,500 characters, the cheapest way for a model t
 string. It's run-length encoded as varint pairs (value, run), zlib-deflated, then base64
 (`"encoding": "rle-varint+zlib+base64"`, with `count` values). Terrain is long runs of a few blocks:
 an 80 × 80 × 20 read, 128,000 cells, is about 6 KB. There is no listing cap below
-`limits.maxPackedReadCells` (default 1,048,576). The read runs in game-thread batches, so it never
-holds up a tick.
+`limits.maxPackedReadCells` (default 1,048,576). The read runs in game-thread slices of about 25 ms,
+as a `surface` read does, so it never holds up a tick however slow its chunks are, and a long one
+reports progress every few seconds.
 
 A packed palette names the same meta as every other read: the one the chunk stores. Some modded
 blocks store a state as a meta that decodes to a different state. A conveyor stair facing south is
@@ -971,8 +972,9 @@ every piece in the dimension in one call (`nodesInBox` is left out).
 
 A role comes from the mounted block's energy capability (`canExtract` / `canReceive`), so a block
 that pushes energy without offering extraction reads as no role; its `mountedTe` is still there to
-tell. At most 30,000 ends are read a call. `load: true` (only with `ends`) loads the ends' chunks
-through the chunk governor and releases them after; without it, nothing is loaded.
+tell. At most 30,000 ends are read a call, in slices of about 25 ms with ticks between them, with
+progress every few seconds. `load: true` (only with `ends`) loads the ends' chunks through the chunk
+governor and releases them after; without it, nothing is loaded.
 
 #### `server_count_blocks`
 
@@ -994,7 +996,9 @@ short slices with ticks between them.
   footprint a block lives, without reading every cell.
 - `byY: true` adds each block's count per layer as `byY: [[y, count], ...]`, only the layers that
   have any: counts per floor.
-- Unloaded chunks are not counted and appear in the `chunks` block. `load: true` counts them. When
+- Unloaded chunks are not counted and appear in the `chunks` block. `load: true` counts them, in a
+  box of at most 512 chunks (about 360 × 360 blocks); a wider one is refused before anything loads,
+  with `requested`, `limit` and `unit` in the structured result. When
   nothing was counted and some chunks were not loaded, a top-level `note` says so, because a bare 0
   reads as "none here".
 - `filtersMatchingNoBlock` lists the `include` and `exclude` entries that no registered block
@@ -1249,6 +1253,8 @@ needs no player and no render distance.
   scale for the whole plan, so a box of thousands of chunks keeps the orchestrator's 120 s
   no-progress limit from ending it. Loads are paced: expect about ten chunks a second on a busy
   server, so a 3,700-chunk box takes several minutes.
+- The columns are sampled in slices of about 25 ms with ticks between them, however large the plan,
+  and a long one reports the rows drawn every few seconds.
 
 The PNG is also written under `mcmcp-plans/` in the game directory, and its path returned.
 
@@ -1552,12 +1558,16 @@ Two shapes:
 
 - **Cube**: `x`, `y`, `z` and `radius`. Searches expanding shells outward from the centre, so
   results are nearest-first and hitting `limit` (at most 500) returns the closest matches. Radius
-  bounded by `limits.maxScanRadius`. Skips unloaded chunks.
+  bounded by `limits.maxScanRadius`. Skips unloaded chunks. Searched in slices of about 25 ms with
+  ticks between them.
 - **Box**: `x`, `y`, `z` to `toX`, `toY`, `toZ`, as for [`server_count_blocks`](#server_count_blocks),
   up to 4,096 chunks. Lists every match as `[x, y, z, palette index]`. The `palette` gives each
   entry's `block`, `metadata` and `count` on the page. A page holds about `limit` matches (default
   1,000, at most 5,000). While `complete` is false, pass the returned `cursor`, with the same box,
-  for the next page. `load: true` searches unloaded chunks too.
+  for the next page. `load: true` searches unloaded chunks too, in a box of at most 512 chunks
+  (about 360 × 360 blocks). Loads are paced, so a wider box took minutes: it is refused before
+  anything loads, with `requested`, `limit` and `unit: "chunks"` in the structured result. Split it.
+  A long search reports progress every few seconds.
 
 **Near** (box mode only): `near: {blocks, radius, mode}` keeps only the matches that have
 (`mode: "with"`, the default) or lack (`"without"`) one of `near.blocks` within `radius` (1 to 8),
@@ -2120,7 +2130,10 @@ right and only took new tile-entity data is not in the undo point, as with `serv
 
 :material-alert: Destructive · `op`, optional `id`, `force`, `limit`, `by`, `since`, `x`/`z`/`toX`/`toZ`
 
-A write that is cancelled or times out part way still leaves an undo point for what it had written. A restore skips cells whose chunks unloaded while it ran and counts them in `unloaded`, with `unloadedNote` saying how to finish.
+A write that is cancelled or times out part way still leaves an undo point for what it had written,
+and the error reply names it: `undoPoint`, `partial.written`, and `timedOut` or `failed`, beside the
+`busy` block, so one `server_undo` puts a half-written batch back. (A cancelled call's reply is a
+protocol error and carries none of this; its undo point is in the server log.) A restore skips cells whose chunks unloaded while it ran and counts them in `unloaded`, with `unloadedNote` saying how to finish.
 
 Lists the undo points block writes left, or puts one back.
 
@@ -2233,14 +2246,25 @@ restored afterwards. The reply has:
 - `changed`, which says whether anything happened. Vanilla answers `pass` for some clicks that
   did act, so don't rely on `result` for that.
 
+`hitX`, `hitY` and `hitZ` say where on the block the click lands, each from 0 to 1 across it: `hitX`
+west to east, `hitY` bottom to top, `hitZ` north to south. The default is the centre of the clicked
+face: 0.5 on two axes, and 0 or 1 on the face's own axis.
+
+**The cell beside the click.** An item places into the cell on the clicked face, which across a chunk
+border is in another chunk. `load: true` holds that chunk too. If it is still not loaded when the click
+is made, nothing is clicked: the call is a tool error with `refused: "unloadedNeighbour"`,
+`chunk: [chunkX, chunkZ]`, the cell as `beside` and a `message`. Pass `load: true`, or hold the area
+with [`server_keep_loaded`](#server_keep_loaded). Left to run, the use would load or generate that
+chunk itself, and a block it placed there would be in neither `changed` nor the undo point. A plain
+block item used on a replaceable block (tall grass, a snow layer) places into the clicked cell, so it
+is not refused.
+
 Through the companion, `player` is always you, and the tool needs `mcmcp.companion.use`. Every call
 leaves an undo point for the clicked block and the one beside it.
 
 #### `server_use_item_on_blocks`
 
 :material-alert: Destructive · `player`, `uses` required · optional `item`, `slot`, `readBack`, `readBackKeys`, `stopOnError`, `load`, `leaseToken`
-
-Where the cell beside a click is in a chunk that is not loaded it is not read, and reads back as `mcmcp:unloaded`.
 
 Many uses of an item in one call, in order: planting a street's trees, or linking a run of
 signals. Each use is the same click as [`server_use_item_on_block`](#server_use_item_on_block).
@@ -2265,6 +2289,18 @@ use's `result` and `changed`. A use outside the build limit, spawn protection or
 `beside` it on the clicked face (where a placement lands), and with
 `readBackKeys` the named tile-entity fields. `lentAfter` gives each lent stack's count at the end.
 `stopOnError` stops at the first failed or refused use. One undo point covers the call.
+
+**Unloaded chunks.** `load: true` holds each clicked block's chunk and the chunk its clicked face
+opens onto, where the item places. A use whose chunk is not loaded when its turn comes is refused by
+itself and the rest of the batch goes on. Its entry is
+`{x, y, z, result: "refused", refused: "unloaded", chunk: [chunkX, chunkZ], i}` when the clicked
+block's chunk is not loaded, and `refused: "unloadedNeighbour"` when the chunk of the cell on the
+clicked face is not. Such a use is counted in `refused`, never in `changed`, and leaves nothing in
+the undo point. The reply then carries one `unloadedHint`. Read the entries by `i`, and run those uses
+again with `load: true` or with the area held by [`server_keep_loaded`](#server_keep_loaded). A plain
+block item used on a replaceable block (tall grass, a snow layer) places into the clicked cell, so it
+is not refused for its neighbour. In that one case the neighbour is not read, and with `readBack` it
+reads back as `mcmcp:unloaded`.
 
 #### `server_player_lease`
 
@@ -2295,10 +2331,18 @@ nothing.
 
 #### `server_activate_block`
 
-:material-alert: Destructive · as above, without `slot`; `player` optional, with `dimension`
+:material-alert: Destructive · `x`, `y`, `z` required · optional `player`, `dimension`, `face`, `hitX`/`hitY`/`hitZ`, `sneak`, `container`, `load`, `settleTicks`, `leaseToken`
 
 Right-clicks a block with an empty hand from any distance: press a button, open a controller, flip a
-lever, open a container. A block reads the hand of the player clicking it, so for the click the
+lever, open a container.
+
+**Where the click lands.** `hitX`, `hitY` and `hitZ` are each 0 to 1 across the clicked block: `hitX`
+west to east, `hitY` bottom to top, `hitZ` north to south. A control that acts by where it is hit
+reads them: a door station with open, stop and close zones up its face picks one by `hitY`. The
+default is the centre of the clicked face, and `face` defaults to `up`, so a call that names neither
+hits the top of the block (`hitY` 1). To choose a zone, name the face the control is on and set the
+fraction, for example `face: "north", hitY: 0.2`. An empty hand places nothing, so this tool is not
+refused for an unloaded chunk beside the click, and `load: true` holds only the block's own chunk. A block reads the hand of the player clicking it, so for the click the
 player's selection moves to an empty hotbar slot (the selected one if it is empty) and back again.
 With no hotbar slot empty, the selected stack is set aside for the click and put back afterwards
 (`setAside` names it). If the block puts an item in that slot meanwhile, the stack goes elsewhere in
@@ -3401,12 +3445,22 @@ See `client_world_load`.
 The rolling 300-line buffer of received chat: command output, other players, death messages, and
 anything mods print to chat. This is how you see the result of `client_send_chat`.
 
+| Argument | Type | Notes |
+| --- | --- | --- |
+| `lines` | integer 1–300 | Default 50. How many of the newest lines to return. |
+| `filter` | string | Case-insensitive substring. Only matching lines are returned, the newest `lines` of them. |
+
+You get the **newest** lines, the oldest of them first, so the latest line is the last one. The
+filter is applied before the cut: `lines: 5` with a `filter` is the five newest matching lines, not
+the matches among the five newest.
+
 Each line reads `[HH:MM:SS] message`. Anything that is not ordinary player chat is tagged after the
 time — `(SYSTEM)` for command output and server messages, `(GAME_INFO)` for the action bar, and
 `(LOCAL)` for lines this client printed itself, such as a client-side command's output, which no
 chat packet carries.
 
-Returns text only, opening with `# N of M buffered line(s)`. There is no structured form, for the
+Returns text only, opening with `# N of M buffered line(s)`, then which lines they are
+(`: the newest, oldest first`, or `: the newest of K matching, oldest first` under a filter). There is no structured form, for the
 reason given under [`game_read_log`](#game_read_log).
 
 #### `client_runtime_info`

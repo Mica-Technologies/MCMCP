@@ -173,13 +173,7 @@ public final class ServerCopyTools {
         final Set<Long> chunks = new LinkedHashSet<>(ChunkKeys.box(box.minX, box.minZ, box.maxX, box.maxZ));
         chunks.addAll(ChunkKeys.box(destination[0], destination[2], destination[3], destination[5]));
 
-        return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
-            if (!dryRun) {
-                ToolResult overBudgetNow = ServerBulkTools.chargeWritesInHold(context, box.cells());
-                if (overBudgetNow != null) {
-                    return overBudgetNow;
-                }
-            }
+        return ServerBulkTools.withChargedChunks(context, dimension, chunks, dryRun ? 0L : box.cells(), outcome -> {
             final CellOverlay overlay = new CellOverlay();
             final ServerApplyOps.StatePalette palette = new ServerApplyOps.StatePalette();
             final Map<Long, NBTTagCompound> tags = new LinkedHashMap<>();

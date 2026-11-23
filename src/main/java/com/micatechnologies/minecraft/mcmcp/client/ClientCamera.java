@@ -210,6 +210,9 @@ public final class ClientCamera {
      * profile started under a detached view ended with the HUD hidden for good, and a view taken
      * during a profile restored the profiler's forced value over the player's own. Read and written
      * through here, the two save the same thing and their restores can come in either order.
+     *
+     * <p>{@code client_view}'s {@code hideHud} goes through here as well (#220): it sets the player's
+     * own setting, so under a view it must change what the view restores to, and report that.
      */
     public static boolean underlyingHideGui() {
         Saved current = saved;

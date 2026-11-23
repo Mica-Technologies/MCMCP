@@ -37,8 +37,14 @@ public final class ServerRegionTools {
     /** Palette entry for a cell in a chunk that is not loaded. Never air. */
     static final String UNLOADED = "mcmcp:unloaded";
 
-    /** Columns read per game-thread task in surface mode. */
+    /** The most columns of one row a surface read takes between looks at the clock. */
     private static final int SURFACE_COLUMNS_PER_TASK = 4096;
+
+    /** How long one game-thread slice may run, as in {@code ServerAreaTools}. */
+    private static final long SLICE_NANOS = 25_000_000L;
+
+    /** A long read says how far it is this often, so the orchestrator's no-progress limit does not end it. */
+    private static final long REPORT_NANOS = 2_000_000_000L;
 
     private ServerRegionTools() {
     }
@@ -96,44 +102,51 @@ public final class ServerRegionTools {
 
         final int[] states = new int[(int) cells];
         final int[] heights = surface ? new int[(int) cells] : null;
+        // Written by the game thread one task at a time, read here after each.
         final long[] read = {0L};
+        // Progress by the clock, not by the hop: a hop is 25 ms, and one report each floods the link (#220).
+        final long[] lastReport = {System.nanoTime()};
         return ServerChunkTools.walk(context, dimension, minX, minZ, maxX, maxZ, 0, tile -> {
-            int tileWidth = tile.maxX - tile.minX + 1;
-            if (surface) {
-                // At most SURFACE_COLUMNS_PER_TASK columns a task: whole rows, or pieces of one long row.
-                int rowsPerTask = Math.max(1, SURFACE_COLUMNS_PER_TASK / tileWidth);
-                int columnsPerTask = Math.min(tileWidth, SURFACE_COLUMNS_PER_TASK);
-                for (int z = tile.minZ; z <= tile.maxZ; z += rowsPerTask) {
-                    final int fromZ = z;
-                    final int toZ = Math.min(tile.maxZ, z + rowsPerTask - 1);
-                    for (int x = tile.minX; x <= tile.maxX; x += columnsPerTask) {
-                        final int fromX = x;
-                        final int toX = Math.min(tile.maxX, x + columnsPerTask - 1);
-                        context.onGameThread(() -> {
-                            readSurface(ServerWorldTools.requireWorld(dimension), minX, minZ, sizeX, minY, maxY, ignore,
-                                fromX, toX, fromZ, toZ, states, heights);
-                            return null;
-                        });
-                        read[0] += (long) (toX - fromX + 1) * (toZ - fromZ + 1);
+            final int tileWidth = tile.maxX - tile.minX + 1;
+            final int tileDepth = tile.maxZ - tile.minZ + 1;
+            // One strip is the unit: a row of the piece, or a piece of one long row. A task reads strips
+            // for about SLICE_NANOS (#220). Sized by count, a task was whole layers up to maxBlockVolume
+            // cells, and where one layer was more than that (a flat box read without load is one piece, so
+            // up to maxPackedReadCells) it was the whole layer, however slow its chunks were to read.
+            final int strip = Math.min(tileWidth,
+                surface ? SURFACE_COLUMNS_PER_TASK : McmcpConfig.getMaxBlockVolume());
+            final int stripsPerRow = (tileWidth + strip - 1) / strip;
+            final long strips = (long) stripsPerRow * tileDepth * (surface ? 1 : sizeY);
+            long done = 0L;
+            while (done < strips) {
+                final long from = done;
+                done = context.onGameThread(() -> {
+                    WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    long started = System.nanoTime();
+                    long at = from;
+                    // At least one strip a task, so a slow strip cannot stall the read.
+                    while (at < strips && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
+                        long row = at / stripsPerRow;
+                        int fromX = tile.minX + (int) (at % stripsPerRow) * strip;
+                        int toX = Math.min(tile.maxX, fromX + strip - 1);
+                        int z = tile.minZ + (int) (row % tileDepth);
+                        if (surface) {
+                            readSurface(world, minX, minZ, sizeX, minY, maxY, ignore, fromX, toX, z, z, states,
+                                heights);
+                        }
+                        else {
+                            int y = minY + (int) (row / tileDepth);
+                            readCells(world, minX, minZ, sizeX, sizeZ, minY, fromX, toX, z, z, y, y, states);
+                        }
+                        read[0] += toX - fromX + 1;
+                        at++;
                     }
-                    context.reportProgress(read[0], cells, "Read " + read[0] + " of " + cells + " columns");
-                }
-            }
-            else {
-                int layer = tileWidth * (tile.maxZ - tile.minZ + 1);
-                int layersPerTask = Math.max(1, McmcpConfig.getMaxBlockVolume() / Math.max(1, layer));
-                for (int y = minY; y <= maxY; y += layersPerTask) {
-                    final int fromY = y;
-                    final int toY = Math.min(maxY, y + layersPerTask - 1);
-                    context.onGameThread(() -> {
-                        readCells(ServerWorldTools.requireWorld(dimension), minX, minZ, sizeX, sizeZ, minY, tile.minX,
-                            tile.maxX, tile.minZ, tile.maxZ, fromY, toY, states);
-                        return null;
-                    });
-                    read[0] += (long) layer * (toY - fromY + 1);
-                    if (cells > McmcpConfig.getMaxBlockVolume()) {
-                        context.reportProgress(read[0], cells, "Read " + read[0] + " of " + cells + " cells");
-                    }
+                    return at;
+                });
+                if (System.nanoTime() - lastReport[0] >= REPORT_NANOS) {
+                    lastReport[0] = System.nanoTime();
+                    context.reportProgress(read[0], cells, "Read " + read[0] + " of " + cells
+                        + (surface ? " columns" : " cells"));
                 }
             }
             return true;
@@ -198,7 +211,8 @@ public final class ServerRegionTools {
 
     /**
      * Game thread. The cells of {@code [x0, x1] x [z0, z1]}, layers {@code fromY..toY}, into the box's
-     * array. Unloaded chunks read as -1, never as air, and are never loaded.
+     * array. Unloaded chunks read as -1, never as air, and are never loaded. Each cell goes to its own
+     * index, so the order the box is read in does not change the result.
      */
     private static void readCells(WorldServer world, int minX, int minZ, int sizeX, int sizeZ, int minY, int x0,
                                   int x1, int z0, int z1, int fromY, int toY, int[] states) {

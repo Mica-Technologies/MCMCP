@@ -335,7 +335,7 @@ public final class ServerTaskPump {
      * Any thread: when an integrated server has not ticked for a second, schedules one vanilla task
      * that drains the pump, unless one is already scheduled. Cheap, and a no-op on a dedicated server.
      */
-    static void kickIfPaused() {
+    public static void kickIfPaused() {
         MinecraftServer server = ServerThreadBridge.server();
         if (server == null || server.isDedicatedServer() || System.nanoTime() - lastTickNanos < KICK_AFTER_NANOS
             || !KICK_PENDING.compareAndSet(false, true)) {

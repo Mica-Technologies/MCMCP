@@ -178,6 +178,12 @@ A read of the tools then found the same family in a dozen places. The rules that
 - **`for (v = min; v <= max; v++)` never ends at `Integer.MAX_VALUE`,** and `max - min + 1` wraps.
   The dispatcher's check keeps both out of reach; do not rely on a volume limit computed in `int`.
 - **A read never touches an unloaded chunk** (`isBlockLoaded` first): the read loads or generates it.
+- **Every block write goes through `SkyLight.setBlockState`, and every neighbour notification through
+  `SkyLight.notifyLoaded`** (#220). Vanilla's own notifying (`setBlockState` with flag 1,
+  `notifyNeighborsOfStateChange`) reads each of the six neighbours, which loads or generates the
+  chunk beside a write on a chunk's edge. MCMCP switches it off and tells loaded neighbours only.
+- **An item use holds, or refuses for, the chunk its clicked face opens onto** as well as the clicked
+  block's: that is where the item places.
 - **`ServerTaskPump` names the task it is running** (`TaskCaller.describing`), so a stall report can
   say which call holds the thread after its caller timed out. An unsliced read loop of MCMCP's own
   calls `ServerTaskPump.checkpoint()` so the watchdog can stop it; a write is never stopped half way.

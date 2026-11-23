@@ -344,11 +344,7 @@ public final class ServerBulkTools {
         final int[] area = UndoPoints.imageArea(minX, minZ, maxX, maxZ);
         final int batch = McmcpConfig.getMaxBlockVolume();
 
-        return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
-            ToolResult overBudgetNow = chargeWritesInHold(context, count);
-            if (overBudgetNow != null) {
-                return overBudgetNow;
-            }
+        return withChargedChunks(context, dimension, chunks, count, outcome -> {
             final PaletteTally tally = new PaletteTally();
             if (abortOnConflict && (expectAll != null || expects != null)) {
                 for (int from = 0; from < count; from += batch) {
@@ -609,6 +605,39 @@ public final class ServerBulkTools {
     @Nullable
     static ToolResult chargeWritesBeforeHold(ToolContext context, long count) {
         return charge(context, count, context.pacesToBudgets());
+    }
+
+    /**
+     * Runs a write's body with its chunks held, charging {@code cells} to the caller's budget in the
+     * right order for who is calling ({@link #chargeWritesBeforeHold} first, by the caller of this), and
+     * giving back what a job was charged when the hold was refused and the body never ran: its part
+     * wrote nothing, and without the refund its next try waited out a minute for cells it never used.
+     *
+     * @param cells the cells charged before the hold; 0 or less for a dry run, which charges nothing
+     */
+    static ToolResult withChargedChunks(final ToolContext context, int dimension, Set<Long> chunks, final long cells,
+                                        final ServerChunkTools.WithChunks<ToolResult> body) throws Exception {
+        final boolean[] entered = {false};
+        try {
+            return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
+                entered[0] = true;
+                if (cells > 0L) {
+                    ToolResult overBudgetNow = chargeWritesInHold(context, cells);
+                    if (overBudgetNow != null) {
+                        return overBudgetNow;
+                    }
+                }
+                return body.run(outcome);
+            });
+        }
+        finally {
+            if (!entered[0] && cells > 0L && context.pacesToBudgets()) {
+                synchronized (WRITE_BUDGET) {
+                    WRITE_BUDGET.unrecord(ChunkLoadGovernor.holdCallerOf(context),
+                        (int) Math.min(Integer.MAX_VALUE, cells));
+                }
+            }
+        }
     }
 
     /** See {@link #chargeWritesBeforeHold}. Null to go on, or the refusal to return; nothing was written. */

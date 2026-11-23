@@ -2,9 +2,14 @@ package com.micatechnologies.minecraft.mcmcp.client;
 
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.client.companion.ClientCompanion;
+import com.micatechnologies.minecraft.mcmcp.game.ServerTaskPump;
+import com.micatechnologies.minecraft.mcmcp.game.TaskCaller;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import net.minecraft.client.Minecraft;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.server.integrated.IntegratedServer;
@@ -378,8 +383,18 @@ public final class PlayerShuttle {
         IntegratedServer server = mc.getIntegratedServer();
         if (server != null) {
             final java.util.UUID id = mc.player.getUniqueID();
-            CompletableFuture<Void> done = new CompletableFuture<>();
-            server.addScheduledTask(() -> {
+            final CompletableFuture<Void> done = new CompletableFuture<>();
+            // Taken by whichever comes first: the server thread starting the move, or this caller
+            // giving up on it. A move the caller gave up on must not happen later, with the lease
+            // given back and nobody left to return the player.
+            final AtomicBoolean claimed = new AtomicBoolean();
+            // Through MCMCP's pump like every other server-thread step, not the server's own
+            // addScheduledTask (#220): that waits, with no timeout, on a lock the server thread holds
+            // for as long as a scheduled task runs.
+            ServerTaskPump.runLater(TaskCaller.MCMCP, () -> {
+                if (!claimed.compareAndSet(false, true)) {
+                    return;
+                }
                 try {
                     EntityPlayerMP player = server.getPlayerList().getPlayerByUUID(id);
                     if (player == null) {
@@ -390,11 +405,11 @@ public final class PlayerShuttle {
                     player.connection.setPlayerLocation(x, y, z, yaw, pitch);
                     done.complete(null);
                 }
-                catch (RuntimeException e) {
-                    done.completeExceptionally(e);
+                catch (Throwable t) {
+                    done.completeExceptionally(t);
                 }
             });
-            done.get(5L, TimeUnit.SECONDS);
+            awaitLocalTeleport(mc, done, claimed);
             return;
         }
         JsonObject args = new JsonObject();
@@ -427,6 +442,65 @@ public final class PlayerShuttle {
         }
         if (result.has("isError") && result.get("isError").getAsBoolean()) {
             throw new IllegalStateException("The server refused the teleport: " + ClientCompanion.textOf(result));
+        }
+    }
+
+    private static final long LOCAL_TELEPORT_WAIT_MILLIS = 5_000L;
+
+    /**
+     * Waits for the integrated server to make a queued move, and takes the move back if it has not
+     * started in five seconds. The pump tells nobody when it drops a plain task, as it does when the
+     * server stops, so that case ends here too, as a sentence and not a wait with no end.
+     *
+     * @throws IllegalStateException when the move was not made; {@code claimed} is then set, so it
+     *         never will be
+     */
+    private static void awaitLocalTeleport(Minecraft mc, CompletableFuture<Void> done, AtomicBoolean claimed)
+        throws InterruptedException {
+        long deadline = System.currentTimeMillis() + LOCAL_TELEPORT_WAIT_MILLIS;
+        try {
+            while (true) {
+                try {
+                    done.get(100L, TimeUnit.MILLISECONDS);
+                    return;
+                }
+                catch (TimeoutException e) {
+                    if (System.currentTimeMillis() >= deadline) {
+                        break;
+                    }
+                    // A paused game's server does not tick, and the pump has it drain only on an
+                    // offer made a second or more after its last tick. A move queued inside that
+                    // second would sit until the game resumed, so offer again while it is paused.
+                    if (mc.isGamePaused()) {
+                        ServerTaskPump.kickIfPaused();
+                    }
+                }
+            }
+            if (claimed.compareAndSet(false, true)) {
+                throw new IllegalStateException("The integrated server did not start the teleport within "
+                    + (LOCAL_TELEPORT_WAIT_MILLIS / 1000L) + " seconds (it is stopping, or far behind); the "
+                    + "player was not moved by it.");
+            }
+            // Started on the server thread, so it will end: one more wait for how.
+            try {
+                done.get(LOCAL_TELEPORT_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+            }
+            catch (TimeoutException e) {
+                throw new IllegalStateException("The integrated server started the teleport and had not "
+                    + "finished it " + (2L * LOCAL_TELEPORT_WAIT_MILLIS / 1000L) + " seconds on; where the "
+                    + "player is now is not known.");
+            }
+        }
+        catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof IllegalStateException) {
+                throw (IllegalStateException) cause;
+            }
+            throw new IllegalStateException("The teleport failed on the integrated server: " + cause, cause);
+        }
+        catch (InterruptedException e) {
+            claimed.compareAndSet(false, true);
+            throw e;
         }
     }
 

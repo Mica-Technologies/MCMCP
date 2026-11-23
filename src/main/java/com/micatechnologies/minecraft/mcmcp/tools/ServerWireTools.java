@@ -61,6 +61,12 @@ public final class ServerWireTools {
     /** Most wire ends read in one call: a whole city's grid was 13,274. */
     static final int MAX_END_READS = 30_000;
 
+    /** How long one game-thread slice of the end reads may run, as in {@code ServerAreaTools}. */
+    private static final long SLICE_NANOS = 25_000_000L;
+
+    /** A long read says how far it is this often, so the orchestrator's no-progress limit does not end it. */
+    private static final long REPORT_NANOS = 2_000_000_000L;
+
     private ServerWireTools() {
     }
 
@@ -183,12 +189,34 @@ public final class ServerWireTools {
         }
 
         return ServerChunkTools.withChunks(context, dimension, chunks, load, outcome -> {
+            // The ends in game-thread slices of about SLICE_NANOS (#220): each is two tile entities and
+            // an energy capability asked of a mod, and 30,000 of them in one task held the server thread
+            // for all of it. Filled in the nodes' order by one task at a time, and read by the last.
+            final Map<String, WireEnds.End> read2 = new HashMap<>();
+            final List<Map.Entry<String, int[]>> pending = new ArrayList<>(nodes.entrySet());
+            long lastReport = System.nanoTime();
+            int done = 0;
+            while (done < pending.size()) {
+                final int from = done;
+                done = context.onGameThread(() -> {
+                    WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    long started = System.nanoTime();
+                    int at = from;
+                    // At least one end a task, so a slow end cannot stall the read.
+                    while (at < pending.size() && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
+                        Map.Entry<String, int[]> node = pending.get(at++);
+                        read2.put(node.getKey(), describe(world, node.getValue()));
+                    }
+                    return at;
+                });
+                // By the clock, not by the task: a task is 25 ms, and one report each floods the link.
+                if (System.nanoTime() - lastReport >= REPORT_NANOS) {
+                    lastReport = System.nanoTime();
+                    context.reportProgress(done, pending.size(), "Read " + done + " of " + pending.size() + " ends");
+                }
+            }
             JsonObject json = context.onGameThread(() -> {
                 WorldServer world = ServerWorldTools.requireWorld(dimension);
-                Map<String, WireEnds.End> read2 = new HashMap<>();
-                for (Map.Entry<String, int[]> node : nodes.entrySet()) {
-                    read2.put(node.getKey(), describe(world, node.getValue()));
-                }
                 JsonObject out = pieces != null ? piecesJson(pieces, box, limit, ends, read2)
                     : wiresJson(world, touching, box, limit);
                 out.addProperty("dimension", dimension);

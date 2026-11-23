@@ -274,13 +274,7 @@ public final class ServerApplyOps {
         final Set<Long> touchedChunks = chunks;
         final long charged = reach;
 
-        return ServerChunkTools.withChunks(context, dimension, touchedChunks, outcome -> {
-            if (!dryRun) {
-                ToolResult overBudgetNow = ServerBulkTools.chargeWritesInHold(context, charged);
-                if (overBudgetNow != null) {
-                    return overBudgetNow;
-                }
-            }
+        return ServerBulkTools.withChargedChunks(context, dimension, touchedChunks, dryRun ? 0L : charged, outcome -> {
             final CellOverlay overlay = new CellOverlay();
             final StatePalette palette = new StatePalette();
             final Map<Long, NBTTagCompound> tags = new LinkedHashMap<>();

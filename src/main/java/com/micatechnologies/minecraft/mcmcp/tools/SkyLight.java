@@ -1,6 +1,8 @@
 package com.micatechnologies.minecraft.mcmcp.tools;
 
+import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
+import net.minecraft.util.EnumFacing;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
@@ -33,10 +35,63 @@ final class SkyLight {
         // What the old block drops as it is overwritten is the write's, not loot (#184).
         WriteDrops.begin(world, pos);
         try {
-            return setWithLight(world, pos, state, flags);
+            if (world.isRemote || !world.isBlockLoaded(pos)) {
+                return setWithLight(world, pos, state, flags);
+            }
+            // The world's own notifying is switched off (no flag 1, flag 16) and done here, to loaded
+            // neighbours only (#220). Vanilla tells all six, and telling one reads its block, which
+            // loads or generates its chunk: every write on a chunk's edge loaded the chunk beside it,
+            // unseen by the governor and in no hold.
+            Block before = world.getBlockState(pos).getBlock();
+            boolean changed = setWithLight(world, pos, state, (flags & ~1) | 16);
+            if (changed) {
+                if ((flags & 1) != 0) {
+                    notifyLoaded(world, pos, before, true);
+                    if (state.hasComparatorInputOverride()) {
+                        world.updateComparatorOutputLevel(pos, state.getBlock());
+                    }
+                }
+                else if ((flags & 16) == 0) {
+                    observersLoaded(world, pos, state.getBlock());
+                }
+            }
+            return changed;
         }
         finally {
             WriteDrops.end();
+        }
+    }
+
+    /** The order vanilla tells a changed block's neighbours in. */
+    private static final EnumFacing[] NOTIFY_ORDER = {EnumFacing.WEST, EnumFacing.EAST, EnumFacing.DOWN,
+        EnumFacing.UP, EnumFacing.NORTH, EnumFacing.SOUTH};
+
+    /**
+     * {@code world.notifyNeighborsOfStateChange}, to the neighbours whose chunks are loaded and no
+     * others. A neighbour in a chunk that is not loaded has nothing to react with; telling it anyway
+     * loads that chunk, or generates it.
+     *
+     * @param observers also tell observer blocks, as a placement does
+     */
+    static void notifyLoaded(World world, BlockPos pos, Block block, boolean observers) {
+        for (EnumFacing facing : NOTIFY_ORDER) {
+            BlockPos beside = pos.offset(facing);
+            if (world.isBlockLoaded(beside)) {
+                world.neighborChanged(beside, block, pos);
+            }
+        }
+        if (observers) {
+            observersLoaded(world, pos, block);
+        }
+    }
+
+    /** {@code world.updateObservingBlocksAt}, to loaded neighbours only. */
+    static void observersLoaded(World world, BlockPos pos, Block block) {
+        for (EnumFacing facing : NOTIFY_ORDER) {
+            BlockPos beside = pos.offset(facing);
+            if (world.isBlockLoaded(beside)) {
+                world.observedNeighborChanged(beside, block, pos);
+            }
         }
     }
 

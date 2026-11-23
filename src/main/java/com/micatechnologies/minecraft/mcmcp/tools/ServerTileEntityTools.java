@@ -47,6 +47,9 @@ public final class ServerTileEntityTools {
     /** About how long one game-thread slice of a {@code groupBy} read runs, as in {@code ServerAreaTools}. */
     private static final long SLICE_NANOS = 25_000_000L;
 
+    /** A long read says how far it is this often, so the orchestrator's no-progress limit does not end it. */
+    private static final long REPORT_NANOS = 2_000_000_000L;
+
     private ServerTileEntityTools() {
     }
 
@@ -336,51 +339,58 @@ public final class ServerTileEntityTools {
         }
         final int dimension = context.getInt("dimension", 0);
         return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
-            JsonObject json = context.onGameThread(() -> {
-                WorldServer world = ServerWorldTools.requireWorld(dimension);
-                JsonArray entities = new JsonArray();
-                int foundCount = 0;
-                for (BlockPos pos : positions) {
-                    TileEntity tile = world.isBlockLoaded(pos) ? world.getTileEntity(pos) : null;
-                    if (tile == null || tile.isInvalid()) {
-                        JsonObject entry = GameJson.blockPos(pos);
-                        entry.addProperty("error", world.isBlockLoaded(pos) ? "No tile entity here."
-                            : "Chunk not loaded; pass load: true.");
-                        entities.add(entry);
-                        continue;
+            // In game-thread slices of about SLICE_NANOS, as box mode (#220): 1,000 tags serialised in
+            // one task held the server thread for all of them. Written by the game thread one task at a
+            // time, read here after the last.
+            final JsonArray entities = new JsonArray();
+            final int[] foundCount = {0};
+            long lastReport = System.nanoTime();
+            int done = 0;
+            while (done < positions.size()) {
+                final int from = done;
+                done = context.onGameThread(() -> {
+                    WorldServer world = ServerWorldTools.requireWorld(dimension);
+                    long started = System.nanoTime();
+                    int at = from;
+                    while (at < positions.size() && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
+                        BlockPos pos = positions.get(at++);
+                        TileEntity tile = world.isBlockLoaded(pos) ? world.getTileEntity(pos) : null;
+                        if (tile == null || tile.isInvalid()) {
+                            JsonObject entry = GameJson.blockPos(pos);
+                            entry.addProperty("error", world.isBlockLoaded(pos) ? "No tile entity here."
+                                : "Chunk not loaded; pass load: true.");
+                            entities.add(entry);
+                            continue;
+                        }
+                        foundCount[0]++;
+                        entities.add(describe(world, tile, keys, maxChars, summary));
                     }
-                    foundCount++;
-                    entities.add(describe(world, tile, keys, maxChars, summary));
+                    return at;
+                });
+                // By the clock, not by the task: a task is 25 ms, and one report each floods the link.
+                if (System.nanoTime() - lastReport >= REPORT_NANOS) {
+                    lastReport = System.nanoTime();
+                    context.reportProgress(done, positions.size(), "Read " + done + " of " + positions.size()
+                        + " positions");
                 }
-                JsonObject result = new JsonObject();
-                result.addProperty("dimension", dimension);
-                result.addProperty("matched", foundCount);
-                result.addProperty("returned", entities.size());
-                result.add("tileEntities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(entities));
-                ChunkLoadGovernor.touch(dimension, chunks);
-                result.add("chunks", chunksBlock(world, chunks, outcome));
-                return result;
-            });
-            return ToolResult.structured(json);
+            }
+            JsonObject result = new JsonObject();
+            result.addProperty("dimension", dimension);
+            result.addProperty("matched", foundCount[0]);
+            result.addProperty("returned", entities.size());
+            result.add("tileEntities", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(entities));
+            result.add("chunks", chunksBlock(context, dimension, chunks, outcome));
+            return ToolResult.structured(result);
         });
     }
 
     /**
      * The read's {@code chunks} block. A chunk loaded only for this read is unloaded again after it, so
      * its tile entities tick only while a read holds it: a controller watched that way re-serves
-     * phases and starves side streets, and looks broken (#88). Said, when it happened. Game thread.
-     */
-    private static JsonObject chunksBlock(WorldServer world, Set<Long> chunks,
-                                          @Nullable ChunkLoadGovernor.Outcome outcome) {
-        if (outcome == null) {
-            return ChunkLoadGovernor.describeUnloaded(world, chunks);
-        }
-        return loadedNote(outcome.toJson());
-    }
-
-    /**
-     * As above from the worker thread, for a box: its chunks are counted across several game-thread
-     * tasks ({@link ServerChunkTools#describeChunks}), where 4096 in one held the server thread (#219).
+     * phases and starves side streets, and looks broken (#88). Said, when it happened.
+     *
+     * <p>From the worker thread: the chunks are counted across several game-thread tasks
+     * ({@link ServerChunkTools#describeChunks}), where 4096 in one held the server thread (#219).
      */
     private static JsonObject chunksBlock(ToolContext context, int dimension, Set<Long> chunks,
                                           @Nullable ChunkLoadGovernor.Outcome outcome) {

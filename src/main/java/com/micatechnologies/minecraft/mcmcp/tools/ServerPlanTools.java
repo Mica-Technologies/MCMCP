@@ -41,7 +41,10 @@ public final class ServerPlanTools {
     static final int MAX_SCALE = 16;
     static final int DEFAULT_MAX_DIMENSION = 768;
     private static final int MAX_PIXELS_PER_BLOCK = 8;
-    private static final int ROWS_PER_HOP = 64;
+    /** How long one game-thread slice may run, as in {@code ServerAreaTools}. */
+    private static final long SLICE_NANOS = 25_000_000L;
+    /** A long plan says how far it is this often, so the orchestrator's no-progress limit does not end it. */
+    private static final long REPORT_NANOS = 2_000_000_000L;
     /** What a differing column is painted. */
     static final int DIFF_RGB = 0xE02020;
 
@@ -160,6 +163,8 @@ public final class ServerPlanTools {
         final TargetDiff judge = diffTarget == null ? null
             : new TargetDiff(normaliser, 0, java.util.Collections.<int[]>emptyList());
         final int[] rowsDrawn = {0};
+        // Progress by the clock, not by the hop: a hop is 25 ms, and one report each floods the link (#220).
+        final long[] lastReport = {System.nanoTime()};
         // Out to the last pixel's sample point, which can be past the box's edge (scale > 1).
         final int walkMaxX = Math.max(minX + spanX - 1, ReadTiles.lastSamplePoint(minX, scale, pixelsX));
         final int walkMaxZ = Math.max(minZ + spanZ - 1, ReadTiles.lastSamplePoint(minZ, scale, pixelsZ));
@@ -179,7 +184,7 @@ public final class ServerPlanTools {
                             WorldServer world = ServerWorldTools.requireWorld(dim);
                             BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
                             long started = System.nanoTime();
-                            while (cursor[0] < keys.size() && System.nanoTime() - started < 25_000_000L) {
+                            while (cursor[0] < keys.size() && System.nanoTime() - started < SLICE_NANOS) {
                                 diffTarget.forEachCellIn(keys.get(cursor[0]++), (x, y, z, want, protect) -> {
                                     if (y > yMax || y < yMin || !tile.containsBlock(x, z) || x >= minX + spanX
                                         || z >= minZ + spanZ) {
@@ -199,23 +204,49 @@ public final class ServerPlanTools {
                             }
                             return null;
                         });
+                        if (System.nanoTime() - lastReport[0] >= REPORT_NANOS) {
+                            lastReport[0] = System.nanoTime();
+                            // On no scale of its own: the rows, or the walk's pieces, are the plan's.
+                            context.reportProgress(0, -1, "Compared " + cursor[0] + " of " + keys.size()
+                                + " target sections");
+                        }
                     }
                 }
 
                 // The pixels whose sample point is in this piece; every pixel's is in exactly one.
                 final int[] across = ReadTiles.pixelRange(minX, scale, pixelsX, tile.minX, tile.maxX);
                 final int[] down = ReadTiles.pixelRange(minZ, scale, pixelsZ, tile.minZ, tile.maxZ);
-                int hop = Math.max(1, ROWS_PER_HOP * pixelsX / Math.max(1, across[1] - across[0]));
-                for (int row = down[0]; row < down[1]; row += hop) {
+                // Rows for about SLICE_NANOS a task, not a fixed count (#220): 64 rows of a 1,568-wide plan
+                // were 100,352 columns in one task, each read down from the top of its chunk.
+                int row = down[0];
+                while (row < down[1]) {
                     final int from = row;
-                    final int to = Math.min(down[1], row + hop);
-                    context.onGameThread(() -> {
-                        sampler.sampleRect(ServerWorldTools.requireWorld(dim), columns, across[0], across[1], from, to);
-                        return null;
+                    row = context.onGameThread(() -> {
+                        WorldServer world = ServerWorldTools.requireWorld(dim);
+                        long started = System.nanoTime();
+                        int at = from;
+                        // At least one row a task, so a slow row cannot stall the plan.
+                        while (at < down[1] && (at == from || System.nanoTime() - started < SLICE_NANOS)) {
+                            sampler.sampleRect(world, columns, across[0], across[1], at, at + 1);
+                            at++;
+                        }
+                        return at;
                     });
-                    if (across[1] - across[0] == pixelsX) {
-                        rowsDrawn[0] += to - from;
-                        context.reportProgress(rowsDrawn[0], pixelsZ, "rows drawn");
+                    boolean wholeWidth = across[1] - across[0] == pixelsX;
+                    if (wholeWidth) {
+                        rowsDrawn[0] += row - from;
+                    }
+                    if (System.nanoTime() - lastReport[0] >= REPORT_NANOS) {
+                        lastReport[0] = System.nanoTime();
+                        if (wholeWidth) {
+                            context.reportProgress(rowsDrawn[0], pixelsZ, "Drew " + rowsDrawn[0] + " of " + pixelsZ
+                                + " rows");
+                        }
+                        else {
+                            // A piece of a tiled plan: the walk reports the pieces, so this only says it is alive.
+                            context.reportProgress(0, -1, "Drew " + (row - down[0]) + " of " + (down[1] - down[0])
+                                + " rows of this piece");
+                        }
                     }
                 }
                 return true;

@@ -197,7 +197,7 @@ public final class ServerWorldTools {
                     + ServerAreaTools.MAX_FIND_LIMIT + " (default 1000).", 1, ServerAreaTools.MAX_FIND_LIMIT)
                 .string("cursor", "Box mode: the 'cursor' a previous page returned, to continue from it.")
                 .bool("load", "Box mode: load the box's unloaded chunks for this call, and release them afterwards; "
-                    + "a box over your hold cap is loaded a piece at a time.")
+                    + "a piece at a time, in a box of at most " + ServerAreaTools.MAX_LOAD_CHUNKS + " chunks.")
                 .object("near", "Box mode: keep only the matches that have (mode 'with', the default) or lack "
                     + "(mode 'without') one of these blocks within 'radius', by box distance (radius 1 is the 26 "
                     + "touching cells). 'with' adds up to 3 of the nearby blocks' positions to each match. "
@@ -286,83 +286,9 @@ public final class ServerWorldTools {
                 if (!context.has("y")) {
                     return ToolResult.error("Give y with x and z for a cube round a point, or toX/toY/toZ for a box.");
                 }
-                final List<String> targets = patterns;
-                final String blockId = String.join(", ", patterns);
-                final Map<Integer, Boolean> matching = new HashMap<>();
-
-                final int centreX = context.requireInt("x");
-                final int centreY = context.requireInt("y");
-                final int centreZ = context.requireInt("z");
-                final int radius = context.getBoundedInt("radius", 16, 1, McmcpConfig.getMaxScanRadius());
-                final int dimension = context.getInt("dimension", 0);
-                final int limit = context.getBoundedInt("limit", 64, 1, 500);
-
-                JsonObject result = context.onGameThread(new Callable<JsonObject>() {
-                    @Override
-                    public JsonObject call() {
-                        WorldServer world = requireWorld(dimension);
-                        JsonArray found = new JsonArray();
-                        int scanned = 0;
-
-                        // Expanding shells outward from the centre, so results come out
-                        // nearest-first and hitting the limit early returns the closest matches
-                        // rather than an arbitrary corner of the box.
-                        for (int shell = 0; shell <= radius && found.size() < limit; shell++) {
-                            for (int dx = -shell; dx <= shell && found.size() < limit; dx++) {
-                                for (int dy = -shell; dy <= shell && found.size() < limit; dy++) {
-                                    for (int dz = -shell; dz <= shell && found.size() < limit; dz++) {
-                                        // Only the surface of each shell; interior points were
-                                        // covered by a previous, smaller shell.
-                                        if (Math.max(Math.abs(dx), Math.max(Math.abs(dy), Math.abs(dz)))
-                                            != shell) {
-                                            continue;
-                                        }
-                                        int y = centreY + dy;
-                                        if (y < 0 || y > 255) {
-                                            continue;
-                                        }
-                                        BlockPos pos = new BlockPos(centreX + dx, y, centreZ + dz);
-                                        if (!world.isBlockLoaded(pos)) {
-                                            continue;
-                                        }
-                                        scanned++;
-                                        IBlockState state = world.getBlockState(pos);
-                                        Boolean match = matching.get(Block.getStateId(state));
-                                        if (match == null) {
-                                            ResourceLocation name = state.getBlock().getRegistryName();
-                                            match = state.getBlock() != Blocks.AIR && NbtProjection.matches(
-                                                name == null ? "unknown" : name.toString(), targets);
-                                            matching.put(Block.getStateId(state), match);
-                                        }
-                                        if (match) {
-                                            JsonObject hit = GameJson.blockPos(pos);
-                                            if (targets.size() > 1 || NbtProjection.isPattern(targets.get(0))) {
-                                                ResourceLocation name = state.getBlock().getRegistryName();
-                                                hit.addProperty("block", name == null ? "unknown" : name.toString());
-                                            }
-                                            hit.addProperty("metadata", state.getBlock().getMetaFromState(state));
-                                            hit.addProperty("distance",
-                                                Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz) * 100.0D)
-                                                    / 100.0D);
-                                            found.add(hit);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        JsonObject json = new JsonObject();
-                        json.addProperty("block", blockId);
-                        json.addProperty("dimension", dimension);
-                        json.addProperty("searchRadius", radius);
-                        json.addProperty("blocksScanned", scanned);
-                        json.addProperty("matches", found.size());
-                        json.addProperty("truncated", found.size() >= limit);
-                        json.add("positions", com.micatechnologies.minecraft.mcmcp.json.JsonTables.table(found));
-                        return json;
-                    }
-                });
-                return ToolResult.structured(result);
+                // Sliced, and stepping only over each shell's surface (#220): the loops this replaced
+                // visited every cell of every shell's cube in one server-thread task.
+                return ServerAreaTools.findInCube(context, patterns);
             })
             .build());
     }

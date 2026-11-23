@@ -52,6 +52,37 @@ public final class LoadBudget {
         byCaller.computeIfAbsent(caller, key -> new ArrayDeque<>()).addLast(new long[] {nowMillis, loads});
     }
 
+    /**
+     * Takes back the newest record of exactly {@code loads} by {@code caller}: what was charged for work
+     * that then did not happen, such as a job's write whose chunk hold was refused. Does nothing when
+     * there is no such record (it has aged out, which comes to the same).
+     */
+    public void unrecord(String caller, int loads) {
+        Deque<long[]> mine = byCaller.get(caller);
+        if (mine == null || loads <= 0) {
+            return;
+        }
+        long at = -1L;
+        for (java.util.Iterator<long[]> newest = mine.descendingIterator(); newest.hasNext(); ) {
+            long[] entry = newest.next();
+            if (entry[1] == loads) {
+                at = entry[0];
+                newest.remove();
+                break;
+            }
+        }
+        if (at < 0L) {
+            return;
+        }
+        for (java.util.Iterator<long[]> newest = all.descendingIterator(); newest.hasNext(); ) {
+            long[] entry = newest.next();
+            if (entry[1] == loads && entry[0] == at) {
+                newest.remove();
+                break;
+            }
+        }
+    }
+
     /** Loads in the last minute, server-wide. */
     public int lastMinute(long nowMillis) {
         expire(nowMillis);

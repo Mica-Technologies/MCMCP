@@ -5,6 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.micatechnologies.minecraft.mcmcp.mcp.ToolContext;
 import com.micatechnologies.minecraft.mcmcp.McmcpConfig;
+import com.micatechnologies.minecraft.mcmcp.client.ClientCamera;
 import com.micatechnologies.minecraft.mcmcp.client.SyntheticMouse;
 import com.micatechnologies.minecraft.mcmcp.json.Json;
 import com.micatechnologies.minecraft.mcmcp.json.JsonSchema;
@@ -1994,7 +1995,11 @@ public final class ClientGuiTools {
                     public JsonObject call() {
                         Minecraft mc = Minecraft.getMinecraft();
                         if (changeHud) {
-                            mc.gameSettings.hideGUI = hideHud;
+                            // Through the camera, which holds the setting while a screenshot's view
+                            // is applied (#220): written straight, the view's restore put back the
+                            // value from before this call, or this call showed a HUD the view was
+                            // hiding for its frame.
+                            ClientCamera.setUnderlyingHideGui(hideHud);
                         }
                         if (perspectiveValue >= 0) {
                             mc.gameSettings.thirdPersonView = perspectiveValue;
@@ -2029,7 +2034,8 @@ public final class ClientGuiTools {
                         // the right default for something that disables a safety behaviour.
 
                         JsonObject json = new JsonObject();
-                        json.addProperty("hudHidden", mc.gameSettings.hideGUI);
+                        // The player's own setting, not what a view applied now forces for its frame.
+                        json.addProperty("hudHidden", ClientCamera.underlyingHideGui());
                         json.addProperty("pauseOnLostFocus", mc.gameSettings.pauseOnLostFocus);
                         json.addProperty("inGameFocus", mc.inGameHasFocus);
                         json.addProperty("thirdPersonView", mc.gameSettings.thirdPersonView);

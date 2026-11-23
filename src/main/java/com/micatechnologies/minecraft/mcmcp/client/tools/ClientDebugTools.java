@@ -1418,8 +1418,10 @@ public final class ClientDebugTools {
     private static void registerReadChat() {
         McpRegistry.registerTool(McpTool.named("client_read_chat")
             .title("Read chat")
-            .description("Read recent chat the client has received, oldest first: command responses, "
-                + "other players' messages, death messages, and anything mods print to chat.\n\n"
+            .description("Read the newest chat the client has received: command responses, "
+                + "other players' messages, death messages, and anything mods print to chat. You get "
+                + "the newest 'lines' lines (of those matching 'filter', when given), oldest of them "
+                + "first, so the latest line is the last one.\n\n"
                 + "This is how you see the result of a command sent with client_send_chat. The server "
                 + "replies asynchronously, so allow a moment — or a tick or two of any other tool — "
                 + "between sending and reading.\n\n"
@@ -1428,8 +1430,9 @@ public final class ClientDebugTools {
                 + "'(GAME_INFO)' for the action bar above the hotbar, '(LOCAL)' for lines this client "
                 + "printed itself, such as a client-side command's output.")
             .schema(JsonSchema.object()
-                .integer("lines", "How many recent lines to return.", 1, 300)
-                .string("filter", "Case-insensitive substring; only matching lines are returned.")
+                .integer("lines", "How many of the newest lines to return. Default 50.", 1, 300)
+                .string("filter", "Case-insensitive substring; only matching lines are returned, the "
+                    + "newest 'lines' of them.")
                 .build())
             .clientOnly()
             .readOnly()
@@ -1441,8 +1444,10 @@ public final class ClientDebugTools {
                     ? null
                     : filter.toLowerCase(java.util.Locale.ROOT);
 
-                List<ClientChatRecorder.Entry> entries =
-                    ClientChatRecorder.recent(needle == null ? lineCount : 300);
+                // The newest 'lines' of what matches. Under a filter the cut was not made at all:
+                // every match came back from the oldest on, so a send-then-read with a filter got
+                // the head of the buffer and its own line last, or not at all.
+                ClientChatRecorder.Selection selection = ClientChatRecorder.recent(lineCount, needle);
 
                 // One rendering of each line, not two. This used to send every message as text and
                 // again as a JSON object carrying the same string plus its type and timestamp,
@@ -1451,11 +1456,7 @@ public final class ClientDebugTools {
                 // wrapper around a string that was already there.
                 int returned = 0;
                 StringBuilder text = new StringBuilder();
-                for (ClientChatRecorder.Entry entry : entries) {
-                    if (needle != null
-                        && !entry.getText().toLowerCase(java.util.Locale.ROOT).contains(needle)) {
-                        continue;
-                    }
+                for (ClientChatRecorder.Entry entry : selection.lines) {
                     returned++;
                     if (text.length() > 0) {
                         text.append('\n');
@@ -1476,8 +1477,12 @@ public final class ClientDebugTools {
                 // {returned, buffered} alongside the text, and a client that reads
                 // structuredContent as the whole answer — which it is entitled to — showed
                 // "returned: 6" and none of the six. See ToolResult.withStructured.
+                // And which lines these are, said after the counts: the last line is the newest.
+                String which = returned == 0 ? ""
+                    : needle == null ? ": the newest, oldest first"
+                    : ": the newest of " + selection.matched + " matching, oldest first";
                 String header = "# " + returned + " of " + ClientChatRecorder.size() + " buffered "
-                    + "line(s)\n";
+                    + "line(s)" + which + "\n";
                 return ToolResult.text(header
                     + (text.length() == 0 ? "(no chat messages match)" : text.toString()));
             })

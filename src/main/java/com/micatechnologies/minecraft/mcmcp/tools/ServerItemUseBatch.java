@@ -93,9 +93,10 @@ public final class ServerItemUseBatch {
                     .integer("z", "Block Z.")
                     .enumeration("face", "The face clicked. Default 'up'.", "down", "up", "north", "south",
                         "west", "east")
-                    .number("hitX", "Where on the face, 0-1. Default the face's centre.", 0.0D, 1.0D)
-                    .number("hitY", "As hitX, in Y.", 0.0D, 1.0D)
-                    .number("hitZ", "As hitX, in Z.", 0.0D, 1.0D)
+                    .number("hitX", "Where on the block the click lands: 0 its west side, 1 its east. Default "
+                        + "the centre of the clicked face.", 0.0D, 1.0D)
+                    .number("hitY", "As hitX: 0 the bottom, 1 the top.", 0.0D, 1.0D)
+                    .number("hitZ", "As hitX: 0 the north side, 1 the south.", 0.0D, 1.0D)
                     .bool("sneak", "Click while sneaking.")
                     .property("item", useItemSchema)
                     .required("x", "y", "z")
@@ -104,7 +105,8 @@ public final class ServerItemUseBatch {
                 .array("readBackKeys", "With readBack, also these tile-entity NBT fields (dot paths).",
                     Json.obj("type", "string"))
                 .bool("stopOnError", "Stop at the first use that fails or is refused. Default false.")
-                .bool("load", "Load the chunks the uses need for this call.")
+                .bool("load", "Load the chunks the uses need for this call: each clicked block's, and the one "
+                    + "its clicked face opens onto.")
                 .string(ServerPlayerLeaseTools.LEASE_TOKEN, ServerPlayerLeaseTools.LEASE_TOKEN_DESCRIPTION)
                 .required("player", "uses")
                 .build())
@@ -223,6 +225,9 @@ public final class ServerItemUseBatch {
                 (float) Json.getDouble(at, "hitZ", 0.5D + 0.5D * face.getZOffset()),
                 Json.getBoolean(at, "sneak", false), itemKey));
             chunks.add(ChunkKeys.ofBlock(pos.getX(), pos.getZ()));
+            // And the chunk the clicked face opens onto, where the item places (#220): unheld, the use
+            // itself loaded or generated it. A door's upper half is in the same column.
+            chunks.add(ChunkKeys.ofBlock(pos.getX() + face.getXOffset(), pos.getZ() + face.getZOffset()));
         }
         final boolean readBack = context.getBoolean("readBack", false);
         final List<String> readBackKeys = Json.getStringList(context.getArguments(), "readBackKeys");
@@ -241,7 +246,7 @@ public final class ServerItemUseBatch {
         return ServerChunkTools.withChunks(context, dimension, chunks, outcome -> {
             final UndoPoints.Recorder recorder = ServerUndoTools.start(context, true);
             final JsonArray results = new JsonArray();
-            final int[] counts = new int[4];  // succeeded, changed, failed, refused
+            final int[] counts = new int[5];  // succeeded, changed, failed, refused, refused for an unloaded chunk
             final boolean[] stopped = {false};
             // A cancel, a timeout or a throw between two tasks leaves the earlier clicks in the world;
             // what they changed still gets its undo point on the way out (#219).
@@ -261,6 +266,9 @@ public final class ServerItemUseBatch {
                         String state = result.get("result").getAsString();
                         if (result.has("refused")) {
                             counts[3]++;
+                            if (result.has("chunk")) {
+                                counts[4]++;
+                            }
                         }
                         else if ("success".equals(state)) {
                             counts[0]++;
@@ -289,6 +297,13 @@ public final class ServerItemUseBatch {
             json.addProperty("changed", counts[1]);
             json.addProperty("failed", counts[2]);
             json.addProperty("refused", counts[3]);
+            if (counts[4] > 0) {
+                // Said once, not on each of a thousand entries: those carry the code and the chunk.
+                json.addProperty("unloadedHint", "A use refused as 'unloaded' or 'unloadedNeighbour' names a "
+                    + "chunk that is not loaded: the clicked block's, or the one its clicked face opens onto, "
+                    + "where the item could place a block unseen. Nothing was clicked there. Pass load: true, "
+                    + "or hold the area with server_keep_loaded, and run those uses again.");
+            }
             if (stopped[0]) {
                 json.addProperty("stoppedAt", results.size() - 1);
             }
@@ -323,6 +338,14 @@ public final class ServerItemUseBatch {
                                       int slot, Map<String, Lent> lent, @Nullable UndoPoints.Recorder recorder,
                                       boolean readBack, List<String> readBackKeys) {
         JsonObject result = GameJson.blockPos(use.pos);
+        // A code and the chunk, so a script can load it and run this use again; the rest of the batch
+        // goes on (#220).
+        if (!world.isBlockLoaded(use.pos)) {
+            result.addProperty("result", "refused");
+            result.addProperty("refused", "unloaded");
+            result.add("chunk", ServerInteractTools.chunkOf(use.pos));
+            return result;
+        }
         String refusal = ServerInteractTools.refusalAt(server, world, player, use.pos, use.face);
         if (refusal != null) {
             result.addProperty("result", "refused");
@@ -330,6 +353,18 @@ public final class ServerItemUseBatch {
             return result;
         }
         BlockPos beside = use.pos.offset(use.face);
+        Lent item = use.itemKey == null ? null : lent.get(use.itemKey);
+        // Before the click and before the player's slot is touched: the use itself would load the
+        // neighbour's chunk, and what it placed there would be in neither 'changed' nor the undo point
+        // (#220). An empty slot is left to its own refusal below.
+        ItemStack own = item == null ? ServerInteractTools.heldIn(player, slot) : ItemStack.EMPTY;
+        if ((item != null || !own.isEmpty()) && ServerInteractTools.reachesUnloaded(world, use.pos, use.face,
+            item != null ? item.item : own.getItem())) {
+            result.addProperty("result", "refused");
+            result.addProperty("refused", "unloadedNeighbour");
+            result.add("chunk", ServerInteractTools.chunkOf(beside));
+            return result;
+        }
         // The cell on the clicked face can be over a chunk border, in a chunk nothing holds, and reading
         // an unloaded position loads or generates its chunk (#219). Asked once, before the click: a
         // neighbour that was not loaded then is not read at all, so nothing there counts towards
@@ -342,7 +377,6 @@ public final class ServerItemUseBatch {
 
         int previousSlot = player.inventory.currentItem;
         boolean previousSneak = player.isSneaking();
-        Lent item = use.itemKey == null ? null : lent.get(use.itemKey);
         ItemStack owned = null;
         EnumActionResult outcome;
         try {

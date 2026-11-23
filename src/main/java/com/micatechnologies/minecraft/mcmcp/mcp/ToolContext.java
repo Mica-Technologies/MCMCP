@@ -106,6 +106,31 @@ public class ToolContext {
      */
     private Map<String, long[]> timings = new LinkedHashMap<>();
 
+    /**
+     * What a call that is about to fail has already done, for the error reply to carry: the undo point
+     * of a write stopped part way, and how much of it was written. Shared with every
+     * {@link #forPart} context, like the timings.
+     */
+    private JsonObject failureDetails = new JsonObject();
+
+    /**
+     * Notes something for this call's error reply to say beside its message, as structured content.
+     * A write that is cancelled or times out part way has changed the world, and the reply that says
+     * it failed is the only place its caller can learn what to undo (#220).
+     */
+    public void noteFailureDetail(String key, JsonElement value) {
+        synchronized (failureDetails) {
+            failureDetails.add(key, value);
+        }
+    }
+
+    /** A copy of what {@link #noteFailureDetail} was told; empty when nothing was. */
+    public JsonObject failureDetails() {
+        synchronized (failureDetails) {
+            return Json.parse(Json.write(failureDetails)).getAsJsonObject();
+        }
+    }
+
     public ToolContext(McpSession session,
                        JsonObject arguments,
                        GameThreadBridge gameThread,
@@ -651,6 +676,7 @@ public class ToolContext {
             }
         };
         part.timings = timings;
+        part.failureDetails = failureDetails;
         part.caller = caller;
         // The same hold owner too: a job's piece of a tiled read is charged to the job, as the room it
         // was cut to was.
